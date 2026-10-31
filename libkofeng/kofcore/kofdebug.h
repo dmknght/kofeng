@@ -80,7 +80,6 @@ enum kof_time_slot {
 	KOF_T_DB_LOAD = 0,      /* reading the database in               */
 	KOF_T_PARSE,            /* working out what an object IS         */
 	KOF_T_UNPACK,           /* an unpacker module, static or emulated */
-	KOF_T_HEUR,             /* a heuristic module                    */
 	KOF_T_EMU,              /* the interpreter itself                */
 	KOF_T_MATCH,            /* the pattern and string engines        */
 	KOF_T_DIAG_SYSCALL,     /* the syscall sweep                     */
@@ -90,6 +89,10 @@ enum kof_time_slot {
 	KOF_T_DIAG_TEXT,        /* a script's calls and what flows between them */
 	KOF_T_DIAG_LINEAGE,     /* which node reaches which, through the program */
 	KOF_T_DIAG_MATCH,       /* fitting diagnoses to what was found   */
+	KOF_T_RECOVER,          /* what the object hides about itself (the API-resolution run) */
+	KOF_T_NORMZ,            /* the normalised view                   */
+	KOF_T_SIMILAR,          /* the similarity detectors              */
+	KOF_T_SCRIPT,           /* the second form of a script           */
 	KOF_T_COUNT
 };
 

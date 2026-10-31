@@ -129,13 +129,16 @@ struct kof_scan_option {
 	 * could not be measured - it ran the most expensive thing the engine does
 	 * on files nothing had recognised.
 	 *
-	 * report_diag IS A DIFFERENT QUESTION: not "should this object be
-	 * analysed" but "tell me what each diagnose made of it", asked by a tool
-	 * for the one object a person is looking at. It is not a verdict and it
-	 * changes none: the report is built after every verdict is final. See
-	 * kof_result.diag.
+	 * `reader` IS A DIFFERENT QUESTION: not "should this object be analysed"
+	 * but "a person looks at this scan's objects": the normalised view of an
+	 * executable is built even when no module, diagnose or similarity block of
+	 * the loaded packs reads it (a scan that is not looked at keeps that
+	 * saving: 66% of the Ir of the binary corpus on a bare pack, BE-4). It
+	 * adds an object to the tree and changes no verdict. What each diagnose
+	 * made of an object is not an option of the scan: it is asked after the
+	 * fact with kscan_explain (kofeng.h, kdet_*).
 	 */
-	int      report_diag;
+	int      reader;
 
 	int      recurse_dirs;     /* descend into directories */
 	/*
@@ -194,6 +197,9 @@ struct kof_scan_option {
 	 * ancestor made). The field stays so that the layout of this struct does not move
 	 * for a host built against an earlier header; writing it has no effect.
 	 */
+	/* KNOWN DEFECT DEAD4-1 (2026-10-29, R) [sev L]: follow_symlinks has no reader in the engine (see also BE-3 at the open in objsrc.c), yet kofscanner --follow-links sets it and tests write it.
+	 * Trigger: any host that sets it. Effect: none; the option promises a behaviour the engine never has. Reproducer: grep -rnw follow_symlinks (writers only).
+	 * Fix: remove the member and --follow-links at the next ABI move; not now, because this struct is passed by pointer with no size field, so removing it shifts every later member for a host built against an earlier header. */
 	int      follow_symlinks;
 
 	/*
@@ -251,20 +257,15 @@ struct kof_scan_option {
 	uint32_t    as_view_len;
 
 	/*
-	 * THE HEURISTIC'S OFF SWITCH, AND WHY IT IS AN OFF SWITCH.
+	 * LOOK, DO NOT OPEN: nonzero scans an object and does not descend into
+	 * what it declares (the entries of a container, a script's second form -
+	 * see kof_objtree_may_open and the deep-scan note above), and level 0 of
+	 * --heur is this switch. Zero - the default a memset gives - descends.
+	 * A caller who wants nothing but the file itself sets it.
 	 *
-	 * Zero - the default a memset gives - RUNS the heuristic. It used to be
-	 * the other way round and that was wrong: the evidence level 0 scores is
-	 * evidence the parse and the unpackers have already produced by the time
-	 * this is reached, so having to ask for it meant paying for the facts and
-	 * then throwing them away. A caller who wants nothing but named families
-	 * sets this, and then nothing is gathered and nothing is scored - the
-	 * collector is not entered at all.
-	 *
-	 * What a heuristic reports is always its own level and never INFECT. It
-	 * works from traces that cannot establish identity, only that something
-	 * is worth a look, and a verdict that named a family from this evidence
-	 * would be claiming more than it measured.
+	 * Its name is from the scored heuristic model that once ran under it;
+	 * that model is gone, and the name stays because a rename is a break for
+	 * every host.
 	 */
 	uint32_t heur_off;
 

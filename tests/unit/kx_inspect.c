@@ -7,7 +7,7 @@
  *
  * Group by FUNCTION: each function below is one suite of data rows. Every row states the CORRECT behaviour; a defect the
  * suite knows is a KM_CHECK (known_miss.h: green while it is there, red the day it is fixed) carrying its id:
- *   EX-1  kof_inspect_identify returns NULL when a sniff accepted and the parse refused (the engine tries the next row)
+ *   EX-1  (FIXED) kof_inspect_identify used to return NULL when a sniff accepted and the parse refused; tests/unit/kx_identify.c holds it
  *   EX-2  kof_inspect_findings is declared in kofinspect.h and defined nowhere
  *   EX-3  kof_hex_respace drops the tail of the pattern when the room is exactly what its own guard asks for
  *   EX-4  kof_pdf_text shows the low byte of a UTF-16BE character whose high byte is not zero
@@ -594,13 +594,10 @@ static void identify_suite(void)
 		}
 	}
 	CK(ex1_total > 5000);
-	/* EX-1 (2026-10-24, R) [sev M]: when a sniff accepts and the parse refuses, kof_inspect_identify returns NULL, where the
-	 * engine's identify goes on to the next row. NOT REPRODUCED (2026-10-27, M): `ex1_hits` counts the objects of this suite
-	 * on which the engine names a format and the examiner names none, and it is zero over 74,000 objects (prefixes and byte
-	 * changes of every format, a tar block named as an ELF, PE, zip, gzip, rar or 7z header, an MZ stub in front of an
-	 * archive): 54 of them hit a refusal (a gzip header cut at 3..9 bytes, a PE cut at 139..151 bytes) and no later row
-	 * accepts those bytes. The defect is latent: it shows the day a row after a refusing one can accept what it refused.
-	 * This row holds the agreement as it is today; it goes red the day they differ, with the object named in the count. */
+	/* EX-1 (fixed): kof_inspect_identify goes on to the next row after a refusal, as the engine's identify does. No real object
+	 * reaches the difference (`ex1_hits` counts the objects on which the engine names a format and the examiner none: zero over
+	 * 74,000), so the row that refuses and is followed by one that accepts is built by tests/unit/kx_identify.c with its own table.
+	 * This row holds the agreement over real objects. */
 	CK(ex1_hits == 0);
 }
 
@@ -1055,25 +1052,6 @@ extern void kof_inspect_findings(const struct kof_finding *, uint32_t, const str
 	__attribute__((weak));
 #pragma GCC diagnostic pop
 
-/* kof_inspect_mutation needs a scanner of a loaded engine to answer anything; what a unit can hold is the guards. */
-static void mutation_guards(void)
-{
-	static struct kof_scanner sc;
-	static struct kof_engine eng;
-	struct kof_mutation_view v[2];
-
-	memset(v, 0x5a, sizeof v);
-	CK(kof_inspect_mutation(NULL, v, 2) == 0);
-	CK(kof_inspect_mutation(&sc, NULL, 2) == 0);
-	CK(kof_inspect_mutation(&sc, v, 0) == 0);
-	CK(kof_inspect_mutation(&sc, v, 2) == 0);           /* a scanner with no engine */
-	sc.eng = &eng;
-	CK(kof_inspect_mutation(&sc, v, 2) == 0);           /* an engine with no blocks */
-	eng.n_blk = 3;
-	CK(kof_inspect_mutation(&sc, v, 2) == 0);           /* blocks, and a scanner whose object has no mutation set */
-	CK(((uint8_t *)v)[0] == 0x5a);                      /* nothing was written in any of them */
-}
-
 static void declared_not_defined(void)
 {
 	/* EX-2 (2026-10-27, M) [sev L]: kofinspect.h:396 declares kof_inspect_findings and no .c file defines it (nm of every
@@ -1097,7 +1075,6 @@ int main(void)
 	describe_suite();
 	toolchain_suite();
 	entropy_suite();
-	mutation_guards();
 	declared_not_defined();
 	printf("kx_inspect: %d checks, %s\n", checks, fails || km_failed() ? "FAILED" : "ok");
 	return fails != 0 || km_failed();

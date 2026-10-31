@@ -216,6 +216,12 @@ static void rtf_hex(void)
 	free(w.p);
 }
 
+/* WP5-ENG-1: a root that reads LIMIT is counted in limit_hits (kofresult.h), whichever stage cut it. */
+static int limit_counted(uint64_t hits0)
+{
+	return !(NG && G[0].broken == KOF_BROKEN_LIMIT) || kscan_stats(sc)->limit_hits > hits0;
+}
+
 static int said_limit(uint64_t hits0)
 {
 	return kscan_stats(sc)->limit_hits > hits0 || (NG && G[0].broken == KOF_BROKEN_LIMIT);
@@ -251,6 +257,7 @@ static void ceiling(void)
 		scan(&w, "x.pdf", res[k]);
 		CK(said_limit(hits0), "ceiling %llu: the cut is not said (root broken %u, limit_hits %llu)", (unsigned long long)res[k], NG ? G[0].broken : 99u,
 		   (unsigned long long)kscan_stats(sc)->limit_hits);
+		CK(limit_counted(hits0), "ceiling %llu: root reads Limit and limit_hits did not move (WP5-ENG-1)", (unsigned long long)res[k]);
 		if (NG > 1) {
 			CK(G[1].len < sizeof big, "ceiling %llu: the child holds %llu bytes, the whole is %zu", (unsigned long long)res[k], (unsigned long long)G[1].len, sizeof big);
 			CK(!memcmp(G[1].head, big, G[1].len < sizeof G[1].head ? (size_t)G[1].len : sizeof G[1].head), "ceiling %llu: the child is not the beginning of the text", (unsigned long long)res[k]);
@@ -267,6 +274,7 @@ static void ceiling(void)
 		na = hv_a85_enc(big, sizeof big, a, sizeof a, 0);
 		pdf(&w, "/ASCII85Decode", a, na);
 		scan(&w, "x.pdf", 2097152u);
+		CK(limit_counted(hits0), "ascii85 alone over the ceiling: root reads Limit and limit_hits did not move (WP5-ENG-1)");
 		CK(said_limit(hits0) && NG == 1, "ascii85 alone over the ceiling: %u objects, root broken %u", NG, NG ? G[0].broken : 99u);
 	}
 	free(w.p);

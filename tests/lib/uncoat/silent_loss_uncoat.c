@@ -374,6 +374,30 @@ static void lzw_signals(void)
 	memset(&r, 0, sizeof r); r.buf = b; r.cap = sizeof b;
 	st = kuncoat_lzw_decode(&lzw_state, in, 3, rec_sink, &r, &produced);
 	CK(st == KUNCOAT_TRUNCATED && produced == 2u && r.got == 2u);
+	/* WP5-F-LZW-1: a corrupt code AFTER bytes the sink refuses at the final flush: the family
+	 * says STOPPED (inflate, bunzip, ovba, lzhuf). Old tests missed it: (b) no test crossed a
+	 * refusing sink with a code the stream never built. */
+	{
+		uint32_t bad[4] = { 'A', 'B', 'C', 500 };
+
+		acc = 0; bits = 0; n = 0;
+		for (k = 0; k < 4u; k++) {
+			acc = (acc << 9) | bad[k];
+			bits += 9u;
+			while (bits >= 8u) {
+				in[n++] = (uint8_t)(acc >> (bits - 8u));
+				bits -= 8u;
+			}
+		}
+		if (bits)
+			in[n++] = (uint8_t)(acc << (8u - bits));
+		memset(&r, 0, sizeof r); r.buf = b; r.cap = sizeof b; r.refuse_after = 1;
+		st = kuncoat_lzw_decode(&lzw_state, in, n, rec_sink, &r, &produced);
+		CK(st == KUNCOAT_STOPPED);
+		memset(&r, 0, sizeof r); r.buf = b; r.cap = sizeof b;
+		st = kuncoat_lzw_decode(&lzw_state, in, n, rec_sink, &r, &produced);
+		CK(st == KUNCOAT_CORRUPT && produced == 3u);
+	}
 }
 
 /* ===================================================================== *

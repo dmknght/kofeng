@@ -23,7 +23,7 @@ KOF_TARGET_FORMAT(KOF_FMT_UNKNOWN);
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "KofengMutationFixture");
 
 /* 32 hash(es): the sketch of a 2048 byte fixture block */
-KOF_MUTATION_BLOCK(fixture, KOF_SCAN_ALL, KOF_MUTATION_RAW,
+KOF_MUTATION_BLOCK(fixture, KOF_SCAN_ALL,
 	0x0003b4afu, 0x00082bd9u, 0x000b4876u, 0x001f32beu,
 	0x00386890u, 0x00da5d1fu, 0x00ddce0du, 0x00f42e08u,
 	0x010fbd9du, 0x01261b21u, 0x01267587u, 0x013edb56u,

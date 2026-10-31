@@ -23,7 +23,9 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofhash.h \
            $(SDK)/include/kofentropy.h \
            $(SDK)/include/verdictor/verdict.h \
+           $(SDK)/include/verdictor/catstore.h \
            $(SDK)/include/verdictor/famcat.h \
+           $(SDK)/include/verdictor/tagcat.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/kofabi.h \
            $(SDK)/include/kofmod/kofobjfmt.h \
@@ -50,6 +52,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/kofdiagtree.h \
            $(SDK)/include/kofmod/disease.h \
+           $(SDK)/include/kofmod/diseaselist.h \
            $(SDK)/include/kofmod/kofdecode.h \
            $(SDK)/include/kofmod/aspack_tab.h \
            $(SDK)/include/kofmod/elf.h \
@@ -148,8 +151,18 @@ $(SDK)/include/verdictor/verdict.h: libkofeng/verdictor/verdict.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
+# The ids and the directory of source files both catalogs share (famcat.h and tagcat.h include it).
+$(SDK)/include/verdictor/catstore.h: libkofeng/verdictor/catstore.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
 # The malware family catalog the viewer's Manage > Malware Families dialog edits (kofexamine/kv_families.c).
 $(SDK)/include/verdictor/famcat.h: libkofeng/verdictor/famcat.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+# The tag catalog the viewer's Manage > Syndromes dialog edits (kofexamine/kv_tags.c).
+$(SDK)/include/verdictor/tagcat.h: libkofeng/verdictor/tagcat.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 

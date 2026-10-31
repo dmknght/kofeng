@@ -25,6 +25,7 @@
 #include "diag_scan_private.h"
 #include "diag_wrapper_private.h"
 #include "diag_lineage.h"
+#include <celllysis/cfg.h>
 #include "emu.h"
 #include "codemap.h"
 
@@ -257,7 +258,7 @@ void kgenome_lineage_uncharge(struct kgenome_lineage *L, uint64_t n);
  */
 struct kgenome_lineage_cfg {
 	uint32_t nb;
-	uint32_t *bfirst;               /* nb + 1: the first instruction of each block, then the count */
+	struct kgenome_cfg cfg;         /* the blocks (celllysis/cfg.h): `first`, `n_insn` and successors as block indices; nb == cfg.n_all */
 	struct kgenome_lineage_state *bs;
 	uint32_t *wl;                   /* the blocks to look at, a ring of nb */
 	uint8_t  *inq;
@@ -282,8 +283,19 @@ int  kgenome_lineage_call_noreturn(const struct kgenome_lineage *L, const struct
 /* The node of an instruction (see diag_lineage_solve.c). */
 int  kgenome_lineage_site_in(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in, uint32_t *node);
 int  kgenome_lineage_site_of(const struct kgenome_lineage *L, uint64_t at, uint32_t *node);
-/* Is this jump a call that does not return here: to a node, or out of the function. */
-int  kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
+/* Is this jump, the end of block `b`, a call that does not return here: to a node, or out of the function (a block that does
+ * not end in a local jump). */
+int  kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kgenome_lineage_cfg *g, uint32_t b,
+				 const struct kgenome_cell_insn *in);
+/* The instructions of block `b` are [first, end). */
+static inline uint32_t kgenome_lineage_bfirst(const struct kgenome_lineage_cfg *g, uint32_t b)
+{
+	return g->cfg.b[b].first;
+}
+static inline uint32_t kgenome_lineage_bend(const struct kgenome_lineage_cfg *g, uint32_t b)
+{
+	return g->cfg.b[b].first + g->cfg.b[b].n_insn;
+}
 /* Does the node's capability hand a handle on in its result. */
 int  kgenome_lineage_hands_on(const struct kgenome_lineage *L, const struct kgenome_diag_hit *h);
 /* The function whose entry is the address, or UINT32_MAX. */

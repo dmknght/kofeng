@@ -28,7 +28,7 @@
  *
  * WHY CREDIT IS A SET BIT. A block's count is the number of its (block, slot) entries whose
  * hash the object held, each counted once per object. A window adds to a count only through
- * the entries of its value that match the CALL - normalizer, side and region (or any region)
+ * the entries of its value that match the CALL - side and region (or any region)
  * - so crediting is idempotent: a second window with the same value in the same context finds
  * every entry it matches already credited. The state keeps one bit per (block, slot) and the
  * count is how many are set. Because it is idempotent the order of the windows does not
@@ -51,6 +51,7 @@
 #include <string.h>
 
 #include "kofmutation.h"
+#include <celllysis/cfg.h>
 
 /* The slot is 8 bits below the block number in an entry's reference. */
 _Static_assert(KOF_MUTATION_MAX_HASH <= 128u,
@@ -91,8 +92,8 @@ struct kof_mutation_set {
 	uint32_t        status;      /* KOF_MTN_B_* */
 	uint32_t        n_key, max_mult;
 	uint64_t        n_pair;
-	uint32_t        norm_bit[32];
-	uint32_t        norm_all;
+	uint32_t        asks_mask;   /* the regions some class names (the union of the classes' masks) */
+	int             asks_any;    /* some class exists */
 	uint64_t        bytes;
 };
 
@@ -103,12 +104,15 @@ struct kof_mutation_set {
  * follows the OBJECT and never the database.
  */
 struct mtn_blk {
-	uint32_t block, gen, cnt, pad;
+	uint32_t block, gen, cnt;
+	uint32_t vgen;                 /* the CFG unit (kof_mutation_cfg_unit) whose keys last reached this block */
 	uint32_t w[4];
+	uint8_t  cfg_hit, cfg_taken;   /* the best CFG result against this block: `hit` of the `taken` smallest elements of the union (0 taken: none) */
+	uint32_t pad_;
 };
 
 /*
- * One entry per (hot value, normalizer+side) this object has walked: the union of the
+ * One entry per (hot value, side) this object has walked: the union of the
  * region masks walked, whether an any-region walk happened, and whether the walk was
  * refused for the budget.
  */
@@ -254,7 +258,7 @@ struct kof_mutation_set *kof_mutation_build_req(const struct kof_mutation_build_
 	struct kof_mutation_src one;
 	const struct kof_mutation_src *src;
 	struct kof_mutation_set *s = NULL;
-	uint32_t n_src = mtn_collect(rq, &one, &src), i, j, st = 0, bit;
+	uint32_t n_src = mtn_collect(rq, &one, &src), i, j, st = 0;
 	uint64_t allow, used = 0, k_bloom = 0, mem_est = 0, fb, scratch, fixed_now, room, ceiling, ceil_x, ceil_b;
 	uint64_t stored_max = 0, n_key_bloom = 0;
 	uint32_t n_mem = 0, bpk, no_filter;
@@ -426,12 +430,8 @@ struct kof_mutation_set *kof_mutation_build_req(const struct kof_mutation_build_
 		if (in.n_pair && in.top > s->top)
 			s->top = in.top;
 		for (c = 0; c < p->n_class; c++) {
-			uint32_t m = 1u << p->cls[c].norm;
-
-			s->norm_all |= m;
-			for (bit = 0; bit < 32u; bit++)
-				if (p->cls[c].mask & (1u << bit))
-					s->norm_bit[bit] |= m;
+			s->asks_any = 1;
+			s->asks_mask |= p->cls[c].mask;
 		}
 	}
 	/* Blocks are numbered pack after pack: the parts must be in that order. */
@@ -501,7 +501,7 @@ refuse:
 		} else {
 			for (i = 0; i < n_src; i++)
 				kof_kix_close(src[i].kix);
-			free(s);
+			kof_fbank_free(s->fb); free(s);        /* the filter bank was made before the part table failed (audit_mem MEM-7) */
 		}
 	}
 	return NULL;
@@ -603,19 +603,14 @@ uint32_t kof_mutation_block_id(const struct kof_mutation_set *s, uint32_t block)
 	return kof_mutation_fold(h, n);
 }
 
-uint32_t kof_mutation_set_norms(const struct kof_mutation_set *s, uint32_t scan_mask)
+int kof_mutation_set_asks(const struct kof_mutation_set *s, uint32_t scan_mask)
 {
-	uint32_t i, m = 0;
-
 	if (!s)
 		return 0;
-	/* Unioned per region when the set was built - see norm_bit. */
+	/* Unioned over the classes when the set was built - see asks_mask. */
 	if (!scan_mask)
-		return s->norm_all;
-	for (i = 0; i < 32u; i++)
-		if (scan_mask & (1u << i))
-			m |= s->norm_bit[i];
-	return m;
+		return s->asks_any;
+	return (scan_mask & s->asks_mask) != 0;
 }
 
 uint32_t kof_mutation_probe(const struct kof_mutation_set *s, uint32_t v)
@@ -678,6 +673,7 @@ void kof_mutation_ctx_done(struct kof_mutation_ctx *c)
 	free(c->tmap);
 	free(c->sv);
 	free(c->sv2);
+	free(c->vl);
 	free(c->span);
 	memset(c, 0, sizeof *c);
 }
@@ -694,10 +690,10 @@ void kof_mutation_trim(struct kof_mutation_ctx *c)
 	free(c->tmap);
 	free(c->sv);
 	free(c->sv2);
+	free(c->vl);
 	free(c->span);
-	c->bs = NULL; c->tmap = NULL; c->sv = c->sv2 = NULL; c->span = NULL;
-	c->bcap = c->bn = c->tcap = c->tn = c->scap = c->nsv = 0;
-	c->span_cap = 0;
+	c->bs = NULL; c->tmap = NULL; c->sv = c->sv2 = NULL; c->vl = NULL; c->span = NULL;
+	c->bcap = c->bn = c->tcap = c->tn = c->scap = c->nsv = c->vn = c->vcap = 0;
 	c->held = 0;
 }
 
@@ -741,6 +737,7 @@ void kof_mutation_begin(struct kof_mutation_ctx *c)
 	if ((c->status | mtn_io_status(c->io.err)) &
 	    (KOF_MTN_S_IO_BUDGET | KOF_MTN_S_IO_ERROR | KOF_MTN_S_SLICE_CRC))
 		c->life_io_objects++;
+	c->life_unsigned_objects += (c->status & KOF_MTN_S_FUNC_UNSIGNED) != 0;
 	/* The tables follow what an object touches, so a big one is let go when the last
 	 * object needed an eighth of it. */
 	if (c->bcap > 4096u && (uint64_t)c->bn * 8u < c->bcap) {
@@ -755,7 +752,7 @@ void kof_mutation_begin(struct kof_mutation_ctx *c)
 		c->tmap = NULL;
 		c->tcap = 0;
 	}
-	c->bn = c->tn = 0;
+	c->bn = c->tn = c->vn = 0;
 	c->visits = c->trunc_pairs = c->probes = 0;
 	c->trunc_walks = c->walks = c->n_chunks = 0;
 	c->status = 0;
@@ -805,6 +802,7 @@ void kof_mutation_stat(const struct kof_mutation_ctx *c, struct kof_mutation_sta
 	o->life_io_bytes = c->life_io_bytes;
 	o->life_visits = c->life_visits;
 	o->life_trunc_objects = c->life_trunc_objects + ((c->status & KOF_MTN_S_WALK_TRUNCATED) != 0);
+	o->life_unsigned_objects = c->life_unsigned_objects + ((c->status & KOF_MTN_S_FUNC_UNSIGNED) != 0);
 	o->life_io_objects = c->life_io_objects +
 		((o->status & (KOF_MTN_S_IO_BUDGET | KOF_MTN_S_IO_ERROR | KOF_MTN_S_SLICE_CRC)) != 0);
 }
@@ -984,7 +982,6 @@ static int span_ensure(struct kof_mutation_ctx *c)
 	c->span = malloc(MTN_WIN);
 	if (!c->span)
 		return 0;
-	c->span_cap = MTN_WIN;
 	c->held += MTN_WIN;
 	return 1;
 }
@@ -993,9 +990,40 @@ static int span_ensure(struct kof_mutation_ctx *c)
 
 /* What one kof_mutation_unit call asks, fixed for all its windows. */
 struct mtn_call {
-	uint32_t norm, side, mask, cls;
+	uint32_t side, mask, cls;
 	int any;
+	int vote;       /* a CFG unit's keys: the run's entries are VOTES for blocks (mtn_credit_vote), not window credits, and a hot value is walked every time */
 };
+
+/* A CFG unit's key met a hash of `block`: the block is one the unit reached (the list of them is `vl`, in the order first reached). */
+static void mtn_credit_vote(struct kof_mutation_ctx *c, uint32_t block)
+{
+	struct mtn_blk *e = bs_get(c, block);
+
+	if (!e) {
+		c->status |= KOF_MTN_S_STATE_NOMEM | KOF_MTN_S_WALK_TRUNCATED;
+		c->trunc_pairs++;
+		return;
+	}
+	if (e->vgen != c->vgen) {
+		if (c->vn == c->vcap) {
+			const uint32_t nc = c->vcap ? c->vcap * 2u : 64u;
+			const uint64_t add = (uint64_t)(nc - c->vcap) * sizeof *c->vl;
+			uint32_t *nv;
+
+			if (nc < c->vcap || !mtn_room(c, add) || !(nv = realloc(c->vl, (size_t)nc * sizeof *nv))) {
+				c->status |= KOF_MTN_S_STATE_NOMEM | KOF_MTN_S_WALK_TRUNCATED;
+				c->trunc_pairs++;
+				return;
+			}
+			c->vl = nv;
+			c->vcap = nc;
+			c->held += add;
+		}
+		e->vgen = c->vgen;
+		c->vl[c->vn++] = block;
+	}
+}
 
 static void mtn_credit_bit(struct kof_mutation_ctx *c, uint32_t block, uint32_t slot)
 {
@@ -1032,15 +1060,18 @@ static void mtn_credit_run(struct kof_mutation_ctx *c, const struct mtn_call *k,
 		}
 		q = &p->cls[ci];
 		/*
-		 * THE REGION, THE NORMALIZER AND THE SIDE ARE PART OF THE MATCH, not a filter
-		 * applied afterwards. The same bytes in another region, hashed another way, or on
+		 * THE REGION AND THE SIDE ARE PART OF THE MATCH, not a filter
+		 * applied afterwards. The same bytes in another region, or on
 		 * the other side of the static library are a different fact - see enum
-		 * kgenome_mutation_side.
+		 * kgenome_mutation_side. (A class's norm byte is RAW: the loader refuses any other.)
 		 */
-		if (q->norm != k->norm || q->side != k->side ||
+		if (q->side != k->side ||
 		    (!k->any && !(q->mask & k->mask)))
 			continue;
-		mtn_credit_bit(c, p->base + blk, slot);
+		if (k->vote)
+			mtn_credit_vote(c, p->base + blk);
+		else
+			mtn_credit_bit(c, p->base + blk, slot);
 	}
 }
 
@@ -1057,14 +1088,15 @@ static int walk_begin(struct kof_mutation_ctx *c, const struct mtn_call *k, uint
 	struct mtn_ent *e = NULL;
 
 	*eo = NULL;
-	if (run > MTN_HOT) {
+	/* A CFG unit asks the SAME hot value again for every unit of the object (its votes belong to the unit), so the once-per-object memo does not apply to it. */
+	if (run > MTN_HOT && !k->vote) {
 		e = tm_find(c, vp, k->cls);
 		if (e && ((e->meta & (MTN_M_REFUSED | MTN_M_ANY)) ||
 			  (!k->any && !(k->mask & ~e->mask))))
 			return 0;
 	}
 	if (run > s->max_visit - (c->visits < s->max_visit ? c->visits : s->max_visit)) {
-		if (run > MTN_HOT) {
+		if (run > MTN_HOT && !k->vote) {
 			if (!e)
 				e = tm_insert(c, vp, k->cls);
 			if (e)
@@ -1075,7 +1107,7 @@ static int walk_begin(struct kof_mutation_ctx *c, const struct mtn_call *k, uint
 		c->trunc_pairs += run;
 		return 0;
 	}
-	if (run > MTN_HOT && !e) {
+	if (run > MTN_HOT && !e && !k->vote) {
 		e = tm_insert(c, vp, k->cls);
 		if (!e)
 			c->status |= KOF_MTN_S_STATE_NOMEM;   /* walked anyway; the budget bounds it */
@@ -1350,7 +1382,7 @@ static void mtn_flush(struct kof_mutation_ctx *c, const struct mtn_call *k, uint
  * whole set (the blocks of an old rule are all small), the filter, and the flat test (a
  * window of one repeated byte is in no block). What passes is collected and probed as a batch.
  */
-void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t norm,
+void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask,
 		     uint32_t side, const uint8_t *p, uint64_t n)
 {
 	const struct kof_mutation_set *s;
@@ -1359,8 +1391,7 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t 
 	uint32_t top, lim, nb = 0;
 	int more;
 
-	if (!c || !c->set || !p || norm >= KGENOME_MUTATION_NORM_COUNT ||
-	    !c->set->n_pair || !kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!c || !c->set || !p || !c->set->n_pair || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	/* A block's side is a byte and its region a mask: no block matches
 	 * anything else, so there is nothing to credit. */
@@ -1369,12 +1400,12 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t 
 	s = c->set;
 	c->fed += n;
 	/* What waits was collected for one call; when this unit asks another, it is probed first. */
-	if (c->nsv && (c->pk_norm != norm || c->pk_side != side || c->pk_mask != scan_mask ||
+	if (c->nsv && (c->pk_side != side || c->pk_mask != scan_mask ||
 		       c->pk_any != c->any_region))
 		mtn_settle(c);
-	c->pk_norm = norm; c->pk_side = side; c->pk_mask = scan_mask; c->pk_any = c->any_region;
-	k.norm = norm; k.side = side; k.mask = scan_mask; k.any = c->any_region;
-	k.cls = norm | (side << 2);
+	c->pk_side = side; c->pk_mask = scan_mask; c->pk_any = c->any_region;
+	k.side = side; k.mask = scan_mask; k.any = c->any_region; k.vote = 0;
+	k.cls = side;
 	lim = chunk_limit(c);
 	top = s->top;
 	nb = c->nsv;
@@ -1415,6 +1446,88 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t 
 }
 
 /*
+ * THE SECOND SCORING KIND: A FUNCTION UNIT'S CFG SKETCH against the blocks. One matcher, one index: the unit's keys (the bottom-32 of the
+ * shape of its function, cfg.h) are looked up in the very index the windows are, through the same filters, the same sorted batch and the same
+ * reads, but what a hit means is different. A window block is held by CONTAINMENT over the whole object (each hash anywhere in it); a CFG
+ * block is held by ONE function: the Jaccard estimate of the two sketches (kgenome_cfg_pct), and the best unit counts. So the hits are VOTES
+ * kept for this unit alone (mtn_credit_vote) only to know WHICH blocks the unit's keys reached: each of those is verified against its keys by the
+ * lib's overlap (no threshold of votes: none was ordered), and the best (hit, taken) per block is what kof_mutation_counts reads back.
+ *
+ * Domain separation is the lib's (KGENOME_CFG_KEY_SEED): a window hash and a CFG key are different functions, so a unit's keys vote for
+ * window blocks only by chance of two independent 32-bit values - and a vote needs two of them.
+ *
+ * IMPROVE cfg-kind-1 (owner decision pending: "a kind flag in the pack"): the pack does not say a block is a CFG sketch; what a block's list
+ * of hashes MEANS is chosen here by the unit that is looked up (a function unit of the block's region: CFG; any other unit: windows). An engine
+ * from before this reads a CFG block as windows and never matches it (harmless). The block record has no free field, so a flag is a pack change
+ * and the owner decides it.
+ */
+void kof_mutation_cfg_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t side,
+			   const struct kgenome_cfg_sign *sg, uint64_t n)
+{
+	const struct kof_mutation_set *s;
+	struct mtn_call k;
+	uint32_t cand[KGENOME_CFG_KEYS], keep[KGENOME_CFG_KEYS], fl, nb = 0, i, m = 0, np;
+	uint8_t flat[KGENOME_CFG_KEYS];
+
+	if (!c || !c->set || !sg || sg->n_key < KGENOME_CFG_MIN_KEYS || sg->n_key > KGENOME_CFG_KEYS || !c->set->n_pair ||
+	    side > 255u || (!c->any_region && !scan_mask))
+		return;
+	s = c->set;
+	c->fed += n;
+	mtn_settle(c);          /* the windows that wait were collected for another call: probed first, and `sv` is free */
+	for (i = 0; i < sg->n_key; i++) {
+		if (sg->key[i] <= s->top) {
+			cand[m] = sg->key[i] * KOF_KIX_MULT;
+			flat[m++] = 0;
+		}
+	}
+	if (!c->scap && !sv_grow(c, KGENOME_CFG_KEYS)) {
+		c->status |= KOF_MTN_S_STATE_NOMEM | KOF_MTN_S_WALK_TRUNCATED;
+		return;
+	}
+	if (c->scap < KGENOME_CFG_KEYS && !sv_grow(c, KGENOME_CFG_KEYS)) {
+		c->status |= KOF_MTN_S_STATE_NOMEM | KOF_MTN_S_WALK_TRUNCATED;
+		return;
+	}
+	np = kof_fbank_pass_n(s->fb, cand, flat, m, keep);
+	for (i = 0; i < np; i++)
+		c->sv[nb++] = keep[i];
+	if (++c->vgen == 0) {           /* wrapped: no entry may look current */
+		uint32_t x;
+
+		for (x = 0; x < c->bcap; x++)
+			c->bs[x].vgen = 0;
+		c->vgen = 1;
+	}
+	c->vn = 0;
+	k.side = side; k.mask = scan_mask; k.any = c->any_region; k.vote = 1;
+	k.cls = side;
+	if (nb)
+		mtn_flush(c, &k, nb);
+	/* the blocks this unit's keys hit: each is verified against its keys, and the best result per block is kept */
+	for (fl = 0; fl < c->vn; fl++) {
+		struct mtn_blk *e = bs_find(c, c->vl[fl]);
+		uint32_t local, h[KOF_MUTATION_MAX_HASH], nh = 0, hit, taken;
+		const struct mtn_part *p;
+		struct kgenome_cfg_sign bs;
+
+		if (!e || e->vgen != c->vgen)
+			continue;
+		p = mtn_part_of(s, e->block, &local);
+		if (!p || !kof_kix_block_hashes(p->kix, local, h, &nh, &c->io) || !nh)
+			continue;
+		kgenome_cfg_keys_sign(&bs, h, nh);      /* a pack's list is ascending as written, but the overlap needs it and does not trust it */
+		kgenome_cfg_overlap(sg, &bs, &hit, &taken);
+		if (taken && taken <= 255u && hit <= taken &&
+		    (!e->cfg_taken || (uint64_t)hit * e->cfg_taken > (uint64_t)e->cfg_hit * taken)) {
+			e->cfg_hit = (uint8_t)hit;
+			e->cfg_taken = (uint8_t)taken;
+		}
+	}
+	c->status |= mtn_io_status(c->io.err);
+}
+
+/*
  * Probe what waits. Called by anything that reads the state - a count, the stats, the held bytes, the
  * start of the next object - and by a call that changes. The context is the ctx's own, and the const on the
  * readers is a promise about what they return and not about when the work behind it was done, which is why
@@ -1428,27 +1541,21 @@ static void mtn_settle(const struct kof_mutation_ctx *cc)
 
 	if (!nb)
 		return;
-	k.norm = c->pk_norm; k.side = c->pk_side; k.mask = c->pk_mask; k.any = c->pk_any;
-	k.cls = k.norm | (k.side << 2);
+	k.side = c->pk_side; k.mask = c->pk_mask; k.any = c->pk_any; k.vote = 0;
+	k.cls = k.side;
 	c->nsv = 0;
 	mtn_flush(c, &k, nb);
 }
 
 /* ---- scoring ------------------------------------------------------------------ */
 
-static uint32_t mtn_count(const struct kof_mutation_ctx *c, uint32_t b)
-{
-	const struct mtn_blk *e = bs_find(c, b);
-
-	return e ? e->cnt : 0u;
-}
-
 uint32_t kof_mutation_matched(const struct kof_mutation_ctx *c, uint32_t b)
 {
-	if (!c || !c->set || b >= c->n_block)
+	uint32_t seen;
+
+	if (!kof_mutation_counts(c, b, &seen, NULL))
 		return 0;
-	mtn_settle(c);
-	return mtn_count(c, b);
+	return seen;
 }
 
 /*
@@ -1477,15 +1584,27 @@ int kof_mutation_counts(const struct kof_mutation_ctx *c, uint32_t b,
 	p = mtn_part_of(c->set, b, &local);
 	if (!p || !kof_kix_block(p->kix, local, &blk, NULL) || !blk.n_hash)
 		return 0;
-	if (seen) {
-		*seen = mtn_count(c, b);
-		/* A block that names one hash twice must not read past a
-		 * hundred per cent. */
-		if (*seen > blk.n_hash)
-			*seen = blk.n_hash;
+	{
+		const struct mtn_blk *e = bs_find(c, b);
+		uint32_t sn = e ? e->cnt : 0u, nh = blk.n_hash;
+
+		/* A block that names one hash twice must not read past a hundred per cent. */
+		if (sn > nh)
+			sn = nh;
+		/*
+		 * THE SECOND SCORING KIND. A CFG unit scored this block by the Jaccard of two sketches (kof_mutation_cfg_unit): `hit` of the `taken`
+		 * smallest elements of the union, the best of any unit. The block's score is the better of that and the window count, and then
+		 * seen / n_hash IS the sketch's estimate, so kof_mutation_pct and every reader of the counts need no second code path.
+		 */
+		if (e && e->cfg_taken && (uint64_t)e->cfg_hit * nh > (uint64_t)sn * e->cfg_taken) {
+			sn = e->cfg_hit;
+			nh = e->cfg_taken;
+		}
+		if (seen)
+			*seen = sn;
+		if (n_hash)
+			*n_hash = nh;
 	}
-	if (n_hash)
-		*n_hash = blk.n_hash;
 	return 1;
 }
 

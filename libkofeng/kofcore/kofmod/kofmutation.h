@@ -38,12 +38,15 @@
  *   records inside a block - a credential table shuffled, a config rewritten in
  *   another order - changes nothing.
  *
- *   A NORMALIZER, DECLARED PER RULE. Measured: hashing the byte-to-byte
- *   difference instead of the bytes makes a single byte XOR key vanish, and
- *   tripled what one block reached on a family that re-keys per campaign. On
- *   two other families it left recall unchanged and multiplied collisions with
- *   unrelated families sevenfold. It is a property of the family, so it is a
- *   property of the rule.
+ *   NO NORMALIZER IN THE MATCHER. A form that hashed the byte-to-byte
+ *   difference (so a single byte XOR key vanishes) existed here and was removed
+ *   2026-10-31 on the owner's word: nothing in the tool decides which form a block
+ *   needs, and an encoding that is detected is decoded by the NORMALISE stage, so
+ *   the matcher always hashes the bytes it is given. Measured before it went: it
+ *   tripled what one block reached on one family that re-keys per campaign, left
+ *   recall unchanged on two others and multiplied collisions with unrelated
+ *   families sevenfold. The argument that chose it is gone from KOF_MUTATION_BLOCK; the
+ *   `norm` byte of a block record stays (pack layout) and holds 0.
  *
  *   A PERCENTAGE AND TWO THRESHOLDS. Measured over one rule against 1300
  *   objects: every clean file scored under 10%, unrelated malware scored under
@@ -63,9 +66,7 @@
  * Object-like macros, so a module (and the signature language) still writes the
  * old name, `struct cell_insn` and `enum kof_arch` included. Engine code uses
  * the KGENOME_ / kgenome_ name. */
-#define KOF_MUTATION_RAW                   KGENOME_MUTATION_RAW
 #define kof_mutation_mix                   kgenome_mutation_mix
-#define kof_mutation_norm                  kgenome_mutation_norm
 #define kof_mutation_side                  kgenome_mutation_side
 
 
@@ -149,9 +150,9 @@ static inline int kof_mutation_same_block(const uint32_t *a, uint32_t na,
  * pattern packs use for their strings, and for the same reason: one
  * allocation, and a record small enough to walk through.
  *
- * Each block carries its OWN region and normalizer. A rule may want a config
+ * Each block carries its OWN region. A rule may want a config
  * table out of the data region hashed raw and a decryptor out of the code
- * region hashed as differences; those are two questions about two places and
+ * region; those are two questions about two places and
  * nothing is served by forcing them to agree.
  */
 
@@ -159,7 +160,7 @@ struct kof_mutation_block {
 	uint32_t first_hash;      /* into the pack's hash pool */
 	uint32_t n_hash;
 	uint32_t scan_mask;       /* which region this block was taken from */
-	uint8_t  norm;            /* enum kof_mutation_norm */
+	uint8_t  norm;            /* reserved, 0: the pack layout keeps the byte that was the normalizer; a loader refuses any other value */
 	uint8_t  side;            /* enum kof_mutation_side */
 	uint8_t  reserved[2];
 };

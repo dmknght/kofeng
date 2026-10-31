@@ -42,7 +42,7 @@ static void t_hot_key(void)
 	struct hk_rng g = { 17 };
 	double t0, t1;
 
-	CK(kgenome_mtn_win_begin(&w, win, 8, KGENOME_MUTATION_RAW));
+	CK(kgenome_mtn_win_begin(&w, win, 8));
 	hot = kgenome_mtn_win_value(&w);
 	for (i = 0; i < NB; i++) {
 		uint32_t j;

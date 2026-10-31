@@ -41,7 +41,8 @@ static inline int kof_name_char(int c)
 	       (c >= '0' && c <= '9') || c == '-' || c == '_';
 }
 
-static inline int kof_name_ok(const char *s)
+/* The shared walk: 1..KOF_NAME_MAX characters, each accepted by `ok`. */
+static inline int kof_name_all_(const char *s, int (*ok)(int))
 {
 	uint32_t n;
 
@@ -50,10 +51,32 @@ static inline int kof_name_ok(const char *s)
 	for (n = 0; s[n]; n++) {
 		if (n >= KOF_NAME_MAX)
 			return 0;
-		if (!kof_name_char((unsigned char)s[n]))
+		if (!ok((unsigned char)s[n]))
 			return 0;
 	}
 	return 1;
+}
+
+static inline int kof_name_ok(const char *s)
+{
+	return kof_name_all_(s, kof_name_char);
+}
+
+/*
+ * A TAG NAME: letters (either case), digits and the hyphen only, 1..KOF_NAME_MAX characters. Narrower than a family name on purpose
+ * (no underscore: the name becomes a file name and a word in a verdict line). Upper case is allowed (owner, 2026-10-28) so a name can
+ * be written the way a person says it (C2-Beacon); two names that differ only in case are ONE name to the catalog (tagcat.h refuses
+ * the second), and every file name made from a tag name is lower-cased on purpose. The typing filter of the Name field and the
+ * catalog's check are these two.
+ */
+static inline int kof_tag_name_char(int c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+}
+
+static inline int kof_tag_name_ok(const char *s)
+{
+	return kof_name_all_(s, kof_tag_name_char);
 }
 
 /*

@@ -1,0 +1,51 @@
+# golden clean_dash_imports: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │   filter                                                                          [ ] icase [ ] regex                                                              │  │
+ 4| │   rec  type    bind   vis       flags name                                                                                                sec     size      value  │  │
+ 5| │   0    NOTYPE  LOCAL  DEFAULT   .U...                                                                                                     UND        0 0x00000000  │  │
+ 6| │   1    FUNC    GLOBAL DEFAULT   .U... __printf_chk                                                                                        UND        0 0x00000000  │  │
+ 7| │   2    FUNC    GLOBAL DEFAULT   .U... _Znam                                                                                               UND        0 0x00000000  │  │
+ 8| │   3    FUNC    GLOBAL DEFAULT   .U... __errno_location                                                                                    UND        0 0x00000000  │  │
+ 9| │   4    FUNC    GLOBAL DEFAULT   .U... getc                                                                                                UND        0 0x00000000  │  │
+10| │   5    FUNC    GLOBAL DEFAULT   .U... strerror                                                                                            UND        0 0x00000000  │  │
+11| │   6    FUNC    GLOBAL DEFAULT   .U... __isoc23_sscanf                                                                                     UND        0 0x00000000  │  │
+12| │   7    FUNC    GLOBAL DEFAULT   .U... strlen                                                                                              UND        0 0x00000000  │  │
+13| │   8    FUNC    GLOBAL DEFAULT   .U... memcmp                                                                                              UND        0 0x00000000  │  │
+14| │   9    FUNC    GLOBAL DEFAULT   .U... strncmp                                                                                             UND        0 0x00000000  │  │
+15| │   10   FUNC    GLOBAL DEFAULT   .U... abort                                                                                               UND        0 0x00000000  │  │
+16| │   11   FUNC    GLOBAL DEFAULT   .U... __sprintf_chk                                                                                       UND        0 0x00000000  │  │
+17| │   12   FUNC    GLOBAL DEFAULT   .U... __snprintf_chk                                                                                      UND        0 0x00000000  │  │
+18| │   13   FUNC    GLOBAL DEFAULT   .U... __assert_fail                                                                                       UND        0 0x00000000  │  │
+19| │   14   FUNC    GLOBAL DEFAULT   .U... __libc_start_main                                                                                   UND        0 0x00000000  │  │
+20| │   15   FUNC    GLOBAL DEFAULT   .U... memcpy                                                                                              UND        0 0x00000000  │  │
+21| │   16   FUNC    GLOBAL DEFAULT   .U... __ctype_b_loc                                                                                       UND        0 0x00000000  │  │
+22| │   17   FUNC    GLOBAL DEFAULT   .U... memchr                                                                                              UND        0 0x00000000  │  │
+23| │   18   FUNC    GLOBAL DEFAULT   .U... __stack_chk_fail                                                                                    UND        0 0x00000000  │  │
+24| │   19   FUNC    GLOBAL DEFAULT   .U... fputs                                                                                               UND        0 0x00000000  │  │
+25| │   20   FUNC    GLOBAL DEFAULT   .U... fflush                                                                                              UND        0 0x00000000  │  │
+26| │   21   FUNC    GLOBAL DEFAULT   .U... fopen                                                                                               UND        0 0x00000000  │  │
+27| │   22   FUNC    GLOBAL DEFAULT   .U... free                                                                                                UND        0 0x00000000  │  │
+28| │   23   FUNC    GLOBAL DEFAULT   .U... exit                                                                                                UND        0 0x00000000  │  │
+29| │   24   FUNC    GLOBAL DEFAULT   .U... fputc                                                                                               UND        0 0x00000000  │  │
+30| │   25   FUNC    GLOBAL DEFAULT   .U... _ZdaPv                                                                                              UND        0 0x00000000  │  │
+31| │   26   FUNC    GLOBAL DEFAULT   .U... malloc                                                                                              UND        0 0x00000000  │  │
+32| │   27   FUNC    GLOBAL DEFAULT   .U... strcmp                                                                                              UND        0 0x00000000  │  │
+33| │   28   FUNC    GLOBAL DEFAULT   .U... realloc                                                                                             UND        0 0x00000000  │  │
+34| │   29   FUNC    GLOBAL DEFAULT   .U... __gxx_personality_v0                                                                                UND        0 0x00000000  │  │
+35| │   30   FUNC    GLOBAL DEFAULT   .U... __memcpy_chk                                                                                        UND        0 0x00000000  │  │
+36| │   31   NOTYPE  WEAK   DEFAULT   .U... _ITM_deregisterTMCloneTable                                                                         UND        0 0x00000000  │  │
+37|-│   32   FUNC    GLOBAL DEFAULT   .U... _Unwind_Resume                                                                                      UND        0 0x00000000  │---
+38| │   33   NOTYPE  WEAK   DEFAULT   .U... __gmon_start__                                                                                      UND        0 0x00000000  │ ]
+39| │   34   NOTYPE  WEAK   DEFAULT   .U... _ITM_registerTMCloneTable                                                                           UND        0 0x00000000  │
+40| │   35   FUNC    GLOBAL DEFAULT   .U... putc                                                                                                UND        0 0x00000000  │
+41| │   36   FUNC    GLOBAL DEFAULT   .U... fwrite                                                                                              UND        0 0x00000000  │
+42| │   37   FUNC    GLOBAL DEFAULT   .U... __isoc23_strtol                                                                                     UND        0 0x00000000  │
+43| │   38   FUNC    WEAK   DEFAULT   .U... __cxa_finalize                                                                                      UND        0 0x00000000  │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-39 of 39 items ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  no verdict

@@ -11,8 +11,6 @@
  * size of a load) are here and not in the header because they read it through a
  * range test or a table, which is not worth inlining into every caller.
  */
-#include <stdatomic.h>
-
 #include "arm64.h"
 #include "arm64_private.h"
 
@@ -47,7 +45,7 @@ static int bitmask_ok(uint32_t x)
 
 /*
  * THE TREE: index, match, descend, and the row's flags. This is the table's
- * authority; the lookup below is derived from it at first use.
+ * authority; the lookup below is derived from it by the generator.
  */
 static unsigned kgenome_arm64_tree(uint32_t x, unsigned *flags)
 {
@@ -70,6 +68,10 @@ static unsigned kgenome_arm64_tree(uint32_t x, unsigned *flags)
 	return id;
 }
 
+/* KNOWN DEFECT DA-A64NEW (2026-10-28, M) [sev L]: kgenome_arm64_decode_tree answers INVALID for encodings of extensions newer than the table: CB<cc> compare-and-branch (FEAT_CMPBR), LDTP/STTP/LDTNP/STTNP (FEAT_LSUI), STLUR/LDAPUR on vector registers (FEAT_LRCPC3), MADDPT and friends (FEAT_CPA), the PRFM slc targets.
+ * Trigger: words 75e6a94d (CBNE), e8878d77 (STTP), ecd74900 (LDTP), 1d88cac5 (STLUR q5), 9b7e3c45 (MADDPT). Effect: the oracle (binutils 2.47) spells each as an instruction; here they are data (a branch among them is not followed). 1966 words in 9.1M instructions of 40 corpus files, nearly all in data inside .text.
+ * [widened 2026-10-29: 4,000,000 random words, 1,895,978 INVALID here, of which 102,087 the oracle spells: the five families and also ~170 more mnemonics (the LDF and STF and LDBF families, LDT, SWPT, CAST, RCW, LDCLRP, LDSETP, SWPP, MRRS, MSRR, SYSP, LDIAPP, STILP, SMAX, SMIN, UMAX, UMIN, ABS, CNT, CTZ, ST64BV, GCSSTR)]. Reproducer: Bazaar.2026.08 HEUR-Backdoor.Linux.Mirai.le-928102caaa088c6d57f9 .text 0x4aaee0, 0x4a84c0.
+ * Fix: OWNER DECISION on the table's scope (which extensions, to which mnemonic), then rows and identities, each with an adapter handler in celllysis/decode_arm64.c (the formatter, arm64_fmt.c, already answers UNSUPPORTED for a word it does not spell). */
 enum kgenome_status kgenome_arm64_decode_tree(struct kgenome_arm64_insn *out, uint32_t x)
 {
 	unsigned fl, id = kgenome_arm64_tree(x, &fl);
@@ -82,130 +84,20 @@ enum kgenome_status kgenome_arm64_decode_tree(struct kgenome_arm64_insn *out, ui
 }
 
 /*
- * THE LOOKUP ON THE TOP 11 BITS, built from the tree by code, on first use.
- *
- * An entry is an identity when the tree would give that identity for EVERY word
- * with those top bits, and L1_MORE (send the word down the tree) otherwise. It is
- * found without running words through the tree: the top bits are the bits known,
- * a row is skipped if they contradict it, taken if they fix everything it tests,
- * and if some row ahead of the answer tests a bit that is not known, or a row
- * carries a check, the entry is MORE. A node whose key is partly unknown is
- * answered only if every bucket its key can still select agrees. That is
- * conservative - it never claims an identity the tree would not give - and
- * arm64.c's unit test compares it with the tree.
- *
- * MEASURED over 8.3 M words of real AArch64 code (118 Mirai-family ELF files),
- * one thread: the tree alone costs 12.6 ns a word; with this lookup 5.5 ns, and
- * the whole adapter path 18.3 ns against 20.0 for the decoder it replaced. The
- * lookup answers 83.3% of those words (the 17% that walk the tree are ret,
- * orr, hint, logical immediates, ldur and register-offset loads). A key of 10,
- * 9 or 8 bits more changed nothing, and an inline copy of this function in the
- * header was 0.2 ns faster, which is not worth publishing the table and the
- * flag. Cost per decode when built: one acquire load, a branch and the call.
+ * THE LOOKUP ON THE TOP 11 BITS: kgenome_arm64_l1, const data written from the tree by
+ * tools/genotype/arm_index_gen.c (arm64_l1_tab.c; the derivation and its measurements
+ * are in that file). An entry is an identity when the tree gives that identity for EVERY
+ * word with those top bits, and KGENOME_ARM64_L1_MORE (send the word down the tree)
+ * otherwise. tests/lib/genome/genotype_arm64.c compares it with the tree.
+ * Cost per decode: one table read, a branch and the call.
  */
-#define L1_SHIFT 21
-#define L1_N (1u << (32 - L1_SHIFT))
-#define L1_MORE 0xffffu
-
-/* KNOWN DEFECT R1-arm64 (2026-10-24, M) [sev L]: the AArch64 level-1 index g_l1 and g_l1_state are writable global state built
- * on first decode (.bss 0x1020), against CLAUDE.md; l1_init() spin-waits unbounded for the builder. Trigger: first
- * decode on two threads. Effect: waiters burn a core until state 2. Reproducer: nm on libkgenome.a (audit2/graph_bin).
- * Fix: emit g_l1 as const data from the table generator. Same defect as D17 and X7. */
-static uint16_t g_l1[L1_N];
-static atomic_int g_l1_state;           /* 0 not built, 1 being built, 2 ready */
-
-static unsigned resolve_node(const struct kgenome_arm64_node *n, uint32_t km, uint32_t kv);
-
-static unsigned resolve_rows(const struct kgenome_arm64_row *r, uint32_t km, uint32_t kv)
-{
-	for (;; r++) {
-		if ((kv ^ r->val) & km & r->mask)
-			continue;               /* a known bit contradicts the row */
-		if (r->mask & ~km)
-			return L1_MORE;         /* the row tests a bit that is not known */
-		if (r->fl)
-			return L1_MORE;
-		if (r->id >= KGENOME_ARM64_NODE0)
-			return resolve_node(kgenome_arm64_nodes[r->id - KGENOME_ARM64_NODE0], km, kv);
-		return r->id;
-	}
-}
-
-static unsigned resolve_node(const struct kgenome_arm64_node *n, uint32_t km, uint32_t kv)
-{
-	unsigned w0 = (unsigned)__builtin_popcount(n->m0);
-	unsigned nb = w0 + (unsigned)__builtin_popcount(n->m1), i;
-	unsigned res = L1_MORE, kk = 0, kval = 0, fr, sub;
-	int first = 1;
-
-	/*
-	 * ONLY THE KEYS THE KNOWN BITS ALLOW ARE VISITED. This tried all 2^nb keys,
-	 * rebuilt each one bit by bit and then threw away the ones that contradict
-	 * a known bit: MEASURED on a 95 KB A64 ELF (callgrind, whole scan 57.2 M Ir)
-	 * the table build was 8.3 M Ir, 14.5% of the scan. A key bit whose position
-	 * is known is fixed by it, and the free ones are enumerated as the subsets
-	 * of their mask - the same keys, in the same increasing order, so the answer
-	 * is the one it was.
-	 */
-	for (i = 0; i < nb; i++) {
-		unsigned pos = i < w0 ? n->sh0 + i : n->sh1 + (i - w0);
-
-		if ((km >> pos) & 1u) {
-			kk |= 1u << i;
-			kval |= ((kv >> pos) & 1u) << i;
-		}
-	}
-	fr = (unsigned)((1ull << nb) - 1u) & ~kk;
-	sub = 0;
-	do {
-		unsigned id = resolve_rows(n->b[kval | sub], km, kv);
-
-		if (id == L1_MORE || (!first && id != res))
-			return L1_MORE;
-		res = id;
-		first = 0;
-		sub = (sub - fr) & fr;
-	} while (sub);
-	return res;
-}
-
-static void l1_build(void)
-{
-	unsigned k;
-
-	for (k = 0; k < L1_N; k++)
-		g_l1[k] = (uint16_t)resolve_node(&kgenome_arm64_top,
-						 ~0u << L1_SHIFT, k << L1_SHIFT);
-}
-
-/*
- * Thread-safe and idempotent with no allocation: the thread that moves the state
- * from 0 to 1 builds into static storage and publishes with a release store;
- * the others wait for 2. The table is read-only afterwards.
- */
-static void l1_init(void)
-{
-	int expect = 0;
-
-	if (atomic_compare_exchange_strong_explicit(&g_l1_state, &expect, 1,
-						    memory_order_acq_rel,
-						    memory_order_acquire)) {
-		l1_build();
-		atomic_store_explicit(&g_l1_state, 2, memory_order_release);
-		return;
-	}
-	while (atomic_load_explicit(&g_l1_state, memory_order_acquire) != 2)
-		;
-}
 
 enum kgenome_status kgenome_arm64_decode(struct kgenome_arm64_insn *out, uint32_t x)
 {
 	unsigned e;
 
-	if (__builtin_expect(atomic_load_explicit(&g_l1_state, memory_order_acquire) != 2, 0))
-		l1_init();
-	e = g_l1[x >> L1_SHIFT];
-	if (e == L1_MORE)
+	e = kgenome_arm64_l1[x >> KGENOME_ARM64_L1_SHIFT];
+	if (e == KGENOME_ARM64_L1_MORE)
 		return kgenome_arm64_decode_tree(out, x);
 	out->word = x;
 	out->id = (uint16_t)e;

@@ -590,8 +590,7 @@ implemented and sound; the threshold is not. Measured across samples, the
 largest gap between two actives inside a decryption that had NOT finished runs
 from 335 to 1,209,199 instructions - three and a half orders of magnitude, with
 PECompact at the top. No single figure separates "finished" from "still
-working", so it sits behind a flag with the measurements written beside it.
-See KOF_EMU_QUIET.
+working", so the experiment that stopped a run on it was removed; the measurements stay in this note.
 
 **US 9,740,864 - "Emulation of files using multiple images of the emulator
 state" (Kaspersky, 2017).** A tree of saved emulator states; termination is

@@ -310,6 +310,8 @@ void out_add(struct out *o, const char *s, size_t n)
 				o->cl_drop++;
 			} else {
 				out_raw(o, s + i, j - i);
+				if (o->bg && j - i == 4u && !memcmp(s + i, "\033[0m", 4))
+					out_raw(o, o->bg, strlen(o->bg));
 			}
 			i = j;
 			continue;
@@ -557,203 +559,414 @@ const char *kv_bar_at(int cells, int i, uint64_t off, uint64_t total,
 	return bar_cell(h0, h1, i, horiz);
 }
 
-/* ---- a dropdown ----------------------------------------------------------- */
+/* ---- the pop-up list ------------------------------------------------------- *
+ *
+ * kv_popup.h says what it is for. The box, the text of a row, the hit test and the key step are decided HERE and nowhere else: the menu
+ * bar, the right-click menu, the draft panel's pick-lists and the tick menu of a table cell all arrive at these functions, so a list
+ * cannot be drawn one width and clicked at another (the chooser's rows were one column narrower than its box and its rule one column
+ * wider), and a submenu cannot open beside the wrong row (the chooser's opened two rows under its parent and one column off).
+ */
+
+/* Columns of a UTF-8 string, one per code point (the labels are the engine's words and the user's names; no East-Asian width table here). */
+static int pop_cols(const char *s)
+{
+	int n = 0;
+
+	for (; *s; s++)
+		n += ((unsigned char)*s & 0xc0u) != 0x80u;
+	return n;
+}
+
+/* Append `s` cut to `room` columns, on a code-point boundary, and padded with spaces to exactly `room`; returns the byte length written. */
+static size_t pop_put(char *out, size_t cap, size_t n, const char *s, int room)
+{
+	int used = 0;
+
+	while (*s && used < room && n + 5 < cap) {
+		out[n++] = *s++;
+		while (((unsigned char)*s & 0xc0u) == 0x80u && n + 1 < cap)
+			out[n++] = *s++;
+		used++;
+	}
+	while (used < room && n + 1 < cap) {
+		out[n++] = ' ';
+		used++;
+	}
+	out[n] = 0;
+	return n;
+}
+
+void kv_popup_init(struct kv_popup *p, int cols)
+{
+	memset(&p->box, 0, sizeof p->box);
+	p->n = 0;
+	p->cols = cols > 1 ? cols : 1;
+}
+
+int kv_popup_add(struct kv_popup *p, const char *text, unsigned flags, int id)
+{
+	struct kv_popup_row *r;
+
+	if (p->n >= KV_POP_MAX)
+		return -1;
+	r = &p->row[p->n];
+	snprintf(r->text, sizeof r->text, "%s", text ? text : "");
+	r->flags = (unsigned char)flags;
+	r->id = (flags & KV_PR_RULE) ? -1 : id;
+	return p->n++;
+}
+
+static int pop_items(const struct kv_popup *p)
+{
+	int i, n = 0;
+
+	for (i = 0; i < p->n; i++)
+		n += (p->row[i].flags & KV_PR_RULE) ? 0 : 1;
+	return n;
+}
+
+/* Rows a list takes: a grid its tallest column, a list every row (rules included). The one place it is counted. */
+static int pop_rows(const struct kv_popup *p)
+{
+	return p->cols > 1 ? (pop_items(p) + p->cols - 1) / p->cols : p->n;
+}
+
+static int pop_tick_w(const struct kv_popup_row *r)
+{
+	return (r->flags & KV_PR_TICK) ? 4 : 0;
+}
+
+void kv_popup_place(struct kv_popup *p, const struct kv_popup_req *q)
+{
+	struct kv_popup_box *b = &p->box;
+	int i, cell = 0, need_w, ncols = p->cols > 1 ? p->cols : 1, area = q->bottom - q->top + 1, cap, h_full, y, x;
+
+	/* A column is as wide as its longest row needs: a space, the tick, the text, a space and, on a row that opens another list, the ">". */
+	for (i = 0; i < p->n; i++) {
+		int need;
+
+		if (p->row[i].flags & KV_PR_RULE)
+			continue;
+		need = 1 + pop_tick_w(&p->row[i]) + pop_cols(p->row[i].text) + (ncols > 1 ? 0 : 1) + ((p->row[i].flags & KV_PR_SUB) ? 1 : 0);
+		if (need > cell)
+			cell = need;
+	}
+	need_w = cell;
+	if (cell < q->min_w)
+		cell = q->min_w;
+	if (q->max_w > 0 && cell > q->max_w)
+		cell = q->max_w;
+	cap = (q->cols - 2) / ncols;
+	if (cap < 1)
+		cap = 1;
+	if (cell > cap)
+		cell = cap;
+	if (cell < 1)
+		cell = 1;
+	if (need_w > cell)
+		need_w = cell;
+	if (area < 1)
+		area = 1;
+	h_full = pop_rows(p);
+	if (h_full < 1)
+		h_full = 1;
+
+	b->cell_w = cell;
+	b->w = cell * ncols;
+	b->n_rows = h_full;
+	y = q->ay;
+	b->side = KV_SIDE_AT;
+	if (q->parent) {
+		y = q->parent_row;
+	} else if (q->anchor_h) {
+		int below = q->ay + 1;
+
+		if (h_full <= q->bottom - below + 1) {
+			y = below;
+			b->side = KV_SIDE_BELOW;
+		} else if (h_full <= q->ay - q->top) {
+			y = q->ay - h_full;
+			b->side = KV_SIDE_ABOVE;
+		} else {
+			y = q->top;
+			b->side = KV_SIDE_COVER;
+		}
+	}
+	b->h = h_full < area ? h_full : area;
+	if (b->side == KV_SIDE_COVER)
+		b->h = h_full < area ? h_full : area;
+	x = q->ax;
+	if (q->parent) {
+		int right = q->parent->x + q->parent->w;
+
+		/* Neither side has room for the LEAST width (a look): take only what the rows need, which may still fit beside the parent. */
+		if (right + b->w - 1 > q->cols && q->parent->x - b->w < 1 && need_w < cell) {
+			cell = need_w;
+			b->cell_w = cell;
+			b->w = cell * ncols;
+		}
+		if (right + b->w - 1 <= q->cols) {
+			x = right;
+			b->side = KV_SIDE_RIGHT;
+		} else if (q->parent->x - b->w >= 1) {
+			x = q->parent->x - b->w;
+			b->side = KV_SIDE_LEFT;
+		}
+	}
+	kv_box_fit(&y, &x, b->h, b->w, q->top, q->bottom, q->cols);
+	b->y = y;
+	b->x = x;
+	b->off = q->off;
+	if (b->off > b->n_rows - b->h)
+		b->off = b->n_rows - b->h;
+	if (b->off < 0)
+		b->off = 0;
+}
+
+int kv_popup_text(const struct kv_popup *p, int r, int c, char *out, size_t cap)
+{
+	const struct kv_popup_box *b = &p->box;
+	size_t n = 0;
+	int w = b->cell_w, field, k, tick = 0;
+	const struct kv_popup_row *row;
+
+	if (cap < 8)
+		return 0;
+	out[0] = 0;
+	if (p->cols > 1) {
+		k = c * b->n_rows + r;
+		if (c < 0 || c >= p->cols || r < 0 || r >= b->n_rows || k >= pop_items(p)) {
+			pop_put(out, cap, 0, "", w);
+			return w;
+		}
+		row = &p->row[k];
+		tick = pop_tick_w(row);
+		n = pop_put(out, cap, 0, " ", 1);
+		if (tick)
+			n = pop_put(out, cap, n, (row->flags & KV_PR_ON) ? "[x] " : "[ ] ", 4);
+		field = w - 1 - tick;
+		pop_put(out, cap, n, row->text, field > 0 ? field : 0);
+		return w;
+	}
+	if (r < 0 || r >= p->n)
+		return 0;
+	row = &p->row[r];
+	w = b->w;
+	if (row->flags & KV_PR_RULE) {
+		n = pop_put(out, cap, 0, " ", 1);
+		for (k = 0; k < w - 2; k++)
+			n = pop_put(out, cap, n, "-", 1);
+		pop_put(out, cap, n, " ", 1);
+		return w;
+	}
+	if ((r == b->off && b->off > 0) || (r == b->off + b->h - 1 && b->off + b->h < b->n_rows)) {
+		n = pop_put(out, cap, 0, " ...", w > 1 ? w - 1 : w);
+		if (w > 1)
+			pop_put(out, cap, n, r == b->off ? "^" : "v", 1);
+		return w;
+	}
+	tick = pop_tick_w(row);
+	n = pop_put(out, cap, 0, " ", 1);
+	if (tick)
+		n = pop_put(out, cap, n, (row->flags & KV_PR_ON) ? "[x] " : "[ ] ", 4);
+	field = w - 1 - tick - 1 - ((row->flags & KV_PR_SUB) ? 1 : 0);
+	n = pop_put(out, cap, n, row->text, field > 0 ? field : 0);
+	n = pop_put(out, cap, n, (row->flags & KV_PR_SUB) ? " >" : " ", (row->flags & KV_PR_SUB) ? 2 : 1);
+	(void)n;
+	return w;
+}
+
+int kv_popup_hit(const struct kv_popup *p, int my, int mx)
+{
+	const struct kv_popup_box *b = &p->box;
+	int r = my - b->y, c = mx - b->x, k;
+
+	if (r < 0 || r >= b->h || c < 0 || c >= b->w)
+		return -2;
+	if (p->cols > 1) {
+		k = (c / b->cell_w) * b->n_rows + b->off + r;
+		return k < pop_items(p) ? k : -1;
+	}
+	k = b->off + r;
+	if (k >= p->n || (p->row[k].flags & KV_PR_RULE))
+		return -1;
+	return k;
+}
+
+static int pop_choosable(const struct kv_popup_row *r)
+{
+	return !(r->flags & (KV_PR_RULE | KV_PR_OFF));
+}
+
+int kv_popup_row_of(const struct kv_popup *p, int id)
+{
+	int i;
+
+	for (i = 0; i < p->n; i++)
+		if (!(p->row[i].flags & KV_PR_RULE) && p->row[i].id == id)
+			return i;
+	return -1;
+}
+
+int kv_popup_first(const struct kv_popup *p)
+{
+	int i;
+
+	for (i = 0; i < p->n; i++)
+		if (pop_choosable(&p->row[i]))
+			return p->row[i].id;
+	return -1;
+}
+
+int kv_popup_step(const struct kv_popup *p, int cur_id, int d)
+{
+	int i;
+
+	if (cur_id < 0) {
+		for (i = d > 0 ? 0 : p->n - 1; i >= 0 && i < p->n; i += d > 0 ? 1 : -1)
+			if (pop_choosable(&p->row[i]))
+				return p->row[i].id;
+		return cur_id;
+	}
+	/* From an item that may not be on the list at all (hidden since): the next choosable one in the table's order, ids ascending down the list. */
+	for (i = d > 0 ? 0 : p->n - 1; i >= 0 && i < p->n; i += d > 0 ? 1 : -1)
+		if (pop_choosable(&p->row[i]) && (d > 0 ? p->row[i].id > cur_id : p->row[i].id < cur_id))
+			return p->row[i].id;
+	return cur_id;
+}
+
+int kv_popup_row_y(const struct kv_popup *p, int id)
+{
+	int r = kv_popup_row_of(p, id);
+
+	if (r < 0 || r < p->box.off || r >= p->box.off + p->box.h)
+		return -1;
+	return p->box.y + r - p->box.off;
+}
+
+void kv_popup_follow(struct kv_popup *p, int id)
+{
+	struct kv_popup_box *b = &p->box;
+	int r = kv_popup_row_of(p, id);
+
+	if (r < 0 || b->n_rows <= b->h || p->cols > 1) {
+		if (b->n_rows <= b->h)
+			b->off = 0;
+		return;
+	}
+	if (r < b->off)
+		b->off = r;
+	else if (r >= b->off + b->h)
+		b->off = r - b->h + 1;
+	if (b->off > b->n_rows - b->h)
+		b->off = b->n_rows - b->h;
+	if (b->off < 0)
+		b->off = 0;
+}
+
+void kv_popup_screen(struct kv_popup_req *q)
+{
+	memset(q, 0, sizeof *q);
+	q->rows = g_rows;
+	q->cols = g_cols;
+	q->top = 2;                     /* row 1 is the menu bar */
+	q->bottom = g_rows - 1;         /* the status line stays uncovered */
+}
+
+void kv_popup_draw(struct out *o, const struct kv_popup *p, int sel, int sel2)
+{
+	const struct kv_popup_box *b = &p->box;
+	struct out_clip cl;
+	char t[KV_POP_TEXT * 4];
+	int r, c;
+
+	if (b->h < 1 || b->w < 1)
+		return;
+	/* A box is a box and stays in it: clipped to its own rectangle, so a row can never wrap onto the next line of the terminal. */
+	cl = out_clip_set(o, b->y, b->x, b->y + b->h - 1, b->x + b->w - 1);
+	for (r = 0; r < b->h; r++) {
+		out_at(o, b->y + r, b->x);
+		if (p->cols > 1) {
+			for (c = 0; c < p->cols; c++) {
+				int it = c * b->n_rows + b->off + r;
+				const struct kv_popup_row *row = it < p->n ? &p->row[it] : NULL;
+
+				kv_popup_text(p, b->off + r, c, t, sizeof t);
+				out_str(o, row && (row->id == sel || row->id == sel2) ? BAR_CUR
+					   : row && (row->flags & KV_PR_OFF) ? BAR_OFF : BAR_ON);
+				out_str(o, t);
+				out_str(o, A_OFF);
+			}
+			continue;
+		}
+		{
+			const struct kv_popup_row *row = &p->row[b->off + r];
+
+			if (row->flags & KV_PR_RULE) {
+				int k;
+
+				out_str(o, BAR_ON " ");
+				for (k = 0; k < b->w - 2; k++)
+					out_glyph(o, G_H);
+				out_str(o, " " A_OFF);
+				continue;
+			}
+			kv_popup_text(p, b->off + r, 0, t, sizeof t);
+			out_str(o, (row->id == sel || row->id == sel2) ? BAR_CUR : (row->flags & KV_PR_OFF) ? BAR_OFF : BAR_ON);
+			out_str(o, t);
+			out_str(o, A_OFF);
+		}
+	}
+	out_clip_restore(o, cl);
+}
+
+/* ---- a menu described by callbacks ------------------------------------------ */
 
 static int kv_shown(const struct kv_menu *m, int i)
 {
 	return m->shown ? m->shown(m->ud, i) : 1;
 }
 
-static int kv_enabled(const struct kv_menu *m, int i)
-{
-	return m->enabled ? m->enabled(m->ud, i) : 1;
-}
-
-static int kv_rule(const struct kv_menu *m, int i)
-{
-	return m->rule_above ? m->rule_above(m->ud, i) : 0;
-}
-
-/*
- * One walk, and every question below is a different thing to do while making
- * it.
- *
- * Written three times over two menus before this, and the copies had already
- * drifted: one counted a rule before deciding the item was hidden, so a hidden
- * item at a group boundary left a rule with nothing under it and every row
- * after it was one off. `want` is the row being looked for, or -1 to just
- * count; `of` is an item to find the row of, or -1.
- */
-static int kv_walk(const struct kv_menu *m, int want, int of)
-{
-	int i, row = 0;
-
-	for (i = 0; i < m->n; i++) {
-		if (!kv_shown(m, i))
-			continue;
-		if (kv_rule(m, i))
-			row++;                  /* the rule takes a row */
-		if (of == i)
-			return row;
-		if (want == row)
-			return i;
-		row++;
-	}
-	return want >= 0 || of >= 0 ? -1 : row;
-}
-
-/* The k-th SHOWN item (0-based), or -1: the order a grid is laid out in. */
-static int kv_nth_shown(const struct kv_menu *m, int k)
+/* The ONE adapter from a menu's own table (shown / enabled / rule_above / label / has_sub / checked) to the rows of a pop-up. */
+void kv_menu_popup(const struct kv_menu *m, struct kv_popup *p)
 {
 	int i;
 
-	for (i = 0; i < m->n; i++)
-		if (kv_shown(m, i) && k-- == 0)
-			return i;
-	return -1;
+	kv_popup_init(p, m->cols);
+	for (i = 0; i < m->n; i++) {
+		unsigned fl = 0;
+
+		if (!kv_shown(m, i))
+			continue;
+		if (p->cols == 1 && m->rule_above && m->rule_above(m->ud, i))
+			kv_popup_add(p, "", KV_PR_RULE, -1);
+		if (m->enabled && !m->enabled(m->ud, i))
+			fl |= KV_PR_OFF;
+		if (p->cols == 1 && m->has_sub && m->has_sub(m->ud, i))
+			fl |= KV_PR_SUB;
+		if (m->checked)
+			fl |= KV_PR_TICK | (m->checked(m->ud, i) ? KV_PR_ON : 0u);
+		kv_popup_add(p, m->label ? m->label(m->ud, i) : "", fl, i);
+	}
 }
 
-static int kv_shown_count(const struct kv_menu *m)
+/* Fill a request for a menu: the screen, the menu's least width, and the anchor; the caller adds a parent when it is a submenu. */
+void kv_menu_req(const struct kv_menu *m, int ay, int ax, int anchor_h, struct kv_popup_req *q)
 {
-	int i, n = 0;
-
-	for (i = 0; i < m->n; i++)
-		n += kv_shown(m, i) ? 1 : 0;
-	return n;
+	kv_popup_screen(q);
+	q->ay = ay;
+	q->ax = ax;
+	q->anchor_h = anchor_h;
+	q->min_w = m->w;
 }
 
+/* Rows a menu takes (a grid: its tallest column) - what a caller covering the box asks. */
 int kv_menu_rows(const struct kv_menu *m)
 {
-	if (m->cols > 1)
-		return (kv_shown_count(m) + m->cols - 1) / m->cols;
-	return kv_walk(m, -1, -1);
-}
+	struct kv_popup p;
 
-int kv_menu_at_row(const struct kv_menu *m, int row)
-{
-	return row < 0 ? -1 : kv_walk(m, row, -1);
-}
-
-int kv_menu_at_cell(const struct kv_menu *m, int row, int col)
-{
-	if (m->cols <= 1)
-		return col == 0 ? kv_menu_at_row(m, row) : -1;
-	if (row < 0 || col < 0 || col >= m->cols || row >= kv_menu_rows(m))
-		return -1;
-	return kv_nth_shown(m, col * kv_menu_rows(m) + row);
-}
-
-int kv_menu_row_of(const struct kv_menu *m, int item)
-{
-	return kv_walk(m, -1, item);
-}
-
-int kv_menu_first(const struct kv_menu *m)
-{
-	int i;
-
-	for (i = 0; i < m->n; i++)
-		if (kv_shown(m, i) && kv_enabled(m, i))
-			return i;
-	return 0;
-}
-
-int kv_menu_step(const struct kv_menu *m, int cur, int d)
-{
-	int i, k = cur;
-
-	for (i = 0; i < m->n; i++) {
-		k += d;
-		if (k < 0 || k >= m->n)
-			return cur;
-		if (kv_shown(m, k) && kv_enabled(m, k))
-			return k;
-	}
-	return cur;
-}
-
-void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
-		  int sel, int sel2)
-{
-	int i, y = top, k, rows = 0;
-	struct out_clip cl;
-
-	if (m->cols > 1) {
-		/* A grid: items run down a column, then the next; every cell is `w` wide and the box is cols * w. */
-		int r, c, nr = kv_menu_rows(m);
-
-		cl = out_clip_set(o, top, left, top + nr - 1, left + m->w * m->cols);
-		for (r = 0; r < nr; r++) {
-			out_at(o, top + r, left);
-			for (c = 0; c < m->cols; c++) {
-				int it = kv_menu_at_cell(m, r, c);
-
-				if (it < 0) {
-					out_fmt(o, "%s%*s" A_OFF, m->c_on, m->w, "");
-					continue;
-				}
-				out_str(o, it == sel || it == sel2 ? m->c_cur : !kv_enabled(m, it) ? m->c_off : m->c_on);
-				if (m->checked)
-					out_fmt(o, " [%c] %-*.*s", m->checked(m->ud, it) ? 'x' : ' ', m->w - 5, m->w - 5,
-						m->label(m->ud, it));
-				else
-					out_fmt(o, " %-*.*s", m->w - 1, m->w - 1, m->label(m->ud, it));
-				out_str(o, A_OFF);
-			}
-		}
-		out_clip_restore(o, cl);
-		return;
-	}
-
-	/*
-	 * A MENU IS A BOX AND IT STAYS IN IT.
-	 *
-	 * Its height is however many of its items are shown plus a row for each
-	 * rule, and its width is the one it was laid out to - both of which it
-	 * has to count before it draws, because a menu opened near the bottom
-	 * or the right edge would otherwise write past it and the terminal
-	 * would wrap the overflow onto the row below, which scrolls the screen.
-	 */
-	for (i = 0; i < m->n; i++) {
-		if (!kv_shown(m, i))
-			continue;
-		rows += kv_rule(m, i) ? 2 : 1;
-	}
-	cl = out_clip_set(o, top, left, top + rows - 1, left + m->w);
-
-	for (i = 0; i < m->n; i++) {
-		if (!kv_shown(m, i))
-			continue;
-		if (kv_rule(m, i)) {
-			out_at(o, y++, left);
-			out_str(o, m->c_on);
-			out_str(o, " ");
-			for (k = 0; k < m->w - 2; k++)
-				out_glyph(o, G_H);
-			out_str(o, " " A_OFF);
-		}
-		out_at(o, y++, left);
-		if (i == sel || i == sel2)
-			out_str(o, m->c_cur);
-		else if (!kv_enabled(m, i))
-			out_str(o, m->c_off);
-		else
-			out_str(o, m->c_on);
-		/* The submenu arrow is drawn INSIDE the width, not after it: a
-		 * row that is one column wider than its neighbours puts a step
-		 * in the right edge of the box. */
-		if (m->checked)
-			out_fmt(o, " [%c] %-*.*s", m->checked(m->ud, i) ? 'x' : ' ', m->w - 5, m->w - 5,
-				m->label(m->ud, i));
-		else if (m->has_sub && m->has_sub(m->ud, i))
-			out_fmt(o, " %-*.*s>", m->w - 2, m->w - 2,
-				m->label(m->ud, i));
-		else
-			out_fmt(o, " %-*.*s", m->w - 1, m->w - 1,
-				m->label(m->ud, i));
-		out_str(o, A_OFF);
-	}
-	out_clip_restore(o, cl);
+	kv_menu_popup(m, &p);
+	return pop_rows(&p);
 }
 
 /* ---- what a format can be asked - see kofview.h ---------------------------- */

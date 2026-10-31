@@ -27,10 +27,14 @@ int main(int argc, char **argv)
 		rc = ksb_tree_main(ksb, argc, argv);
 	else if (argc > 1 && strcmp(argv[1], "--diagnose") == 0)
 		rc = ksb_diagnose_main(ksb, argc, argv);
-	else if (argc > 1 && strcmp(argv[1], "--tags") == 0)
-		rc = ksb_tags_main(argc, argv);
+	else if (argc > 1 && strcmp(argv[1], "--catalog") == 0)
+		rc = ksb_catalog_main(ksb, argc, argv);
 	else
 		rc = ksb_pack_main(ksb, argc, argv);
+	/* The catalogs the first diagnose that named one opened (ksb_catalog_get): 2.6 MB with the shipped ones, never given back
+	 * (audit_mem MEM-5, LeakSanitizer on --tree over the diagnoses). */
+	ksb_catalog_close(ksb->diag.cat);
+	free(ksb->diseases.ent);        /* the registry ksb_disease_note grew (4608 bytes with the test bases, LeakSanitizer) */
 	free(ksb);
 	return rc;
 }

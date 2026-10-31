@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "kofdiag.h"
+#include "../../databases/pack/diagform.h"
 #include <phenotype/diag_scan_state.h>
 #include "../../kofcore/kofdebug.h"
 #include "../../kofcore/kofcore.h"
@@ -685,7 +686,38 @@ int kof_diag_scan_name(const struct kgenome_diag_scan *s, const struct kof_diag 
  * half read is a diagnose that matches something its author did not write.
  */
 
-int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st)
+/* The bodies of a record's KDIG_SEC_FORM sections, concatenated: one stream (see diagform.h). Heap, because a stream is
+ * up to KOF_FORM_MAX_WIRE bytes and this runs once per record at load. */
+struct formacc {
+	uint8_t *p;
+	size_t   n, cap;
+};
+
+static int formacc_add(struct formacc *fa, const uint8_t *b, size_t len)
+{
+	/* A section of no bytes adds none (and the first one has no buffer yet: memcpy(NULL, p, 0) is undefined). */
+	if (!len)
+		return 1;
+	if (fa->n + len > KOF_FORM_MAX_WIRE)
+		return 0;               /* refused whole, not cut: a stream cut in the middle is another form */
+	if (fa->n + len > fa->cap) {
+		size_t nc = fa->cap ? fa->cap : 1024u;
+		uint8_t *g;
+
+		while (nc < fa->n + len)
+			nc *= 2u;
+		g = realloc(fa->p, nc);
+		if (!g)
+			return 0;
+		fa->p = g;
+		fa->cap = nc;
+	}
+	memcpy(fa->p + fa->n, b, len);
+	fa->n += len;
+	return 1;
+}
+
+static int diag_load_(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st, struct formacc *fa)
 {
 	const uint8_t *b = rec.p;
 	const uint64_t n = rec.n;
@@ -704,7 +736,8 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 		return 0;
 	n_node = (uint32_t)b[0] | ((uint32_t)b[1] << 8);
 	nlen   = b[3];
-	if (!n_node || n_node > max_node || nlen + 1u > name_cap)
+	/* NO NODE IS A FORM'S RECORD (KDIG_SEC_FORM); kof_diag_load below says whether it had one. */
+	if (n_node > max_node || nlen + 1u > name_cap)
 		return 0;
 	at = 4u + nlen;
 	if (n < at || (n - at) / 8u < n_node)
@@ -724,17 +757,14 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 
 		if ((uint64_t)(r - b) + 8u > n)
 			return 0;
+		/* Every field, so a node array that held a value and a symbol before is clean after a record
+		 * with neither (WP9-F13: val and sym were left, a pointer into a string store that may be gone). */
+		memset(&node[i], 0, sizeof node[i]);
 		node[i].cap    = (uint16_t)(r[0] | (r[1] << 8));
 		node[i].flags  = (uint16_t)(r[2] | (r[3] << 8));
 		node[i].parent = r[4];
 		node[i].role   = r[5];
 		node[i].bits   = r[6];
-		/* KNOWN DEFECT WP9-F13 (2026-10-25, M) [sev L]: kof_diag_load assigns node fields one by one and leaves
-		 * node.val and node.sym of a reused array. Trigger: a record without attributes loaded into a node array
-		 * that was used before. Effect: val and sym keep the old value or a pointer into a string store that may be
-		 * gone (the pack loader callocs its arrays: not reached there). Reproducer:
-		 * tests/unit/diag_load_known_misses.c f13. Fix: set `node[i].val = 0; node[i].sym = NULL;` beside this
-		 * line. */
 		node[i].attr_len = r[7];
 		alen = r[7];
 		at += 8u;
@@ -921,6 +951,30 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 				if (!out->disease)
 					return 0;
 			}
+			/* The catalog facts: three ids and the type, fixed layout (KDIG_SEC_META). A length
+			 * that is not 25, an id of zero, a type that is no maltype or is Packer, or a second
+			 * section refuses the record, like the disease: half an identity names another one. */
+			if (tag == KDIG_SEC_META) {
+				uint64_t id[3] = { 0, 0, 0 };
+				unsigned q, z;
+
+				if (len != KDIG_META_LEN || out->family_id ||
+				    b[at + 24u] >= KOF_MALTYPE_COUNT ||
+				    b[at + 24u] == KOF_MALTYPE_PACKER)
+					return 0;
+				for (z = 0; z < 3u; z++)
+					for (q = 0; q < 8u; q++)
+						id[z] |= (uint64_t)b[at + z * 8u + q] << (q * 8u);
+				if (!id[0] || !id[1] || !id[2])
+					return 0;
+				out->family_id = id[0];
+				out->variant_id = id[1];
+				out->tag_id = id[2];
+				out->type = b[at + 24u];
+			}
+			/* The detection form: a piece of one stream, put together after the loop. */
+			if (tag == KDIG_SEC_FORM && !formacc_add(fa, b + at, len))
+				return 0;
 			if (tag == KDIG_SEC_WHEN) {
 				uint32_t q;
 
@@ -961,10 +1015,44 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 		for (i = 0; i < n_node; i++)
 			if (node[i].parent == KOF_DIAG_NO_PARENT)
 				roots++;
-		if (roots != 1u)
+		if (n_node && roots != 1u)
 			return 0;
 	}
 	return 1;
+}
+
+/*
+ * THE RECORD'S DETECTION FORM, if it has one. A diagnose is a graph or a form: a record with nodes and a form, with
+ * neither, or whose form does not decode (a stream cut, an index outside its table, an expression that is not a tree, a
+ * hex program that is not one) is refused whole, like every other section.
+ */
+int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st)
+{
+	struct formacc fa = { NULL, 0, 0 };
+	int ok = diag_load_(rec, out, st, &fa);
+
+	if (ok) {
+		if (fa.n && out->n_node)
+			ok = 0;
+		else if (!fa.n && !out->n_node)
+			ok = 0;
+		else if (fa.n) {
+			out->form = kof_form_decode(fa.p, fa.n, NULL);
+			ok = out->form != NULL;
+		}
+	}
+	free(fa.p);
+	if (!ok && out)
+		out->form = NULL;
+	return ok;
+}
+
+void kof_diag_form_free(struct kof_diag *d)
+{
+	if (!d)
+		return;
+	kof_form_free((struct kof_form *)(uintptr_t)d->form);
+	d->form = NULL;
 }
 
 uint32_t kof_diag_graph_build(struct kgenome_diag_scan *s, uint8_t *out,

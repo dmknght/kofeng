@@ -108,14 +108,14 @@ int kgenome_elf_sec_is_code(const struct kgenome_elf_sec *s)
 int kgenome_elf_sec_is_stub(const struct kgenome_elf_info *e, uint32_t i)
 {
 	uint32_t k, home = e->sec_count;
+	uint64_t best = 0;
 
-	if (!e->valid || !e->entry_addr || i >= e->sec_count ||
-	    i >= KGENOME_ELF_MAX_SECTIONS || !kgenome_elf_sec_is_code(&e->sec[i]))
+	if (!e->valid || i >= e->sec_count || i >= KGENOME_ELF_MAX_SECTIONS ||
+	    !kgenome_elf_sec_is_code(&e->sec[i]))
 		return 0;
 	/* The program's own code is the executable section the entry point is in; the
-	 * others are the loader's and the linker's (.init, .fini, the PLT, ...). An
-	 * entry in no executable section says nothing about which is which. */
-	for (k = 0; k < e->sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++) {
+	 * others are the loader's and the linker's (.init, .fini, the PLT, ...). */
+	for (k = 0; e->entry_addr && k < e->sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++) {
 		const struct kgenome_elf_sec *s = &e->sec[k];
 
 		if (kgenome_elf_sec_is_code(s) && e->entry_addr >= s->mem_addr &&
@@ -124,6 +124,16 @@ int kgenome_elf_sec_is_stub(const struct kgenome_elf_info *e, uint32_t i)
 			break;
 		}
 	}
+	/* An entry in none (a shared library has e_entry 0, a packed file can point into
+	 * data) says nothing about which is which: the body is then the largest executable
+	 * section, a decision by size and never by name. It only decides which sections are
+	 * stubs, never whether an import has one. */
+	if (home >= e->sec_count)
+		for (k = 0; k < e->sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++)
+			if (kgenome_elf_sec_is_code(&e->sec[k]) && e->sec[k].file_size >= best) {
+				best = e->sec[k].file_size;
+				home = k;
+			}
 	return home < e->sec_count && home != i;
 }
 

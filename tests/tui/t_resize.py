@@ -82,11 +82,11 @@ def resize_with_open_menu():
 @case(A)
 def resize_with_field_edit_active():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abc')
         v.resize(30, 100)
         v.type('d'); v.key('enter')
-        check('Family [abcd]' in v.row(grip(v) + 1), v.row(grip(v) + 1)[:60])
+        check('[abcd' in v.row(grip(v) + 1), v.row(grip(v) + 1)[:60])
 
 
 @case(A)

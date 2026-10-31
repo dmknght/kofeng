@@ -182,8 +182,6 @@ enum kgenome_diag_emu_force_kind { KGENOME_DIAG_EMU_FORCE_NONE = 0, KGENOME_DIAG
  * emulator issues and far below anything that could be a pointer. */
 #define KGENOME_DIAG_EMU_FD0 0x200u
 
-#define KGENOME_DIAG_EMU_FILL_ON 0
-
 /* rax on amd64, eax on i386 - the same register number either way. */
 #define KGENOME_DIAG_EMU_RET KGENOME_EMU_RAX
 
@@ -420,7 +418,6 @@ enum kgenome_diag_emu_rel_act { KGENOME_DIAG_EMU_REL_ON, KGENOME_DIAG_EMU_REL_NE
 int kgenome_diag_emu_ret_is_carryable(uint64_t ret);
 int kgenome_diag_emu_cap_hands_on_value(uint16_t cap, const char *nm);
 enum kgenome_diag_emu_force_kind kgenome_diag_emu_cap_force_kind(uint16_t cap);
-void kgenome_diag_emu_fill_buffer(struct kgenome_emu *em, uint64_t at, uint64_t n);
 extern const unsigned kgenome_diag_emu_arg_reg64[6];
 extern const unsigned kgenome_diag_emu_arg_reg32[6];
 unsigned kgenome_diag_emu_guest_name(struct kgenome_diag_scan *s, struct kgenome_emu *em, uint64_t va, char *out);

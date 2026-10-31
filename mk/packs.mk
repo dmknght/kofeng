@@ -102,6 +102,8 @@ DB        ?= $(strip $(if $(filter bases,$(BASESET)),$(OUT)/databases,\
 KSB_OPTS = --include $(abspath $(OUT)/include) \
            --ldscript $(abspath ksigbuilder/module.ld) \
            --basedir $(abspath $(BASEDIR)) \
+           --pathogens $(abspath $(BASEDIR)/pathogens) \
+           --syndromes $(abspath $(BASEDIR)/syndromes) \
            --cc $(CC) --ld $(LD_FOR_SIGS)
 ifneq ($(KOF_TARGET_TRIPLE),)
 KSB_OPTS += --triple $(KOF_TARGET_TRIPLE)

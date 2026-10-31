@@ -706,7 +706,7 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 	 *
 	 * So the invariants are decided once and the next boundary is kept
 	 * here: the per-byte question becomes `i >= next_mark`, one compare
-	 * against a register. KOF_NO_MARK is past any offset an object can
+	 * against a register. ~(uint64_t)0 (next_mark's value past the last boundary) is past any offset an object can
 	 * have, so the test is simply false once the last boundary is passed.
 	 */
 	const uint64_t *mk = (mark && mark_out) ? mark : NULL;

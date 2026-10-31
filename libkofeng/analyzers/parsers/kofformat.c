@@ -315,7 +315,7 @@ static uint64_t anom_rtf(const void *v)
  *
  * A parse's table that cannot grow (the file's own bound, or the engine's ledger: see tabgrow.h)
  * records it as an anomaly. Reading that word is not the module's business: the engine reads it,
- * once, after the parse (sx_facts), and the object says it was cut (KOF_BROKEN_LIMIT) - one place,
+ * once, after the parse (view_say, scan_facts.c), and the object says it was cut (KOF_BROKEN_LIMIT) - one place,
  * so no module has to remember, and none does. Every "full" bit a parser sets is here, because a bit
  * nothing reads is a member that is gone with no word anywhere. (The 7z coded-header walk is listed
  * too: a header that cannot be decoded within the account is a folder list not read.)
@@ -340,6 +340,34 @@ uint64_t kof_parser_cut_bits(const struct kof_parser *p)
 	case KOF_FMT_TAR: return KOF_TAR_ANOM_ENTRIES_FULL | KOF_TAR_ANOM_EXTENTS_FULL;
 	case KOF_FMT_7Z:  return KOF_7Z_ANOM_FOLDERS_FULL;
 	case KOF_FMT_SCRIPT: return KOF_SCRIPT_ANOM_ISLANDS_FULL;
+	default:          return 0;
+	}
+}
+
+/*
+ * THE ANOMALY BITS THAT MEAN "THE FILE DECLARES MORE THAN IT HOLDS". A walk that ends on a
+ * member whose size runs past the end, or a directory that starts past it, keeps what came
+ * before and records a bit; nothing read the bit, so the archive read as clean with members
+ * missing (WP2-D1..D4). Read here, once, after the parse (view_say, scan_facts.c). A bit that is a
+ * convention of the format (a tar with no end blocks, a stored member with a gap) is not
+ * listed: damage is a size or an offset that cannot be true.
+ */
+uint64_t kof_parser_damage_bits(const struct kof_parser *p)
+{
+	if (!p)
+		return 0;
+	switch (p->format) {
+	case KOF_FMT_LHA: return KOF_LHA_ANOM_TRUNCATED;
+	case KOF_FMT_ARJ: return KOF_ARJ_ANOM_TRUNCATED;
+	case KOF_FMT_CAB: return KOF_CAB_ANOM_TRUNCATED | KOF_CAB_ANOM_ENTRY_PAST_EOF;
+	case KOF_FMT_CHM: return KOF_CHM_ANOM_TRUNCATED | KOF_CHM_ANOM_ENTRY_PAST_EOF;
+	/* KNOWN DEFECT DF-5 (2026-10-30, M) [sev H]: KOF_ZIP_ANOM_NO_EOCD is not in the zip damage bits, so a zip with no end record reads as a clean object (same family as HD-2, see HD-2; 7z and RAR cuts say DAMAGED).
+	 * Trigger: a zip cut before its end record, or with the end signature damaged. Effect: one clean object, no member read, nothing says so.
+	 * Reproducer: /mnt/games/normtest/fix_detacc2_fmt/defects/df_repro.c (prints "DF-5 REPRODUCED").
+	 * Fix: add KOF_ZIP_ANOM_NO_EOCD here (the cheapest report); the real fix is HD-2 (walk the local headers). */
+	case KOF_FMT_ZIP: case KOF_FMT_DOCZIP:
+		return KOF_ZIP_ANOM_CD_PAST_EOF | KOF_ZIP_ANOM_DATA_PAST_EOF | KOF_ZIP_ANOM_BAD_LOCAL;
+	case KOF_FMT_TAR: return KOF_TAR_ANOM_TRUNCATED;
 	default:          return 0;
 	}
 }

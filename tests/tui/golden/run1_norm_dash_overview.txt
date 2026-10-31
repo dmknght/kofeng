@@ -1,0 +1,51 @@
+# golden run1_norm_dash_overview: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2| ╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │ Enclosing 0                                                                                                                                                        │  │
+ 4| │   name        run1  ELF-x64                                                                                                                                        │  │
+ 5| │   folder      /mnt/games/kofscratch/vt/work/golden/  [ Copy full path ]                                                                                            │  │
+ 6| │   size        64608 bytes (63.0 KiB)                                                                                                                               │  │
+ 7| │                                                                                                                                                                    │  │
+ 8| │ Object 1                                                                                                                                                           │  │
+ 9| │   name        //0:norm ELF-x64                                                                                                                                     │  │
+10|*│   sha256      3810eb3fdd88716c13be8b33f8ae1d3bbaced3a79f05c59c1a291cfb50098c2d                                                                                     │  │
+11| │   size        54249 bytes (52.9 KiB)                                                                                                                               │  │
+12| │   format      ELF ET_DYN                                                                                                                                           │  │
+13| │   arch        x64                                                                                                                                                  │  │
+14| │   linking     dynamic                                                                                                                                              │  │
+15| │ Detection                                                                                                                                                          │  │
+16| │   verdict     Infected#ELF-x64/Botnet:Mirai.A!Diagnose                                                                                                             │  │
+17| │   family      Mirai                                                                                                                                                │  │
+18| │   variant     Mirai.A                                                                                                                                              │  │
+19| │   tag         Mirai-Ops-Str                                                                                                                                        │  │
+20| │   basis       variant  cover 1000  jaccard 1000  groups 1  matched 2                                                                                               │  │
+21| │   diagnose    botnet_mirai_mirai-ops-str_01  Botnet                                                                                                                │  │
+22| │     family Mirai  variant Mirai.A  tag Mirai-Ops-Str                                                                                                               │  │
+23| │     similarity over 1 matcher(s): 0                                                                                                                                │  │
+24| │       matcher 0 similarity 100% of the 1 block(s), 70% demanded                                                                                                    │  │
+25| │       part block fd523fd5 yes: holds 32 of 32 hashes (100%), cut from DATA; place 0xa259 +302 in DATA holds 32                                                     │  │
+26| │ botnet_mirai_mirai-wordlist_01  Botnet                                                                                                                             │  │
+27| │     family Mirai  variant Mirai.A  tag Mirai-wordlist                                                                                                              │  │
+28| │     similarity over 1 matcher(s): 0                                                                                                                                │  │
+29| │       matcher 0 similarity 100% of the 1 block(s), 70% demanded                                                                                                    │  │
+30| │       part block 541cd7e6 yes: holds 32 of 32 hashes (100%), cut from DATA; place 0x9178 +4056 in DATA holds 32                                                    │  │
+31| │ Regions                                                                                                                                                            │  │
+32| │   HEADERS     2600        4.8%  1.4/8 bits                                                                                                                         │  │
+33| │   CODE        29988      55.3%  5.8/8 bits                                                                                                                         │  │
+34| │   DATA        15954      29.4%  4.5/8 bits                                                                                                                         │  │
+35| │   NOLOAD      5557       10.2%  4.5/8 bits                                                                                                                         │  │
+36| │   UNCLAIMED   6           0.0%  0.0/8 bits                                                                                                                         │  │
+37|-│   SLIB_CODE   140         0.3%  5.4/8 bits                                                                                                                         │---
+38| │   SLIB_DATA   4           0.0%  1.5/8 bits                                                                                                                         │ ]
+39| │ Anomalies                                                                                                                                                          │
+40| │   SHOFF_PAST_EOF                                                                                                                                                   │
+41| │   SEG_PAST_EOF                                                                                                                                                     │
+42| │   SECTAB_MISSING                                                                                                                                                   │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-40 of 40 lines ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|Norm  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

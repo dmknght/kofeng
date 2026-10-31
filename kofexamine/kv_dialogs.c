@@ -10,8 +10,9 @@
  * line can only hold the one being typed. Every setting is a control that says
  * its own state, so nothing has to be remembered between openings.
  *
- * Regex is drawn and refused. Leaving it out would invite the question every
- * time; drawing it greyed answers it once and marks the place the work goes.
+ * Regex is a tick like the others: it compiles the pattern as the text changes
+ * (find_compile, kv_find.c) and is greyed only in hex mode, where a pattern
+ * over text has no meaning.
  */
 /*
  * Four rows: a top rule and three of content.
@@ -118,14 +119,7 @@ int dframe_begin(struct out *o, struct dframe *f, const char *title,
 	 */
 	f->x += f->off.dx;
 	f->y += f->off.dy;
-	if (f->x + f->w - 1 > g_cols)
-		f->x = g_cols - f->w + 1;
-	if (f->x < 1)
-		f->x = 1;
-	if (f->y + f->h - 1 > g_rows)
-		f->y = g_rows - f->h + 1;
-	if (f->y < 2)
-		f->y = 2;               /* row 1 is the menu bar */
+	kv_box_fit(&f->y, &f->x, f->h, f->w, 2, g_rows, g_cols);     /* row 1 is the menu bar */
 	f->ix = f->x + 2;
 	f->iw = f->w - 4;
 	/* The box owns these rows and these columns and nothing else. Set
@@ -577,38 +571,6 @@ static int enc_in_text(const struct view *v, int y, int x)
 	return v->enc_txt_h > 0 && y >= v->enc_txt_y &&
 	       y < v->enc_txt_y + v->enc_txt_h &&
 	       x >= v->enc_txt_x && x < v->enc_txt_x + v->enc_txt_w;
-}
-
-/* The selected plaintext, as bytes. The same span dlg_copy takes, handed back
- * instead of being put on the clipboard - so Copy and Declare cannot disagree
- * about what was picked. */
-size_t enc_sel_text(struct view *v, char *out, size_t cap)
-{
-	int r0, c0, r1, c1, r;
-	size_t n = 0;
-
-	if (!dlg_span(v, &r0, &c0, &r1, &c1))
-		return 0;
-	for (r = r0; r <= r1 && n + 1u < cap; r++) {
-		int row = dlg_row_of_src(v, r), len, from, to;
-
-		if (row < 0)
-			continue;
-		len = (int)v->dlg_cols[row];
-		from = (r == r0) ? c0 : 0;
-		to   = (r == r1) ? c1 + 1 : len;
-		if (to > len)
-			to = len;
-		while (to > from &&
-		       v->dlg_line[row][v->dlg_bx[row][to - 1]] == ' ')
-			to--;
-		if (n && n + 1u < cap)
-			out[n++] = '\n';
-		while (from < to && n + 1u < cap)
-			out[n++] = v->dlg_line[row][v->dlg_bx[row][from++]];
-	}
-	out[n] = 0;
-	return n;
 }
 
 /* A click in the Decoder: a control, or nothing. */

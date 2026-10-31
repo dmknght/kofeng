@@ -11,8 +11,9 @@
  *     score between the extremes: the percentage is the finding, so a matcher
  *     that only had two answers would pass every yes/no test and be useless.
  *   - REORDERING THE RECORDS COSTS ONLY THE SEAMS.
- *   - THE NORMALIZER ERASES A CONSTANT KEY: a unit XORed with any single byte
- *     scores the same under KGENOME_MUTATION_XOR, and does not under RAW.
+ *   - THE MATCHER DOES NOT UNDO A KEY: a unit XORed with a single byte scores
+ *     nothing (an encoding that is detected is decoded by the normalise stage,
+ *     not here).
  *   - THE REGION AND THE SIDE ARE PART OF THE MATCH.
  *   - THE BEST UNIT, NOT THE SUM: two units that each hold half of a block do not
  *     add up to the whole of it.
@@ -68,27 +69,21 @@ static void make_block(uint8_t *b, uint32_t seed)
 		b[i] = (uint8_t)rnd(&s);
 }
 
-/* The sketch a buffer yields under one normalizer, in ascending order. The
+/* The sketch a buffer yields, in ascending order. The
  * engine's own generator: this file carried a copy of it once, and a copy is
  * exactly what lets the authoring side and the matcher drift apart with
  * nothing reporting it. */
-static uint32_t harvest(const uint8_t *p, uint32_t n, uint32_t norm,
-			uint32_t *out)
+static uint32_t harvest(const uint8_t *p, uint32_t n, uint32_t *out)
 {
-	return kgenome_mutation_minhash(p, n, norm, out);
+	return kgenome_mutation_minhash(p, n, out);
 }
 
 /* Feed a buffer as ONE unit, then read one block's percentage. */
 static uint32_t score_of(struct kof_mutation_ctx *c, uint32_t rgn,
-			 const uint8_t *p, uint32_t n, uint32_t norms,
-			 uint32_t block)
+			 const uint8_t *p, uint32_t n, uint32_t block)
 {
-	uint32_t k;
-
 	kof_mutation_begin(c);
-	for (k = 0; k < KGENOME_MUTATION_NORM_COUNT; k++)
-		if (norms & (1u << k))
-			kof_mutation_unit(c, rgn, k, KGENOME_MUTATION_SIDE_USER, p, n);
+	kof_mutation_unit(c, rgn, KGENOME_MUTATION_SIDE_USER, p, n);
 	return kof_mutation_pct(c, block);
 }
 
@@ -99,20 +94,20 @@ int main(void)
 	struct kof_mutation_block blocks[2];
 	struct kof_mutation_set *set;
 	struct kof_mutation_ctx ctx;
-	uint32_t n0, n1, norms, s;
+	uint32_t n0, s;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 	make_block(blk, 0x1234u);
 	make_block(anchor, 0x9999u);
 
-	n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+	n0 = harvest(blk, BLK, pool);
 	if (n0 < KGENOME_MUTATION_MIN_HASH) {
 		printf("mutation match: block yielded %u hashes, too few to test\n", n0);
 		return 1;
 	}
 	memset(blocks, 0, sizeof blocks);        /* `side` and the padding were stack garbage: the verdicts followed the stack */
 	blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-	blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+	blocks[0].scan_mask = RGN_A;
 	memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 
 	set = kof_mutation_build(blocks, 1, pool, n0);
@@ -120,22 +115,22 @@ int main(void)
 		printf("mutation match: could not build the set\n");
 		return 1;
 	}
-	norms = kof_mutation_set_norms(set, RGN_A);
-	ok_(norms == (1u << KGENOME_MUTATION_RAW), "the set reports the one normalizer it uses");
+	ok_(kof_mutation_set_asks(set, RGN_A) == 1 && kof_mutation_set_asks(set, RGN_B) == 0 &&
+	    kof_mutation_set_asks(set, 0) == 1, "the set reports the regions it asks for");
 
 	/* whole, absent, and the region */
-	ok_(score_of(&ctx, RGN_A, blk, BLK, norms, 0u) == 100u,
+	ok_(score_of(&ctx, RGN_A, blk, BLK, 0u) == 100u,
 	    "a unit equal to the block scores 100");
-	ok_(score_of(&ctx, RGN_B, blk, BLK, norms, 0u) == 0u,
+	ok_(score_of(&ctx, RGN_B, blk, BLK, 0u) == 0u,
 	    "the same bytes in another region score nothing");
 	memset(hay, 0x5A, sizeof hay);
-	ok_(score_of(&ctx, RGN_A, hay, BLK, norms, 0u) == 0u,
+	ok_(score_of(&ctx, RGN_A, hay, BLK, 0u) == 0u,
 	    "a unit that is not the block scores nothing");
 
 	/* damage: overwrite a quarter of it */
 	memcpy(hay, blk, BLK);
 	memset(hay, 0x00, BLK / 4u);
-	s = score_of(&ctx, RGN_A, hay, BLK, norms, 0u);
+	s = score_of(&ctx, RGN_A, hay, BLK, 0u);
 	if (s < 45u || s > 90u) {
 		char why[96];
 
@@ -160,7 +155,7 @@ int main(void)
 		 * cannot give, and one accepting 50 would not notice a matcher
 		 * that had lost set semantics entirely.
 		 */
-		s = score_of(&ctx, RGN_A, shuf, BLK, norms, 0u);
+		s = score_of(&ctx, RGN_A, shuf, BLK, 0u);
 		if (s < 70u || s > 98u) {
 			char why[112];
 
@@ -172,37 +167,19 @@ int main(void)
 	kof_mutation_ctx_done(&ctx);
 	kof_mutation_set_free(set);
 
-	/* ---- the normalizer erases a constant key ----------------------- */
+	/* ---- the matcher does not undo a constant key ------------------- */
 	{
 		uint8_t keyed[BLK];
-		uint32_t i, raw_s, xor_s;
+		uint32_t i, raw_s;
 
-		n1 = harvest(blk, BLK, KGENOME_MUTATION_XOR, pool);
-		blocks[0].n_hash = n1; blocks[0].norm = KGENOME_MUTATION_XOR;
-		set = kof_mutation_build(blocks, 1, pool, n1);
-		if (!set || !kof_mutation_ctx_init(&ctx, set)) return 1;
-		for (i = 0; i < BLK; i++)
-			keyed[i] = (uint8_t)(blk[i] ^ 0x3Bu);
-		xor_s = score_of(&ctx, RGN_A, keyed, BLK,
-				 1u << KGENOME_MUTATION_XOR, 0u);
-		ok_(xor_s == 100u, "a constant XOR key vanishes under XOR");
-		kof_mutation_ctx_done(&ctx);
-		kof_mutation_set_free(set);
-
-		blocks[0].n_hash = n0; blocks[0].norm = KGENOME_MUTATION_RAW;
-		set = kof_mutation_build(blocks, 1, pool, n0);
-		if (set) {
-			uint32_t m = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
-			(void)m;
-			kof_mutation_set_free(set);
-		}
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		n0 = harvest(blk, BLK, pool);
 		blocks[0].n_hash = n0;
 		set = kof_mutation_build(blocks, 1, pool, n0);
 		if (!set || !kof_mutation_ctx_init(&ctx, set)) return 1;
-		raw_s = score_of(&ctx, RGN_A, keyed, BLK,
-				 1u << KGENOME_MUTATION_RAW, 0u);
-		ok_(raw_s == 0u, "and does not vanish under RAW");
+		for (i = 0; i < BLK; i++)
+			keyed[i] = (uint8_t)(blk[i] ^ 0x3Bu);
+		raw_s = score_of(&ctx, RGN_A, keyed, BLK, 0u);
+		ok_(raw_s == 0u, "a unit XORed with one byte does not score: the matcher hashes the bytes it is given");
 		kof_mutation_ctx_done(&ctx);
 		kof_mutation_set_free(set);
 	}
@@ -211,12 +188,12 @@ int main(void)
 	{
 		uint32_t na;
 
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
-		na = harvest(anchor, BLK, KGENOME_MUTATION_RAW, pool + n0);
+		n0 = harvest(blk, BLK, pool);
+		na = harvest(anchor, BLK, pool + n0);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		blocks[1].first_hash = n0; blocks[1].n_hash = na;
-		blocks[1].scan_mask = RGN_A; blocks[1].norm = KGENOME_MUTATION_RAW;
+		blocks[1].scan_mask = RGN_A;
 		memset(blocks[1].reserved, 0, sizeof blocks[1].reserved);
 
 		set = kof_mutation_build(blocks, 2, pool, n0 + na);
@@ -227,9 +204,9 @@ int main(void)
 		 * second: each block reports its own number.
 		 */
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				anchor, BLK / 3u);
 		ok_(kof_mutation_pct(&ctx, 0u) == 100u,
 		    "the block that is whole reports 100");
@@ -244,7 +221,7 @@ int main(void)
 
 		/* and one absent reports nothing while the other still does */
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 100u &&
 		    kof_mutation_pct(&ctx, 1u) == 0u,
@@ -257,9 +234,9 @@ int main(void)
 		 * is the scanner's cut and not a fact about the object, so it must
 		 * not change the score. */
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK / 2u);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk + BLK / 2u, BLK / 2u);
 		s = kof_mutation_pct(&ctx, 0u);
 		if (s < 80u) {
@@ -270,9 +247,9 @@ int main(void)
 			fail("units add up", why);
 		}
 		/* And a hash seen again in a later unit is still one hash. */
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 100u,
 		    "the same block seen in three units reads 100, not 300");
@@ -295,9 +272,9 @@ int main(void)
 	{
 		size_t at;
 
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		n0 = harvest(blk, BLK, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 
 		set = kof_mutation_build(blocks, 1, pool, n0);
@@ -305,7 +282,7 @@ int main(void)
 
 		for (at = 0; at + BLK / 16u <= sizeof hay; at += BLK / 16u)
 			memcpy(hay + at, blk, BLK / 16u);
-		s = score_of(&ctx, RGN_A, hay, sizeof hay, 1u << KGENOME_MUTATION_RAW, 0u);
+		s = score_of(&ctx, RGN_A, hay, sizeof hay, 0u);
 		if (s > 25u) {
 			char why[128];
 
@@ -336,14 +313,14 @@ int main(void)
 		memset(blk + BLK / 2u, 0, BLK / 2u);
 		memset(hay, 0, sizeof hay);
 
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		n0 = harvest(blk, BLK, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 
 		set = kof_mutation_build(blocks, 1, pool, n0);
 		if (!set || !kof_mutation_ctx_init(&ctx, set)) return 1;
-		ok_(score_of(&ctx, RGN_A, hay, sizeof hay, 1u << KGENOME_MUTATION_RAW, 0u) == 0u,
+		ok_(score_of(&ctx, RGN_A, hay, sizeof hay, 0u) == 0u,
 		    "a unit of pure padding matches nothing");
 		kof_mutation_ctx_done(&ctx);
 		kof_mutation_set_free(set);
@@ -358,30 +335,30 @@ int main(void)
 	 */
 	{
 		make_block(blk, 0x1234u);
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		n0 = harvest(blk, BLK, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 
 		set = kof_mutation_build(blocks, 1, pool, n0);
 		if (!set || !kof_mutation_ctx_init(&ctx, set)) return 1;
 
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 0u,
 		    "the wrong region scores nothing");
 
 		kof_mutation_begin(&ctx);
 		kof_mutation_any_region(&ctx, 1);
-		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 100u,
 		    "without the anchor the same bytes score whole");
 
 		/* And the next object starts anchored again. */
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_B, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 0u,
 		    "begin puts the anchor back");
@@ -398,9 +375,9 @@ int main(void)
 	 */
 	{
 		make_block(blk, 0x77aau);
-		n0 = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		n0 = harvest(blk, BLK, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 		blocks[0].side = KGENOME_MUTATION_SIDE_LIB;
 
@@ -408,12 +385,12 @@ int main(void)
 		if (!set || !kof_mutation_ctx_init(&ctx, set)) return 1;
 
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_USER,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 0u,
 		    "a library block is not scored by the author's code");
 		kof_mutation_begin(&ctx);
-		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_LIB,
+		kof_mutation_unit(&ctx, RGN_A, KGENOME_MUTATION_SIDE_LIB,
 				blk, BLK);
 		ok_(kof_mutation_pct(&ctx, 0u) == 100u,
 		    "and is scored by the library's");
@@ -430,21 +407,21 @@ int main(void)
 	 * so asked by containment it scores all of them.
 	 */
 	{
-		uint32_t n = harvest(blk, BLK, KGENOME_MUTATION_RAW, pool);
+		uint32_t n = harvest(blk, BLK, pool);
 		uint32_t seed;
 
 		for (seed = 0; seed < 4u; seed++)
 			make_block(hay + seed * BLK, 0x7000u + seed);
 		memcpy(hay + 2u * BLK, blk, BLK);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n;
-		blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
+		blocks[0].scan_mask = RGN_A;
 		set = kof_mutation_build(blocks, 1, pool, n);
 		if (!set || !kof_mutation_ctx_init(&ctx, set))
 			return 1;
-		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 1u << KGENOME_MUTATION_RAW, 0u);
+		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 0u);
 		ok_(s == 100u, "a block inside a unit four times its size scores all of it");
 		make_block(hay + 2u * BLK, 0x7002u);
-		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 1u << KGENOME_MUTATION_RAW, 0u);
+		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 0u);
 		ok_(s == 0u, "and the same unit without the block scores nothing");
 		kof_mutation_ctx_done(&ctx);
 		kof_mutation_set_free(set);

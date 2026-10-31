@@ -261,3 +261,15 @@ static int failk_probe(struct fz_ctx *c, const uint8_t *in, size_t n)
 	return 0;
 }
 FZ_ADAPTER(failk_probe, .name = "kit/failk_probe", .shape = FZ_REQ, .seeds = seeds, .run = failk_probe);
+
+/* The HANG backstop is per CASE: a case takes 100 ms and the backstop is one second, so a campaign of more than ten of them (the default
+ * is 24) ends only if the alarm is armed once for the whole child and not before each case (WP9-F15). */
+static int slow_case(struct fz_ctx *c, const uint8_t *in, size_t n)
+{
+	struct timespec ts = { 0, 100 * 1000 * 1000 };
+
+	(void)c; (void)in; (void)n;
+	nanosleep(&ts, NULL);
+	return 0;
+}
+FZ_ADAPTER(slow_case, .name = "kit/slow_case", .shape = FZ_REQ, .flags = FZ_NO_FAILK, .backstop_s = 1, .seeds = seeds, .run = slow_case);

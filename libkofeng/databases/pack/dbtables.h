@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * dbtables.h - the LAYOUT of a loaded database, and the accessors that read it.
  *
  * What dbloader.c produces and everything else consumes: struct kof_engine and
@@ -408,6 +414,15 @@ struct kof_disease_ent {
 	const char *name;
 };
 
+/* One name of the catalog ids in the database's table; kind is 'F' family, 'V' variant ("Family.A"), 'T' tag. */
+struct kof_name_ent {
+	uint64_t    id;
+	uint8_t     kind;
+	const char *name;
+};
+
+struct kof_catnames;
+
 struct kof_engine {
 	uint8_t *code;        /* arena base, mapped read + execute */
 	size_t   code_cap;
@@ -450,6 +465,19 @@ struct kof_engine {
 	 */
 	uint32_t              diag_refused;
 	uint32_t              diag_packs_refused;
+	/*
+	 * THE SIMILARITY BLOCKS OF THE DIAGNOSES' FORMS (KDIG_SEC_FORM), laid end to end: block k of a form is number
+	 * `n_blk + form->blk_base_in_dblk + k` of the matcher's one set, so a form's score is the very number a module's
+	 * kof_mutation_score reads. Records and hashes are the diagnoses' own, copied here because a record is gone when
+	 * its pack has been read; the matcher builds its index over them in memory beside the packs' (a diagnose pack has no
+	 * index trailer). Freed with the engine.
+	 */
+	struct kof_mutation_block *dblk;
+	uint32_t              n_dblk, cap_dblk;
+	/* How many of the loaded diagnoses are detection forms (KDIG_SEC_FORM): a scan of a database with none asks no form at all. */
+	uint32_t              n_form;
+	uint32_t             *dpool;
+	uint32_t              n_dpool, cap_dpool;
 	/*
 	 * THE DISEASES' NAMES, from diseases.kdig: id to name and type, ascending by
 	 * id. For a tool that has an id and must show one - a scan reads ids only.
@@ -587,9 +615,9 @@ struct kof_engine {
 	 * several do (16 bytes a block; their `first_hash` stay local to their own pack, since
 	 * the hash pools are not concatenated any more). The hashes themselves are NOT held:
 	 * the matcher's index lives in the pack (pack/dbkix.h) and reads them from there, so
-	 * what a database with blocks costs in memory does not follow its hash count. Only the
-	 * viewer reads this table (kof_inspect_mutation: mask, normalizer and count of each
-	 * block). `blk_owned` says whether it is to be freed.
+	 * what a database with blocks costs in memory does not follow its hash count. Read by grep
+	 * (2026-10-29), no source file but the loader and tests/unit/kix_load.c reads it since kofexamine's kof_inspect_mutation was
+	 * removed; dropping it from memory is an engine decision not taken here. `blk_owned` says whether it is to be freed.
 	 *
 	 * Empty in every build with no mutation rules, and an empty set costs an
 	 * index that is never consulted.
@@ -597,7 +625,6 @@ struct kof_engine {
 	struct kof_mutation_block *blk_tab;
 	uint32_t                 n_blk;
 	int                      blk_owned;
-	uint32_t                 n_blk_pool;   /* hashes in all of them: a count, the pool itself is not held */
 	/* The index built over the two above - see detectors/mutations/kofmutation.h. NULL
 	 * when there are no blocks. */
 	struct kof_mutation_set   *mutation;
@@ -704,6 +731,14 @@ struct kof_engine {
 	 * kofcore/kofbudget.h. Allocated and freed by keng_open / keng_close (kofeng.c), NULL
 	 * for an engine made any other way, which then has no engine-level cap. */
 	struct kof_budget *budget;
+	/* The names of the catalog ids (verdictor/catnames.h), built by keng_catalog_load from directories the host names; NULL = none:
+	 * a verdict then spells its family, variant and tag in hex. Owned and freed by keng_close; set before scanning begins. */
+	struct kof_catnames *names;
+	/* THE NAMES THE DATABASE CARRIES (names.kdig, written by the build beside diseases.kdig, read by kof_db_load_names the way the disease
+	 * table is): the families, variants and tags its diagnoses use, id -> name, sorted by (kind, id). A variant's text is "Family.A". */
+	struct kof_name_ent *cat_name;
+	char *cat_name_pool;
+	uint32_t n_cat_name;
 };
 
 /*

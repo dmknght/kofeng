@@ -37,7 +37,7 @@ static void ref_make(struct ref *r, uint64_t seed)
 		r->len[f] = 300u + hk_below(&g, MAXL - 300u);
 		for (j = 0; j < r->len[f]; j++)
 			r->body[f][j] = (uint8_t)hk_next(&g);
-		n = kgenome_mutation_minhash(r->body[f], r->len[f], KGENOME_MUTATION_RAW, r->pool + r->n_blk * 32u);
+		n = kgenome_mutation_minhash(r->body[f], r->len[f], r->pool + r->n_blk * 32u);
 		r->blk[r->n_blk].first = r->n_blk * 32u;
 		r->blk[r->n_blk].n = n;
 		r->blk[r->n_blk].side = KGENOME_MUTATION_SIDE_USER;

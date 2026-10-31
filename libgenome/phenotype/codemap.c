@@ -63,13 +63,8 @@ static int cm_push(struct cm_build *b, const struct kgenome_codemap_ref *r)
 	struct kgenome_codemap *m = b->m;
 
 	if (m->n == b->cap) {
-		/* KNOWN DEFECT REV-D8e (2026-10-25, Inference) [sev L]: cm_push (codemap.c) doubles a uint32 capacity (code map
-		 * refs) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of this kind
-		 * (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly). Reproducer:
-		 * none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against UINT32_MAX / 2
-		 * before doubling. */
-		uint32_t nc = b->cap ? b->cap * 2u : 1024u;
-		struct kgenome_codemap_ref *nv = realloc(m->v, (size_t)nc * sizeof *nv);
+		uint32_t nc = kgenome_grow_cap(b->cap, 1024u);
+		struct kgenome_codemap_ref *nv = nc ? realloc(m->v, (size_t)nc * sizeof *nv) : NULL;
 
 		if (!nv)
 			return 0;
@@ -217,6 +212,8 @@ static void cm_numbers_extent(struct cm_build *b, const struct cm_ext *e, int se
 	memset(&k, 0, sizeof k);
 	if (!kgenome_cell_seek(&k, e->at, 0))
 		return;
+	/* the extents are not in order of `at`, so each starts its own cursor over the ordered refs */
+	*ri = kof_lower_bound_u64(m->v, m->n, sizeof *m->v, offsetof(struct kgenome_codemap_ref, at), e->at);
 	while (k.at < e->at + e->len) {
 		while (*ri < m->n && m->v[*ri].at < k.at)
 			(*ri)++;
@@ -257,6 +254,17 @@ static int cm_index(struct kgenome_codemap *m)
 	return 1;
 }
 
+static int cm_cmp_at(const void *a, const void *b)
+{
+	const uint64_t x = ((const struct kgenome_codemap_ref *)a)->at, y = ((const struct kgenome_codemap_ref *)b)->at;
+
+	return x < y ? -1 : x > y;
+}
+
+/* CONSOLIDATION DEC-2 (2026-10-30, M): KEEP (will be the single table of branches, calls, returns and syscalls with the ordered by_to index; 2 callers:
+ * diag_lineage.c, codenotes.c). MERGE-FROM -> nothing; but it takes no walk, so it decodes the object a second time (2.02 calls per offset alone, +1 for
+ * the register-model re-read of cm_numbers_extent): it must read through kgenome_diag_code_run with the scan's walk and pass the number reads to the
+ * register model once. Prove with: deccnt.c rows "codemap_build alone" and "entry walk (with trace) + codemap" on 19 x86-64 ELF. */
 int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, uint64_t size,
 			  const struct kgenome_elf_relocs *relocs, struct kgenome_codemap *out)
 {
@@ -280,14 +288,20 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 		out->status = KGENOME_NOMEM;
 		return 0;
 	}
-	/* KNOWN DEFECT WP9-F5 (2026-10-25, M) [sev M]: kgenome_codemap_build appends refs extent by extent, so m->v
-	 * is not in order of `at` (codemap.h says it is) and holds duplicates. Trigger: two executable segments in
-	 * descending file order, or overlapping ones. Effect: kgenome_codemap_at (binary search) silently misses
-	 * refs that exist: evidence lost on a crafted ELF. Reproducer: tests/lib/genome/diag_known_misses.c f5
-	 * (green until fixed). Fix: sort m->v by `at` and drop equal `at` before cm_index, or read the extents in
-	 * ascending order. */
 	for (i = 0; ok && i < n; i++)
 		ok = cm_read_extent(&b, &ext[i], size, base);
+	/* The extents are read in the object's order, which is not the order of `at` (segments may come
+	 * in descending file order, or overlap): order the refs and keep one per `at`, so that
+	 * kgenome_codemap_at's binary search finds every ref there is. */
+	if (ok && n > 1u && out->n > 1u) {
+		uint32_t w = 1;
+
+		qsort(out->v, out->n, sizeof *out->v, cm_cmp_at);
+		for (i = 1; i < out->n; i++)
+			if (out->v[i].at != out->v[w - 1u].at)
+				out->v[w++] = out->v[i];
+		out->n = w;
+	}
 	if (ok)
 		ok = cm_index(out);
 	for (i = 0; ok && i < out->n; i++)
@@ -305,9 +319,8 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 
 void kgenome_codemap_free(struct kgenome_codemap *m)
 {
-	/* KNOWN DEFECT WP9-F3 (2026-10-25, M) [sev L]: kgenome_codemap_free dereferences its argument, unlike every
-	 * other free of the diagnose scan. Trigger: kgenome_codemap_free(NULL). Effect: NULL dereference.
-	 * Reproducer: tests/lib/genome/diag_known_misses.c f3 (green until fixed). Fix: `if (!m) return;` first. */
+	if (!m)
+		return;
 	free(m->v);
 	free(m->by_to);
 	memset(m, 0, sizeof *m);

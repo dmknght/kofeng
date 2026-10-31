@@ -9,7 +9,7 @@
  *      it - is analysed by a plain scan, and the verdict it makes is there.
  *   2. A diagnose NOTHING reads (no rule, no disease) is not run by a plain scan:
  *      an object only it could be answered on costs no analysis at all. The caller
- *      asks for every diagnose with kof_scan_option.report_diag, and that runs it.
+ *      asks for every diagnose with kscan_explain (kof_scan_set_explain), and that runs it.
  *   3. An object no gate is open on - no diagnose can be answered on it - builds
  *      no analysis, no function table and no walk, whatever its name.
  *   4. An object that looks like nothing (no symbols, no sections, a harmless
@@ -101,7 +101,7 @@ static struct got scan(const uint8_t *b, uint64_t n, const char *name, int repor
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
 	memset(&pend, 0, sizeof pend);
-	opt.report_diag = report;
+	(void)kof_scan_set_explain(sc, report);
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -332,7 +332,7 @@ static void view_functions(const char *db, const char *shipped)
 			CK(a.all[KOF_PROD_FUNCS] >= 1u);        /* a block rule may read it */
 		} else {
 			b = scan(img, len, "stub.bin", 0);
-			CK(b.n_obj >= 2u);
+			CK(b.n_obj == 1u);                      /* the shipped pack holds no module that reads a view: none is made (BE-4) */
 			CK(b.all[KOF_PROD_FUNCS] == 0u && b.all[KOF_PROD_WALK] == 0u);
 			CK(b.all[KOF_PROD_DIAG] == 0u);
 		}

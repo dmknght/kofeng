@@ -6,7 +6,7 @@
  *             the longest name the table can reach must fit 63 characters (KOF_FAMCAT_VARIANT_NAME); duplicate family
  *   LETTERING the library names variants <family>_A .. _Z, _AA .. (bijective base 26) against an independent spreadsheet-column
  *             oracle, the add creates the name variant_name shows, and the 64-character rule counts the longest suffix of the table
- *   VARIANT   add inside a family, a set equal to a sibling's is refused (DUP_TYPES) and allowed in another family, no type, Packer, a bit
+ *   VARIANT   add inside a family, a set equal to a sibling's is allowed, no type, Packer, a bit
  *             past the list; set_types follows the same rules
  *   COMMENT   kof_comment_char on every byte, 120/121 characters, empty/NULL ok, the comment of a variant only (add_family's is the first variant's), add and
  *             set_comment share the check and refuse without changing anything
@@ -143,25 +143,25 @@ static void variant(void)
 		big[62] = 0;
 		CK(kof_famcat_first_variant_name(&C, big, nm, sizeof nm) == KOF_FAMCAT_VARIANT_NAME);
 	}
-	/* the same set in the same family is refused, in another family it is fine */
-	CK(kof_famcat_add_variant(&C, 0, NULL, TRO, 0, &v) == KOF_FAMCAT_DUP_TYPES);
-	CK(kof_famcat_add_variant(&C, 0, NULL, BOT, 0, &v) == KOF_FAMCAT_DUP_TYPES);     /* the first variant's set */
+	/* the same set as a sibling is NOT refused (family, variant and type are never a gate); each variant takes the next letter */
+	CK(kof_famcat_add_variant(&C, 0, NULL, TRO, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_C"));
+	CK(kof_famcat_add_variant(&C, 0, NULL, BOT, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_D"));     /* the first variant's set */
 	CK(kof_famcat_add_variant(&C, 1, NULL, TRO, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Gafgyt_B"));
-	CK(kof_famcat_add_variant(&C, 0, NULL, BOT | TRO, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_C"));
+	CK(kof_famcat_add_variant(&C, 0, NULL, BOT | TRO, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_E"));
 	CK(kof_famcat_add_variant(&C, 2, NULL, TRO, 0, &v) == KOF_FAMCAT_NO_FAMILY);
 	CK(kof_famcat_add_variant(&C, 0, NULL, 0, 0, &v) == KOF_FAMCAT_NO_TYPE);
 	CK(kof_famcat_add_variant(&C, 0, NULL, 1u << KOF_MALTYPE_PACKER, 0, &v) == KOF_FAMCAT_BAD_TYPE);
 	CK(kof_famcat_add_variant(&C, 0, NULL, 1u << KOF_MALTYPE_COUNT, 0, &v) == KOF_FAMCAT_BAD_TYPE);
 	CK(kof_famcat_add_variant(&C, 0, NULL, 0x80000000u, 0, &v) == KOF_FAMCAT_BAD_TYPE);
 	CK(kof_famcat_add_variant(&C, 0, NULL, all, 0, &v) == KOF_FAMCAT_OK);
-	CK(C.n_var == 6);
-	/* set types: replace, not empty, not a sibling's set, Packer refused; a refusal changes nothing */
+	CK(C.n_var == 8);
+	/* set types: replace, not empty, Packer refused; a refusal changes nothing */
 	CK(kof_famcat_set_types(&C, 0, VIR) == KOF_FAMCAT_OK && V[0].types == VIR);
 	CK(kof_famcat_set_types(&C, 0, all | (1u << KOF_MALTYPE_PACKER)) == KOF_FAMCAT_BAD_TYPE && V[0].types == VIR);
 	CK(kof_famcat_set_types(&C, 0, 0) == KOF_FAMCAT_NO_TYPE && V[0].types == VIR);
-	CK(kof_famcat_set_types(&C, 0, TRO) == KOF_FAMCAT_DUP_TYPES && V[0].types == VIR);
-	CK(kof_famcat_set_types(&C, 0, VIR) == KOF_FAMCAT_OK);                   /* its own set is not a duplicate */
-	CK(kof_famcat_set_types(&C, 6, VIR) == KOF_FAMCAT_NO_FAMILY);
+	CK(kof_famcat_set_types(&C, 0, TRO) == KOF_FAMCAT_OK && V[0].types == TRO);   /* a sibling's set is not a reason to refuse */
+	CK(kof_famcat_set_types(&C, 0, VIR) == KOF_FAMCAT_OK && V[0].types == VIR);
+	CK(kof_famcat_set_types(&C, 8, VIR) == KOF_FAMCAT_NO_FAMILY);
 }
 
 /* The k-th non-empty set of selectable types (k = 1..1023): the bits of k spread over the engine's list. */
@@ -303,19 +303,20 @@ static void edit(void)
 	CK(kof_famcat_add_variant(&C, 0, NULL, VIR, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_C") && F[0].next == 4u);
 	CK(kof_famcat_add_variant(&C, 0, NULL, VIR | TRO, 0, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_D") && F[0].next == 5u);
 	CK(kof_famcat_free_letters(&C, 0) == 0u && kof_famcat_variant_name(&C, 0, 1, nm, sizeof nm) == KOF_FAMCAT_NO_FREE_LETTER);
-	/* delete Mirai_B: the default never reuses its letter, the option takes the smallest free one */
+	/* delete Mirai_B: the default never reuses its letter, a CHOSEN deleted letter (2 = B) takes it; a declared letter (1) is refused */
 	CK(kof_famcat_delete_variant(&C, 1) == KOF_FAMCAT_OK && C.n_var == 3u && F[0].next == 5u);
 	CK(kof_famcat_free_letters(&C, 0) == 1u);
 	CK(kof_famcat_variant_name(&C, 0, 0, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_E"));
-	CK(kof_famcat_variant_name(&C, 0, 1, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_B"));
-	CK(kof_famcat_add_variant(&C, 0, NULL, TRO, 1, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_B") && F[0].next == 5u);
+	CK(kof_famcat_variant_name(&C, 0, 2, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_B"));
+	CK(kof_famcat_variant_name(&C, 0, 1, nm, sizeof nm) == KOF_FAMCAT_NO_FREE_LETTER);
+	CK(kof_famcat_add_variant(&C, 0, NULL, TRO, 2, &v) == KOF_FAMCAT_OK && !strcmp(V[v].name, "Mirai_B") && F[0].next == 5u);
 	CK(kof_famcat_free_letters(&C, 0) == 0u);
 	/* deleting the LAST letter does not lower the counter either */
 	for (i = 0; i < C.n_var; i++)
 		if (!strcmp(V[i].name, "Mirai_D"))
 			CK(kof_famcat_delete_variant(&C, i) == KOF_FAMCAT_OK);
 	CK(F[0].next == 5u && kof_famcat_variant_name(&C, 0, 0, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_E"));
-	CK(kof_famcat_variant_name(&C, 0, 1, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_D"));
+	CK(kof_famcat_variant_name(&C, 0, 4, nm, sizeof nm) == KOF_FAMCAT_OK && !strcmp(nm, "Mirai_D"));
 	CK(kof_famcat_delete_variant(&C, 99) == KOF_FAMCAT_NO_FAMILY);
 	/* a family with no variant left stays and still takes a variant, with the counter going on */
 	fresh(8, 16);
@@ -348,7 +349,7 @@ static void edit(void)
 	CK(kof_famcat_set_variant(&C, 1, "note", VIR) == KOF_FAMCAT_OK && !strcmp(C.var[1].comment, "note") && C.var[1].types == VIR);
 	CK(kof_famcat_set_variant(&C, 1, "a*b", TRO) == KOF_FAMCAT_BAD_COMMENT && C.var[1].types == VIR && !strcmp(C.var[1].comment, "note"));
 	CK(kof_famcat_set_variant(&C, 1, "x", 0) == KOF_FAMCAT_NO_TYPE && !strcmp(C.var[1].comment, "note"));
-	CK(kof_famcat_set_variant(&C, 1, "x", BOT) == KOF_FAMCAT_DUP_TYPES && C.var[1].types == VIR);
+	CK(kof_famcat_set_variant(&C, 1, "x", BOT) == KOF_FAMCAT_OK && C.var[1].types == BOT && !strcmp(C.var[1].comment, "x"));
 	CK(kof_famcat_set_variant(&C, 9, "x", BOT) == KOF_FAMCAT_NO_FAMILY);
 }
 

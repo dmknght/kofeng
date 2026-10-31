@@ -151,8 +151,19 @@ UNIT_LIBS_norm_defect_engine := -Wl,--wrap=kof_exe_decode_run
 # diag_text_oom refuses every allocation of a scan in turn (G9: an allocation that fails must not leave a shorter graph with a clean status); -rdynamic so that the
 # trace it prints for an allocation whose refusal was silent has the names of the functions that made it.
 UNIT_LIBS_diag_text_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -rdynamic
+# mem_oom_open refuses every allocation of an engine open / catalog load / scan / close in turn (audit_mem MEM-7) and asks that every block the engine made was freed:
+# malloc, calloc, realloc and free are wrapped (what libc keeps for itself is not counted), -rdynamic for the names of the frames that asked for a block that was kept.
+# OOM_WRAP is what a test that includes tests/unit/oom_harness.h is linked with (the harness defines the wrappers); the memory tests of the public APIs share it.
+OOM_WRAP := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free -rdynamic
+UNIT_LIBS_mem_oom_open := $(OOM_WRAP)
+# mem_api applies the same harness to every public API row (oom + flat + hostile packs); mem_oom_open keeps the open/scan/close path with its own match assertion.
+UNIT_LIBS_mem_api := $(OOM_WRAP)
+UNIT_LIBS_api_tables_hostile := $(OOM_WRAP)
+UNIT_LIBS_api_kix_hostile := $(OOM_WRAP)
 # diag_bin_oom does the same for the BINARY route (the sweep, symbol, emulate, API-hash and lineage routes, the function table, the code map): every allocation refused in turn,
 # free wrapped as well so that an allocation left behind after a refused call is counted without a sanitiser.
+# fnprint_bsketch_oom refuses each allocation of the sketch builder in turn (WP9-F14).
+UNIT_LIBS_fnprint_bsketch_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 UNIT_LIBS_diag_bin_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free -rdynamic
 # diag_text_ops refuses every allocation of a scan over the list, cast and operator shapes in turn (the evaluator's lists: a refusal must be said, never a shorter set of constants with a clean
 # status): malloc, calloc and realloc wrapped, armed only around the scan. text_scan_once counts, at the one call every stage makes, how many times the TEXT route scans a script through the
@@ -161,6 +172,8 @@ UNIT_LIBS_diag_text_ops := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=reallo
 UNIT_LIBS_text_scan_once := -Wl,--wrap=kgenome_diag_scan_text
 # diag_text_nullargs counts the memory-function calls that are handed a NULL pointer (memcpy(d, NULL, 0) is undefined) over texts that make an empty value reach a copy
 UNIT_LIBS_diag_text_nullargs := -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memcmp -Wl,--wrap=memset
+# diag_form_nullargs counts the same for the detection form (the record loader, the codec, the source reader): a section or a text with nothing in it
+UNIT_LIBS_diag_form_nullargs := -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memcmp -Wl,--wrap=memset
 # diag_text_work counts the basic blocks the TEXT route executes on its hostile shapes (tests/lib/work_count.h). The route is in the archive, uninstrumented, so the test is
 # built with the route's own sources compiled with the instrumentation and linked AHEAD of the archive (every symbol an archive member of them defines is defined by these
 # objects, so the member is not pulled in). An explicit rule: the pattern rule above links the archive alone.
@@ -394,6 +407,8 @@ UT_INC_codec_forms := -I$(SDK)/include
 UT_LIB_codec_forms := yes
 UT_INC_code_notes   := -Ilibkofeng -Ilibkofeng/kofcore -Ilibgenome
 UT_LIB_code_notes   := yes
+UT_INC_callnames    := -Ilibkofeng -Ilibkofeng/kofcore -Ilibgenome
+UT_LIB_callnames    := yes
 UT_DEP_codec_forms := $(SDK_HDR)
 
 # The examiner's shellcode-loader finder is tool code, not library code, so the
@@ -408,6 +423,42 @@ UT_SRC_cond_expr      := $(EDITOR_SRC)
 UT_INC_cond_expr      := -I$(SDK)/include
 UT_LIB_cond_expr      := yes
 UT_DEP_cond_expr      := $(SDK_HDR)
+
+# The generator's writer (draft_generate) is in the editor's model too.
+UT_SRC_diag_write      := $(EDITOR_SRC)
+UT_INC_diag_write      := -I$(SDK)/include
+UT_LIB_diag_write      := yes
+UT_DEP_diag_write      := $(SDK_HDR)
+
+# The Patterns tab's draft model attacked (names, files already there, expressions, removals, edits): the draft model is compiled in.
+UT_SRC_pattern_audit   := $(EDITOR_SRC)
+UT_INC_pattern_audit   := -I$(SDK)/include
+UT_LIB_pattern_audit   := yes
+UT_DEP_pattern_audit   := $(SDK_HDR)
+
+# What the Save does about units that were added and units that were removed (the link, the plan, the failure paths).
+UT_SRC_diag_save       := $(EDITOR_SRC)
+UT_INC_diag_save       := -I$(SDK)/include
+UT_LIB_diag_save       := yes
+UT_DEP_diag_save       := $(SDK_HDR)
+
+# The header comment of a diagnose (name, digest, dates, engine numbers): the printer, Save and the builder over it (the draft model is compiled in).
+UT_SRC_diag_head      := $(EDITOR_SRC)
+UT_INC_diag_head      := -I$(SDK)/include
+UT_LIB_diag_head      := yes
+UT_DEP_diag_head      := $(SDK_HDR)
+
+# What Generate writes for the detection part of a unit, built, loaded and run (the draft model is compiled in, like diag_write).
+UT_SRC_diag_form_generate := $(EDITOR_SRC)
+UT_INC_diag_form_generate := -I$(SDK)/include
+UT_LIB_diag_form_generate := yes
+UT_DEP_diag_form_generate := $(SDK_HDR)
+
+# A function row ticked into a draft: Generate, the builder, the verdict and Save (the draft model is compiled in, like diag_save).
+UT_SRC_cfg_sig_gen := $(EDITOR_SRC)
+UT_INC_cfg_sig_gen := -I$(SDK)/include
+UT_LIB_cfg_sig_gen := yes
+UT_DEP_cfg_sig_gen := $(SDK_HDR)
 
 # The terminal writer is a tool source: kofview.c is the viewer's drawing layer, it
 # lives beside the tool because nothing that scans needs it, so a test over it
@@ -464,9 +515,9 @@ UT_DEP_api_engine_modhelpers := $(SDK_HDR)
 UT_SRC_grille_host := $(GRILLE_HOST_SRC)
 UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 
-UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr \
+UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr diag_write diag_save diag_form_generate diag_head cfg_sig_gen pattern_audit \
               out_clip fidset fridge proc_rule \
-              chan_ring report_model grille_host api_engine_modhelpers code_notes
+              chan_ring report_model grille_host api_engine_modhelpers code_notes callnames
 UNIT_EXTRA += $(ORBIT_TESTS) $(KX_TESTS)
 
 define UNIT_EXTRA_RULES
@@ -496,6 +547,10 @@ $(foreach t,$(UNIT_EXTRA),$(eval $(call UNIT_EXTRA_RULES,$(t))))
 test-sigs:
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/sigs
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/shape
+	@# tests/agree: the same sample named three other ways (tool_agree.c): other family, variant letter, tag and type; six diagnoses / three / none
+	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_a
+	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_b
+	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_none
 
 #
 # ONE TARGET PER TEST, rather than one recipe looping over all of them.
@@ -550,3 +605,13 @@ unit: fixtures test-sigs $(UNIT_RUN)
 	$(info $(SP)not built on this host: $(if $(UNIT_SKIP),$(UNIT_SKIP),none))
 	@$(NOOP)
 
+
+# last, because its prerequisite list is read when the file is read and names UNIT_EXTRA, which is set above
+include mk/tests_cov.mk
+
+# Static half of the "a tool shows what the engine answers" test (tests/tool_logic_check.py; the dynamic half is unit_tool_agree and tests/tui/t_agree.py).
+# Not wired into `check-rules` (mk/checks.mk is not this work's): the coordinator decides; run it with `make check-tool-logic`.
+check-tool-logic:
+	@python3 -I tests/tool_logic_check.py .
+
+.PHONY: check-tool-logic

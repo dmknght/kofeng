@@ -1,0 +1,61 @@
+# golden run1_panel_blocks: 170x60
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*ELF-x64                64608 ┃  00000000   7F 45 4C 46 02 01 01 00 00 00 00 00 00 00 00 00  .ELF............                                                            ╿
+ 3|  HEADERS                2600 ┃  00000010   03 00 3E 00 01 00 00 00 B0 33 00 00 00 00 00 00  ..>......3......                                                            │
+ 4|  CODE                  30141 ┃  00000020   40 00 00 00 00 00 00 00 E0 F4 00 00 00 00 00 00  @...............                                                            │
+ 5|  DATA                  17984 ┃  00000030   00 00 00 00 40 00 38 00 0B 00 40 00 1E 00 1D 00  ....@.8...@.....                                                            │
+ 6|  NOLOAD                 7331 ╿  00000040   06 00 00 00 04 00 00 00 40 00 00 00 00 00 00 00  ........@.......                                                            │
+ 7|  UNCLAIMED              6552 │  00000050   40 00 00 00 00 00 00 00 40 00 00 00 00 00 00 00  @.......@.......                                                            │
+ 8|  SYM_IMP                1432 │  00000060   68 02 00 00 00 00 00 00 68 02 00 00 00 00 00 00  h.......h.......                                                            │
+ 9|  SYM_EXP                1801 │  00000070   08 00 00 00 00 00 00 00 03 00 00 00 04 00 00 00  ................                                                            │
+10|  //0:norm ELF-x64      54249 │  00000080   A8 02 00 00 00 00 00 00 A8 02 00 00 00 00 00 00  ................                                                            │
+11|----------------------------------------------------------------------------------=======---------------------------------------------------------------------------------
+12| Family [ Mirai ]  Variant [ A ]  [Well known IOT botnet]                                                                                           [ Save ]  [ Discard ]
+13| Format  ELF  [+ Formats]                                                                                                                                                ┃
+14| Option  [+ Options]                                                                                                                                                     ┃
+15|  Patterns  |  Blocks  |  Graphs                                                                                                                                         ┃
+16| Mutation blocks                                                                                                                                                         ┃
+17| [-] use  offset      hash      name                            size  region  score                                                                                      ┃
+18|     [ ]  0x000002a8  cfee780b                                  1601  DATA                                                                                               ┃
+19|     [ ]  0x000008e9  1e403b15                                   539  DATA                                                                                               ┃
+20|     [ ]  0x00000b04  bb058ba7                                  2392  DATA                                                                                               ┃
+21|     [ ]  0x0000145c  e1d7ebbd                                  2209  DATA                                                                                               ┃
+22|     [ ]  0x00001cfd  810ec245                                  1419  DATA                                                                                               ┃
+23|     [ ]  0x00003495  -         rand_cmwc                        420  CODE                                                                                               ┃
+24|     [ ]  0x00003639  -         rand_str                         321  CODE                                                                                               ┃
+25|     [ ]  0x0000377a  -         rand_alphastr                    326  CODE                                                                                               ┃
+26|     [ ]  0x000038c0  -         fdgets                           269  CODE                                                                                               ┃
+27|     [ ]  0x000039cd  d7ed0994  prints                           240  CODE                                                                                               ┃
+28|     [ ]  0x00003abd  631fe11c  printi                           300  CODE                                                                                               ┃
+29|     [ ]  0x00003be9  308e6e3d  print                           1028  CODE                                                                                               ┃
+30|     [ ]  0x00003fed  -         szprintf                         168  CODE                                                                                               ┃
+31|     [ ]  0x00004095  -         botnetPrint                      321  CODE                                                                                               ┃
+32|     [ ]  0x000041d6  -         trim                             291  CODE                                                                                               ┃
+33|     [ ]  0x000042f9  95c27f9d  recvLine                         609  CODE                                                                                               ┃
+34|     [ ]  0x0000455a  -         connectTimeout                   596  CODE                                                                                               ┃
+35|     [ ]  0x000047ae  -         listFork                         356  CODE                                                                                               ┃
+36|     [ ]  0x00004912  -         read_with_timeout                264  CODE                                                                                               ┃
+37|     [ ]  0x00004a1a  -         advance_state                    260  CODE                                                                                               ┃
+38|     [ ]  0x00004b1e  -         contains_string                  151  CODE                                                                                               ┃
+39|     [ ]  0x00004bb5  95ed4df8  negotiate                        281  CODE                                                                                               ┃
+40|     [ ]  0x00004cce  f4f63ec9  matchPrompt                      298  CODE                                                                                               ┃
+41|     [ ]  0x00004df8  88acca02  readUntil                        599  CODE                                                                                               ┃
+42|     [ ]  0x0000504f  25d9bf94  GIP                             7738  CODE                                                                                               ┃
+43|     [ ]  0x00006e89  -         socket_connect                   276  CODE                                                                                               ┃
+44|     [ ]  0x00006f9d  d77aee6d  botnetTScan                     3900  CODE                                                                                               ┃
+45|     [ ]  0x00007ed9  -         tcpcsum                          395  CODE                                                                                               ┃
+46|     [ ]  0x00008064  -         SendHTTP                         400  CODE                                                                                               ┃
+47|     [ ]  0x000081f4  -         SendHTTPHex                      427  CODE                                                                                               ┃
+48|     [ ]  0x0000839f  -         makeIPPacket                     197  CODE                                                                                               ┃
+49|     [ ]  0x00008464  79644480  sendUDP                         1395  CODE                                                                                               ┃
+50|     [ ]  0x000089d7  6913df46  sendTCP                         1375  CODE                                                                                               │
+51|     [ ]  0x00008f36  -         sendSTD                          380  CODE                                                                                               │
+52|     [ ]  0x000090b2  a6b772be  processCmd                      2850  CODE                                                                                               │
+53|     [ ]  0x00009bd4  26435265  getOurIP                         491  CODE                                                                                               │
+54|     [ ]  0x00009dbf  38878d4e  getEndianness                    112  CODE                                                                                               │
+55|     [ ]  0x00009e2f  -         initConnection                   313  CODE                                                                                               │
+56|     [ ]  0x00009f68  7ef5f630  main                            1511  CODE                                                                                               │
+57|     [x]  0x0000b008  541cd7e6                                  4080  DATA    100%                                                                                       │
+58|     [x]  0x0000c101  fd523fd5                                   302  DATA    100%                                                                                       │
+59|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+60|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

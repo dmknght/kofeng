@@ -38,6 +38,19 @@ static inline uint64_t kof_view_room(const struct kof_view_mem *m)
 }
 
 /*
+ * The next capacity of a table that DOUBLES, in 32 bits: `first` for an empty one, twice `cap`
+ * otherwise - and 0 when twice `cap` does not fit, where the unchecked `cap * 2u` wrapped to a
+ * smaller capacity (or zero) and the table was then written past its end. The caller treats 0 as
+ * its allocator's refusal (its own "lost" flag), so the answer is a stated cut and never a wrap.
+ */
+static inline uint32_t kof_cap_double(uint32_t cap, uint32_t first)
+{
+	if (!cap)
+		return first;
+	return cap > 0x7fffffffu ? 0u : cap * 2u;
+}
+
+/*
  * Make `*tab` (rows of `elem` bytes, `*cap` of them) hold at least `want` rows.
  *
  * 1 when it does, 0 when `want` is past `limit`, past the room, or the allocator said no;

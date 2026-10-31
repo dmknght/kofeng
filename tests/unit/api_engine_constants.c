@@ -454,9 +454,6 @@ static const struct kc g116[] = {
 static const struct kc g117[] = {
 	K(KOF_MUTATION_MAX_HASH),
 };
-static const struct kc g119[] = {
-	K(KOF_MUTATION_RAW),
-};
 static const struct kc g120[] = {
 };
 static const struct kc g121[] = {
@@ -801,7 +798,6 @@ static const struct group groups[] = {
 	{ "kofcore/kofmod/kofmodemu.h: KOF_EMU_RGN", g115, 3, 1 },
 	{ "kofcore/kofmod/kofmodemu.h: KUNP_REG", g116, 9, 1 },
 	{ "kofcore/kofmod/kofmutation.h: KOF_MUTATION_MAX", g117, 1, 2 },
-	{ "kofcore/kofmod/kofmutation.h: KOF_MUTATION", g119, 1, 2 },
 	{ "kofcore/kofmod/kofmutation.h: kof_mutation", g120, 1, 2 },
 	{ "kofcore/kofmod/kofname.h: KOF_NAME", g121, 1, 2 },
 	{ "kofcore/kofmod/kofobjfmt.h: KOF_TARGET", g122, 1, 2 },
@@ -985,7 +981,7 @@ static const struct pin pins[] = {
 	{ "KUNP_REG_BX", (uint64_t)(KUNP_REG_BX), 3ull }, { "KUNP_REG_CX", (uint64_t)(KUNP_REG_CX), 1ull },
 	{ "KUNP_REG_DI", (uint64_t)(KUNP_REG_DI), 7ull }, { "KUNP_REG_DX", (uint64_t)(KUNP_REG_DX), 2ull },
 	{ "KUNP_REG_IP", (uint64_t)(KUNP_REG_IP), 16ull }, { "KUNP_REG_SI", (uint64_t)(KUNP_REG_SI), 6ull },
-	{ "KUNP_REG_SP", (uint64_t)(KUNP_REG_SP), 4ull }, { "KOF_MUTATION_RAW", (uint64_t)(KOF_MUTATION_RAW), 0ull },
+	{ "KUNP_REG_SP", (uint64_t)(KUNP_REG_SP), 4ull },
 	{ "KOF_TARGET_FIRST_EVENT", (uint64_t)(KOF_TARGET_FIRST_EVENT), 19ull }, { "KOF_SCAN_ALL", (uint64_t)(KOF_SCAN_ALL), 1ull },
 	{ "KOF_SCAN_EMBEDDED", (uint64_t)(KOF_SCAN_EMBEDDED), 536870912ull }, { "KOF_SCAN_SYM", (uint64_t)(KOF_SCAN_SYM), 3221225472ull },
 	{ "KOF_SCAN_SYM_EXP", (uint64_t)(KOF_SCAN_SYM_EXP), 2147483648ull }, { "KOF_SCAN_SYM_IMP", (uint64_t)(KOF_SCAN_SYM_IMP), 1073741824ull },

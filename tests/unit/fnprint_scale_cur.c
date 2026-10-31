@@ -156,7 +156,7 @@ static void t_both(uint32_t n, double *ns_cur, double *ns_new)
 	r1 = rss_kb();
 	kof_mutation_begin(&kc);
 	t2 = now();
-	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, obj, objn);
+	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_SIDE_USER, obj, objn);
 	t3 = now();
 	memset(&o, 0, sizeof o);
 	o.n_tag = 16;
@@ -266,7 +266,7 @@ static void t_hot_run(void)
 	CK(kgenome_fnprint_wdb_build(&d, wb, R, pool, (uint64_t)R * 32u, &o) && kgenome_fnprint_wctx_init(&c, &d, NULL));
 	kof_mutation_begin(&kc);
 	t0 = now();
-	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_SIDE_USER, obj, (uint64_t)REP * 8u);
 	t1 = now();
 	kgenome_fnprint_wctx_begin(&c);
 	ext.off = 0; ext.len = (uint64_t)REP * 8u;

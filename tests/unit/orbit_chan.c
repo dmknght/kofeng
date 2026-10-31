@@ -405,9 +405,7 @@ static void case_ring(void)
 		clock_gettime(CLOCK_MONOTONIC, &b);
 		first_ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
 		printf("       a wait of 120 ms after a record that was read without waiting took %ld ms\n", first_ms);
-		/* KNOWN DEFECT WP12-13 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(first_ms >= 100, "kof_chan_next(120 ms) on an empty ring returned after a stale semaphore count, not after 120 ms (the budget is charged 50 ms per iteration whatever the wait took)",
-			 "WP12-13: the wake semaphore is never drained by a reader that does not wait, and `left -= slice` assumes the wait took its slice");
+		ok(first_ms >= 100, "kof_chan_next(120 ms) on an empty ring waits the 120 ms by the clock even when the semaphore holds a stale count (the budget is not charged 50 ms per iteration)");
 		/* drain the stale counts, then the wait is a wait */
 		for (k = 0; k < 20; k++)
 			(void)kof_chan_next(s, &out, 60);
@@ -454,12 +452,24 @@ static void case_stale(void)
 	ok(p != NULL, "a new publisher takes over a channel whose publisher is dead");
 	kof_chan_publish_close(p);
 	scrub(n);
-	/* a channel whose header was never finished (magic 0): taken over at once */
+	/* a channel whose header is not finished (magic 0) and was made just now: a publisher still initialising, not wreckage */
 	ok(seg_make(&g, n, 8, 0), "a segment");
 	g.h->magic = 0;
 	p = kof_chan_publish_open(n, 8);
-	ok(p != NULL, "magic 0 (a publisher still initialising, or a closed one): treated as stale and replaced");
-	printf("       (a second sensor starting inside the first one's initialisation window does the same to a LIVE one - WP12-12, read from the code)\n");
+	ok(p == NULL, "magic 0 on a segment made this second (a sensor still initialising): left alone, the second publisher is refused");
+	if (p)
+		kof_chan_publish_close(p);
+	/* the same, an hour old: wreckage, replaced */
+	{
+		struct timespec old[2];
+
+		clock_gettime(CLOCK_REALTIME, &old[0]);
+		old[0].tv_sec -= 3600;
+		old[1] = old[0];
+		ok(futimens(g.fd_d, old) == 0, "the segment is made to look an hour old");
+	}
+	p = kof_chan_publish_open(n, 8);
+	ok(p != NULL, "magic 0 on a segment an hour old (a closed or dead publisher): treated as stale and replaced");
 	kof_chan_publish_close(p);
 	munmap(g.h, g.bytes);
 	close(g.fd_d);

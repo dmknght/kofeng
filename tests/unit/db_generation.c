@@ -160,7 +160,7 @@ int main(int argc, char **argv)
 	kof_engine *a, *b, *c;
 	struct stat st, st2;
 	char first[600] = "", missing[700];
-	unsigned n_packs, rec_a, unp_a;
+	unsigned n_packs, dia_a, unp_a;
 	DIR *d;
 	struct dirent *de;
 	uint8_t one[4] = { 1, 2, 3, 4 };
@@ -204,7 +204,7 @@ int main(int argc, char **argv)
 		printf("db generation: cannot open %s\n", gen_db);
 		return 2;
 	}
-	rec_a = kdb_records(a);
+	dia_a = kdb_diagnoses(a);
 	unp_a = kdb_unpackers(a);
 	CK(objects_of(a) == 2, "baseline: the layer opens (%d objects)", objects_of(a));
 
@@ -217,13 +217,13 @@ int main(int argc, char **argv)
 	CK(count_tmp() == 0, "no temporary left after replacing");
 
 	/* the engine that mapped generation 1 is undisturbed */
-	CK(kdb_records(a) == rec_a && kdb_unpackers(a) == unp_a, "old engine: counts unchanged");
+	CK(kdb_diagnoses(a) == dia_a && kdb_unpackers(a) == unp_a, "old engine: counts unchanged");
 	CK(objects_of(a) == 2, "old engine: still scans against the old pack (%d)", objects_of(a));
 	CK(objects_of(a) == 2, "old engine: and again");
 
 	/* an engine opened now sees generation 2 (garbage): refused, not half loaded */
 	b = keng_open(gen_db);
-	CK(b == NULL || (kdb_records(b) == 0 && kdb_unpackers(b) == 0),
+	CK(b == NULL || (kdb_diagnoses(b) == 0 && kdb_unpackers(b) == 0),
 	   "new engine does not load the damaged generation");
 	if (b)
 		keng_close(b);
@@ -252,7 +252,7 @@ int main(int argc, char **argv)
 	c = keng_open(gen_db);
 	CK(c != NULL, "new engine opens generation 3");
 	if (c) {
-		CK(kdb_records(c) == rec_a && kdb_unpackers(c) == unp_a, "generation 3 is the full database");
+		CK(kdb_diagnoses(c) == dia_a && kdb_unpackers(c) == unp_a, "generation 3 is the full database");
 		CK(objects_of(c) == 2, "generation 3 scans");
 	}
 	CK(objects_of(a) == 2, "the generation-1 engine is STILL scanning (3 generations alive)");

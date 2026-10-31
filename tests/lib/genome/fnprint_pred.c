@@ -56,7 +56,7 @@ static void t_libtab_basic(void)
 		kgenome_fnprint_libvote(&t, flat, sizeof flat, &v);
 		CK(v.n_win == 0);
 	}
-	if (kgenome_mtn_win_begin(&w, lib, sizeof lib, 0))
+	if (kgenome_mtn_win_begin(&w, lib, sizeof lib))
 		do { n++; hit += (uint32_t)kgenome_fnprint_libtab_has(&t, kgenome_mtn_win_value(&w)); } while (kgenome_mtn_win_next(&w));
 	CK(n == hit);
 	kgenome_fnprint_libtab_free(&t);

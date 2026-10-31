@@ -123,6 +123,11 @@ int kof_obj_regionless(const struct kof_obj_ctx *ctx);
  * what is past it was not read; zero for a format whose module says so itself. */
 uint64_t kof_parser_cut_bits(const struct kof_parser *p);
 
+/* The anomaly bits of a format's view that mean a member, a directory or a table points
+ * past the end of the file, so the parse holds less than the file declares. The object
+ * reads KOF_BROKEN_DAMAGED (oc_scan_damaged); zero for a format with none. */
+uint64_t kof_parser_damage_bits(const struct kof_parser *p);
+
 /* Non-zero for a format whose parse clears everything it reads: the host skips its own memset. */
 int kof_parser_self_clears(const struct kof_parser *p);
 

@@ -1,0 +1,51 @@
+# golden run1_dash_overview: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │ Object                                                                                                                                                             │  │
+ 4| │   name        run1                                                                                                                                                 │  │
+ 5| │   folder      /mnt/games/kofscratch/vt/work/golden/  [ Copy full path ]                                                                                            │  │
+ 6| │   sha256      30c811b8e53d943c1e91bef1ca4091e503a10412bb17eb04dca173717fd00e19                                                                                     │  │
+ 7| │   size        64608 bytes (63.0 KiB)                                                                                                                               │  │
+ 8| │   linking     dynamic                                                                                                                                              │  │
+ 9| │   compiler    GCC: (Debian 10.2.1-6) 10.2.1 20210110                                                                                                               │  │
+10| │ Detection                                                                                                                                                          │  │
+11| │   verdict     Infected#ELF-x64/Botnet:Mirai.A!Diagnose                                                                                                             │  │
+12| │ ELF                                                                                                                                                                │  │
+13| │   format      ELF · ET_DYN                                                                                                                                         │  │
+14| │   arch        x86-64 64-bit · little-endian                                                                                                                        │  │
+15| │   symbols     not stripped                                                                                                                                         │  │
+16| │   entry       R-X at .text                                                                                                                                         │  │
+17| │               virtual address 0x33b0                                                                                                                               │  │
+18| │               file offset     0x33b0                                                                                                                               │  │
+19| │               section offset  0x0                                                                                                                                  │  │
+20| │   layout      4 loadable segments · 30 sections                                                                                                                    │  │
+21| │ Regions                                                                                                                                                            │  │
+22| │   HEADERS     2600        4.0%  1.4/8 bits                                                                                                                         │  │
+23| │   CODE        30141      46.7%  5.8/8 bits                                                                                                                         │  │
+24| │   DATA        17984      27.8%  4.1/8 bits                                                                                                                         │  │
+25| │   NOLOAD      7331       11.3%  3.8/8 bits                                                                                                                         │  │
+26| │   UNCLAIMED   6552       10.1%  0.0/8 bits                                                                                                                         │  │
+27| │ Anomalies                                                                                                                                                          │  │
+28| │   none                                                                                                                                                             │  │
+29| │                                                                                                                                                                    │  │
+30| │                                                                                                                                                                    │  │
+31| │                                                                                                                                                                    │  │
+32| │                                                                                                                                                                    │  │
+33| │                                                                                                                                                                    │  │
+34| │                                                                                                                                                                    │  │
+35| │                                                                                                                                                                    │  │
+36| │                                                                                                                                                                    │  │
+37|-│                                                                                                                                                                    │---
+38| │                                                                                                                                                                    │ ]
+39| │                                                                                                                                                                    │
+40| │                                                                                                                                                                    │
+41| │                                                                                                                                                                    │
+42| │                                                                                                                                                                    │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-26 of 26 lines ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

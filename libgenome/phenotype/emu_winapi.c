@@ -890,20 +890,59 @@ static uint64_t win_handles(struct kgenome_emu *e, unsigned id, int *mine)
 	}
 	case KGENOME_EMU_WIN_RtlAddFunctionTable:
 		return 1;
-	case KGENOME_EMU_WIN_NtQueryInformationProcess:
+	case KGENOME_EMU_WIN_NtQueryInformationProcess: {
 		/*
-		 * Every class is refused with STATUS_INVALID_INFO_CLASS rather
-		 * than answered. Two of the classes a protector asks for -
-		 * ProcessDebugPort and ProcessDebugObjectHandle - are debugger
-		 * checks, and the honest answer to those is "no debugger",
-		 * which is what a failed query leaves the caller's buffer
-		 * saying: untouched, and it was zeroed before the call.
+		 * The two classes a loader READS the answer of are answered: ProcessBasicInformation (0:
+		 * the PEB address, the process id) and ProcessWow64Information (26: zero, this machine is
+		 * native). Every other class is refused with STATUS_INVALID_INFO_CLASS, among them the
+		 * two debugger checks - ProcessDebugPort and ProcessDebugObjectHandle - whose honest
+		 * answer is "no debugger", which a failed query leaves the caller's zeroed buffer saying.
+		 * Refusing class 0 as well sent a loader that used the PEB it asked for on with a null
+		 * (VirtualAlloc(0) = 0, a store to 0x80, FAULT: PECompact, EMU-NTQIP).
 		 */
-		/* KNOWN DEFECT EMU-NTQIP (2026-10-24, M) [sev M]: NtQueryInformationProcess refuses every class, and a loader that uses the
-		 * answer (not only the debugger classes) goes on with garbage. Trigger: PECompact build of 五味传奇 (agent-reported).
-		 * Effect: 0xc0000003 -> VirtualAlloc(0) = 0 -> store to 0x80, FAULT, the unpack stops. Reproducer:
-		 * /mnt/games/normtest/emu_unpack_report.md. Fix: answer the classes a loader reads (ProcessBasicInformation, WoW64). */
-		return 0xc0000003ull;
+		uint64_t cls = (uint32_t)kgenome_emu_win_arg(e, 1), buf = kgenome_emu_win_arg(e, 2);
+		uint64_t len = (uint32_t)kgenome_emu_win_arg(e, 3), retlen = kgenome_emu_win_arg(e, 4);
+		unsigned w = e->bits == 32 ? 4u : 8u, need;
+		uint64_t v, peb = 0;
+
+		if (cls != 0u && cls != 26u)
+			return 0xc0000003ull;
+		need = cls == 0u ? 6u * w : w;
+		if (retlen) {
+			v = need;
+			kgenome_emu_mem_wr(e, retlen, &v, 4u);
+		}
+		if (len != need)
+			return 0xc0000004ull;           /* STATUS_INFO_LENGTH_MISMATCH */
+		if (!buf)
+			return 0xc0000005ull;           /* STATUS_ACCESS_VIOLATION */
+		if (cls == 26u) {
+			v = 0;
+			return kgenome_emu_mem_wr(e, buf, &v, w) ? 0 : 0xc0000005ull;
+		}
+		/* The PEB is the thread block's pointer (gs:[0x60], fs:[0x30]); no block, no PEB. */
+		if (e->bits == 32 ? e->fs_base : e->gs_base) {
+			uint64_t at = e->bits == 32 ? e->fs_base + 0x30u : e->gs_base + 0x60u;
+
+			if (!kgenome_emu_mem_rd(e, at, &peb, w))
+				peb = 0;
+		}
+		{
+			uint64_t f[6];
+			unsigned k;
+
+			f[0] = 0x103u;                  /* ExitStatus: STILL_ACTIVE */
+			f[1] = peb;                     /* PebBaseAddress */
+			f[2] = 1u;                      /* AffinityMask */
+			f[3] = 8u;                      /* BasePriority */
+			f[4] = 0x1000u;                 /* UniqueProcessId: what GetCurrentProcessId says */
+			f[5] = 0x400u;                  /* InheritedFromUniqueProcessId */
+			for (k = 0; k < 6u; k++)
+				if (!kgenome_emu_mem_wr(e, buf + (uint64_t)k * w, &f[k], w))
+					return 0xc0000005ull;
+		}
+		return 0;
+	}
 	/*
 	 * THE SECOND BATCH: what a protector reaches for once it has kernel32
 	 * and has started work.

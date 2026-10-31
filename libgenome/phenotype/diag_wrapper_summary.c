@@ -141,6 +141,10 @@ static int summarise_end(struct kgenome_diag_wrapper_ctx *c, struct kgenome_diag
  */
 /* The span of the function at `entry`: its length to the next call target, never
  * less than KGENOME_DIAG_WRAPPER_SPAN_MIN - see the note there. */
+/* CONSOLIDATION FUNC-8 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk (read the extent from the one set). It re-derives a function end as "next
+ * call target" with a floor SPAN_MIN: the same rule as the entry walk's extent. Better logic here that the keeper lacks: the floor SPAN_MIN keeps a one-
+ * instruction stub from getting a zero span (Inference). Prove with: a thunk-only function in tests/lib/genome diag_wrapper rows; compare the span with
+ * the set. */
 static uint64_t span_of(const struct kgenome_diag_wrapper_ctx *c, uint64_t entry)
 {
 	uint32_t lo = 0, hi = c->wk->n_tgt;

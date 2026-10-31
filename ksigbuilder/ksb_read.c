@@ -4,130 +4,14 @@
  */
 
 #include "ksb.h"
-
-/* The region lists, one per format: rgn_names[] below is generated from them
- * rather than restating them. */
-#include <analyzers/parsers/binaries/elf/elf_parse.h>
-#include <analyzers/parsers/binaries/pe/pe_parse.h>
-#include <analyzers/parsers/containers/gzip_parse.h>
-#include <analyzers/parsers/containers/docole_parse.h>
-#include <analyzers/parsers/containers/zip_parse.h>
-#include <analyzers/parsers/containers/tar_parse.h>
-#include <analyzers/parsers/containers/sevenzip_parse.h>
-#include <analyzers/parsers/containers/rar_parse.h>
-#include <analyzers/parsers/containers/xz_parse.h>
-#include <analyzers/parsers/scripts/script_parse.h>
-#include <analyzers/parsers/containers/rtf_parse.h>
-#include <analyzers/parsers/containers/pdf_parse.h>
-#include <kofmod/amsi.h>   /* an event's two regions */
+#include <databases/diagsrc.h>
 
 /*
- * The region names a range may be built from, bound to the enums rather than
- * copied from them.
- *
- * This table was a hand-written copy of the ELF values, with a comment claiming a
- * unit test kept it honest. No such test existed, PE regions were added to the
- * headers, and every PE signature failed to compile with "not a known region name".
- * Naming the enum removed the risk of a WRONG value, which is what that fix was
- * about, and left the other half untouched: a region added to a header is still
- * invisible here until somebody adds a line.
- *
- * That half then failed too, and larger. Four formats arrived - compound files,
- * zip, tar, 7z - with eighteen regions between them, and not one of them could be
- * named by a signature. The regions existed, the parsers filled them, kofexamine
- * printed them, and the only consumer that matters could not ask for them.
- *
- * No build-time check catches this table falling behind a format header's region
- * list - the coverage assert this comment used to claim existed here does not, on
- * either count that made the earlier claim wrong: nothing in this file or under
- * tests/ enumerates a format's declared regions and cross-checks them against
- * rgn_names[]. A region added to a header today is invisible to every signature
- * until someone remembers to add a line here, same failure this whole comment is
- * the history of - just not yet caught a third time.
+ * THE REGION NAMES a range may be built from are the library's table now (kof_dsrc_region_at, databases/diagsrc.h): a
+ * diagnose's KOF_TARGET_RANGE and a block's regions are read with the same words, so there is ONE table and not a copy
+ * in the builder beside the reader's. The history of the table (a hand written copy that fell behind the headers, then
+ * one generated from each format's own region list) is in databases/diagsrc_form.c, where it lives.
  */
-struct rgn_name {
-	const char   *name;
-	unsigned long bit;
-};
-
-#define RGN(x) { #x, (unsigned long)(x) },
-/* the lists that hold the bare suffix (see ELF_REGIONS): the word is "KOF_" #x */
-#define RGN_S(x) { "KOF_" #x, (unsigned long)(KGENOME_##x) },
-/* the lists that hold the bare suffix (see ELF_REGIONS): the word is "KOF_" #x */
-#define RGN_S(x) { "KOF_" #x, (unsigned long)(KGENOME_##x) },
-static const struct rgn_name rgn_names[] = {
-	RGN(KOF_SCAN_ALL)
-
-	/*
-	 * Not a format's, like the lists below are: the symbol block means the
-	 * same thing for every input that has one, so kofsig.h defines these and
-	 * any target may name them. A rule scoped to SYM_EXP says "this object
-	 * exports these bytes", which is a narrower claim than the same bytes
-	 * found loose in DATA.
-	 */
-	RGN(KOF_SCAN_SYM_IMP)
-	RGN(KOF_SCAN_SYM_EXP)
-
-	/*
-	 * And every format's, taken from the format itself.
-	 *
-	 * These were fifty hand written lines, and the comment above this table
-	 * said outright that nothing checked them against the headers - a region
-	 * added to a format was invisible to every signature until someone
-	 * remembered to add a line here. The lists moved into the headers so
-	 * this could stop being a copy.
-	 */
-	ELF_REGIONS(RGN_S)
-	PE_REGIONS(RGN_S)
-	GZIP_REGIONS(RGN)
-	DOCOLE_REGIONS(RGN)
-	ZIP_REGIONS(RGN)
-	TAR_REGIONS(RGN)
-	SZ_REGIONS(RGN)
-	RAR_REGIONS(RGN)
-	XZ_REGIONS(RGN)
-	RTF_REGIONS(RGN)
-	PDF_REGIONS(RGN)
-	SCRIPT_REGIONS(RGN)
-	AMSI_REGIONS(RGN)
-	/*
-	 * AND A PROCESS'S, which were defined in proc.h and named here by
-	 * nothing - the exact drift the note above says this table was
-	 * generated to stop, caught on the next target that was added.
-	 *
-	 * The consequence was not a weaker rule, it was no rule at all:
-	 * KOF_TARGET_RANGE(cmd, KOF_SCAN_PROC_CMDLINE) failed to build with
-	 * "unknown region", so the command line - the one attacker-controlled
-	 * field in the record, and the only one KOF_SCAN_PROC_CLAIMED offers -
-	 * could not be written about.
-	 *
-	 * Three, not five: META and FD are FIELDS a rule reads through
-	 * kof_proc(ctx), not byte ranges to search. proc.h argues that at
-	 * length and KOF_SCAN_PROC_LIST is where it says so, so this names
-	 * what that list names and does not second-guess it.
-	 */
-	KOF_SCAN_PROC_LIST(RGN)
-
-	/*
-	 * THE SENTINEL, AND WITHOUT IT EVERY LOOKUP HERE WALKS OFF THE END.
-	 *
-	 * Both searches of this table are written `for (i = 0;
-	 * rgn_names[i].name; i++)`, so they stop on a NULL name - and there was
-	 * none. A name that IS here exits the loop early and every legitimate
-	 * signature therefore built; a name that is NOT - a typo in a range
-	 * declaration, which is the single case the careful message below
-	 * exists for - read past the last entry until it found something that
-	 * was not a string, and crashed.
-	 *
-	 * So ksigbuilder answered a misspelled region with "Segmentation
-	 * fault", from a build with no line number and nothing to look at, and
-	 * the error that lists every valid region name could never be reached.
-	 * Found by writing `KOF_SCAN_PDF_IMAGE` for KOF_SCAN_PDF_RESOURCE_IMAGE.
-	 */
-	{ NULL, 0 }
-};
-#undef RGN
-#undef RGN
 
 /*
  * Find argument number `want` (1-based) of a macro invocation starting at p.
@@ -290,48 +174,23 @@ int ksb_read_literal(struct ksb_ctx *ksb, const char *p, int line,
 		ksb_err(ksb, line, "second argument of KOF_DEFINE_STR must be a string literal");
 		return 0;
 	}
-	q = p;
-	q++;
+	/* The literal ends at its first quote that is not escaped; what is between is read by the library's one reader of the
+	 * escapes (the same six, the same bound, the same words in the refusal) - see kof_dsrc_lit_unescape. */
+	q = p + 1;
 	while (*q && *q != '"') {
-		char c = *q;
-
-		if (c == '\\') {
-			/*
-			 * SIX ESCAPES AND NO MORE.
-			 *
-			 * Three stand for themselves - a backslash, a quote and
-			 * a question mark, which C would otherwise read as part
-			 * of the syntax. Three are whitespace, because a marker
-			 * that crosses a line has a newline in it and a
-			 * researcher must be able to declare one; they are
-			 * spelled the way C spells them, so this file means the
-			 * same thing to a compiler as it does here.
-			 *
-			 * Not \\x: it is greedy, so "\\x41BC" is one escape
-			 * rather than a byte and three letters, and a pattern
-			 * whose length depends on what follows it is a pattern
-			 * nobody can read. Hex patterns exist for bytes that
-			 * are not text.
-			 */
-			switch (q[1]) {
-			case '\\': case '"': case '?': c = q[1]; break;
-			case 't': c = '\t'; break;
-			case 'n': c = '\n'; break;
-			case 'r': c = '\r'; break;
-			default:
-				ksb_err(ksb, line, "only \\\\, \\\", \\?, \\t, \\n and \\r "
-						   "are supported in patterns - use a hex "
-						   "pattern for anything else");
-				return 0;
-			}
+		if (*q == '\\' && q[1])
 			q++;
-		}
-		if (n >= MAX_LITERAL) {
-			ksb_err(ksb, line, "pattern literal too long");
+		q++;
+	}
+	if (*q == '"') {
+		const char *why = NULL;
+		long got = kof_dsrc_lit_unescape(p + 1, (size_t)(q - (p + 1)), out->bytes, MAX_LITERAL, &why);
+
+		if (got < 0) {
+			ksb_err(ksb, line, why);
 			return 0;
 		}
-		out->bytes[n++] = (uint8_t)c;
-		q++;
+		n = (uint32_t)got;
 	}
 	if (*q != '"') {
 		ksb_err(ksb, line, "unterminated string literal");
@@ -365,6 +224,8 @@ int ksb_read_mask(struct ksb_ctx *ksb, const char *p, int line,
 	char tok[64];
 	size_t n = 0;
 	int i, done = 0;
+	const char *nm;
+	uint32_t bit = 0;
 
 	if (!a)
 		return 0;
@@ -381,10 +242,10 @@ int ksb_read_mask(struct ksb_ctx *ksb, const char *p, int line,
 				ksb_err(ksb, line, "empty term in the region mask");
 				return 0;
 			}
-			for (i = 0; rgn_names[i].name; i++)
-				if (strcmp(tok, rgn_names[i].name) == 0)
+			for (i = 0; (nm = kof_dsrc_region_at((size_t)i, &bit)) != NULL; i++)
+				if (strcmp(tok, nm) == 0)
 					break;
-			if (!rgn_names[i].name) {
+			if (!nm) {
 				int k;
 				/* The list below is the useful half; the
 				 * sentence that used to be here explained why
@@ -394,13 +255,13 @@ int ksb_read_mask(struct ksb_ctx *ksb, const char *p, int line,
 				fprintf(stderr, "%s:%d: error: unknown region "
 					"\"%s\". Known:\n",
 					ksb->src_name, line, tok);
-				for (k = 0; rgn_names[k].name; k++)
-					fprintf(stderr, "    %s\n", rgn_names[k].name);
+				for (k = 0; (nm = kof_dsrc_region_at((size_t)k, NULL)) != NULL; k++)
+					fprintf(stderr, "    %s\n", nm);
 				ksb->errors++;
 				return 0;
 			}
-			out->mask |= (uint32_t)rgn_names[i].bit;
-			ksb->decl.scan_mask |= rgn_names[i].bit;
+			out->mask |= bit;
+			ksb->decl.scan_mask |= bit;
 			n = 0;
 			a++;
 			continue;
@@ -630,50 +491,7 @@ int ksb_blk_name_taken(struct ksb_ctx *ksb, const char *nm)
 }
 
 /*
- * The normalizer, argument 3 of KOF_MUTATION_BLOCK.
- *
- * By name only. The value decides how the hashes were computed, so a rule whose
- * normalizer disagreed with the one the generator used would produce a block
- * that matches nothing and reports no error anywhere - which is the failure
- * every name-not-number rule in this file exists to prevent.
- */
-int ksb_read_norm(struct ksb_ctx *ksb, const char *p, int line,
-		  struct blk *out)
-{
-	static const struct { const char *name; uint32_t v; } nm[] = {
-		{ "KOF_MUTATION_RAW", KGENOME_MUTATION_RAW },
-		{ "KOF_MUTATION_XOR", KGENOME_MUTATION_XOR },
-		{ "KOF_MUTATION_SUB", KGENOME_MUTATION_SUB },
-		{ NULL, 0 }
-	};
-	const char *a = nth_arg(ksb, p, 3, line);
-	char tok[64];
-	size_t n = 0;
-	int i;
-
-	if (!a)
-		return 0;
-	/* nth_arg returns the byte after the comma, so the argument still has
-	 * whatever the author wrote before it - a space, or a newline and a tab
-	 * when the declaration is spread over several lines, which a generated
-	 * one always is. */
-	while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r')
-		a++;
-	while (*a && *a != ',' && *a != ')' && *a != ' ' && *a != '\t' &&
-	       *a != '\n' && *a != '\r' && n + 1u < sizeof tok)
-		tok[n++] = *a++;
-	tok[n] = 0;
-	for (i = 0; nm[i].name; i++)
-		if (strcmp(tok, nm[i].name) == 0) {
-			out->norm = nm[i].v;
-			return 1;
-		}
-	ksb_err(ksb, line, "unknown normalizer; use KOF_MUTATION_RAW, _XOR or _SUB");
-	return 0;
-}
-
-/*
- * The hashes: every argument from the fourth on.
+ * The hashes: every argument from the third on.
  *
  * Read as unsigned 32 bit values however they are spelled, because a generator
  * writes them in hex and a person editing one may not. A value that does not
@@ -683,7 +501,7 @@ int ksb_read_norm(struct ksb_ctx *ksb, const char *p, int line,
 int ksb_read_hashes(struct ksb_ctx *ksb, const char *p, int line,
 		    struct blk *out)
 {
-	const char *a = nth_arg(ksb, p, 4, line);
+	const char *a = nth_arg(ksb, p, 3, line);
 
 	if (!a)
 		return 0;
@@ -724,7 +542,7 @@ int ksb_read_hashes(struct ksb_ctx *ksb, const char *p, int line,
 		while (*a == 'u' || *a == 'U' || *a == 'l' || *a == 'L')
 			a++;
 	}
-	if (out->n_hash < KGENOME_MUTATION_MIN_HASH) {
+	if (out->n_hash < kgenome_mutation_block_min(out->mask)) {
 		ksb_err(ksb, line, "too few hashes to score a block with; widen it");
 		return 0;
 	}

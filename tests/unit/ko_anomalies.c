@@ -1,22 +1,13 @@
 /*
  * ko_anomalies - a kernel module is not a damaged executable.
  *
- * WHAT THIS IS FOR. Kernel modules were being reported as
- * "ELF-x64/Heur:Truncated", which is the scored model adding up terms from
- * kofheur.c - SEG_PAST_EOF, SHOFF_PAST_EOF and SEC_PAST_EOF all carry that
- * word. Every .ko on a machine firing one of them is a false positive on the
- * largest single population of ELF files most Linux hosts have.
- *
- * The weights in that table were measured on a population of EXECUTABLES. An
- * ET_REL is a different shape: no program headers, no entry point, sections
- * that the module loader relocates rather than maps. If a term fires on it, the
- * term is being asked a question it was not measured against.
- *
- * So this walks the modules that are actually on the machine and reports which
- * anomalies they trip. It is a regression test for the false positive and, the
- * first time it runs, the measurement that says which term causes it - the
- * report names the anomaly rather than only failing, because "some .ko trips
- * something" is not a thing anybody can act on.
+ * WHAT THIS IS FOR. An ET_REL is a different shape from an executable: no
+ * program headers, no entry point, sections that the module loader relocates
+ * rather than maps. So this walks the modules that are actually on the machine
+ * and reports which parser anomalies they trip - the report names the anomaly
+ * rather than only failing, because "some .ko trips something" is not a thing
+ * anybody can act on. It was written when a scored model (since removed) turned
+ * these anomalies into a verdict; the anomalies themselves are the parser's.
  *
  * SKIPPED, NOT FAILED, WHERE THERE ARE NO MODULES. A build machine in a
  * container has no /lib/modules, and a test that failed there would be a test
@@ -38,9 +29,7 @@
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 
-/* The three that carry the word "Truncated" in kofheur.c, plus the two the
- * emulator gate reads - all of which describe a file that was supposed to be
- * loadable and is not. */
+/* The anomalies that describe a file that was supposed to be loadable and is not. */
 static const struct {
 	uint64_t bit;
 	const char *name;
@@ -183,18 +172,12 @@ int main(int argc, char **argv)
 	 *
 	 * An anomaly firing on a .ko is not by itself wrong: an ET_REL really
 	 * has no load segment and no executable entry, and the parse is right
-	 * to say so. What was wrong was SCORING it - heur's weights come
-	 * from a population of executables, and heur_object now declines an ELF
-	 * that is neither ET_EXEC nor ET_DYN for that reason.
-	 *
-	 * Which of the three "Truncated" anomalies a real module trips, and
-	 * whether that one is a true observation about how a .ko is laid out or
-	 * a bug in the section walk, is a question this answers and nothing
-	 * else here can: it needs real modules, and a build machine may have
-	 * none. So it prints the counts and the first path for each, and
+	 * to say so. Whether a real module trips one of the "past EOF" anomalies
+	 * because of how a .ko is laid out or because of a bug in the section
+	 * walk is a question only real modules answer, and a build machine may
+	 * have none. So it prints the counts and the first path for each, and
 	 * whoever reads them decides whether there is a parser bug underneath.
 	 */
-	printf("ko anomalies: reported, not judged - the verdict is gated in "
-	       "heur_object, not here\n");
+	printf("ko anomalies: reported, not judged\n");
 	return 0;
 }

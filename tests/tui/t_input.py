@@ -78,7 +78,7 @@ def non_utf8_and_binary_bytes_on_stdin():
 def home_end_variants_in_a_field_do_not_corrupt_it():
     # tmux/screen send ESC[1~ / ESC[4~ for Home/End and xterm ESC[1;5C for Ctrl+Right.
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abc')
         v.send('\x1b[1;5C', 0.3)
         r = v.row(grip(v) + 1)
@@ -115,7 +115,7 @@ def bracketed_paste_outside_a_field_is_harmless():
 @case(A)
 def bracketed_paste_with_newlines_into_a_field():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.send('\x1b[200~line1\nline2\x1b[201~', 0.5)
         check(v.alive())
         v.key('enter')
@@ -235,7 +235,7 @@ def burst_of_random_clicks_then_normal_use():
 @case(A)
 def burst_typing_into_a_field():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.send('z' * 400, 1.0)
         check(v.alive())
         v.key('enter')

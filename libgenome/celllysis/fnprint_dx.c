@@ -22,6 +22,11 @@
  * MEMORY. The index (dxdb) is read-only and shared; each context holds one byte or word per diagnose,
  * block and cluster. begin() resets them: O(blocks + diagnoses) per object, charged to the object.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #include "fnprint.h"
 #include "fnprint_private.h"
 

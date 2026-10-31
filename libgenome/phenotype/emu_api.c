@@ -135,47 +135,6 @@ void kgenome_emu_free(struct kgenome_emu *e)
 	free(e->wev);
 	free(e->wev_tab);
 	free(e->hblk);
-	if (e->hot) {
-		uint64_t tot = 0, top = 0, best;
-		uint32_t q, n_used = 0, j, k, bi;
-
-		for (q = 0; q <= e->hot_mask; q++)
-			if (e->hot[q].n) { tot += e->hot[q].n; n_used++; }
-		fprintf(stderr, "[act] active=%llu gapmax=%llu tail=%llu\n",
-			(unsigned long long)e->active_n,
-			(unsigned long long)e->gap_max,
-			(unsigned long long)e->since_active);
-		fprintf(stderr, "[hot] miss: empty=%llu va=%llu pg=%llu bytes=%llu\n",
-			(unsigned long long)e->m_empty,
-			(unsigned long long)e->m_va,
-			(unsigned long long)e->m_pg,
-			(unsigned long long)e->m_bytes);
-		fprintf(stderr, "[hot] icache hit=%llu miss=%llu (%.2f%%)\n",
-			(unsigned long long)e->ic_hit,
-			(unsigned long long)e->ic_miss,
-			e->ic_hit + e->ic_miss ? 100.0 * (double)e->ic_hit /
-				(double)(e->ic_hit + e->ic_miss) : 0.0);
-		fprintf(stderr, "[hot] distinct=%u total=%llu\n", n_used,
-			(unsigned long long)tot);
-		for (j = 0; j < 12u; j++) {
-			best = 0; bi = 0;
-			for (k = 0; k <= e->hot_mask; k++)
-				if (e->hot[k].n > best) {
-					best = e->hot[k].n; bi = k;
-				}
-			if (!best)
-				break;
-			top += best;
-			fprintf(stderr, "[hot] %2u %#010llx %llu (%.1f%%)\n",
-				j, (unsigned long long)e->hot[bi].va,
-				(unsigned long long)best,
-				tot ? 100.0 * (double)best / (double)tot : 0.0);
-			e->hot[bi].n = 0;
-		}
-		fprintf(stderr, "[hot] top12 = %.1f%% of the run\n",
-			tot ? 100.0 * (double)top / (double)tot : 0.0);
-	}
-	free(e->hot);
 	free(e->ic);
 	for (i = 0; i <= e->tab_mask; i++)
 		if (!e->tab[i].shared)
@@ -233,7 +192,7 @@ struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t)
 	struct kgenome_emu *e;
 	uint32_t i;
 
-	if (!t || t->insn || t->itr || t->wev || t->hot || t->runs ||
+	if (!t || t->insn || t->itr || t->wev || t->runs ||
 	    t->snap || t->n_snap)
 		return NULL;
 	e = malloc(sizeof *e);
@@ -638,20 +597,17 @@ int kgenome_emu_write(struct kgenome_emu *e, uint64_t va, const void *src, unsig
 	 * THE PAGES ARE CHECKED BEFORE ANY BYTE LANDS, as kgenome_emu_read does: mem_wr copies
 	 * byte by byte and stops at the first page the guest does not have, which leaves the
 	 * bytes before the hole written. A write that is refused is a write that did not
-	 * happen. (During a run the soft-write path may give a missing page, so it is not
-	 * refused here: mem_wr decides, as it always did.)
+	 * happen.
 	 */
-	if (!(e->softwrite && e->running)) {
-		last = (va + n - 1u) & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
-		for (pg = va & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);; pg += KGENOME_EMU_PAGE) {
-			if (!kgenome_emu_page_lookup(e, pg)) {
-				e->fault_va = pg < va ? va : pg;
-				memcpy(e->fault_kind, "write", 6);
-				return 0;
-			}
-			if (pg == last)
-				break;
+	last = (va + n - 1u) & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
+	for (pg = va & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);; pg += KGENOME_EMU_PAGE) {
+		if (!kgenome_emu_page_lookup(e, pg)) {
+			e->fault_va = pg < va ? va : pg;
+			memcpy(e->fault_kind, "write", 6);
+			return 0;
 		}
+		if (pg == last)
+			break;
 	}
 	return kgenome_emu_mem_wr(e, va, src, n);
 }

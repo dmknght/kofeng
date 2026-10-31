@@ -458,7 +458,6 @@ static void pe_report(struct kgenome_emu *e, struct kgenome_emu_unp_report *rep,
 		rep->improvised = improvised;
 		rep->detail = kgenome_emu_stop_detail(e);
 		rep->unmodelled = kgenome_emu_unmodelled_calls(e);
-		rep->unmodelled_guessed = kgenome_emu_unmodelled_guessed(e);
 		/*
 		 * A fault at the sentinel is the stub RETURNING, which
 		 * is how a PE entry point finishes - see

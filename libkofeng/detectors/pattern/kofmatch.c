@@ -798,10 +798,6 @@ int kof_hex_walk_flags(kof_buf d, uint64_t start, const uint8_t *prog,
 
 /* ---- searching ranges ----------------------------------------------------- */
 
-/* The boundary question lives in dbcore.h beside the flags that ask it -
- * there were two copies of this and three spellings of the test. */
-#define is_word_byte(c) kof_is_word_byte(c)
-
 /*
  * Search one range for a pattern of either kind.
  *

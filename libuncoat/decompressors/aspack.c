@@ -27,6 +27,7 @@ struct asp {
 	const uint8_t *in;
 	uint64_t n, at;
 	uint64_t pad;          /* zero bytes still allowed past the end */
+	uint64_t loaded;       /* bytes shifted in so far, real and pad */
 	int      eof;          /* the input ran out, as opposed to being wrong */
 
 	uint32_t d3[4][24], d4[4][24];
@@ -49,11 +50,12 @@ struct asp {
  * Feed the shift register. Past the end of the input it feeds zeroes, for up to
  * KUNCOAT_ASPACK_LOOKAHEAD bytes - see the note in aspack.h - and fails after that.
  */
-/* KNOWN DEFECT WP5-F-ASP-1 (2026-10-25, M) [sev M]: asp_fill spends the KUNCOAT_ASPACK_LOOKAHEAD (0x10e) zero pad bytes on EVERY symbol, not only the last one's look-ahead.
- * Trigger: an ASPack block cut short, or declared larger than the stream decodes to. Effect: up to 0x10e*8 bits of symbols are decoded out of zeros, fabricating
- * thousands of output bytes and status OK once the declared size is reached (339 of 617 cut streams, 12 shapes, wrong or OK).
- * Reproducer: tests_wp5/findings/aspack_cut_says_OK.bin; row ASPACK_LOOKAHEAD in tests/lib/uncoat/cov_aspack_roundtrip.c (green until fixed).
- * Fix: allow the pad only to complete the last symbol's window and report TRUNCATED when a symbol's first bit lies in the pad. */
+/*
+ * The pad completes the window of the LAST symbol and nothing more: a read that ends past the
+ * end of the real input (asp_used) is the cut stream's end, eof, not a symbol made of zeros.
+ * The read position is 8 * (bytes loaded - 4) + bitpos, because the shift register holds the
+ * last four loaded bytes and bitpos counts the bits of the oldest already used.
+ */
 static int asp_fill(struct asp *s)
 {
 	while (s->bitpos >= 8u) {
@@ -70,6 +72,18 @@ static int asp_fill(struct asp *s)
 		}
 		s->hash = (s->hash << 8) | b;
 		s->bitpos -= 8u;
+		s->loaded++;
+	}
+	return 1;
+}
+
+/* After a read: its last bit must lie inside the real input. Zero-width reads (an offset class
+ * with no raw bits) are legal at the very end, so the test is on where the cursor ENDED. */
+static int asp_used(struct asp *s)
+{
+	if (8u * (s->loaded - 4u) + s->bitpos > 8u * s->n) {
+		s->eof = 1;
+		return 0;
 	}
 	return 1;
 }
@@ -86,6 +100,10 @@ static uint32_t asp_bits(struct asp *s, uint32_t num, int *err)
 	*err = 0;
 	v = ((s->hash >> (8u - s->bitpos)) & 0xffffffu) >> (24u - num);
 	s->bitpos += num;
+	if (!asp_used(s)) {
+		*err = 1;
+		return 0;
+	}
 	return v & 0xffu;
 }
 
@@ -130,6 +148,8 @@ static uint32_t asp_sym(struct asp *s, uint32_t w, int *err)
 	}
 
 	s->bitpos += pos;
+	if (!asp_used(s))
+		return 0;
 	ret = ((ret - d3[pos - 1u]) >> (24u - pos)) + d4[pos];
 	if (ret >= s->size[w])
 		return 0;
@@ -342,6 +362,8 @@ static int asp_run(struct asp *s, uint64_t size, uint8_t *out, uint64_t *done)
 			       ((((s->hash >> (8u - s->bitpos)) & 0xffffffu) >>
 				 (0x18u - extra)));
 			s->bitpos += extra;
+			if (!asp_used(s))
+				return 0;
 		}
 
 		use = s->init[cls];
@@ -352,6 +374,8 @@ static int asp_run(struct asp *s, uint64_t size, uint8_t *out, uint64_t *done)
 			use += ((s->hash >> (8u - s->bitpos)) & 0xffffffu) >>
 			       (24u - wide);
 			s->bitpos += wide;
+			if (!asp_used(s))
+				return 0;
 		} else {
 			uint32_t low;
 
@@ -361,6 +385,8 @@ static int asp_run(struct asp *s, uint64_t size, uint8_t *out, uint64_t *done)
 			use += (((s->hash >> (8u - s->bitpos)) & 0xffffffu) >>
 				(24u - wide)) * 8u;
 			s->bitpos += wide;
+			if (!asp_used(s))
+				return 0;
 			low = asp_sym(s, 2u, &oob);
 			if (oob)
 				return 0;

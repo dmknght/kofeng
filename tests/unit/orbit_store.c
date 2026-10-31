@@ -21,6 +21,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -435,8 +437,29 @@ static void case_fridge_files(void)
 		f = koffridge_open(1024, 0x77);
 		ok(koffridge_load(f, path_of("liar.bin"), &why) == 0 && strstr(why, "ends before"), "a 40-byte file claiming 4194304 entries: refused");
 		koffridge_close(f);
-		printf("       (the loader first allocates 4194304 x sizeof(entry) = %zu MiB for those entries - WP12-11)\n",
-		       (size_t)(1u << 22) * 320u >> 20);
+		/* ...and under a cap of 256 MiB of address space, where the allocation the old loader made first (4194304 entries,
+		 * over a gigabyte) fails: the answer is still "ends before", not "out of memory" */
+		{
+			pid_t kid = fork();
+			int st = 0;
+
+			if (kid == 0) {
+				struct rlimit rl;
+				struct koffridge *g;
+				const char *w2 = "";
+
+				rl.rlim_cur = rl.rlim_max = 256ul << 20;
+				if (setrlimit(RLIMIT_AS, &rl) != 0)
+					_exit(2);
+				g = koffridge_open(1024, 0x77);
+				if (!g)
+					_exit(3);
+				(void)koffridge_load(g, path_of("liar.bin"), &w2);
+				_exit(strstr(w2, "ends before") ? 0 : 1);
+			}
+			waitpid(kid, &st, 0);
+			ok(WIFEXITED(st) && WEXITSTATUS(st) == 0, "the same file under a 256 MiB address-space cap: refused as 'ends before', no allocation sized by the header");
+		}
 	}
 	/* entries that disagree with themselves under a CORRECT checksum */
 	{
@@ -867,9 +890,8 @@ static void case_report(void)
 
 			setvbuf(full, NULL, _IONBF, 0);
 			rc = k == 0 ? kof_report_write_text(r, full, 0) : wr[k](r, full);
-			snprintf(w, sizeof w, "the %s writer into a full disk reports the failure (it returned %d with ferror = %d)", nm[k], rc, ferror(full) != 0);
-			/* KNOWN DEFECT WP12-6 (2026-10-24, M): this row pins it, green until fixed. */
-			KM_CHECK(!(ferror(full) && rc == 0), w, "WP12-6: the report writers never look at ferror and return 0");
+			snprintf(w, sizeof w, "the %s writer into a full disk returns KOF_REPORT_ERR_WRITE (it returned %d with ferror = %d)", nm[k], rc, ferror(full) != 0);
+			ok(ferror(full) && rc == KOF_REPORT_ERR_WRITE, w);
 			fclose(full);
 		}
 	}
@@ -912,9 +934,7 @@ static void case_report_delete(void)
 			phantom++;
 	}
 	ok(kof_report_count(r) >= 1, "the delete is a fingerprint");
-	/* KNOWN DEFECT WP12-23 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(phantom == 0, "a FILE_DELETE of a path no event created interns a FILE_NEW fingerprint of count 0: the table holds a row the trace never produced",
-		 "WP12-23: feed uses intern() where kofrep_find() was meant, to mark SELF_DEL on an existing row");
+	ok(phantom == 0, "a FILE_DELETE of a path no event created does not intern a FILE_NEW fingerprint of count 0");
 	f = open_memstream(&buf, &blen);
 	(void)kof_report_write_json(r, f);
 	fclose(f);
@@ -934,9 +954,7 @@ static void case_report_delete(void)
 		kof_report_feed(r2, &e, 3000);
 		printf("       3000 deletes then one create: %zu fingerprints in the table, dropped (FILE_NEW) %llu, dropped (FILE_DELETE) %llu\n", kof_report_count(r2),
 		       (unsigned long long)kof_report_dropped(r2, KOF_FP_FILE_NEW), (unsigned long long)kof_report_dropped(r2, KOF_FP_FILE_DELETE));
-		/* KNOWN DEFECT WP12-23 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(kof_report_dropped(r2, KOF_FP_FILE_NEW) == 0, "3000 deletes occupy two rows each, so the 4096-row table is full when the one real create arrives and the create is dropped (a cap deleting evidence)",
-			 "WP12-23");
+		ok(kof_report_dropped(r2, KOF_FP_FILE_NEW) == 0, "3000 deletes then one real create: the create is kept (deletes occupy one row each, not two)");
 		kof_report_close(r2);
 	}
 	kof_report_close(r);
@@ -1152,9 +1170,7 @@ static void case_report_finish(void)
 		snprintf(w, sizeof w, "the copy onto a full disk: the file is %s, and the temporary is %s", f && f->bytes.stored[0] ? "reported as stored" : "not reported as stored",
 			 f && f->bytes.why_not == KOF_FP_WHY_DENIED ? "named DENIED" : "named something else");
 		ok(f && !f->bytes.stored[0], w);
-		/* KNOWN DEFECT WP12-15 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(f && f->bytes.why_not != KOF_FP_WHY_DENIED, "a copy that failed with ENOSPC is reported as DENIED: the report says 'the file could not be opened' about a full disk",
-			 "WP12-15: collect_file maps every failure after the hash to KOF_FP_WHY_DENIED");
+		ok(f && f->bytes.why_not == KOF_FP_WHY_IO, "a copy that failed with ENOSPC is reported as IO, not DENIED ('the file could not be opened' would send a reader to the permissions)");
 	}
 	{
 		char p[1000];
@@ -1173,9 +1189,7 @@ static void case_report_finish(void)
 	osys_enospc(NULL);
 	f = fp_of(r, KOF_FP_FILE_WRITE, ftgt);
 	ok(f && f->bytes.got == 200 && f->bytes.sha256[0], "evidence onto a full disk: the bytes were still read and hashed");
-	/* KNOWN DEFECT WP12-16 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(f && !f->bytes.stored[0], "evidence onto a full disk is reported as stored (evidence/NNNN.bin): fwrite into the stdio buffer succeeded and the failing fclose is ignored",
-		 "WP12-16: read_written ignores the result of fclose on the evidence file");
+	ok(f && !f->bytes.stored[0], "evidence onto a full disk is not reported as stored (the failing fclose is looked at)");
 	kof_report_close(r);
 	/* the report directory cannot be made */
 	{
@@ -1214,16 +1228,8 @@ static void case_report_finish(void)
 		st.collect = 1;
 		kof_report_finish(r, &st);
 		f = fp_of(r, KOF_FP_FILE_NEW, fa);
-		if (f && f->bytes.stored[0]) {
-			char p[1400];
-			struct stat sb;
-
-			snprintf(p, sizeof p, "%s/%s", deep, f->bytes.stored);
-			/* KNOWN DEFECT WP12-14 (2026-10-24, M): this row pins it, green until fixed. */
-			KM_CHECK(stat(p, &sb) == 0, "a report directory of 460 bytes: the store path is cut to 511 bytes and the report names a copy at a path that was never written",
-				 "WP12-14: collect_file builds the store path in 512 bytes and reports the untruncated name");
-		} else
-			ok(1, "a report directory of 460 bytes: no copy is claimed");
+		ok(f && !f->bytes.stored[0] && f->bytes.why_not == KOF_FP_WHY_IO,
+		   "a report directory of 460 bytes: the store path does not fit, no copy is claimed and the reason is IO (it used to be cut to 511 bytes and reported under the whole name)");
 		kof_report_close(r);
 		ri.dir = dir;
 	}

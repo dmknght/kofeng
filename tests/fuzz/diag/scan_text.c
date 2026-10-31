@@ -504,8 +504,8 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 #ifdef DIAG_STRICT_G9
 			FZ_CHECK(c, sig == clean.sig, "G9: a refused allocation made a different graph and the status is ok");
 #else
-			/* F17 (diag_text_cmdval.c cv_new): the shell reader's refused allocation is not noted. Counted in the digest; -DDIAG_STRICT_G9 fails. */
-			/* KNOWN DEFECT WP9-F17 (2026-10-25, M): this row pins it, green until fixed. */
+			/* F17 (diag_text_cmdval.c cv_new) is fixed: the shell reader's refused allocation is noted (tests/lib/genome/diag_text_oom.c "sh chain").
+			 * What this counts in the digest and does not fail is any other silent answer; -DDIAG_STRICT_G9 fails it. */
 			fz_digest(c, sig == clean.sig ? 0u : 0x69u);
 #endif
 		}

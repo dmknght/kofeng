@@ -21,7 +21,7 @@ void kv_fam_content_size(const struct kof_famcat *c, const struct kv_fam_row *ro
 {
 	char name[KOF_FAMCAT_NAME_MAX + 8], types[128], comment[KOF_FAMCAT_COMMENT_MAX + 1];
 	uint32_t i;
-	int widest = 0, btn = (int)strlen("[ Add family ]") + 4 + (int)strlen("[ Save ]") + 2 + (int)strlen("[ Discard ]");
+	int widest = 0;
 
 	for (i = 0; i < n_row; i++) {
 		int n;
@@ -34,11 +34,7 @@ void kv_fam_content_size(const struct kof_famcat *c, const struct kv_fam_row *ro
 		}
 		widest = n > widest ? n : widest;
 	}
-	widest = btn > widest ? btn : widest;
-	/* The bottom rule carries a refusal ("Select at least one Malware type", 32 characters) and the count: leave room for both. */
-	widest = widest < 69 ? 69 : widest;           /* 75 columns with the frame: about one and a half times the first size (owner) */
-	*w = widest + 6;                    /* the frame, the margin and the scroll bar column */
-	*h = (int)n_row + 2 + 2 < 12 ? 12 : (int)n_row + 2 + 2;   /* a row each, a blank, the buttons, the frame; not shorter than 12 (one and a half times the first 8) */
+	kv_dd_content_size(widest, n_row, kv_fam_add_family, &kv_dd_catalog_limits, w, h);
 }
 
 const char *kv_fam_label_add_family(void)
@@ -75,6 +71,46 @@ uint32_t kv_fam_rows(const struct kof_famcat *c, struct kv_fam_row *out, uint32_
 		n++;
 	}
 	return n;
+}
+
+int32_t kv_fam_find_family(const struct kof_famcat *c, const char *name)
+{
+	uint32_t i;
+
+	for (i = 0; i < c->n_fam; i++)
+		if (!strcmp(c->fam[i].name, name))
+			return (int32_t)i;
+	return -1;
+}
+
+int32_t kv_fam_find_variant(const struct kof_famcat *c, const char *name)
+{
+	uint32_t i;
+
+	for (i = 0; i < c->n_var; i++)
+		if (!strcmp(c->var[i].name, name))
+			return (int32_t)i;
+	return -1;
+}
+
+int32_t kv_fam_find_family_id(const struct kof_famcat *c, uint64_t id)
+{
+	uint32_t i;
+
+	for (i = 0; id && i < c->n_fam; i++)
+		if (kof_famcat_fam_id_at(c, i) == id)
+			return (int32_t)i;
+	return -1;
+}
+
+int32_t kv_fam_find_variant_id(const struct kof_famcat *c, uint64_t id)
+{
+	uint32_t i;
+
+	for (i = 0; id && i < c->n_var; i++)
+		if (kof_famcat_var_id_at(c, i) == id)
+			return (int32_t)i;
+	return -1;
 }
 
 void kv_fam_cells(const struct kof_famcat *c, const struct kv_fam_row *r, char *name, size_t ncap, char *types,
@@ -150,31 +186,6 @@ void kv_fam_spec_widths(struct kv_tab_spec *t, struct kv_fam_tab *ft, const stru
 	memcpy(t->width, width, KV_FAM_COLS * sizeof width[0]);
 }
 
-/* The screen columns [*x0, *x1] of the text of column `k` that are visible, or 0 when none is. `empty_w` is how wide an empty cell
- * answers (0: not at all). */
-static int fam_extent(const struct kv_tab_geo *g, uint32_t k, const char *text, uint32_t empty_w, int *x0, int *x1)
-{
-	uint32_t a = 0, b = (uint32_t)strlen(text), lo, hi;
-
-	if (k >= g->n_col || g->cw[k] <= 0)
-		return 0;
-	while (a < b && text[a] == ' ')
-		a++;
-	while (b > a && text[b - 1] == ' ')
-		b--;
-	if (a == b) {
-		a = 0;
-		b = empty_w;
-	}
-	lo = a > g->cfrom[k] ? a : g->cfrom[k];
-	hi = b < g->cfrom[k] + (uint32_t)g->cw[k] ? b : g->cfrom[k] + (uint32_t)g->cw[k];
-	if (hi <= lo)
-		return 0;
-	*x0 = g->cx[k] + (int)(lo - g->cfrom[k]);
-	*x1 = g->cx[k] + (int)(hi - g->cfrom[k]) - 1;
-	return 1;
-}
-
 enum kv_fam_hit kv_fam_hit_of(const struct kof_famcat *c, const struct kv_fam_row *r, const struct kv_tab_geo *g, int col,
 			      uint32_t *index)
 {
@@ -190,7 +201,7 @@ enum kv_fam_hit kv_fam_hit_of(const struct kof_famcat *c, const struct kv_fam_ro
 
 		if (r->kind == KV_FAM_FAMILY && k != 0)
 			break;          /* a family has no types and no comment */
-		if (!fam_extent(g, k, s, k == (uint32_t)KV_FAM_COL_COMMENT ? (uint32_t)KV_FAM_EMPTY_HIT : 0u, &x0, &x1) ||
+		if (!kv_tab_extent(g, k, s, k == (uint32_t)KV_FAM_COL_COMMENT ? (uint32_t)KV_FAM_EMPTY_HIT : 0u, &x0, &x1) ||
 		    col < x0 || col > x1)
 			continue;
 		if (r->kind == KV_FAM_FAMILY) {
@@ -212,47 +223,6 @@ int kv_fam_button_at(const struct kv_tab_geo *g, int col)
 	return col >= x0 && col <= x1 && col >= g->cx[0] && col < g->cx[0] + g->cw[0];
 }
 
-uint32_t kv_fam_buttons(const struct kv_dd_geo *g, int dirty, struct kv_fam_btn out[KV_FAM_BTN_COUNT])
-{
-	static const char *const label[KV_FAM_BTN_COUNT] = { "[ Add family ]", "[ Save ]", "[ Discard ]" };
-	int len[KV_FAM_BTN_COUNT], i, y, right, need;
-	uint32_t n;
-
-	if (!g->ok || g->body_rows < 3)
-		return 0;
-	for (i = 0; i < (int)KV_FAM_BTN_COUNT; i++)
-		len[i] = (int)strlen(label[i]);
-	y = g->body_y0 + g->body_rows - 1;
-	need = 2 + len[0] + 2 + len[1] + 2 + len[2] + 2;
-	n = g->body_cols >= need ? KV_FAM_BTN_COUNT : g->body_cols >= len[0] + 2 ? 1u : 0u;
-	right = g->body_x0 + g->body_cols - 2;
-	for (i = 0; i < (int)n; i++) {
-		out[i].id = (enum kv_fam_btn_id)i;
-		out[i].label = label[i];
-		out[i].y = y;
-		out[i].enabled = i == (int)KV_FAM_BTN_ADD_FAMILY || dirty;
-	}
-	if (n)
-		out[0].x0 = g->body_x0 + 2;
-	if (n == KV_FAM_BTN_COUNT) {
-		out[KV_FAM_BTN_DISCARD].x0 = right - len[KV_FAM_BTN_DISCARD] + 1;
-		out[KV_FAM_BTN_SAVE].x0 = out[KV_FAM_BTN_DISCARD].x0 - 2 - len[KV_FAM_BTN_SAVE];
-	}
-	for (i = 0; i < (int)n; i++)
-		out[i].x1 = out[i].x0 + len[i] - 1;
-	return n;
-}
-
-int kv_fam_btn_at(const struct kv_fam_btn *b, uint32_t n, int y, int x)
-{
-	uint32_t i;
-
-	for (i = 0; i < n; i++)
-		if (b[i].enabled && y == b[i].y && x >= b[i].x0 && x <= b[i].x1)
-			return (int)b[i].id;
-	return -1;
-}
-
 uint32_t kv_fam_menu_count(void)
 {
 	return kof_famcat_type_count();
@@ -263,14 +233,31 @@ const char *kv_fam_menu_label(uint32_t i)
 	return kof_famcat_type_name(i);
 }
 
+static const char *type_label(uint32_t i, char *buf)
+{
+	(void)buf;                          /* the engine's spelling is already what is shown */
+	return kof_famcat_type_name(i);
+}
+
+struct kv_pick kv_fam_types(void)
+{
+	struct kv_pick l = { kof_famcat_type_count(), type_label, kof_famcat_type_value };
+
+	return l;
+}
+
 int kv_fam_mask_has(uint32_t mask, uint32_t i)
 {
-	return i < kof_famcat_type_count() && (mask >> kof_famcat_type_value(i) & 1u) != 0u;
+	struct kv_pick l = kv_fam_types();
+
+	return kv_pick_has(&l, mask, i);
 }
 
 uint32_t kv_fam_mask_flip(uint32_t mask, uint32_t i)
 {
-	return i < kof_famcat_type_count() ? mask ^ (1u << kof_famcat_type_value(i)) : mask;
+	struct kv_pick l = kv_fam_types();
+
+	return kv_pick_flip(&l, mask, i);
 }
 
 int kv_fam_menu_checked(const struct kof_famcat *c, uint32_t variant, uint32_t i)

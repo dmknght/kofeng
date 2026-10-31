@@ -727,15 +727,24 @@ static void big_views(void)
 	 * nothing about what it did not look at - the decoded text was never searched -
 	 * where a bound that cuts the decode (above) is reported as BROKEN_LIMIT.
 	 */
+	/* The OBJECT cap is an entry's bound, not a view's (BE-10): a view the size of the parent is made though the
+	 * cap is under it. The tree's produced-bytes budget is what refuses it. */
 	opt.max_object_bytes = 2u << 20;
 	scan(sc, o, n, &opt, &r);
-	NCKF(r.n == 1u && !view_of(&r), "an object cap under the view: %u objects", r.n);
-	NCK(!has(&r.o[0], "NormViewDecoded"));
-	NCKF(r.n >= 1u && r.o[0].broken == KOF_BROKEN_LIMIT,
-	     "a view refused for the object cap leaves the parent reading as complete (broken = %d)",
+	NCKF(r.n >= 2u && view_of(&r) && r.o[0].broken == 0, "an object cap under the view: %u objects, parent broken %d (BE-10)", r.n,
 	     r.n >= 1u ? (int)r.o[0].broken : -1);
 	er_free(&r);
-	/* and a roomier cap is a view */
+	defaults(&opt, 0);
+	opt.max_produced_bytes = 2u << 20;
+	scan(sc, o, n, &opt, &r);
+	NCKF(r.n == 1u && !view_of(&r), "a produced-bytes budget under the view: %u objects", r.n);
+	NCK(!has(&r.o[0], "NormViewDecoded"));
+	NCKF(r.n >= 1u && r.o[0].broken == KOF_BROKEN_LIMIT,
+	     "a view refused for the budget leaves the parent reading as complete (broken = %d)",
+	     r.n >= 1u ? (int)r.o[0].broken : -1);
+	er_free(&r);
+	/* and a roomier budget is a view */
+	defaults(&opt, 0);
 	opt.max_object_bytes = 8u << 20;
 	scan(sc, o, n, &opt, &r);
 	NCK(r.n == 2u && view_of(&r) && has(view_of(&r), "NormViewDecoded"));

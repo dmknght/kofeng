@@ -159,6 +159,16 @@ static void c_streams(void)
 	at = stream(at, 0x240, 0x20, "#Unknown");
 	CK(read_meta(&m, N) && m.strings.off == 0x300 && m.strings.len == 0x40);
 	CK((m.anomalies & KGENOME_CLR_ANOM_STREAM_OVER) != 0 && m.streams_read == 3u);
+	/* E-CLROVER: two DIFFERENTLY named streams whose ranges overlap are said too (both kept). Old tests missed it:
+	 * (b) the only overlap built was a repeated name. Disjoint and merely adjacent ranges say nothing. */
+	at = root(12, 2);
+	at = stream(at, 0x100, 0x40, "#Strings");
+	at = stream(at, 0x120, 0x40, "#Blob");
+	CK(read_meta(&m, N) && m.strings.len == 0x40 && m.blob.len == 0x40 && (m.anomalies & KGENOME_CLR_ANOM_STREAM_OVER));
+	at = root(12, 2);
+	at = stream(at, 0x100, 0x40, "#Strings");
+	at = stream(at, 0x140, 0x40, "#Blob");
+	CK(read_meta(&m, N) && !(m.anomalies & KGENOME_CLR_ANOM_STREAM_OVER));
 	/* a stream that runs past the object is clipped and said; one that starts past it keeps nothing */
 	at = root(12, 2);
 	at = stream(at, 0x400, 0x1000, "#Blob");

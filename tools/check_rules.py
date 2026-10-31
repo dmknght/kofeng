@@ -13,12 +13,18 @@ same on every host, so the rule lives here and the Makefile only starts it.
      KOF_TARGET_CONTENT.
   3. The word "syndrome" names only the directory bases/syndromes (and the few
      spellings the allowlist below lists).
+  4. A GENERATED source is what its generator makes of its pinned input
+     (libgenome/celllysis/nucleo_index.c, nucleo_sysnames.c): a hand edit or a stale
+     table is a build failure and not something only a test notices.
 
 Usage: check_rules.py [root]   (default: the directory above tools/). Exit 1 on a violation.
 """
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 ENGINE_DIRS = ["libkofeng", "libgenome", "libuncoat", "libkoforbit", "kofexamine",
                "kofscanner", "kofwatcher", "ksigbuilder"]
@@ -26,7 +32,10 @@ SYNDROME_DIRS = ENGINE_DIRS + ["tools", "mk", "tests", "bases", "docs", "CLAUDE.
 MODULE_DIRS = ["bases/unp", "bases/decomp", "bases/decoders"]
 
 SYNDROME_ALLOW = re.compile(r"bases/syndromes|--syndromes|/syndromes|.syndromes.|"
-                            r"Syndrome table|syndromes\.kdig|only place for the", re.I)
+                            r"Syndrome table|syndromes\.kdig|only place for the|"
+                            # The button and the form titles of Manage > Syndromes: the owner asked for "Add Syndrome" (2026-10-28), "Edit Syndrome" is its other
+                            # form; no other use of the singular.
+                            r"(Add|Edit) Syndrome", re.I)
 
 
 def walk(root, rels):
@@ -102,9 +111,39 @@ def check_syndrome(root):
         "the word syndrome only names bases/syndromes"
 
 
+# (generated file, generator, its arguments after the output path); paths are relative to the root.
+GENERATED = [
+    ("libgenome/celllysis/nucleo_index.c", "tools/gen_nucleo_index.py", ["libgenome/celllysis"]),
+    ("libgenome/celllysis/nucleo_sysnames.c", "tools/gen_sysnames.py",
+     ["tools/sysnames_x86_64.txt", "tools/sysnames_i386.txt"]),
+]
+
+
+def check_generated(root):
+    bad = []
+    scratch = os.path.join(root, "build")
+    os.makedirs(scratch, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="check_gen_", dir=scratch)
+    try:
+        for out, gen, args in GENERATED:
+            made = os.path.join(tmp, os.path.basename(out))
+            r = subprocess.run([sys.executable, os.path.join(root, gen), made] + [os.path.join(root, a) for a in args],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                bad.append("%s: the generator failed: %s" % (gen, r.stderr.strip().splitlines()[-1:] or r.returncode))
+                continue
+            with open(made, "rb") as a, open(os.path.join(root, out), "rb") as b:
+                if a.read() != b.read():
+                    bad.append("%s is not what %s makes of its input" % (out, gen))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return bad, "a generated source differs from its generator's output (regenerate it, never edit it):", \
+        "generated sources are what their generators make"
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    for check in (check_getenv, check_content, check_syndrome):
+    for check in (check_getenv, check_content, check_syndrome, check_generated):
         bad, why, ok = check(root)
         if bad:
             print(why)

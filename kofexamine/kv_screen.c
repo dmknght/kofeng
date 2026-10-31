@@ -41,9 +41,6 @@
  * the moment something else moved. Comparing the picture instead cannot fall
  * behind a field, because the picture is the only thing that has to be right.
  */
-static char  *g_last;
-static size_t g_last_n;
-
 /* The properties page was up on the frame before this one. */
 /*
  * WHICH FULL-COVER DIALOG WAS DRAWN LAST FRAME, or 0.
@@ -52,8 +49,6 @@ static size_t g_last_n;
  * has to repaint the panes once: the box that is leaving is only erased by
  * what was under it.
  */
-static int g_modal_drawn;
-static struct dlg_off g_prop_drawn;   /* the dashboard's offset the last frame was drawn with */
 
 /*
  * Settle the draft panel's height and its scroll before anything asks where it is.
@@ -90,7 +85,6 @@ static void redraw_draft_rows(struct view *v)
 			v->prow_off = 0;
 			v->prow_home = 0;
 		}
-		v->prow_seen = v->n_prow;
 
 		/* Two more than the rows it shows: the heading it starts with
 		 * and the rule it ends on, which is what puts a border between
@@ -209,33 +203,26 @@ static int redraw_under(struct view *v, int wiped)
 		 * what a narrower page leaves of a wider one's edge is erased only by what was beneath. */
 		int modal = v->prop_open   ? 1 + 10 * (int)v->prop_pg
 			  : v->help_open   ? 4
-			  : syn_page_up(v) ? 5
-			  : syn_modal(v)   ? 6
-			  : fam_up(v)      ? 7 : 0;
+			  : fam_up(v)      ? 7
+			  : tags_up(v)     ? 8
+			  : cfgd_up(v)     ? 9 : 0;
 
 		/* A bar menu opened over the dialog is another picture: it has to be
 		 * erased when it moves or closes, and only the panes can do that. */
 		if (modal)
 			modal = modal * 100 + (v->bar_open + 2);
 
-		under = !modal || wiped || g_modal_drawn != modal;
-		/*
-		 * A POP-UP LIST OVER THE PANES, NOT A PAGE: the tag chooser covers
-		 * part of them and changes size as its search narrows it, so what
-		 * it uncovers has to be painted again on every frame.
-		 */
-		if (syn_modal(v) && !syn_page_up(v))
-			under = 1;
+		under = !modal || wiped || v->scr_modal != modal;
 		/*
 		 * THE FAMILIES DIALOG IS AS BIG AS ITS CONTENT, so what a smaller or moved box uncovers is erased only by
 		 * what was beneath. Where its boxes are is known only once it is drawn: redraw() asks fam_uncovered() after
 		 * draw_fam and paints the frame again with the panes when a box moved, shrank, opened or closed.
 		 */
 		/* A dashboard that was moved uncovers what it stood on: the panes are painted again while its offset changes. */
-		if (v->prop_open && (v->prop_move.dx != g_prop_drawn.dx || v->prop_move.dy != g_prop_drawn.dy))
+		if (v->prop_open && (v->prop_move.dx != v->scr_prop.dx || v->prop_move.dy != v->scr_prop.dy))
 			under = 1;
-		g_prop_drawn = v->prop_move;
-		g_modal_drawn = modal;
+		v->scr_prop = v->prop_move;
+		v->scr_modal = modal;
 	}
 
 	return under;
@@ -494,20 +481,27 @@ static void redraw_dialogs(struct out *o, struct view *v)
  * Write the frame unless it is the one already on the screen, and keep it for
  * the comparison. Frees the frame either way.
  */
-static void redraw_flush(struct out *o)
+static void redraw_flush(struct view *v, struct out *o)
 {
 	/* Nothing moved: the frame is the one already on the screen. */
-	if (o->n && o->n == g_last_n && !memcmp(o->p, g_last, o->n)) {
+	if (o->n && o->n == v->scr_last_n && !memcmp(o->p, v->scr_last, o->n)) {
 		free(o->p);
 		return;
 	}
 	if (o->n) {
-		char *keep = realloc(g_last, o->n);
+		char *keep = realloc(v->scr_last, o->n);
 
 		if (keep) {
 			memcpy(keep, o->p, o->n);
-			g_last = keep;
-			g_last_n = o->n;
+			v->scr_last = keep;
+			v->scr_last_n = o->n;
+		} else {
+			/* No room to keep this frame: forget the old one, which the
+			 * screen no longer shows. Kept, it would make the next frame
+			 * that equals it a "nothing moved" that is not true. */
+			free(v->scr_last);
+			v->scr_last = NULL;
+			v->scr_last_n = 0;
 		}
 	}
 	if (o->n)
@@ -530,9 +524,9 @@ static int redraw_pass(struct view *v, int force_under)
 	term_size();
 	if (g_term_small) {
 		/* 60 columns written into 40 wrap every line into the next: say so instead */
-		free(g_last);
-		g_last = NULL;
-		g_last_n = 0;
+		free(v->scr_last);
+		v->scr_last = NULL;
+		v->scr_last_n = 0;
 		term_write("[2J[HTerminal too small - need at least 60x12");
 		return 0;
 	}
@@ -566,9 +560,9 @@ static int redraw_pass(struct view *v, int force_under)
 		 * leave the screen as the resize left it.
 		 */
 		kof_tty_resize_clear();
-		free(g_last);
-		g_last = NULL;
-		g_last_n = 0;
+		free(v->scr_last);
+		v->scr_last = NULL;
+		v->scr_last_n = 0;
 		term_write("\033[2J");
 		wiped = 1;
 	}
@@ -601,11 +595,17 @@ static int redraw_pass(struct view *v, int force_under)
 	draw_bar(&o, v);
 	if (v->prop_open)
 		draw_prop(&o, v);
-	if (syn_modal(v))
-		draw_syn(&o, v);
 	if (fam_up(v)) {
 		draw_fam(&o, v);
 		moved = fam_uncovered(v);
+	}
+	if (tags_up(v)) {
+		draw_tags(&o, v);
+		moved = tags_uncovered(v);
+	}
+	if (cfgd_up(v)) {
+		draw_cfgd(&o, v);
+		moved = cfgd_uncovered(v);
 	}
 	if (v->help_open)
 		draw_help(&o, v);
@@ -616,7 +616,7 @@ static int redraw_pass(struct view *v, int force_under)
 		free(o.p);
 		return 1;
 	}
-	redraw_flush(&o);
+	redraw_flush(v, &o);
 	return 0;
 }
 

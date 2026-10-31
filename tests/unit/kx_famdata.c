@@ -25,7 +25,9 @@
 #include "../../kofexamine/kv_famdata.h"
 
 #include "../../kofexamine/kv_table.c"
+#include "../../kofexamine/kv_dash_dialog.c"
 #include "../../kofexamine/kv_famdata.c"
+#include "../../kofexamine/kv_ftext.c"
 
 static int fails;
 
@@ -219,7 +221,7 @@ static void button(void)
 	g.body_rows = 10;
 	g.body_x0 = 4;
 	g.body_cols = 50;
-	n = kv_fam_buttons(&g, 0, b);
+	n = kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b);
 	CK(n == 3);
 	CK(b[0].id == KV_FAM_BTN_ADD_FAMILY && b[1].id == KV_FAM_BTN_SAVE && b[2].id == KV_FAM_BTN_DISCARD);
 	for (i = 0; i < n; i++)
@@ -227,10 +229,10 @@ static void button(void)
 	CK(b[0].x0 == 6 && b[0].x1 < b[1].x0 && b[1].x1 < b[2].x0 && b[2].x1 == 4 + 50 - 2);   /* Add family left, Save and Discard right */
 	CK(b[0].enabled && !b[1].enabled && !b[2].enabled);
 	/* Save and Discard follow the dirty flag: enabled iff dirty, and then they answer by id on their own columns */
-	CK(kv_fam_buttons(&g, 1, b) == 3 && b[0].enabled && b[1].enabled && b[2].enabled);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 1, b) == 3 && b[0].enabled && b[1].enabled && b[2].enabled);
 	CK(kv_fam_btn_at(b, 3, 12, b[1].x0) == (int)KV_FAM_BTN_SAVE && kv_fam_btn_at(b, 3, 12, b[1].x1) == (int)KV_FAM_BTN_SAVE &&
 	   kv_fam_btn_at(b, 3, 12, b[2].x0) == (int)KV_FAM_BTN_DISCARD && kv_fam_btn_at(b, 3, 12, b[2].x1 + 1) == -1);
-	CK(kv_fam_buttons(&g, 0, b) == 3 && !b[1].enabled && !b[2].enabled && kv_fam_btn_at(b, 3, 12, b[1].x0) == -1);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 3 && !b[1].enabled && !b[2].enabled && kv_fam_btn_at(b, 3, 12, b[1].x0) == -1);
 	/* a greyed button answers nothing; an enabled one answers by id, on its own columns only */
 	for (i = 0; i < 60; i++) {
 		int want = i >= (uint32_t)b[0].x0 && i <= (uint32_t)b[0].x1 ? (int)KV_FAM_BTN_ADD_FAMILY : -1;
@@ -240,17 +242,17 @@ static void button(void)
 	}
 	/* narrower: only Add family; narrower still, none; too short or not ok, none */
 	g.body_cols = 40;
-	CK(kv_fam_buttons(&g, 0, b) == 1 && b[0].id == KV_FAM_BTN_ADD_FAMILY);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 1 && b[0].id == KV_FAM_BTN_ADD_FAMILY);
 	g.body_cols = 15;
-	CK(kv_fam_buttons(&g, 0, b) == 0);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 0);
 	g.body_cols = 16;
-	CK(kv_fam_buttons(&g, 0, b) == 1);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 1);
 	g.body_cols = 50;
 	g.body_rows = 2;
-	CK(kv_fam_buttons(&g, 0, b) == 0);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 0);
 	g.body_rows = 10;
 	g.ok = 0;
-	CK(kv_fam_buttons(&g, 0, b) == 0);
+	CK(kv_dd_buttons(&g, kv_fam_label_add_family(), 0, b) == 0);
 }
 
 static void menu(void)
@@ -281,9 +283,9 @@ static void menu(void)
 	CK(kv_fam_mask_flip(0, kv_fam_menu_count()) == 0 && !kv_fam_mask_has(~0u, kv_fam_menu_count()));
 	CK(kv_fam_menu_toggle(&C, 5, 0) == KOF_FAMCAT_NO_FAMILY && !kv_fam_menu_checked(&C, 5, 0));
 	CK(kv_fam_menu_toggle(&C, 0, kv_fam_menu_count()) == KOF_FAMCAT_OK && C.var[0].types == VIR);   /* past the list: no bit */
-	/* two variants of a family may not end up with one set: {Virus, Trojan} minus Trojan is the first variant's set */
+	/* two variants of a family may end up with one set (never a gate): {Virus, Trojan} minus Trojan is the first variant's set */
 	CK(kof_famcat_add_variant(&C, 0, NULL, VIR | TRO, 0, NULL) == KOF_FAMCAT_OK);
-	CK(kv_fam_menu_toggle(&C, 1, 1) == KOF_FAMCAT_DUP_TYPES && C.var[1].types == (VIR | TRO));
+	CK(kv_fam_menu_toggle(&C, 1, 1) == KOF_FAMCAT_OK && C.var[1].types == VIR);
 }
 
 /* A click opens something only over the text of a cell (first to last character, indent and padding excluded), clipped to what the
@@ -376,7 +378,7 @@ static void comment_column(void)
 	kv_fam_spec(&t, &ft, &C, R, n);
 	CK(t.n_col == 3 && t.width[2] == 10);                  /* "first note", measured */
 	click_extents(n);
-	/* the content size grows with the longest row, comment included; the layout clips it to the screen */
+	/* the content size grows with the longest row, comment included, up to KV_FAM_WIDTH_MAX; the layout clips it to the screen */
 	kv_fam_content_size(&C, R, n, &w0, &h0);
 	{
 		char big[KOF_FAMCAT_COMMENT_MAX + 1];
@@ -386,7 +388,9 @@ static void comment_column(void)
 		CK(kof_famcat_set_comment(&C, 1, big) == KOF_FAMCAT_OK);
 	}
 	kv_fam_content_size(&C, R, n, &w1, &h1);
-	CK(h1 == h0 && w1 > w0 && w1 >= 9 + 2 + 6 + 2 + 120);   /* "  Mirai_B", "Trojan", 120 characters */
+	/* a 120-character comment must not make the box grow past its cap: the table scrolls sideways instead */
+	CK(h1 == h0 && w1 >= w0 && w1 <= KV_FAM_WIDTH_MAX && h1 <= KV_FAM_HEIGHT_MAX);
+	CK(w1 == KV_FAM_WIDTH_MAX);                             /* "  Mirai_B", "Trojan" and 120 characters need more than the cap */
 }
 
 static void errors(void)
@@ -407,6 +411,127 @@ static void errors(void)
 	CK(strlen(s) == 4);
 }
 
+/* The text field API with fake callbacks: open pre-filled, the typing filter, the limit, validate / commit / cancel in both modes. */
+static int fk_taken;
+static char fk_last[KV_FT_BUF];
+
+static int fk_check(void *user, const char *text, char *err, size_t cap)
+{
+	(void)user;
+	if (strchr(text, '!')) {
+		snprintf(err, cap, "no bangs");
+		return 0;
+	}
+	return 1;
+}
+
+static int fk_commit(void *user, const char *text, char *err, size_t cap)
+{
+	(void)user;
+	if (!strcmp(text, "refuse")) {
+		snprintf(err, cap, "refused");
+		return 0;
+	}
+	fk_taken++;
+	snprintf(fk_last, sizeof fk_last, "%s", text);
+	return 1;
+}
+
+static int fk_accept(int k)
+{
+	return k != '*';
+}
+
+static void field_api(void)
+{
+	struct kv_ftext f;
+	char err[64] = "stale";
+	size_t i;
+
+	fk_taken = 0;
+	kv_ft_init(&f, 7, 8, fk_accept, fk_check, fk_commit, NULL, KV_FT_LIVE, 0, err, sizeof err);
+	CK(!f.open && f.id == 7 && f.cap == 8);
+	/* open pre-filled: the text, scrolled to the start, no error left over, open */
+	f.off = 5;
+	kv_ft_set(&f, "abc");
+	CK(!strcmp(f.buf, "abc") && f.off == 0 && f.open && err[0] == 0);
+	/* a text longer than the field is cut to what fits (cap - 1) */
+	kv_ft_set(&f, "0123456789");
+	CK(!strcmp(f.buf, "0123456") && strlen(f.buf) == f.cap - 1u);
+	kv_ft_set(&f, "abc");
+	/* the filter and the limit: printable, not refused, room for it and for the spare (cap - 2 characters, then the library says too long) */
+	CK(kv_ft_accepts(&f, 'x') && !kv_ft_accepts(&f, '*') && !kv_ft_accepts(&f, 0x1f) && !kv_ft_accepts(&f, 0x7f));
+	kv_ft_set(&f, "abcde");                              /* 5: the 6th is the last that fits (cap 8 = 6 + spare + NUL) */
+	CK(kv_ft_accepts(&f, 'x'));
+	kv_ft_set(&f, "abcdef");
+	CK(!kv_ft_accepts(&f, 'x'));
+	for (i = 0; i < 3; i++)
+		CK(!kv_ft_accepts(&f, 'x'));
+	/* validate: the rule, the error line says why */
+	kv_ft_set(&f, "a!b");
+	CK(!kv_ft_validate(&f) && !strcmp(err, "no bangs"));
+	kv_ft_set(&f, "fine");
+	CK(kv_ft_validate(&f) && err[0] == 0);
+	/* LIVE commit: validate, hand over, close; a refusal (rule or callback) keeps the field open with one line */
+	kv_ft_set(&f, "a!b");
+	CK(!kv_ft_commit(&f) && f.open && fk_taken == 0 && !strcmp(err, "no bangs"));
+	kv_ft_set(&f, "refuse");
+	CK(!kv_ft_commit(&f) && f.open && fk_taken == 0 && !strcmp(err, "refused"));
+	kv_ft_set(&f, "good");
+	CK(kv_ft_commit(&f) && !f.open && fk_taken == 1 && !strcmp(fk_last, "good") && err[0] == 0);
+	CK(kv_ft_commit(&f) && fk_taken == 1);               /* not open: nothing to take */
+	/* cancel: closed, error cleared, nothing handed over */
+	kv_ft_set(&f, "x");
+	snprintf(err, sizeof err, "left over");
+	kv_ft_cancel(&f);
+	CK(!f.open && err[0] == 0 && fk_taken == 1);
+	/* HELD: commit only validates, the text stays and the field stays open (the form's OK reads it later) */
+	kv_ft_init(&f, 8, 8, NULL, fk_check, fk_commit, NULL, KV_FT_HELD, 1, err, sizeof err);
+	kv_ft_set(&f, "keep");
+	CK(kv_ft_commit(&f) && f.open && !strcmp(f.buf, "keep") && fk_taken == 1);
+	kv_ft_set(&f, "k!");
+	CK(!kv_ft_commit(&f) && !strcmp(err, "no bangs") && f.open);
+	/* the hit test is the span of the last draw */
+	f.y = 5;
+	f.x0 = 10;
+	f.x1 = 20;
+	CK(kv_ft_hit(&f, 5, 10) && kv_ft_hit(&f, 5, 20) && !kv_ft_hit(&f, 5, 9) && !kv_ft_hit(&f, 5, 21) && !kv_ft_hit(&f, 4, 15));
+	/* no error line given: nothing is written, nothing crashes */
+	kv_ft_init(&f, 9, 8, NULL, fk_check, NULL, NULL, KV_FT_LIVE, 0, NULL, 0);
+	kv_ft_set(&f, "a!");
+	CK(!kv_ft_commit(&f));
+	kv_ft_set(&f, "ok");
+	CK(kv_ft_commit(&f) && !f.open);
+}
+
+/*
+ * THE ENGINE'S ANSWER FINDS ITS CATALOG ROW BY ID. kdet_diag_of spells a variant "Mirai.A" (the verdict's spelling) while the catalog names it
+ * "Mirai_A", so a lookup by that text found nothing and the Blocks head kept `Variant [ ? ]` (found by tests/tui/t_detect.py). The ids are what
+ * the diagnose carries; here they are made the way the engine makes them. Old tests missed it: (c) the lookup was only ever fed a catalog name.
+ */
+static void find_by_id(void)
+{
+	uint32_t f, g;
+
+	fresh();
+	CK(kof_famcat_add_family(&C, "Gafgyt", NULL, BOT, &f) == KOF_FAMCAT_OK);
+	CK(kof_famcat_add_family(&C, "Mirai", NULL, BOT, &g) == KOF_FAMCAT_OK);
+	CK(kof_famcat_add_variant(&C, g, NULL, BOT, 0, NULL) == KOF_FAMCAT_OK);   /* Mirai_B, the second variant */
+	/* the text the engine answers is not a name of the catalog: by name nothing is found */
+	CK(kv_fam_find_variant(&C, "Mirai.A") < 0 && kv_fam_find_variant(&C, "Mirai_A") == 1);
+	/* by id: variant B of two (not the first, not the only one), a single-variant family, and the family */
+	CK(kv_fam_find_variant_id(&C, kof_famcat_var_id_at(&C, 2)) == 2);
+	CK(kv_fam_find_variant_id(&C, kof_famcat_var_id_at(&C, 1)) == 1);
+	CK(kv_fam_find_variant_id(&C, kof_famcat_var_id_at(&C, 0)) == 0);
+	CK(kv_fam_find_family_id(&C, kof_famcat_fam_id_at(&C, 1)) == 1 && kv_fam_find_family_id(&C, kof_famcat_fam_id_at(&C, 0)) == 0);
+	/* nothing: id 0 (a diagnose with no catalog), an id the catalog does not hold, a family id asked as a variant and the reverse */
+	CK(kv_fam_find_variant_id(&C, 0) < 0 && kv_fam_find_family_id(&C, 0) < 0);
+	CK(kv_fam_find_variant_id(&C, 0x12345678u) < 0 && kv_fam_find_family_id(&C, 0x12345678u) < 0);
+	CK(kv_fam_find_variant_id(&C, kof_famcat_fam_id_at(&C, 1)) < 0 && kv_fam_find_family_id(&C, kof_famcat_var_id_at(&C, 1)) < 0);
+	fresh();
+	CK(kv_fam_find_variant_id(&C, 1u) < 0 && kv_fam_find_family_id(&C, 1u) < 0);   /* an empty catalog */
+}
+
 int main(void)
 {
 	model();
@@ -416,6 +541,8 @@ int main(void)
 	menu();
 	comment_column();
 	errors();
+	field_api();
+	find_by_id();
 	printf("kx_famdata: %d failure(s)\n", fails);
 	return fails != 0;
 }

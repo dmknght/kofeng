@@ -287,9 +287,8 @@ void diag_exercise_ex(struct fz_ctx *c, const struct kgenome_obj *obj, const uin
 #ifdef DIAG_STRICT_G9
 			FZ_CHECK(c, sig == clean.sig, "G9: a refused allocation made a different graph and the status is ok");
 #else
-			/* F7..F10 (tests/lib/genome/diag_bin_oom.c) are known silent answers of this route, so the default row counts them in the
+			/* F7..F10 (tests/lib/genome/diag_bin_oom.c) are fixed; the default row counts any other silent answer of this route in the
 			 * digest and does not fail; `make fuzz FZ_CFLAGS_diag=-DDIAG_STRICT_G9` makes each one a failure and saves the input. */
-			/* KNOWN DEFECT WP9-F7 (2026-10-25, M): this row pins it, green until fixed. */
 			fz_digest(c, sig == clean.sig ? 0u : 0x69u);
 #endif
 		}

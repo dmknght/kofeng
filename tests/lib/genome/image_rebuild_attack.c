@@ -96,7 +96,10 @@ static void t_write_hdr(void)
 		CK(back.dir[3].rva == 0x2100 && back.dir[3].size == 0x44);
 		CK(back.dir[1].rva == 0x3000 && back.dir[1].size == 0x20);
 		CK(back.dir[0].rva == tmpl.dir[0].rva && back.dir[0].size == tmpl.dir[0].size);
-		CK(back.dir[9].rva == tmpl.dir[9].rva && back.dir[9].size == tmpl.dir[9].size);
+		/* E-PEDIR: the parent's directory 9 points at 0x1900, in the PAD section (not written to the table), so it names no
+		 * written section and is dropped; this row used to pin it as carried. */
+		CK(back.dir[9].rva == 0 && back.dir[9].size == 0);
+		CK(back.dir[7].rva == tmpl.dir[7].rva && back.dir[7].size == tmpl.dir[7].size);   /* in .text: carried */
 		CK(back.dir[KGENOME_PE_DIR_SECURITY].rva == 0 && back.dir[KGENOME_PE_DIR_BASERELOC].rva == 0);
 		/* a parent directory that points at no declared section is not carried; zero rva or size neither */
 		template_pe((int)plus);

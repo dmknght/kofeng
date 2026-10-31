@@ -16,23 +16,17 @@ static void cnd_seq(struct view *v)
 	uint32_t t;
 
 	v->n_cseq = 0;
-	for (t = 0; t < v->ed.dr.n_cnd; t++) {
-		/* Only the open tab's conditions: each tab has its own list,
-		 * and each condition is a block of its own. */
-		if (v->ed.dr.cnd[t].tab != v->ed.dr.tab)
-			continue;
+	/* Only the Patterns tab has conditions; each is a block of its own. */
+	for (t = 0; v->ed.dr.tab == DT_PATTERNS && t < v->ed.dr.n_cnd; t++) {
 		cseq_put(v, CS_MATCH, t);
 		cseq_put(v, CS_COND, t);
 	}
 }
 
-static void prow_add(struct view *v, int kind, uint32_t idx)
+static void prow_add(struct view *v)
 {
-	if (v->n_prow >= sizeof v->prow_kind / sizeof v->prow_kind[0])
-		return;
-	v->prow_kind[v->n_prow] = (uint8_t)kind;
-	v->prow_idx[v->n_prow] = idx;
-	v->n_prow++;
+	if (v->n_prow < MAX_PROW)
+		v->n_prow++;
 }
 
 /*
@@ -52,74 +46,56 @@ static void prow_strings(struct view *v)
 	 * was a string, so a draft with no declared strings painted one row
 	 * more than the model held and every row below was one out.
 	 */
-	prow_add(v, RW_STRHDR, 0);
+	prow_add(v);
 	for (i = 0; i < v->ed.dr.n_decl; i++)
-		prow_add(v, RW_STR, i);
-	prow_add(v, RW_ADDS, 0);
-}
-
-static void prow_lineage(struct view *v)
-{
-	struct object *dob = cur_obj(v);
-	uint32_t i, n = diag_shown_n(v);
-
-	prow_add(v, RW_DIAGHDR, 0);
-	prow_add(v, RW_DIAGCOL, 0);
-	if (v->diag_fold)
-		return;
-	/* An empty table says why on one row of its own. */
-	if (!n)
-		prow_add(v, RW_DIAG, 0);
-	for (i = 0; n && i < dob->n_diag; i++)
-		if (dob->diag[i].state == KOF_DIAG_ST_MATCH)
-			prow_add(v, RW_DIAG, i);
+		prow_add(v);
+	prow_add(v);
 }
 
 static void prow_blocks(struct view *v)
 {
 	uint32_t i;
 
-	prow_add(v, RW_BLKHDR, 0);
+	prow_add(v);
 	/* Two rows: the heading and the column names, or the heading and the
 	 * reason an object that has no code has no table. */
-	prow_add(v, RW_BLKCOL, 0);
+	prow_add(v);
 	if (!blk_section_shown(v))
 		return;
 	for (i = 0; i < v->ed.dr.n_blk; i++)
 		if (blk_row_shown(v, i))
-			prow_add(v, RW_BLK, i);
+			prow_add(v);
 }
 
 static void prow_matchers(struct view *v)
 {
 	uint32_t i;
 
-	prow_add(v, RW_MATHDR, 0);
+	prow_add(v);
 	for (i = 0; i < v->ed.dr.n_grp; i++) {
 		if (grp_tab(&v->ed, i) != v->ed.dr.tab)
 			continue;
-		prow_add(v, RW_MATCH, i);
-		/* A search matcher is two rows: what it IS, and the markers it
-		 * searches for. A block matcher is one - the hash and the
-		 * threshold. */
-		if (v->ed.dr.grp[i].kind != GRP_KIND_SIM)
-			prow_add(v, RW_MARKERS, i);
+		prow_add(v);
+		/* Every matcher is two rows. A search matcher: what it IS, and the markers it
+		 * searches for. A block matcher: the hash, the function and the threshold, and
+		 * the unit's Type and Tag under it (draw_block_matcher). */
+		prow_add(v);
 	}
-	/* [+ Matcher] is the Patterns tab's: a block's matcher is made by
-	 * ticking the block. */
+	/* [+ Matcher] is the Patterns tab's: a block matcher is made by ticking
+	 * the block. */
 	if (v->ed.dr.tab == DT_PATTERNS)
-		prow_add(v, RW_ADDM, 0);
+		prow_add(v);
 }
 
 static void prow_conds(struct view *v)
 {
 	uint32_t i;
 
-	prow_add(v, RW_CNDHDR, 0);
+	prow_add(v);
 	cnd_seq(v);
 	for (i = 0; i < v->n_cseq; i++)
-		prow_add(v, RW_COND, i);
-	prow_add(v, RW_ADDC, 0);
+		prow_add(v);
+	prow_add(v);
 }
 
 /* Every row the panel would show, in order, before deciding which fit. */
@@ -130,14 +106,12 @@ void prow_build(struct view *v)
 	v->n_prow = 0;
 	/*
 	 * IN THE ORDER THE PANEL DRAWS THEM - see the chain in draw_decl(),
-	 * which is fmts, ranges, optbtn, opts, strings, matchers, conds. The
+	 * which is fmts, optbtn, opts, tabs, strings or blocks, ranges, matchers, conds. The
 	 * head row is not here because it is not scrolled: draw_decl_head takes
 	 * no row number and paints at a fixed line.
 	 *
-	 * ONLY THE COUNT IS READ. prow_kind and prow_idx are written and
-	 * nothing looks at them, so what this really produces is how many rows
-	 * the panel has - and that number sizes the panel and bounds its
-	 * scroll. A row the draw emits and this does not is a row that CANNOT
+	 * ONLY THE COUNT EXISTS. What this produces is how many rows the panel
+	 * has - and that number sizes the panel and bounds its scroll. A row the draw emits and this does not is a row that CANNOT
 	 * BE REACHED: g_decl_rows comes out short by exactly that many, and the
 	 * rows that fall off are the ones at the bottom.
 	 *
@@ -151,57 +125,28 @@ void prow_build(struct view *v)
 	 * it, because the next person to add a row will copy whichever of the
 	 * two lists they read first.
 	 */
-	prow_add(v, RW_FMTS, 0);
-	/*
-	 * The scan range row while there is ANY range to show, which is not the
-	 * same as "while there is a matcher".
-	 *
-	 * Gated on n_grp alone, removing the last matcher took the row with it -
-	 * and with the row went every DECLARED range that no matcher had been
-	 * given yet. Those still existed in rng_add, still blocked the save
-	 * ("scan range X is in no matcher"), and now had nowhere to be seen and
-	 * no menu to be removed from, because [Update scan range] lives on this
-	 * row. A range one can neither use nor get rid of is a draft that cannot
-	 * be finished.
-	 */
-	/*
-	 * ALWAYS, like the Matchers and Conditions headings.
-	 *
-	 * Gated on having a matcher, removing the last one took the row away -
-	 * and [+ Add scan range] lives on it, so there was then no way to
-	 * declare a range at all: the draft could not be finished and nothing
-	 * on the screen said why. A heading that disappears takes its controls
-	 * with it, so this one does not disappear.
-	 */
-	prow_add(v, RW_RANGES, 0);
-	prow_add(v, RW_OPTBTN, 0);
+	prow_add(v);
+	prow_add(v);
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
 		if (v->ed.dr.opt_on[i])
-			prow_add(v, RW_OPT, i);
+			prow_add(v);
 	/* The title bar of tabs: everything above it is shared by every
 	 * diagnose the draft generates, everything below is the open tab's. */
-	prow_add(v, RW_TABS, 0);
+	prow_add(v);
 	switch (v->ed.dr.tab) {
 	case DT_BLOCKS:
 		prow_blocks(v);
-		prow_matchers(v);
-		prow_conds(v);
+		prow_matchers(v);     /* no conditions: each matcher is a unit of its own */
 		break;
 	case DT_GRAPHS:
-		prow_lineage(v);
-		prow_add(v, RW_CNDHDR, 0);
-		prow_add(v, RW_COND, 0);
 		break;
 	default:
 		prow_strings(v);
+		prow_add(v);      /* the region list, below [+ String] (draw_decl_ranges) */
 		prow_matchers(v);
 		prow_conds(v);
 		break;
 	}
-	/* The output pane, when Generate has been pressed: the same count the
-	 * drawing uses. */
-	for (i = 0; i < preview_rows(v); i++)
-		prow_add(v, RW_PREV, i);
 }
 
 void sec_bar(struct out *o, struct view *v, int row, const char *text)

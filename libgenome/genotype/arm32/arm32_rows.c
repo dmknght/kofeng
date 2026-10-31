@@ -32,6 +32,9 @@
 #include "arm32_ids.h"
 #include "arm32_private.h"
 
+/* KNOWN DEFECT DA-ARM32ROWS (2026-10-28, M) [sev L]: [narrowed 2026-10-29: the BFC row is fixed] rows of kgenome_arm32_src_cond are looser than the encodings: MRS, CLZ, REV*, RBIT, BX, BLX, SDIV, UDIV, SXT*, UXT*, SWP, LDREX*, STREX*, DSB, DMB, ISB, MOV, MVN and the register-offset halfword rows leave should-be-zero/one bits unchecked.
+ * Trigger: words 01010101 (MRS; the oracle reads TST), 91616812 (CLZ; the oracle reads CMN), 0007d1bc (STRH; oracle: undefined). Effect: ids, cell operands and text for such words are what the decoder's row says, not what the oracle's decoder says; the text formatter (arm32_fmt.c) checks the bits itself and answers UNSUPPORTED.
+ * Reproducer: Bazaar.2026.08 HEUR-Trojan.Linux.Agent.vy-30a3ce8 .text 0x2f2d4, 0x1cc14 (disassembler differential, feat_disarch). Fix: add the bits to the masks of those rows; OWNER DECISION first: which words stay VALID-but-UNPREDICTABLE (a mask change turns them INVALID or hands them to a later row). */
 const struct kgenome_arm32_row kgenome_arm32_src_cond[] = {
 	/* ======================= conditional space: bits 27..25 = 000 ============= */
 
@@ -250,7 +253,7 @@ const struct kgenome_arm32_row kgenome_arm32_src_cond[] = {
 	/* cccc 0111 1000 xxxx 1111 xxxx 0001 xxxx */ { 0x0ff0f0f0u, 0x0780f010u, KGENOME_ARM32_I_USAD8 },
 	/* cccc 0111 1000 xxxx xxxx xxxx 0001 xxxx */ { 0x0ff000f0u, 0x07800010u, KGENOME_ARM32_I_USADA8 },
 	/* cccc 0111 101x xxxx xxxx xxxx x101 xxxx */ { 0x0fe00070u, 0x07a00050u, KGENOME_ARM32_I_SBFX },
-	/* cccc 0111 110x 1111 xxxx xxxx x001 xxxx */ { 0x0fef0070u, 0x07cf0010u, KGENOME_ARM32_I_BFC },
+	/* cccc 0111 110x xxxx xxxx xxxx x001 1111 */ { 0x0fe0007fu, 0x07c0001fu, KGENOME_ARM32_I_BFC },
 	/* cccc 0111 110x xxxx xxxx xxxx x001 xxxx */ { 0x0fe00070u, 0x07c00010u, KGENOME_ARM32_I_BFI },
 	/* cccc 0111 111x xxxx xxxx xxxx x101 xxxx */ { 0x0fe00070u, 0x07e00050u, KGENOME_ARM32_I_UBFX },
 	/* cccc 0111 1xxx xxxx xxxx xxxx xxx1 xxxx */ { 0x0f800010u, 0x07800010u, KGENOME_ARM32_I_INVALID },

@@ -324,6 +324,12 @@ static void small_object(const char *db)
  * itself; the big-endian one does not - its bytes are the other way round - and does through
  * its view, whose functions the endian step finds again from the parent's: the plan is applied
  * to each function before it is looked for (kgenome_funcs_remap_endian).
+ *
+ * PROTOTYPE 2026-10-30: a function unit carries no similarity signature (kgenome_mutation_signature), so the
+ * block is NOT scored on any of the four objects (the function is still found, cut and listed in both byte orders:
+ * the object says so through kof_stats.mutation_unsigned_objects). The rows below assert that; when the CFG
+ * signature replaces the windows, the original expectation (the little-endian object and the view of the
+ * big-endian one hit, the big-endian object does not) comes back.
  */
 static void make_block(uint8_t *b)
 {
@@ -392,18 +398,22 @@ static void block_path(kof_scanner *sc)
 		ek_build(&le, a, 0, 1);
 		put_block_function(&be, a, 1, blk);
 		put_block_function(&le, a, 0, blk);
+		uint64_t unsigned_before = kscan_stats(sc)->mutation_unsigned_objects;
+
 		hit[0] = hit[1] = 0;
 		notes_clear();
 		CK(kscan_bytes(sc, le.b, le.n, "block-le", &opt, fixture_found, hit) > 0);
-		/* The little-endian object holds the block. (Where the engine scores it is its own
-		 * business and not this test's: measured on the unmodified engine, the parent of
-		 * this object is not credited and its ordinary view is.) */
-		CK(hit[0] || hit[1]);
+		/* The little-endian object holds the block, in a function: a function unit is listed and not scored. */
+		CK(!hit[0] && !hit[1]);
+		/* mips32: the small function is signed now (no floor of 12), the object is not counted unsigned; ppc64: still unsigned (measured: the count rises; the engine's reason is not asserted here) */
+		CK(k == 0 ? kscan_stats(sc)->mutation_unsigned_objects == unsigned_before : kscan_stats(sc)->mutation_unsigned_objects > unsigned_before);
+		unsigned_before = kscan_stats(sc)->mutation_unsigned_objects;
 		hit[0] = hit[1] = 0;
 		notes_clear();
 		CK(kscan_bytes(sc, be.b, be.n, "block-be", &opt, fixture_found, hit) > 0);
 		CK(!hit[0]);                            /* the big-endian object does not */
-		CK(hit[1]);                             /* its canonical view does */
+		CK(!hit[1]);                            /* nor does its canonical view: its functions are found again (remapped) but not scored */
+		CK(k == 0 ? kscan_stats(sc)->mutation_unsigned_objects == unsigned_before : kscan_stats(sc)->mutation_unsigned_objects > unsigned_before);
 	}
 }
 

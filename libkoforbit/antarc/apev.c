@@ -125,6 +125,10 @@ struct kofa_pev {
 	} rb;
 	ssize_t  have;
 	char    *at;
+	/* The record handed out by stream_next: copied here because the
+	 * connector's payload sits 36 bytes into the message, which is not
+	 * the 8-byte alignment a struct proc_event wants. */
+	struct proc_event ev;
 
 	struct apev_ent tab[APEV_PTAB];
 	uint64_t recycled;    /* entries thrown out to make room */
@@ -307,27 +311,24 @@ static void prefetch(struct kofa_pev *p, const char *buf, ssize_t n)
 	 */
 	while (n > 0 && NLMSG_OK(h, (size_t)n)) {
 		const struct cn_msg *cn = (const struct cn_msg *)NLMSG_DATA(h);
-		/* KNOWN DEFECT WP12-18 (2026-10-24, M) [sev L]: prefetch and stream_next
-		 * cast cn->data (offset 36 of the message) to struct proc_event,
-		 * which wants 8-byte alignment. Trigger: every connector record.
-		 * Effect: UB on strict-alignment targets, UBSAN abort.
-		 * Reproducer: fuzz orbit/pev_stream seed 1 iter 274. Fix: memcpy
-		 * into an aligned local. */
-		const struct proc_event *ev =
-			(const struct proc_event *)cn->data;
 
 		if (pev_msg_whole(h) &&
 		    h->nlmsg_type == NLMSG_DONE &&
-		    cn->id.idx == CN_IDX_PROC &&
-		    ev->what == PROC_EVENT_EXEC) {
-			uint32_t tgid = (uint32_t)ev->event_data.exec.process_tgid;
-			struct apev_ent *e = ent_get(p, tgid);
+		    cn->id.idx == CN_IDX_PROC) {
+			struct proc_event ev;   /* aligned copy: cn->data is not */
 
-			if (e) {
-				e->got_exe = (uint8_t)read_exe(tgid, e->image,
-							       sizeof e->image);
-				e->got_cmd = (uint8_t)read_cmdline(tgid, e->cmd,
-								   sizeof e->cmd);
+			memcpy(&ev, cn->data, sizeof ev);
+			if (ev.what == PROC_EVENT_EXEC) {
+				uint32_t tgid = (uint32_t)
+					ev.event_data.exec.process_tgid;
+				struct apev_ent *e = ent_get(p, tgid);
+
+				if (e) {
+					e->got_exe = (uint8_t)read_exe(tgid,
+						e->image, sizeof e->image);
+					e->got_cmd = (uint8_t)read_cmdline(tgid,
+						e->cmd, sizeof e->cmd);
+				}
 			}
 		}
 		h = NLMSG_NEXT(h, n);
@@ -732,13 +733,10 @@ static int to_evt_start(struct kofa_pev *p, const struct proc_event *ev,
 				 * including spaces and brackets - the
 				 * LAST ')' ends it. */
 				rp = strrchr(st, ')');
-				/* KNOWN DEFECT WP12-17 (2026-10-24, R) [sev M]:
-				 * to_evt_start guards rp[1] && rp[2] but reads
-				 * strtoul(rp + 4). Trigger: a stat file ending
-				 * ") S". Effect: reads uninitialised stack (a
-				 * real kernel never writes it). Reproducer:
-				 * none. Fix: guard rp[3] and rp[4]. */
-				if (rp && rp[1] && rp[2])
+				/* ") S 123": the number starts at rp + 4, so
+				 * the state and the space after it must be
+				 * there, or strtoul reads past the NUL. */
+				if (rp && rp[1] && rp[2] && rp[3] && rp[4])
 					e->ppid = (uint32_t)strtoul(
 						rp + 4, NULL, 10);
 			}
@@ -950,23 +948,21 @@ static const struct proc_event *stream_next(struct kofa_pev *p,
 		while (p->have > 0) {
 			struct nlmsghdr *h = (struct nlmsghdr *)p->at;
 			struct cn_msg *cn;
-			const struct proc_event *ev;
 
 			if (!NLMSG_OK(h, (size_t)p->have)) {
 				p->have = 0;
 				break;
 			}
 			cn = (struct cn_msg *)NLMSG_DATA(h);
-			ev = (const struct proc_event *)cn->data;
 			{
 				size_t step = NLMSG_ALIGN(h->nlmsg_len);
 
 				p->at   += step;
 				p->have -= (ssize_t)step;
 			}
-			/* `ev` is RETURNED, so a short message would be read
-			 * out of bounds by the caller and not by this file -
-			 * see pev_msg_whole. */
+			/* The record is RETURNED, so a short message would be
+			 * read out of bounds by the caller and not by this
+			 * file - see pev_msg_whole. */
 			if (!pev_msg_whole(h))
 				continue;
 			if (h->nlmsg_type != NLMSG_DONE)
@@ -974,7 +970,8 @@ static const struct proc_event *stream_next(struct kofa_pev *p,
 			if (cn->id.idx != CN_IDX_PROC)
 				continue;
 			p->records++;
-			return ev;
+			memcpy(&p->ev, cn->data, sizeof p->ev);
+			return &p->ev;
 		}
 		{
 			struct pollfd pf;
@@ -1119,13 +1116,10 @@ static int probe(struct kofa_pev *p, uint32_t ms)
 
 	if (kid == 0)
 		_exit(0);
-	/* KNOWN DEFECT WP12-25 (2026-10-24, M) [sev L]: probe returns 0 when fork()
-	 * fails and the open answers KOFA_ERR_DENIED. Trigger: RLIMIT_NPROC
-	 * reached (EAGAIN). Effect: a resource failure reads as a refusal of the
-	 * connector (WP12-1 family). Reproducer: tests/unit/ orbit_events.c
-	 * case_pev_fork_signal. Fix: a distinct status for fork(). */
+	/* A fork that fails (RLIMIT_NPROC, no memory) is the machine failing,
+	 * not the connector refusing: -1, and the open says so. */
 	if (kid < 0)
-		return 0;
+		return -1;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	end = t.tv_sec * 1000L + t.tv_nsec / 1000000L + (long)ms;
 	for (;;) {
@@ -1152,6 +1146,7 @@ struct kofa_pev *kofa_pev_open(const struct kofa_pev_option *opt, int *err)
 	struct kofa_pev *p;
 	struct kofa_pev_option o;
 	struct sockaddr_nl sa;
+	int probed;
 
 	memset(&o, 0, sizeof o);
 	if (opt)
@@ -1202,8 +1197,11 @@ struct kofa_pev *kofa_pev_open(const struct kofa_pev_option *opt, int *err)
 	 * AND NOW PROVE IT. Everything above reported success on a kernel that
 	 * then sent nothing at all - see apev.h for the measurement.
 	 */
-	if (!probe(p, o.probe_ms)) {
-		if (err) *err = KOFA_ERR_DENIED;
+	probed = probe(p, o.probe_ms);
+	if (probed <= 0) {
+		if (err) *err = probed < 0 ? (errno == ENOMEM ? KOFA_ERR_NOMEM
+							      : KOFA_ERR_OS)
+					   : KOFA_ERR_DENIED;
 		mcast(p->fd, PROC_CN_MCAST_IGNORE);
 		close(p->fd);
 		free(p);

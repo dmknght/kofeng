@@ -136,6 +136,7 @@ const char *kof_fp_why_not(uint8_t why)
 	case KOF_FP_WHY_BUDGET:    return "the run's evidence budget was spent";
 	case KOF_FP_WHY_NOT_ASKED: return "collection was not asked for";
 	case KOF_FP_WHY_SHORT:     return "the range is past the end of the file now";
+	case KOF_FP_WHY_IO:        return "the copy could not be written";
 	default:                   return "?";
 	}
 }
@@ -1195,13 +1196,10 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		 * fingerprint, because that is the one a reader will be looking
 		 * at when they wonder where the file went.
 		 */
-		/* KNOWN DEFECT WP12-23 (2026-10-24, M) [sev M]: feed interns a FILE_NEW
-		 * row (count 0) for every FILE_DELETE; kofrep_find() was meant.
-		 * Trigger: deletes of paths nothing created. Effect: 3000
-		 * deletes fill the 4096-row table and a real create is dropped.
-		 * Reproducer: orbit_store.c case_report_delete. Fix: look the
-		 * row up without interning. */
-		prev = intern(r, KOF_FP_FILE_NEW, kof_evt_object(e));
+		/* FIND, not intern: a delete of a path nothing created must not
+		 * put a count-0 create into the table (3000 of them filled it
+		 * and a real create was dropped). */
+		prev = kofrep_find(r, KOF_FP_FILE_NEW, kof_evt_object(e));
 		if (prev && prev->count)
 			prev->flags |= KOF_FP_F_SELF_DEL;
 		break;

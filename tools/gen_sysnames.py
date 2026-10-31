@@ -8,11 +8,13 @@ never typed:
 
     gen_sysnames.py <out.c> <asm/unistd_64.h> <asm/unistd_32.h>
 
+Either input may instead be a pinned list ("<number> <name>" per line, a file ending in .txt): tools/sysnames_x86_64.txt and tools/sysnames_i386.txt are the
+numbers of the headers the committed file was made from, and `make check-rules` regenerates the file from them and compares (tools/check_rules.py), so a hand
+edit or a stale table is a build failure. (The host's own headers give other counts: 375 and 452 against 385 and 461.)
+
 Only plain `#define __NR_name number` lines are read. Anything else (the `__NR_syscalls` count, the x32 bit, __NR_Linux) is not a syscall and is
 skipped by name. Regenerate when the headers move on; the test (tests/lib/genome/nucleo_sysnames.c) pins known numbers of both tables and that every
-capability row of nucleo_sys.c agrees with this file. The emitted file carries a KNOWN DEFECT comment (REV-D16b: no make target regenerates and diffs it, and the
-host's headers give other counts than the committed file); the text is in the template of main(), so a regeneration keeps it.
-"""
+capability row of nucleo_sys.c agrees with this file. """
 import re
 import sys
 
@@ -21,6 +23,12 @@ SKIP = {"syscalls", "Linux", "Linux_syscalls", "SYSCALL_MASK", "syscall_max"}
 
 def read(path):
     rows = {}
+    if path.endswith(".txt"):
+        for line in open(path, encoding="utf-8"):
+            if line.strip() and not line.startswith("#"):
+                nr, name = line.split()
+                rows.setdefault(int(nr), name)
+        return sorted(rows.items())
     for line in open(path, encoding="utf-8", errors="replace"):
         m = re.match(r"#define\s+__NR_(\w+)\s+(\d+)\s*$", line)
         if m and m.group(1) not in SKIP:
@@ -55,10 +63,6 @@ def main():
 
 struct kgenome_sysname { uint16_t nr; const char *name; };
 
-/* KNOWN DEFECT REV-D16b (2026-10-25, R) [sev L]: no make target regenerates this file and diffs it against the committed copy, and it cannot be reproduced from the host's headers.
- * Trigger: tools/gen_sysnames.py run against the UAPI headers of the machine. Effect: here it writes 375 and 452 numbers, the committed file has 385 and 461, so a stale or hand-edited table is not caught.
- * Reproducer: python3 tools/gen_sysnames.py scratch.c /usr/include/x86_64-linux-gnu/asm/unistd_64.h /usr/include/x86_64-linux-gnu/asm/unistd_32.h && cmp scratch.c libgenome/celllysis/nucleo_sysnames.c (differs).
- * Fix: pin the two header files (or their number lists) under tools/, generate from them, and add a target that cmp's the result. */
 %s
 
 %s

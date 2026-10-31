@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include <kofcore.h>
+#include <kgenome_budget.h>   /* kgenome_grow_cap */
 #include <genotype/image/elf_types.h>
 #include <genotype/image/pe_types.h>
 #include "funcs.h"
@@ -29,6 +30,10 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
  * functions through exports and the exception directory, and which of those is
  * the source is not settled - an empty set is what it answers until then.
  */
+/* CONSOLIDATION FUNC-1 (2026-10-30, M): KEEP (will be the single primitive for table/symbol evidence of function extents; 1 caller,
+ * kgenome_diag_funcs_with_walk). Gaps it must close, measured on 96 static ELF: symtab-only, so .eh_frame FDEs (88.7% of x86-64 symtab starts, FDE range
+ * == symtab size in 99.9% of matches), .ARM.exidx (29/40 ARM files have it) and .dynsym are unused. Prove with: evmix.c harness (fix_consol/h): FDE vs
+ * symtab per arch; stripped .so: dynsym starts 1197, entry walk finds 15 (1.3%), FDE finds all. */
 void kgenome_funcs_build(uint32_t format, const uint8_t *data, uint64_t data_n,
 		     const void *info, struct kgenome_func_set *out)
 {
@@ -277,6 +282,10 @@ void kgenome_funcs_remap_endian(const uint8_t *par, uint64_t par_n,
  * measured on a static Mirai, 419 declared starts and every one outside the code
  * range - see the history of the sweep that reads these.)
  */
+/* CONSOLIDATION FUNC-2 (2026-10-30, M): KEEP (symtab STT_FUNC extents, the most exact evidence when present; MERGE-FROM ->
+ * kgenome_elf_funcs_from_entries for stripped files). Not yet handled, see CN-2 (Thumb bit) and CN-3 (IFUNC, size-0 FUNC); .dynsym is never read here
+ * (KGENOME_ELF_SYMTAB_FULL). Callers: kgenome_funcs_build only. Prove with: evmix.c: ARM odd start offsets 1078/15909, x86-64 IFUNC 365, size-0 FUNC
+ * 106; tests/lib/genome/hostile_image.c for the hostile-table rows. */
 static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
 			 struct kgenome_func_set *out)
 {
@@ -297,6 +306,11 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
 
 		if (!kgenome_elf_symbol_at(file, &t, si, &sy))
 			break;
+		/* KNOWN DEFECT CN-3 (2026-10-30, M) [sev M]: kgenome_elf_funcs_build drops, without a report, symbols of an executable section that are
+		 * functions: STT_GNU_IFUNC (10), NOTYPE with a size, FUNC of size 0. Trigger: static glibc (IFUNC resolvers), assembly functions without .size.
+		 * Effect: the function is missing from the set (its bytes fall into the neighbour's extent): 365 IFUNC + 2 NOTYPE + 106 size-0 in 19 x86-64
+		 * files, 512 size-0 in 40 ARM files. Reproducer: evmix.c column `exec-section syms dropped`. Fix: accept type 10; give a size-0 symbol the
+		 * extent to the next symbol or section end and mark it so. */
 		if ((sy.info & 0xfu) != 2u || !sy.size)         /* sized STT_FUNC */
 			continue;
 		if (!sy.shndx || sy.shndx >= e->sec_count ||
@@ -308,6 +322,10 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
 		/* By the object's type, not by whether this section has an
 		 * address: a linked file's section at address zero would be read
 		 * as relocatable. */
+		/* KNOWN DEFECT CN-2 (2026-10-30, M) [sev M]: kgenome_elf_funcs_build uses sy.value as it is: an ARM Thumb function has bit 0 set (st_value | 1)
+		 * and its file offset is odd. Trigger: an ARM ELF with Thumb functions and a symtab. Effect: the extent starts one byte late and ends one byte
+		 * late, and any decode from `off` is misaligned: 1078 of 15909 symtab starts in 40 ARM files are odd. Reproducer: evmix.c (fix_consol/h) on
+		 * fix_cfg_survey/samples ARM files, column `odd`. Fix: clear bit 0 for EM_ARM, keep a per-function Thumb flag for a Thumb-state decode. */
 		if (e->e_type != KGENOME_ELF_REL) {
 			if (!kgenome_elf_va_to_off(e, sy.value, sy.size, &off))
 				continue;
@@ -321,13 +339,8 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
 		if (off > file.n || sy.size > file.n - off)
 			continue;
 		if (n == cap) {
-			/* KNOWN DEFECT REV-D8g (2026-10-25, Inference) [sev L]: the function table build (funcs.c) doubles a uint32
-			 * capacity (functions) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements
-			 * of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly).
-			 * Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against
-			 * UINT32_MAX / 2 before doubling. */
-			uint32_t nc = cap ? cap * 2u : 256u;
-			struct kgenome_func *nv = realloc(v, (size_t)nc * sizeof *nv);
+			uint32_t nc = kgenome_grow_cap(cap, 256u);
+			struct kgenome_func *nv = nc ? realloc(v, (size_t)nc * sizeof *nv) : NULL;
 
 			if (!nv) {
 				out->status = KGENOME_NOMEM;
@@ -353,6 +366,10 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
  * segment; the object's own entry point is one as well. No decoding here: this
  * only cuts the segments where the entries say.
  */
+/* CONSOLIDATION FUNC-6 (2026-10-30, M): DROP -> kgenome_diag_funcs_with_walk (the cut becomes one static step there, fed by every evidence source, not
+ * only call targets). Its extent rule (to the next entry or the end of the code segment) is the weak part: 14154 symtab functions had the right start
+ * and another end, 17419 were exact (CS-1). Better logic here that the keeper lacks: none verified; the end rule of fnprint body_ends/skip_pad is
+ * better. Prove with: tests/lib/genome/api_diag.c funcs_of rows; fix_cfg_survey out_ext.txt (symtab vs stripped extents). */
 void kgenome_elf_funcs_from_entries(kof_buf file, const struct kgenome_elf_info *e,
 				uint64_t entry_off, const uint64_t *ent,
 				uint32_t n_ent, struct kgenome_func_set *out)
@@ -409,6 +426,10 @@ void kgenome_elf_funcs_from_entries(kof_buf file, const struct kgenome_elf_info 
 		}
 		if (!end)
 			continue;       /* not in code: an entry of nothing */
+		/* KNOWN DEFECT CS-1 (2026-10-30, M) [sev M]: kgenome_diag_funcs_of on a stripped file: a function runs to the next ENTRY found, so a missing entry merges neighbours and padding stays in.
+		 * Trigger: any ELF without symtab. Effect (55218 symtab functions of 5 archs): 17419 exact, 14154 right start with another end, 4898 extents hold >= 2 symbols; MIPS 32 of 10891 exact (cause for MIPS Inference: the walk finds no entry).
+		 * Reproducer: /mnt/games/normtest/fix_cfg_survey/out_ext.txt (harness h/cfgsv.c, py/); the signature quality on such extents is unmeasured.
+		 * Fix: end a body at the last ret/jump after the farthest forward target (fnprint body_ends/skip_pad) and add FDE, .ARM.exidx and .dynsym starts (see FUNC-4). */
 		if (i + 1u < n_ent && all[i + 1u] < end)
 			end = all[i + 1u];
 		if (end <= all[i])
@@ -439,6 +460,10 @@ void kgenome_elf_funcs_from_entries(kof_buf file, const struct kgenome_elf_info 
  * listed either. An entry that does not resolve to bytes of the file is
  * skipped, and the table is read as far as the file holds it.
  */
+/* CONSOLIDATION FUNC-3 (2026-10-30, R): KEEP (the PE evidence source, .pdata RUNTIME_FUNCTION: exact start and end, chained fragments left out; x64
+ * only, 1 caller kgenome_funcs_build). A leaf function has no unwind entry and x86 PE has no table: the completion lives in diag_lineage.c fns_build
+ * today and moves into kgenome_diag_funcs_with_walk. Better logic here that the keeper lacks: none (this is part of the keeper). Prove with: a PE x64
+ * fixture with one leaf function (tests/lib/genome/hostile_image.c style): funcs_of misses it, lineage lists it. */
 void kgenome_pe_funcs_build(kof_buf file, const struct kgenome_pe_info *p,
 			struct kgenome_func_set *out)
 {
@@ -483,13 +508,8 @@ void kgenome_pe_funcs_build(kof_buf file, const struct kgenome_pe_info *p,
 		    (uint64_t)(e - b) > file.n - off)
 			continue;
 		if (n == cap) {
-			/* KNOWN DEFECT REV-D8o (2026-10-25, Inference) [sev L]: the PE unwind-table function build (funcs.c) doubles a uint32 capacity (functions, bounded only by the exception directory: file size / 12)
-			 * with no overflow guard and no ledger charge. Trigger: an exception directory of 2^31 or more entries (input over 24 GiB); the engine caps an object at 512 MiB,
-			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-			 * UINT32_MAX / 2 before doubling. */
-			uint32_t nc = cap ? cap * 2u : 256u;
-			struct kgenome_func *nv = realloc(v, (size_t)nc * sizeof *nv);
+			uint32_t nc = kgenome_grow_cap(cap, 256u);
+			struct kgenome_func *nv = nc ? realloc(v, (size_t)nc * sizeof *nv) : NULL;
 
 			if (!nv) {
 				out->status = KGENOME_NOMEM;

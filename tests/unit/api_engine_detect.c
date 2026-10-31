@@ -1,6 +1,5 @@
 /*
- * api_engine_detect.c - the detectors' own API: the heuristic model
- * (kofheur.h), the hex program walker and the match memo (kofmatch.h), the
+ * api_engine_detect.c - the detectors' own API: the hex program walker and the match memo (kofmatch.h), the
  * multi-pattern tables (kofmultimatch.h), the mutation block names
  * (kofmutation.h) and the diagnose graph block (kofdiag.h).
  *
@@ -26,7 +25,6 @@
 #include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/databases/pack/dbcore.h"
 #include "../../libkofeng/databases/pack/hexprog.h"
-#include "../../libkofeng/detectors/heur/kofheur.h"
 #include "../../libkofeng/detectors/pattern/kofmatch.h"
 #include "../../libkofeng/detectors/pattern/kofmultimatch.h"
 #include "../../libkofeng/detectors/pattern/kofpix.h"
@@ -40,123 +38,6 @@
 #include <kofmod/zip.h>
 
 static char tmp[300];
-
-/* ---- the heuristic model ------------------------------------------------------------ */
-
-static void t_heur(void)
-{
-	const struct kof_heur_model *m = kof_heur_default();
-	struct kof_heur_facts f;
-	int32_t s = 12345;
-	const char *g = "unset";
-	uint32_t i;
-
-	CK(m != NULL && m == kof_heur_default(), "the default model is one static table");
-	CK(m->n_anom > 0 && m->n_flag > 0 && m->bar_centinats > 0, "it has terms and a bar");
-	CK((m->formats & (1u << KOF_FMT_ELF)) && (m->formats & (1u << KOF_FMT_PE)), "it covers ELF and PE");
-	CK(!(m->formats & (1u << KOF_FMT_ZIP)), "and nothing else");
-	for (i = 0; i < m->n_anom; i++)
-		CK(m->anom[i].mask != 0 && m->anom[i].guess && m->anom[i].guess[0] &&
-		   (m->formats & (1u << m->anom[i].format)), "anomaly term %u is for a covered format and names a guess", i);
-	for (i = 0; i < m->n_flag; i++)
-		CK(m->flag[i].fact < KOF_HEUR_F_COUNT && m->flag[i].guess, "flag term %u is a known fact", i);
-
-	memset(&f, 0, sizeof f);
-	f.format = KOF_FMT_PE;
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 0, "no anomalies, no flags: the score is 0");
-	f.anomalies = KGENOME_PE_ANOM_SEC_WRITE_EXEC;
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 864 && strcmp(g, "WriteExec") == 0,
-	   "one anomaly scores its weight and names its guess (%d %s)", (int)s, g);
-	f.anomalies |= KGENOME_PE_ANOM_SEC_PAST_EOF;
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 864 + 110 && strcmp(g, "WriteExec") == 0,
-	   "weights add, the guess is the heaviest term (%d %s)", (int)s, g);
-	f.flags = KOF_HEUR_FL(KOF_HEUR_F_PACKED);
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 864 + 110 + 111, "a flag adds its weight (%d)", (int)s);
-	f.anomalies = 0;
-	f.flags = KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 324 && strcmp(g, "PackTamper") == 0, "a flag can be the guess");
-	f.flags = 0;
-	f.anomalies = ~(uint64_t)0;
-	CK(kof_heur_score(m, &f, &s, NULL) == 1 && s > m->bar_centinats, "every anomaly bit clears the bar; guess is optional");
-	f.anomalies = 0x8000000000000000ull;
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 0, "a bit no term names scores nothing");
-
-	f.format = KOF_FMT_ELF;
-	f.anomalies = KGENOME_ELF_ANOM_SECTAB_MISSING;
-	CK(kof_heur_score(m, &f, &s, &g) == 1 && s == 275 && strcmp(g, "Stripped") == 0, "an ELF term");
-	f.anomalies = KGENOME_PE_ANOM_SEC_WRITE_EXEC;
-	CK(kof_heur_score(m, &f, &s, &g) == 1, "a term of the wrong format's mask is not scored for this format");
-
-	f.format = KOF_FMT_ZIP;
-	f.anomalies = ~(uint64_t)0;
-	CK(kof_heur_score(m, &f, &s, &g) == 0, "a format the model does not cover has no score");
-	f.format = 32;
-	CK(kof_heur_score(m, &f, &s, &g) == 0, "format 32: the shift would leave the mask, refused first");
-	f.format = 255;
-	CK(kof_heur_score(m, &f, &s, &g) == 0, "format 255");
-	f.format = KOF_FMT_PE;
-	CK(kof_heur_score(NULL, &f, &s, &g) == 0 && kof_heur_score(m, NULL, &s, &g) == 0 &&
-	   kof_heur_score(m, &f, NULL, &g) == 0, "NULL model, facts, out");
-
-	/* A model of the caller's own: weights that overflow int32 are clamped. */
-	{
-		static const struct kof_heur_anom_term big[] = {
-			{ KOF_FMT_PE, 1, 2000000000, "A" }, { KOF_FMT_PE, 2, 2000000000, "B" },
-			{ KOF_FMT_PE, 4, -2000000000, "C" }, { KOF_FMT_PE, 8, -2000000000, "D" },
-			{ KOF_FMT_PE, 16, -2000000000, "E" }
-		};
-		struct kof_heur_model mm;
-
-		memset(&mm, 0, sizeof mm);
-		mm.anom = big;
-		mm.n_anom = 5;
-		mm.formats = 1u << KOF_FMT_PE;
-		f.format = KOF_FMT_PE;
-		f.flags = 0;
-		f.anomalies = 3;
-		CK(kof_heur_score(&mm, &f, &s, &g) == 1 && s == 0x7fffffff, "a sum past int32 max clamps, not wraps (%d)", (int)s);
-		f.anomalies = 4 | 8 | 16;
-		CK(kof_heur_score(&mm, &f, &s, &g) == 1 && s == -0x7fffffff, "and so does the other end (%d)", (int)s);
-	}
-}
-
-static void t_heur_anomalies(void)
-{
-	struct kof_obj_ctx ctx;
-	struct kof_pe_info *pe = calloc(1, sizeof *pe);
-	struct kof_elf_info *elf = calloc(1, sizeof *elf);
-	struct kof_zip_info *zip = calloc(1, sizeof *zip);
-
-	if (!pe || !elf || !zip) {
-		CK(0, "memory");
-		free(pe); free(elf); free(zip);
-		return;
-	}
-	memset(&ctx, 0, sizeof ctx);
-	CK(kof_heur_anomalies(NULL) == 0, "NULL ctx");
-	CK(kof_heur_anomalies(&ctx) == 0, "no view");
-	pe->anomalies = 0x1111;
-	elf->anomalies = 0x2222;
-	zip->anomalies = 0x3333;
-	ctx.format = KOF_FMT_PE;
-	ctx.file_header = pe;
-	CK(kof_heur_anomalies(&ctx) == 0x1111, "PE view");
-	ctx.format = KOF_FMT_ELF;
-	ctx.file_header = elf;
-	CK(kof_heur_anomalies(&ctx) == 0x2222, "ELF view");
-	ctx.format = KOF_FMT_ZIP;
-	ctx.file_header = zip;
-	CK(kof_heur_anomalies(&ctx) == 0x3333, "zip view");
-	ctx.format = KOF_FMT_DOCZIP;
-	CK(kof_heur_anomalies(&ctx) == 0x3333, "a zip-based document reads the zip view");
-	ctx.format = KOF_FMT_UNKNOWN;
-	CK(kof_heur_anomalies(&ctx) == 0, "a format with no anomaly word");
-	ctx.format = 250;
-	CK(kof_heur_anomalies(&ctx) == 0, "an unknown format");
-	free(pe);
-	free(elf);
-	free(zip);
-}
 
 /* ---- hex programs, the match memo --------------------------------------------------------- */
 
@@ -823,8 +704,6 @@ int main(void)
 		printf("api_engine_detect: no build/test directory - nothing tested\n");
 		return 0;
 	}
-	t_heur();
-	t_heur_anomalies();
 	t_hex();
 	t_memo();
 	t_pattern();

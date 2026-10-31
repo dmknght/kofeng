@@ -5,7 +5,7 @@ tests/unit, tests/lib and tests/sigs for the name as a whole word. The headers: 
 kofcore/*.h (kofcore, koftypes, kofresult, kofoption, kofobjname, kofhash, kofentropy, rangelist, range, runlist, entryname,
 kofcmp, heapsort, kofdebug, kofplatform*); the module ABI kofcore/kofmod/*.h; databases/{dbpacker,dbloader,diagsrc}.h;
 analyzers/parsers/**/*.h (every parser entry point, kofformat.h, cname.h, scantext.h); analyzers/diseases/*.h and genome_obj.h;
-detectors/{heur,linkage,mutations,pattern}/*.h; scanners/scan.h. Not covered here: the normaliser (another agent), libgenome and
+detectors/{linkage,mutations,pattern}/*.h; scanners/scan.h. Not covered here: the normaliser (another agent), libgenome and
 libuncoat (their own coverage documents), the pack internals (databases/pack/*, covered by pack_load and pack_fuzz).
 
   tested-by   the tests that named it BEFORE this work (first three); UNTESTED when none did.
@@ -322,8 +322,16 @@ databases/dbpacker.h                    type   struct kof_pw_name               
 databases/dbpacker.h                    type   struct kof_pw_str                             db_scale.c, multimatch_equal_marke api_engine_db.c, api_engine_detect.c
 databases/diagsrc.h                     func   kof_dsrc_arg                                  UNTESTED                           api_engine_db.c
 databases/diagsrc.h                     func   kof_dsrc_blank_comments                       UNTESTED                           api_engine_db.c
+databases/diagsrc.h                     func   kof_dsrc_catalog_word_ok                     UNTESTED                           diagsrc.c
 databases/diagsrc.h                     func   kof_dsrc_cap_at                               diagsrc.c                          
 databases/diagsrc.h                     func   kof_dsrc_cap_of                               diagsrc.c                          
+databases/diagsrc.h                     func   kof_dsrc_view_free                            UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_text                                 UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_mask_of                              UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_region_at                            UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_lit_unescape                         UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_widen                                UNTESTED                           diagsrc_form.c
+databases/diagsrc.h                     func   kof_dsrc_lit_escape                           UNTESTED                           diagsrc_form.c
 databases/diagsrc.h                     func   kof_dsrc_cap_table_check                      diagsrc.c                          
 databases/diagsrc.h                     func   kof_dsrc_cap_word                             diagsrc.c                          
 databases/diagsrc.h                     func   kof_dsrc_parse                                diagsrc.c, silent_loss_db.c        api_engine_db.c
@@ -343,16 +351,6 @@ databases/diagsrc.h                     type   struct kof_dsrc_node             
 databases/diagsrc.h                     type   struct kof_dsrc_report                        diagsrc.c, silent_loss_db.c, syndr api_engine_db.c
 databases/diagsrc.h                     type   struct kof_dsrc_view                          diagsrc.c, silent_loss_db.c        api_engine_db.c
 databases/syndsrc.h                     macro  KOFENG_DATABASES_SYNDSRC_H                    UNTESTED                           (include guard: tools/check_layers.py)
-detectors/heur/kofheur.h                func   kof_heur_anomalies                            UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                func   kof_heur_default                              UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                func   kof_heur_score                                UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                macro  KOFENG_KOFHEUR_H                              UNTESTED                           (include guard: tools/check_layers.py)
-detectors/heur/kofheur.h                macro  KOF_HEUR_FL                                   UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                type   enum kof_heur_fact                            UNTESTED                           (through its members: constants and fields of this header are exercised)
-detectors/heur/kofheur.h                type   struct kof_heur_anom_term                     UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                type   struct kof_heur_facts                         UNTESTED                           api_engine_detect.c
-detectors/heur/kofheur.h                type   struct kof_heur_flag_term                     UNTESTED                           (through its members: constants and fields of this header are exercised)
-detectors/heur/kofheur.h                type   struct kof_heur_model                         UNTESTED                           api_engine_detect.c
 detectors/linkage/kofdiag.h             func   kof_diag_flow_join                            diag_join.c                        
 detectors/linkage/kofdiag.h             func   kof_diag_graph_build                          diag_graph_block.c, silent_cuts_en api_engine_detect.c
 detectors/linkage/kofdiag.h             func   kof_diag_load                                 diag_db.c, synd 
@@ -381,7 +379,7 @@ detectors/mutations/kofmutation.h       func   kof_mutation_pct                 
 detectors/mutations/kofmutation.h       func   kof_mutation_probe                            mutation_index.c                   
 detectors/mutations/kofmutation.h       func   kof_mutation_set_free                         fnprint_db.h, fnprint_scale_cur.c, api_engine_detect.c
 detectors/mutations/kofmutation.h       func   kof_mutation_set_info                         fnprint_scale_cur.c, kix_load.c    
-detectors/mutations/kofmutation.h       func   kof_mutation_set_norms                        mutation_match.c                   
+detectors/mutations/kofmutation.h       func   kof_mutation_set_asks                         mutation_match.c                   
 detectors/mutations/kofmutation.h       func   kof_mutation_stat                             fnprint_scale_cur.c, kix_load.c, m 
 detectors/mutations/kofmutation.h       func   kof_mutation_trim                             mutation_index.c                   
 detectors/mutations/kofmutation.h       func   kof_mutation_unit                             fnprint_credit.c, fnprint_db.h, fn 
@@ -1055,9 +1053,7 @@ kofcore/kofmod/kofmutation.h            func   kof_mutation_fold                
 kofcore/kofmod/kofmutation.h            func   kof_mutation_same_block                       UNTESTED                           api_engine_modhelpers.c
 kofcore/kofmod/kofmutation.h            macro  KOFENG_KOFMUTATION_H                          UNTESTED                           (include guard: tools/check_layers.py)
 kofcore/kofmod/kofmutation.h            macro  KOF_MUTATION_MAX_HASH                         fnprint_scale_cur. api_engine_constants.c
-kofcore/kofmod/kofmutation.h            macro  KOF_MUTATION_RAW                              anyregion_00.c, en api_engine_constants.c
 kofcore/kofmod/kofmutation.h            macro  kof_mutation_mix                              UNTESTED                           api_engine_slots.c
-kofcore/kofmod/kofmutation.h            macro  kof_mutation_norm                             UNTESTED                           api_engine_slots.c
 kofcore/kofmod/kofmutation.h            macro  kof_mutation_side                             UNTESTED                           api_engine_slots.c
 kofcore/kofmod/kofmutation.h            type   struct kof_mutation_block                     fnprint_db.h, fnprint_scale_cur.c, api_engine_detect.c
 kofcore/kofmod/kofname.h                func   kof_comment_char                              UNTESTED                           api_engine_modhelpers.c
@@ -1613,7 +1609,6 @@ kofeng.h                                func   kdb_diag_refused                 
 kofeng.h                                func   kdb_diagnoses                                 diag_db.c, diag_report.c, flag_rea api_engine_scan.c
 kofeng.h                                func   kdb_mutation_status                           UNTESTED                           db_load_opt.c
 kofeng.h                                func   kdb_pattern_status                           UNTESTED                           api_engine_detect.c, pix_tail.c
-kofeng.h                                func   kdb_records                                   UNTESTED                           api_engine_scan.c
 kofeng.h                                func   kdb_stamp                                     pack_load.c                        api_engine_db.c, api_engine_scan.c
 kofeng.h                                func   kdb_unpackers                                 db_generation.c                    api_engine_scan.c
 kofeng.h                                func   kdb_version                                   UNTESTED                           api_engine_parsers.c, api_engine_scan.c
@@ -1646,6 +1641,13 @@ kofeng.h                                type   struct kof_db_version            
 kofeng.h                                type   struct kof_version                            UNTESTED                           api_engine_scan.c
 kofeng.h                                func   kdb_diagnose_name                            verdict_diseases.c                 UNTESTED
 kofeng.h                                func   kdb_diagnose_disease                         verdict_diseases.c                 UNTESTED
+kofeng.h                                func   kdb_diagnose_family                          UNTESTED                          diag_meta.c
+kofeng.h                                func   kdb_diagnose_variant                         UNTESTED                          diag_meta.c
+kofeng.h                                func   kdb_diagnose_tag                             UNTESTED                          diag_meta.c
+kofeng.h                                func   kdb_diagnose_type                            UNTESTED                          diag_meta.c
+kofeng.h                                func   kdb_diagnose_form                            UNTESTED                           diag_form_engine.c
+kofeng.h                                func   kdb_diagnose_form_expr                       UNTESTED                           diag_form_engine.c
+kofeng.h                                type   kdb_diag_form                                UNTESTED                           diag_form_engine.c
 kofeng.h                                func   kdb_disease_name                             verdict_diseases.c                 UNTESTED
 kofeng.h                                func   kdb_disease_type                             verdict_diseases.c                 UNTESTED
 scanners/scan.h                         func   kof_ext_fixed                                 scan_modctx.c                      INDIRECT: needs a module context; reached only from inside a scan (every scan, and the probe modules of api_engine_modabi.c)
@@ -1695,7 +1697,6 @@ scanners/scan.h                         macro  KOFENG_SCAN_H                    
 scanners/scan.h                         macro  KOF_TRIM_CACHES                               UNTESTED                           api_engine_scanint.c
 scanners/scan.h                         macro  KOF_TRIM_HEAP                                 UNTESTED                           api_engine_scanint.c
 scanners/scan.h                         type   kof_scan_unit_fn                              UNTESTED                           (through its members: constants and fields of this header are exercised)
-scanners/scan.h                         func   kof_scan_verdict                             scan_modctx.c                      UNTESTED
 verdictor/verdict.h                     func   kof_object_label                              object_label.c                     api_engine_verdict.c
 verdictor/verdict.h                     func   kof_verdict_name                              UNTESTED                           api_engine_verdict.c
 verdictor/verdict.h                     func   kverdict_filemap_at                           UNTESTED                           api_engine_verdict.c

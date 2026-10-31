@@ -616,19 +616,9 @@ static inline int run_fetch(struct kgenome_emu *e, uint8_t (*cp)[16], struct kge
 				 * is 8.3 GB of memcpy for bytes that are
 				 * already in the right place.
 				 */
-				e->ic_hit++;
 				step_fill(st, e->rip, &ent->ix, ent, ent->bytes);
 				return 0;
 			}
-			e->ic_miss++;
-			if (!ent->valid)
-				e->m_empty++;
-			else if (ent->va != e->rip)
-				e->m_va++;
-			else if (ent->pg != fpg)
-				e->m_pg++;
-			else
-				e->m_bytes++;
 			ent->valid = 0;
 			ent->pg = fpg;
 			ent->va = e->rip;
@@ -644,7 +634,6 @@ static inline int run_fetch(struct kgenome_emu *e, uint8_t (*cp)[16], struct kge
 			goto fetched;
 		}
 	}
-	e->in_fetch = 1;
 	if (!kgenome_emu_mem_rd(e, e->rip, code, sizeof *cp)) {
 		/* The tail of a mapping is a legitimate place to be: try
 		 * the shortest fetch that can still hold an instruction
@@ -663,7 +652,6 @@ static inline int run_fetch(struct kgenome_emu *e, uint8_t (*cp)[16], struct kge
 		memset(code + got, 0, sizeof *cp - got);
 	}
 fetched:
-	e->in_fetch = 0;
 	/*
 	 * DECODED INTO THE CACHE SLOT ITSELF, so that filling it costs
 	 * nothing beyond the decode. The length is not known until
@@ -963,51 +951,6 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 				 "watched instruction at %#llx",
 				 (unsigned long long)e->rip);
 			e->stop = KGENOME_EMU_STOP_INSN;
-			goto done;
-		}
-		if (e->hot) {
-			uint32_t h = (uint32_t)((e->rip * 2654435761u) >> 8) &
-				     e->hot_mask;
-			uint32_t q;
-
-			for (q = 0; q < 8u; q++) {
-				uint32_t k = (h + q) & e->hot_mask;
-
-				if (!e->hot[k].n || e->hot[k].va == e->rip) {
-					e->hot[k].va = e->rip;
-					e->hot[k].n++;
-					break;
-				}
-			}
-		}
-		/*
-		 * AND HAS THE DECRYPTION STOPPED - see KGENOME_EMU_QUIET. Counted
-		 * per instruction here, reset by the write that completes a
-		 * read-write pair, and only ever consulted once the guest has
-		 * shown it decrypts at all.
-		 */
-		/*
-		 * OFF UNTIL IT IS RIGHT - see KGENOME_EMU_QUIET.
-		 *
-		 * The signal is measured and real; the THRESHOLD is not settled.
-		 * Measured on four Sality samples: three stop correctly and the
-		 * fourth stops 11,066 instructions in, having decrypted
-		 * nothing, because a handful of sequential writes before the
-		 * decryption starts arm the test. A stop rule that is right
-		 * three times in four is a rule that loses a detection, so it
-		 * stays behind a flag until the arming condition is measured
-		 * across more than one family.
-		 */
-		if (e->active_n)
-			e->since_active++;
-		if (e->quiet_on && e->active_n &&
-		    e->since_active > KGENOME_EMU_QUIET) {
-			snprintf(e->detail, sizeof e->detail,
-				 "%llu instructions since the last decryption "
-				 "write, after %llu of them",
-				 (unsigned long long)e->since_active,
-				 (unsigned long long)e->active_n);
-			e->stop = KGENOME_EMU_STOP_QUIET;
 			goto done;
 		}
 		e->trace[e->trace_n++ % KGENOME_EMU_TRACE] = e->rip;

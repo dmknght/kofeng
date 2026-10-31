@@ -389,11 +389,11 @@ static void ref_free(struct ref *r)
 	free(r->pair); free(r->seen); free(r->stamp); free(r->pstamp);
 }
 
-static void ref_unit(struct ref *r, uint32_t mask, uint32_t norm, uint32_t side, const uint8_t *p, uint64_t n)
+static void ref_unit(struct ref *r, uint32_t mask, uint32_t side, const uint8_t *p, uint64_t n)
 {
 	struct kgenome_mtn_win w;
 
-	if (!r->n_pair || !kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!r->n_pair || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	do {
 		uint32_t h = kgenome_mtn_win_value(&w), lo = 0, hi = r->n_pair;
@@ -412,7 +412,7 @@ static void ref_unit(struct ref *r, uint32_t mask, uint32_t norm, uint32_t side,
 			uint32_t b = r->pair[lo].bs >> 8;
 			const struct kof_mutation_block *k = &r->blk[b];
 
-			if (r->pstamp[lo] == r->gen || k->norm != norm || k->side != side || !(k->scan_mask & mask))
+			if (r->pstamp[lo] == r->gen || k->side != side || !(k->scan_mask & mask))
 				continue;
 			r->pstamp[lo] = r->gen;
 			if (r->stamp[b] != r->gen) {
@@ -448,7 +448,6 @@ static void db_make(struct db *d, uint32_t nb, const uint32_t *src, uint32_t ns,
 		d->b[i].first_hash = d->np;
 		d->b[i].n_hash = n;
 		d->b[i].scan_mask = 1u << (rnd(seed) % 3u);
-		d->b[i].norm = (uint8_t)(rnd(seed) % 3u);
 		d->b[i].side = (uint8_t)(rnd(seed) % 2u);
 		for (j = 0; j < n; j++)
 			d->pool[d->np++] = rnd(seed) % 4u ? src[rnd(seed) % ns] : rnd(seed);
@@ -536,16 +535,16 @@ static void compare(struct kof_mutation_set *set, const struct db *d, uint32_t n
 	c2.chunk_max = 4096u;
 	kof_mutation_begin(&c);
 	kof_mutation_begin(&c2);
-	for (k = 0; k < 18u; k++) {
-		/* every (region, normalizer, side) once, over a piece of the object each */
-		uint32_t mask = 1u << (k % 3u), norm = (k / 3u) % 3u, side = (k / 9u) % 2u;
+	for (k = 0; k < 6u; k++) {
+		/* every (region, side) once, over a piece of the object each */
+		uint32_t mask = 1u << (k % 3u), side = (k / 3u) % 2u;
 		const uint8_t *p = obj + rnd(seed) % (N / 2u);
 		uint64_t n = 2000u + rnd(seed) % (N / 2u - 2000u);
 
 		for (i = 0; i < n_db; i++)
-			ref_unit(&r[i], mask, norm, side, p, n);
-		kof_mutation_unit(&c, mask, norm, side, p, n);
-		kof_mutation_unit(&c2, mask, norm, side, p, n);
+			ref_unit(&r[i], mask, side, p, n);
+		kof_mutation_unit(&c, mask, side, p, n);
+		kof_mutation_unit(&c2, mask, side, p, n);
 	}
 	for (i = 0; i < n_db; i++)
 		for (b = 0; b < d[i].nb; b++) {
@@ -583,7 +582,7 @@ static void t_matcher(void)
 	{
 		struct kgenome_mtn_win w;
 
-		if (kgenome_mtn_win_begin(&w, obj, N, 0))
+		if (kgenome_mtn_win_begin(&w, obj, N))
 			do {
 				if (ns < N && !kgenome_mtn_win_flat(&w))
 					vals[ns++] = kgenome_mtn_win_value(&w);

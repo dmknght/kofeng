@@ -1,3 +1,9 @@
+/*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
 #include "kofdisease.h"
 
 #include <stdio.h>

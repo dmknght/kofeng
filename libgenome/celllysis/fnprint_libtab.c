@@ -16,6 +16,11 @@
  * the stream pass (fnprint_wpass.c) is made only for the windows that already passed the database's
  * cheap rejects, which is a few in a hundred.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #include "fnprint.h"
 
 #include <stdlib.h>
@@ -152,7 +157,7 @@ void kgenome_fnprint_libtab_add(struct kgenome_fnprint_libtab *t, const uint8_t 
 {
 	struct kgenome_mtn_win w;
 
-	if (!t || !p || !kgenome_mtn_win_begin(&w, p, n, KGENOME_MUTATION_RAW))
+	if (!t || !p || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	do {
 		uint32_t v = kgenome_mtn_win_value(&w);
@@ -170,7 +175,7 @@ void kgenome_fnprint_libvote(const struct kgenome_fnprint_libtab *t, const uint8
 	struct kgenome_mtn_win w;
 
 	memset(out, 0, sizeof *out);
-	if (!p || !kgenome_mtn_win_begin(&w, p, n, KGENOME_MUTATION_RAW))
+	if (!p || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	do {
 		uint32_t v = kgenome_mtn_win_value(&w);
@@ -290,7 +295,7 @@ uint32_t kgenome_fnprint_wsketch(const uint8_t *p, uint64_t n, const struct kgen
 	struct kgenome_mtn_win w;
 	uint32_t m = 0, i, mx = 0, mi = 0;
 
-	if (!p || !out || !k || !kgenome_mtn_win_begin(&w, p, n, KGENOME_MUTATION_RAW))
+	if (!p || !out || !k || !kgenome_mtn_win_begin(&w, p, n))
 		return 0;
 	/* the k smallest distinct values: an unsorted buffer whose maximum is cached. Once it is full a
 	 * window enters it rarely (the values are mixed), so the cost is one comparison per window. */
@@ -334,7 +339,7 @@ uint32_t kgenome_fnprint_runs(const uint8_t *p, uint64_t n, const struct kgenome
 
 	if (dropped)
 		*dropped = 0;
-	if (!p || !fn || !kgenome_mtn_win_begin(&w, p, n, KGENOME_MUTATION_RAW))
+	if (!p || !fn || !kgenome_mtn_win_begin(&w, p, n))
 		return 0;
 	do {
 		uint32_t v = kgenome_mtn_win_value(&w);

@@ -9,10 +9,13 @@
 
 #define _GNU_SOURCE
 
+#include "../kofcore/kofdebug.h"
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "../detectors/pattern/kofpix.h"
 #include "../analyzers/parsers/kofformat.h"
+#include "../analyzers/cfgsign.h"
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -21,10 +24,10 @@
  *
  * THE OBJECT IS CUT INTO UNITS THE WAY A BLOCK WAS CUT - kgenome_mutation_units is the
  * one cut, for the tool that makes a block and for this - and each unit is
- * sketched and credited. One pass per (region, normalizer) that some block asked
+ * sketched and credited. One pass per region that some block asked
  * for, and no pass at all otherwise: the set is NULL unless a pack carried
  * blocks, so a database without mutation rules does not reach this, and
- * kof_mutation_set_norms answers which normalizers a region needs.
+ * kof_mutation_set_asks answers whether a region is asked for.
  *
  * BEFORE ANY MODULE, for the reason sx_multi_prepass runs first: a rule's
  * kof_mutation_score has to be a division rather than a search, and the only way
@@ -35,21 +38,59 @@
  */
 struct mutation_feed {
 	struct kof_mutation_ctx *pc;
-	uint32_t mask, norms;
+	uint32_t mask;
+	int asks;
 	const uint8_t *p;
+	const struct kof_obj_ctx *ctx;
+	kof_buf b;
+	const struct kof_cfgsign_host *cfg;
+	uint32_t n_units;       /* DEBUG: how many units the pass sketched, and their bytes */
+	uint64_t n_bytes;
+	uint32_t n_nosig;       /* function units listed and not signed: below the floor, undecodable, no rules for the architecture, over the lib's allowance */
+	uint32_t n_cfg;         /* function units whose CFG signature was credited */
 };
+
+/*
+ * A FUNCTION UNIT is signed by the shape of its first (largest) function - kof_cfgsign_function, the one place a function is decoded for a
+ * graph - and the sketch is credited to the blocks of the region by the matcher's second scoring kind (kof_mutation_cfg_unit: containment
+ * is not what a CFG sketch means, the Jaccard of two sketches is). The window sketch of a function unit is not computed any more (measured
+ * ineffective, exp_cfg/report.md). A CFG block is region CODE, norm RAW. A unit below the
+ * floor is met, counted and said (KOF_MTN_S_FUNC_UNSIGNED), not scored.
+ */
+static int mutation_feed_func(struct mutation_feed *f, uint64_t len, uint32_t side, const struct kgenome_func *first)
+{
+	struct kof_cfgsign cs;
+	struct kof_cfgsign_req rq;
+
+	if (!f->asks)
+		return 0;       /* no block asked for this region's bytes: nothing a CFG sketch could be credited to */
+	memset(&rq, 0, sizeof rq);
+	rq.ctx = f->ctx;
+	rq.data = f->b;
+	rq.off = first->off;
+	rq.len = first->len;
+	rq.host = f->cfg;
+	if (kof_cfgsign_function(&rq, &cs) != KOF_CFGSIGN_SIGNED) {
+		if (!f->n_nosig++)
+			kof_mutation_note_unsigned(f->pc);
+		return 0;
+	}
+	f->n_cfg++;
+	kof_mutation_cfg_unit(f->pc, f->mask, side, &cs.sign, len);
+	return 0;
+}
 
 static int mutation_feed_unit(void *user, uint64_t off, uint64_t len, uint32_t side,
 			    const struct kgenome_func *first)
 {
 	struct mutation_feed *f = user;
-	uint32_t k;
 
-	(void)first;
-	for (k = 0; k < KGENOME_MUTATION_NORM_COUNT; k++)
-		if (f->norms & (1u << k))
-			kof_mutation_unit(f->pc, f->mask, k, side,
-					f->p + off, len);
+	if (kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG)
+		return mutation_feed_func(f, len, side, first);
+	f->n_units++;
+	f->n_bytes += len;
+	if (f->asks)
+		kof_mutation_unit(f->pc, f->mask, side, f->p + off, len);
 	return 0;
 }
 
@@ -186,6 +227,16 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 	fp = kof_parser_of(ctx->format);
 	f.pc = pc;
 	f.p  = b.p;
+	f.ctx = ctx;
+	f.b = b;
+	f.cfg = cut->cfg;
+	f.n_units = 0;
+	f.n_bytes = 0;
+	f.n_nosig = 0;
+	f.n_cfg = 0;
+	KOF_TRACE("[feed] format %u, %s, %llu byte(s), present %x, from_packer %d\n", (unsigned)ctx->format,
+		  has_regions(ctx, fp) ? "parsed regions" : "no regions (one region, ALL)", (unsigned long long)b.n,
+		  (unsigned)present, from_packer);
 
 	/*
 	 * WHAT AN UNPACKER PRODUCED IS CUT WHOLE, WITHOUT THE REGION ANCHOR.
@@ -202,7 +253,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		whole.off = 0;
 		whole.len = b.n;
 		f.mask  = KOF_SCAN_ALL;
-		f.norms = kof_mutation_set_norms(pc->set, 0);
+		f.asks = kof_mutation_set_asks(pc->set, 0);
 		kof_mutation_any_region(pc, 1);
 		kgenome_mutation_units(&(const struct kgenome_mutation_req){
 				.p = b.p,
@@ -216,6 +267,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 				.fn = mutation_feed_unit,
 				.user = &f,
 			});
+		KOF_TRACE("[feed] from-packer pass: %u unit(s), %llu byte(s)\n", (unsigned)f.n_units, (unsigned long long)f.n_bytes);
 		return;
 	}
 
@@ -228,13 +280,13 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 	 * region and the functions, never on which block is asking. The two
 	 * used to be two passes - the region under its own mask, and again as
 	 * part of ALL through kof_scan_mutation_units - and the window
-	 * hashing, which is the cost, ran twice per normalizer.
+	 * hashing, which is the cost, ran twice.
 	 *
 	 * Now one pass credits the mask set (own region | ALL): a block counts
 	 * an entry when its scan_mask meets the set (mtn_credit_run), and an entry
 	 * is one bit of its block's state, set once per object, so crediting two
-	 * masks in one pass is the same fact as two passes. The normalizers are those of the
-	 * masks named, which set_norms already unions per bit.
+	 * masks in one pass is the same fact as two passes. Whether a block asked is that of the
+	 * masks named, which set_asks already unions per bit.
 	 *
 	 * KOF_SCAN_ALL is "wherever in the object", not "every byte": it covers
 	 * the regions of the parse except the ones that are not hashed - see
@@ -244,8 +296,8 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		uint32_t n;
 
 		f.mask  = KOF_SCAN_ALL;
-		f.norms = kof_mutation_set_norms(pc->set, KOF_SCAN_ALL);
-		if (f.norms) {
+		f.asks = kof_mutation_set_asks(pc->set, KOF_SCAN_ALL);
+		if (f.asks) {
 			n = kof_scan_resolve_range(ctx, KOF_SCAN_ALL, eb);
 			kgenome_mutation_units(&(const struct kgenome_mutation_req){
 					.p = b.p,
@@ -265,11 +317,12 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		fp = NULL;
 	}
 	for (mi = 1; mi < 16u + (fp ? fp->n_regions : 0u); mi++) {
-		uint32_t m, own = 0, an = 0, n;
+		uint32_t m, n;
+		int own = 0, an = 0;
 
 		if (mi < 16u) {
 			m = 1u << mi;
-			own = kof_mutation_set_norms(pc->set, m);
+			own = kof_mutation_set_asks(pc->set, m);
 		} else {
 			/* A region of the parse that is none of the sixteen
 			 * masks: it is fed for ALL and for nothing else. */
@@ -277,13 +330,18 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 			if (m < (1u << 16))
 				continue;
 		}
+		/* KNOWN DEFECT DF-7 (2026-10-30, M) [sev H]: a region that is not in `present` is skipped here although ALL is credited from every region of the parse (the comment above says so); `present` holds only regions some block names (see DF-8).
+		 * Trigger: a PE with a block in its overlay (region ALL, even with another block naming PE_DATA). Effect: never fed, never scored; the same bytes in .data score. [cause Inference: the overlay bit is not in scan_mask, not run]
+		 * Reproducer: /mnt/games/normtest/fix_detacc2_fmt/defects/df_repro.c (prints "DF-7 REPRODUCED").
+		 * Fix: as DF-8, plus the regions a block of ALL is credited from must be resolved for the object, overlay and unclaimed tail included. */
 		if (!(present & m))
 			continue;
 		if (fp && is_region_of(fp, m) && region_in_all(fp, m, present))
-			an = kof_mutation_set_norms(pc->set, KOF_SCAN_ALL);
+			an = kof_mutation_set_asks(pc->set, KOF_SCAN_ALL);
 		f.mask  = (own ? m : 0u) | (an ? KOF_SCAN_ALL : 0u);
-		f.norms = own | an;
-		if (!f.norms)
+		f.asks = own || an;
+		KOF_TRACE("[feed] region %x credited as %x, asked %d\n", (unsigned)m, (unsigned)f.mask, f.asks);
+		if (!f.asks)
 			continue;
 		n = kof_scan_resolve_range(ctx, m, eb);
 		kgenome_mutation_units(&(const struct kgenome_mutation_req){
@@ -301,6 +359,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 				.user = &f,
 			});
 	}
+	KOF_TRACE("[feed] done: %u unit(s) sketched, %llu byte(s), %u function unit(s) signed by shape, %u unsigned\n", (unsigned)f.n_units, (unsigned long long)f.n_bytes, (unsigned)f.n_cfg, (unsigned)f.n_nosig);
 }
 
 /*
@@ -326,9 +385,9 @@ static int feed_wants_funcs(const struct kof_mutation_set *set,
 
 		if (!(present & rm) || !kgenome_mutation_by_function(ctx->format, rm))
 			continue;
-		if ((rm < (1u << 16) && kof_mutation_set_norms(set, rm)) ||
+		if ((rm < (1u << 16) && kof_mutation_set_asks(set, rm)) ||
 		    (region_in_all(fp, rm, present) &&
-		     kof_mutation_set_norms(set, KOF_SCAN_ALL)))
+		     kof_mutation_set_asks(set, KOF_SCAN_ALL)))
 			return 1;
 	}
 	return 0;
@@ -339,14 +398,58 @@ int sx_mutation_loaded(const struct kof_scanner *sc)
 	return sc->eng && sc->eng->mutation && sc->mutation.set;
 }
 
+/* The allocator the CFG signature of a function unit runs under: every byte is charged to the scanner's ledger as any other allocation is, and
+ * refused (NULL: the unit is unsigned with the reason NOMEM, said) when the object's share has no room. */
+static void *cfg_alloc(void *user, size_t n)
+{
+	struct kof_scanner *sc = user;
+	void *p;
+
+	if (n > oc_scan_room(sc))
+		return NULL;
+	p = malloc(n);
+	if (p)
+		scan_charge(sc, n);
+	return p;
+}
+
+static void cfg_release(void *user, void *p, size_t n)
+{
+	if (!p)
+		return;
+	oc_scan_release(user, n);
+	free(p);
+}
+
+/*
+ * WHAT THE CUT IS TOLD ABOUT THE OBJECT IN HAND - the one place it is made, for the feed above and for the report that locates a block
+ * (scan_explain.c): the object's functions when some block would be credited from a region cut a function at a time, its library, the
+ * units a producer cut already.
+ */
+void sx_feed_cut(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t present, int from_packer,
+		 struct kof_scan_cut *cut)
+{
+	cut->funcs = !from_packer && feed_wants_funcs(sc->mutation.set, ctx, present)
+			     ? oc_funcs(ctx) : NULL;
+	cut->lib = sc->cur.lib_ok ? &sc->cur.lib : NULL;
+	cut->fixed = kof_src_fixed_of(sc->cur.src, &cut->n_fixed);
+	sc->cfgsign.mem.alloc = cfg_alloc;
+	sc->cfgsign.mem.release = cfg_release;
+	sc->cfgsign.mem.user = sc;
+	cut->cfg = &sc->cfgsign;
+}
+
 void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			   uint32_t present, int from_packer)
 {
 	struct kof_scan_cut cut;
 	kof_buf b;
 
-	if (!sc->eng->mutation || !sc->mutation.set)
+	if (!sc->eng->mutation || !sc->mutation.set) {
+		KOF_TRACE("[feed] NOT RUN: %s\n", !sc->eng->mutation ? "the engine has no similarity set (no block in any pack or form)"
+								       : "this scanner has no matcher state");
 		return;
+	}
 	/*
 	 * A NORMALISED VIEW IS FED ON ITS OWN BYTES, like any object.
 	 *
@@ -360,13 +463,17 @@ void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * in either.
 	 */
 	b = kof_src_buf(sc->cur.src);
+	/* The regions the feed may credit are `present`, which holds only the regions in kof_engine.scan_mask: a block
+	 * whose region is not in it is never fed (the run1 defect). */
+	KOF_TRACE("[feed] present=%x scan_mask=%x from_packer=%d bytes=%llu\n", (unsigned)present, (unsigned)sc->eng->scan_mask,
+		  from_packer, (unsigned long long)b.n);
 	/* What the matcher's state may take is what the object's ledger has left on top of
 	 * what it already holds for this object; it is charged below, once the feed has run. */
 	kof_mutation_limit(&sc->mutation, kof_mutation_held(&sc->mutation) + oc_scan_room(sc));
-	cut.funcs = !from_packer && feed_wants_funcs(sc->mutation.set, ctx, present)
-			    ? oc_funcs(ctx) : NULL;
-	cut.lib = sc->cur.lib_ok ? &sc->cur.lib : NULL;
-	cut.fixed = kof_src_fixed_of(sc->cur.src, &cut.n_fixed);
+	sx_feed_cut(sc, ctx, present, from_packer, &cut);
+	sc->st.work_feeds++;
+	KOF_TRACE("[work] similarity feed #%llu of this scanner (objects so far %llu): the object's windows are hashed now\n",
+		  (unsigned long long)sc->st.work_feeds, (unsigned long long)sc->st.objects);
 	kof_scan_mutation_feed(&sc->mutation, ctx, b, present, from_packer, &cut,
 			     kof_scan_ext_buf(sc, 1));
 	/* The matcher's counters, read where its bound would be noticed: see
@@ -377,9 +484,13 @@ void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		uint64_t held = kof_mutation_held(&sc->mutation);
 
 		kof_mutation_stat(&sc->mutation, &ms);
+		KOF_TRACE("[feed] matcher state: status %x, %u chunk(s), %u touched, %llu visit(s), %llu probe(s), %llu byte(s) held\n",
+			  (unsigned)ms.status, (unsigned)ms.n_chunks, (unsigned)ms.touched, (unsigned long long)ms.visits,
+			  (unsigned long long)ms.probes, (unsigned long long)ms.state_bytes);
 		sc->st.mutation_visits = ms.life_visits + ms.visits;
 		sc->st.mutation_trunc_objects = ms.life_trunc_objects;
 		sc->st.mutation_io_objects = ms.life_io_objects;
+		sc->st.mutation_unsigned_objects = ms.life_unsigned_objects;
 		sc->st.mutation_io_bytes = ms.life_io_bytes + ms.io_bytes;
 		/* The state the feed grew is the object's: charged to the ledger the way a produced
 		 * buffer is, and given back when the next object begins (scan_pipeline.c). */
@@ -584,6 +695,8 @@ void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
 	if (sc->obj.latch[KOF_OL_MUTATION])
 		return;
+	KOF_TRACE("[feed] first ask for the similarity counts of this object (format %u, present %x)\n", (unsigned)ctx->format,
+		  (unsigned)sc->cur.present);
 	sc->obj.latch[KOF_OL_MUTATION] = 1;
 	sx_mutation_feed(sc, ctx, sc->cur.present, sc->cur.from_packer);
 }

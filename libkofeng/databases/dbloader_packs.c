@@ -1,10 +1,19 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * dbloader_packs.c - mapping a pack and reading the diagnose and disease tables beside it. Split from dbloader.c; the text is unchanged.
  */
 
 #define _GNU_SOURCE
 
+#include "../kofcore/kofdebug.h"
 #include "dbloader_int.h"
+#include "../kofcore/kofmod/kofname.h"
+#include "pack/dbcrc.h"
 
 /* ---- mapping ---------------------------------------------------------------- */
 
@@ -333,6 +342,10 @@ static void note_users(struct kof_engine *e, const uint8_t *rec, uint64_t rl,
  * fixed size, it does not refuse a diagnose for having a long symbol. The block is
  * kept on the engine and freed with it.
  */
+/* KNOWN DEFECT MEM-6 (2026-10-29, R) [sev L]: the store is "record length + 1" for EVERY record, and a detection form (no node, no symbol) uses none of it: the whole
+ * record is mostly the form's hashes. Trigger: any pack of form diagnoses. Effect: the engine holds the pack's bytes a second time for its life (780 KB of 700 forms in
+ * tests/unit/mem_diag_forms.c; at most the pack's size, 256 MiB, and it counts in keng_memory_db). Reproducer: tests/unit/mem_diag_forms.c (growth pack, 779 KB, needs 0).
+ * Fix: a kof_diag_needs_bound() beside kof_diag_load (the bytes of the record outside its KDIG_SEC_FORM sections) sizes each slice; the section walk stays in kofdiag.c. */
 static char *diag_arena_new(struct kof_engine *e, const uint8_t *buf, size_t got,
 			    size_t n_rec)
 {
@@ -354,6 +367,98 @@ static char *diag_arena_new(struct kof_engine *e, const uint8_t *buf, size_t got
 	return a;
 }
 
+/*
+ * THE BLOCKS OF A DIAGNOSE'S FORM, appended to the engine's table of them (dblk, dpool) and numbered after every pack's:
+ * `blk_base` of the form is the number of its first block in the matcher's one set. Both arrays double as they grow and
+ * a failure to grow is the caller's refusal of the record (answers 0, nothing appended). Hashes are copied: a record is
+ * freed when its pack has been read.
+ */
+static int diag_form_blocks(struct kof_engine *e, struct kof_diag *d)
+{
+	struct kof_form *f = (struct kof_form *)(uintptr_t)d->form;
+	uint32_t k, need_b, need_p;
+
+	if (!f || !f->n_block)
+		return 1;
+	need_b = e->n_dblk + f->n_block;
+	need_p = e->n_dpool + f->n_hash;
+	if (need_b > e->cap_dblk) {
+		uint32_t nc = e->cap_dblk ? e->cap_dblk : 16u;
+		struct kof_mutation_block *g;
+
+		while (nc < need_b)
+			nc *= 2u;
+		g = realloc(e->dblk, (size_t)nc * sizeof *g);
+		if (!g)
+			return 0;
+		e->dblk = g;
+		e->cap_dblk = nc;
+	}
+	if (need_p > e->cap_dpool) {
+		uint32_t nc = e->cap_dpool ? e->cap_dpool : 256u;
+		uint32_t *g;
+
+		while (nc < need_p)
+			nc *= 2u;
+		g = realloc(e->dpool, (size_t)nc * sizeof *g);
+		if (!g)
+			return 0;
+		e->dpool = g;
+		e->cap_dpool = nc;
+	}
+	memcpy(e->dpool + e->n_dpool, f->hash, (size_t)f->n_hash * sizeof *f->hash);
+	for (k = 0; k < f->n_block; k++) {
+		struct kof_mutation_block *b = &e->dblk[e->n_dblk + k];
+
+		memset(b, 0, sizeof *b);
+		b->first_hash = e->n_dpool + f->block[k].first;
+		b->n_hash = f->block[k].n_hash;
+		b->scan_mask = f->block[k].mask;
+		b->side = f->block[k].side;
+	}
+	/* The set reads the engine's copy (dpool, borrowed by the matcher for as long as the engine lives); the form's own is
+	 * never read again, and kept it was n_hash * 4 bytes (up to 16 KiB) of a second copy for every similarity diagnose
+	 * (audit_mem MEM-1: 700 forms, 640000 bytes). `n_hash` stays: diag_form_unblocks gives back that many. */
+	free(f->hash);
+	f->hash = NULL;
+	f->hash_cap = 0;
+	/* The pack blocks come first: their count is final when the diagnoses are read (db_finish). */
+	f->blk_base = e->n_blk + e->n_dblk;
+	KOF_TRACE("[load] form blocks: %u block(s), %u hash(es), set numbers from %u (pack blocks %u), scan_mask now %x\n",
+		  (unsigned)f->n_block, (unsigned)f->n_hash, (unsigned)f->blk_base, (unsigned)e->n_blk, (unsigned)e->scan_mask);
+	e->n_dblk += f->n_block;
+	e->n_dpool += f->n_hash;
+	return 1;
+}
+
+/* Take back the blocks the last appended form added (a diagnose that is not kept). */
+static void diag_form_unblocks(struct kof_engine *e, const struct kof_diag *d)
+{
+	const struct kof_form *f = d->form;
+
+	if (!f || !f->n_block)
+		return;
+	e->n_dblk -= f->n_block;
+	e->n_dpool -= f->n_hash;
+}
+
+/* A region some block is cut from is a region the scanner must resolve for the object (sx_regions_present asks only for
+ * `scan_mask`, the union of what the detectors name): left out, the feed finds no region of the parse present, credits no
+ * unit, and every similarity form scores 0 on an object that holds the block whole (the run1 defect). Added only when the
+ * diagnose is KEPT, after the collision test: a diagnose that is dropped (its name is another's) names no region, and
+ * scan_mask is a union that cannot take one bit back (audit_mem MEM-2). */
+static void diag_form_regions(struct kof_engine *e, const struct kof_diag *d)
+{
+	uint32_t k;
+
+	for (k = 0; d->form && k < d->form->n_block; k++)
+		/* KNOWN DEFECT DF-8 (2026-10-30, M) [sev H]: a block of region KOF_SCAN_ALL adds only the bit ALL to scan_mask, so sx_regions_present resolves no region of the parse (cause read, R).
+		 * Trigger: a pack whose similarity blocks are all region ALL, on a PE or ELF. Effect: kof_scan_mutation_feed credits no unit, the block scores 0 even in .data; it scores once another block names a PE region; Raw is fine. kofregion.h says ALL means the same for every input.
+		 * Reproducer: /mnt/games/normtest/fix_detacc2_fmt/defects/df_repro.c (prints "DF-8 REPRODUCED").
+		 * Fix: when a block's mask has ALL, add every region of the parse that region_in_all covers (the format is known when the object is opened), or resolve them for ALL in sx_regions_present. */
+		e->scan_mask |= d->form->block[k].mask;
+}
+
 static void load_diag_pack(struct kof_engine *e, uint64_t *left, const char *p)
 {
 	uint8_t *buf;
@@ -370,6 +475,7 @@ static void load_diag_pack(struct kof_engine *e, uint64_t *left, const char *p)
 		e->diag_packs_refused++;
 		return;
 	}
+	KOF_TRACE("[load] diagnose pack %s: %zu record(s), %u diagnose(s) loaded before it\n", p, n_rec, (unsigned)e->n_diag);
 	arena = diag_arena_new(e, buf, got, n_rec);
 	if (!arena) {
 		free(buf);
@@ -382,6 +488,11 @@ static void load_diag_pack(struct kof_engine *e, uint64_t *left, const char *p)
 		int loaded;
 
 		if (e->n_diag >= e->diag_room) {
+			/* A cap bounds cost and must be said (rule 4): kdb_diag_full answered it to a host that asked, and nothing
+			 * told the one that did not (audit_mem MEM-8: 50000 diagnoses, 4096 loaded, no word on stderr). */
+			if (!e->diag_full)
+				fprintf(stderr, "dbloader: %s holds more diagnoses than the engine keeps (%u, KOF_DB_MAX_DIAG): the rest are NOT loaded (kdb_diag_full)\n",
+					p, (unsigned)e->diag_room);
 			e->diag_full = 1;
 			break;
 		}
@@ -414,6 +525,14 @@ static void load_diag_pack(struct kof_engine *e, uint64_t *left, const char *p)
 			e->diag_refused++;
 			continue;
 		}
+		/* The blocks of a form join the similarity set; a table that cannot grow refuses the record, said. */
+		if (!diag_form_blocks(e, &e->diag[e->n_diag])) {
+			fprintf(stderr, "dbloader: no memory for the similarity blocks of diagnose %zu of %s\n", i, p);
+			e->diag_refused++;
+			kof_diag_form_free(&e->diag[e->n_diag]);
+			memset(&e->diag[e->n_diag], 0, sizeof e->diag[0]);
+			continue;
+		}
 		/*
 		 * THE ID IS THE NAME'S 32-BIT HASH - see kof_diag_id32_. It was the
 		 * load position: adding a record renumbered every diagnose after it,
@@ -438,12 +557,25 @@ static void load_diag_pack(struct kof_engine *e, uint64_t *left, const char *p)
 					e->diag_collide++;
 					break;
 				}
-			if (q < e->n_diag)
+			if (q < e->n_diag) {
+				/* Not loaded: its form, and the blocks it put into the set, go with it. */
+				diag_form_unblocks(e, &e->diag[e->n_diag]);
+				kof_diag_form_free(&e->diag[e->n_diag]);
+				memset(&e->diag[e->n_diag], 0, sizeof e->diag[0]);
 				continue;
+			}
 		}
+		diag_form_regions(e, &e->diag[e->n_diag]);
 		note_users(e, buf + off, rl, &e->diag[e->n_diag]);
+		e->n_form += e->diag[e->n_diag].form != NULL;
+		KOF_TRACE("[load] diagnose %u %s id=%08x: %s\n", (unsigned)e->n_diag, e->diag[e->n_diag].name,
+			  (unsigned)e->diag[e->n_diag].id,
+			  e->diag[e->n_diag].form ? (e->diag[e->n_diag].form->n_sim ? "form (similarity)" : "form (strings)")
+						  : "graph diagnose");
 		e->n_diag++;
 	}
+	KOF_TRACE("[load] diagnose pack %s done: %u diagnose(s), %u form(s), %u refused, %u collided\n", p, (unsigned)e->n_diag,
+		  (unsigned)e->n_form, (unsigned)e->diag_refused, (unsigned)e->diag_collide);
 	free(buf);
 }
 
@@ -745,4 +877,123 @@ void kof_db_mark_diag_readers(struct kof_engine *e)
 	free(e->diag_user);
 	e->diag_user = NULL;
 	e->n_diag_user = e->cap_diag_user = 0;
+}
+
+/*
+ * THE NAMES OF THE IDS, from names.kdig - the same road as the disease table above: read whole by read_kdig, kept in the engine as a sorted table
+ * with its own pool, looked up by binary search, for a tool that has an id and has to show it (and for the verdict's name). Layout, little endian,
+ * written by ksigbuilder (ksb_names.c):
+ *     0   "KDNM"      4   version 1      5..7 zero      8   u32 rows      12  u32 CRC-32 of bytes 16..end
+ *     16  rows x { u8 kind 'F' | 'V' | 'T', u64 id, u8 length 1..255, name }, ascending by (kind, id), no repeat
+ * A name is checked as the catalogs' own rule checks it (a family kof_name_ok, a tag kof_tag_name_ok, a variant "<family>.<capital letters>"), because it
+ * is spelled into a verdict whose separators a name must not hold. A missing file is a database that names nothing; a wrong one is refused WHOLE.
+ */
+#define KOF_NAMES_MAX_BYTES (16u << 20)
+
+static int name_row_ok(uint8_t kind, const char *s, size_t l)
+{
+	char t[256];
+	const char *dot;
+
+	if (l >= sizeof t)
+		return 0;
+	memcpy(t, s, l);
+	t[l] = 0;
+	if (kind == 'F')
+		return kof_name_ok(t);
+	if (kind == 'T')
+		return kof_tag_name_ok(t);
+	if (kind != 'V' || !(dot = strrchr(t, '.')) || dot[1] == 0 || strlen(dot + 1u) > 5u)
+		return 0;
+	for (s = dot + 1; *s; s++)
+		if (*s < 'A' || *s > 'Z')
+			return 0;
+	t[dot - t] = 0;
+	return kof_name_ok(t);
+}
+
+void kof_db_load_names(struct kof_engine *e, const char *dir)
+{
+	char p[4096];
+	uint8_t *buf;
+	size_t got, at = 16u, i, n, used = 0;
+	struct kof_name_ent *tab = NULL;
+	char *pool = NULL;
+	uint64_t left = KOF_NAMES_MAX_BYTES, prev_id = 0;
+	uint8_t prev_kind = 0;
+	uint32_t crc;
+
+	if ((size_t)snprintf(p, sizeof p, "%s/names.kdig", dir) >= sizeof p)
+		return;
+	buf = read_kdig(e, &left, p, "KDNM", "names table", 16, &got);
+	if (!buf)
+		return;
+	crc = (uint32_t)buf[12] | ((uint32_t)buf[13] << 8) | ((uint32_t)buf[14] << 16) | ((uint32_t)buf[15] << 24);
+	if (kof_crc32_fast_cont(0u, buf + 16, got - 16u) != crc) {
+		fprintf(stderr, "dbloader: %s fails its checksum; its names are not used\n", p);
+		goto bad_quiet;
+	}
+	n = (size_t)buf[8] | ((size_t)buf[9] << 8) | ((size_t)buf[10] << 16) | ((size_t)buf[11] << 24);
+	if (buf[5] || buf[6] || buf[7] || n > (got - 16u) / 11u)     /* the reserved bytes are zero, and every row is at least 11 bytes */               /* every row is at least 11 bytes */
+		goto bad;
+	tab = calloc(n ? n : 1u, sizeof *tab);
+	pool = malloc(got + n + 1u);
+	if (!tab || !pool)
+		goto bad;
+	for (i = 0; i < n; i++) {
+		uint8_t kind;
+		uint64_t id = 0;
+		size_t L, k;
+
+		if (at + 10u > got)
+			goto bad;
+		kind = buf[at];
+		for (k = 0; k < 8u; k++)
+			id |= (uint64_t)buf[at + 1u + k] << (8u * k);
+		L = buf[at + 9u];
+		if (id < 0x10000u || !L || at + 10u + L > got || !name_row_ok(kind, (const char *)buf + at + 10u, L) ||
+		    (i && (kind < prev_kind || (kind == prev_kind && id <= prev_id))))
+			goto bad;
+		tab[i].id = id;
+		tab[i].kind = kind;
+		memcpy(pool + used, buf + at + 10u, L);
+		pool[used + L] = 0;
+		tab[i].name = pool + used;
+		used += L + 1u;
+		at += 10u + L;
+		prev_id = id;
+		prev_kind = kind;
+	}
+	if (at != got)
+		goto bad;
+	e->cat_name = tab;
+	e->cat_name_pool = pool;
+	e->n_cat_name = (uint32_t)n;
+	free(buf);
+	return;
+bad:
+	fprintf(stderr, "dbloader: %s does not add up; its names are not used\n", p);
+bad_quiet:
+	e->diag_packs_refused++;
+	free(tab);
+	free(pool);
+	free(buf);
+}
+
+const char *kof_db_cat_name(const struct kof_engine *e, char kind, uint64_t id)
+{
+	uint32_t lo = 0, hi = e ? e->n_cat_name : 0;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+		const struct kof_name_ent *m = &e->cat_name[mid];
+
+		if (m->kind == (uint8_t)kind && m->id == id)
+			return m->name;
+		if (m->kind < (uint8_t)kind || (m->kind == (uint8_t)kind && m->id < id))
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return NULL;
 }

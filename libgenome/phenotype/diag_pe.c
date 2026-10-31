@@ -53,6 +53,7 @@ struct pe_imp {
 	uint64_t slot;          /* the address a call goes through            */
 	uint64_t name_off;      /* where the import's name is, 0 if unknown   */
 	uint16_t cap;
+	uint8_t  noret;         /* an import that never returns (ExitProcess ...): no node, an end of block */
 };
 
 struct pe_acc {
@@ -79,20 +80,17 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 		char name[KGENOME_PE_IMP_DLLLEN];
 		uint16_t cap;
 		struct pe_imp *e;
+		int nr;
 
 		if (!kgenome_pe_imp_name(f, im, name, sizeof name))
 			continue;               /* by ordinal: no word to match */
 		cap = kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, name);
-		if (cap == KGENOME_NUCLEO_NONE)
+		nr = cap == KGENOME_NUCLEO_NONE && kgenome_diag_name_is_noreturn(name);
+		if (cap == KGENOME_NUCLEO_NONE && !nr)
 			continue;
 		if (a->n == a->cap_n) {
-			/* KNOWN DEFECT REV-D8q (2026-10-25, Inference) [sev L]: gather_imports (diag_pe.c) doubles a uint32 capacity (the matched PE imports)
-			 * with no overflow guard and no ledger charge. Trigger: 2^31 or more named imports; the engine caps an object at 512 MiB,
-			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-			 * UINT32_MAX / 2 before doubling. */
-			uint32_t nc = a->cap_n ? a->cap_n * 2u : 64u;
-			struct pe_imp *nv = realloc(a->v, (size_t)nc * sizeof *nv);
+			uint32_t nc = kgenome_grow_cap(a->cap_n, 64u);
+			struct pe_imp *nv = nc ? realloc(a->v, (size_t)nc * sizeof *nv) : NULL;
 
 			if (!nv) {
 				/* the imports from here on are not looked at: said */
@@ -106,6 +104,7 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 		e = &a->v[a->n++];
 		e->slot = im->slot;
 		e->cap = cap;
+		e->noret = (uint8_t)nr;
 		e->name_off = im->nameoff;
 	}
 }
@@ -124,31 +123,16 @@ static const struct pe_imp *imp_find(const struct pe_acc *a, uint64_t slot)
 	return bsearch(&key, a->v, a->n, sizeof *a->v, kof_cmp_u64);
 }
 
-/*
- * THE SLOT AN INDIRECT BRANCH GOES THROUGH, or KGENOME_BROKEN when it is not a
- * fixed address. x64 reaches the IAT RIP-relative; x86 names it absolutely.
- * Anything with a base or index register is a table lookup or a vtable call and
- * is not an import.
- */
-static uint64_t slot_of(const struct kgenome_cell_insn *in, int wide)
-{
-	const struct kgenome_cell_operand *o = &in->o[0];
-
-	if (o->flags & KGENOME_CELL_OF_RIPREL) {
-		if (in->at_va == KGENOME_BROKEN)
-			return KGENOME_BROKEN;
-		return in->at_va + in->len + (uint64_t)o->disp;
-	}
-	if (o->reg == KGENOME_CELL_REG_NONE && o->index == KGENOME_CELL_REG_NONE)
-		return wide ? (uint64_t)o->disp : (uint64_t)o->disp & 0xffffffffu;
-	return KGENOME_BROKEN;
-}
-
 static void add_node(struct kgenome_diag_scan *s, uint64_t at,
 		     const struct pe_imp *im)
 {
-	struct kgenome_diag_hit *h = kgenome_diag_hit_add(s, at, im->cap, 0);
+	struct kgenome_diag_hit *h;
 
+	if (im->noret) {
+		(void)kgenome_diag_noret_add(s, at);
+		return;
+	}
+	h = kgenome_diag_hit_add(s, at, im->cap, 0);
 	if (h && im->name_off) {
 		h->symref = im->name_off;
 		h->bits |= KGENOME_DIAG_H_SYMREF;
@@ -168,13 +152,8 @@ static int grow(struct kgenome_diag_scan *s, void **v, uint32_t *cap, uint32_t n
 	if (n < *cap)
 		return 1;
 	{
-		/* KNOWN DEFECT REV-D8j (2026-10-25, Inference) [sev L]: grow (diag_pe.c), the PE route's generic table grow
-		 * doubles a uint32 capacity (stubs and calls) with no overflow guard and no ledger charge. Trigger: an object with
-		 * 2^31 or more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using
-		 * the lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or
-		 * test cap against UINT32_MAX / 2 before doubling. */
-		uint32_t nc = *cap ? *cap * 2u : 256u;
-		void *nv = realloc(*v, (size_t)nc * each);
+		uint32_t nc = kgenome_grow_cap(*cap, 256u);
+		void *nv = nc ? realloc(*v, (size_t)nc * each) : NULL;
 
 		if (!nv) {
 			/* a stub or a call that is not recorded is an import call never matched */
@@ -220,7 +199,7 @@ static void walk_code(struct kgenome_diag_scan *s, const struct kgenome_obj *obj
 		if ((in.op == KGENOME_CELL_CALL || in.op == KGENOME_CELL_JMP) &&
 		    (in.flags & KGENOME_CELL_F_INDIRECT) && in.n_op &&
 		    in.o[0].kind == KGENOME_CELL_O_MEM) {
-			uint64_t slot = slot_of(&in, wide);
+			uint64_t slot = kgenome_cell_slot_of(&in, wide, 0);
 			const struct pe_imp *im;
 
 			if (slot == KGENOME_BROKEN)
@@ -339,6 +318,9 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 		}
 	}
 out:
+	/* the calls through thunks are noted after the code is read: the list is searched in address order */
+	if (s->n_noret > 1u)
+		qsort(s->noret_at, s->n_noret, sizeof *s->noret_at, kof_cmp_u64);
 	free(w.imp.v);
 	free(w.thunk);
 	free(w.call);

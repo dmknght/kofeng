@@ -161,10 +161,10 @@ void kof_inspect_free(const struct kof_parser *fmt, void *view)
 /*
  * Identify the object and parse it.
  *
- * The first format whose sniff claims the bytes wins and no other is tried: a
- * sniff that claims something is a claim, and asking a second parser what it
- * thinks of an object the first recognised is how a tool ends up with two
- * answers and a rule for picking between them.
+ * The first format whose sniff claims the bytes AND whose parse agrees wins, which
+ * is what the engine's identify does: a row that sniffed and then refused is not
+ * an answer, and the next row is asked, so the examiner names the same format the
+ * scanner does.
  *
  * The view is the caller's to free, with kof_inspect_free: a plain malloc of the
  * format's own info struct, except that zip and pdf views own tables the parse
@@ -253,13 +253,12 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 			*view_out = view;
 			return &parsers[i];
 		}
-		/* KNOWN DEFECT EX-1 (2026-10-24, R) [sev M]: kof_inspect_identify returns NULL when a sniff accepted and the
-		 * parse then refused, where the engine's identify() tries the next parser, so a file the scanner names shows as Raw here.
-		 * Trigger: a valid magic over a damaged or foreign body. Effect: the examiner disagrees with the scanner on the format.
-		 * Reproducer: none yet. Fix: reset ctx per candidate and free the view when the next parser succeeds (lifetime question:
-		 * ctx is memset once, above, not per attempt). */
+		/* The same rule as the engine's identify (sx_identify): a row whose
+		 * sniff accepted and whose parse refused is not the answer, and the
+		 * next row is asked. What the refusing parse left in ctx goes with
+		 * it. */
 		kof_inspect_free(&parsers[i], view);
-		return NULL;
+		memset(ctx, 0, sizeof *ctx);
 	}
 	return NULL;
 }
@@ -482,49 +481,4 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n)
  * joined by control has no row in a sequence. What replaces it draws a
  * store of nodes and typed edges.
  */
-
-
-uint32_t kof_inspect_mutation(const struct kof_scanner *sc,
-			    struct kof_mutation_view *out, uint32_t max_out)
-{
-	const struct kof_engine *e;
-	uint32_t b, n = 0;
-
-	if (!sc || !out || !max_out)
-		return 0;
-	e = sc->eng;
-	if (!e || !e->n_blk || !sc->mutation.set)
-		return 0;
-
-	for (b = 0; b < e->n_blk && n < max_out; b++) {
-		const struct kof_mutation_block *blk = &e->blk_tab[b];
-		uint32_t i;
-
-		out[n].block     = b;
-		out[n].scan_mask = blk->scan_mask;
-		out[n].norm      = blk->norm;
-		out[n].n_hash    = blk->n_hash;
-		out[n].score     = (uint8_t)kof_mutation_pct(&sc->mutation, b);
-		out[n].matched   = kof_mutation_matched(&sc->mutation, b);
-		out[n].rule      = "";
-		/*
-		 * Which module declared it. A linear walk because the tables
-		 * are tens to hundreds of rules and this runs once per object a
-		 * PERSON asked about, not per object scanned.
-		 */
-		for (i = 0; i < e->n_mods; i++) {
-			const struct kof_module *m = &e->mods[i];
-			const char *fam;
-
-			if (!m->n_block || b < m->block_base ||
-			    b >= m->block_base + m->n_block)
-				continue;
-			fam = kof_db_family(e, m);
-			out[n].rule = fam ? fam : "";
-			break;
-		}
-		n++;
-	}
-	return n;
-}
 

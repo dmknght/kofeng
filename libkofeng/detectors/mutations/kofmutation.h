@@ -9,7 +9,7 @@
  *
  * COST, because this runs on every eligible object:
  *
- *   - one linear pass per (region, normalizer) a rule asked for. About two
+ *   - one linear pass per region a rule asked for. About two
  *     operations a byte: a rolling hash update and a multiply.
  *   - one filter test per window. Most windows are in no rule; they are rejected
  *     by one cache line of a filter whose size comes from the engine's memory
@@ -138,11 +138,11 @@ void kof_mutation_set_info(const struct kof_mutation_set *set, struct kof_mutati
 #define KOF_MTN_B_NO_FILTER        0x02u  /* none at all: every window reaches the index */
 #define KOF_MTN_B_OVER_BUDGET      0x04u  /* refused: the index does not fit the allowance */
 #define KOF_MTN_B_TOO_MANY_BLOCKS  0x08u  /* refused: more than 16,777,215 blocks */
-#define KOF_MTN_B_BAD_BLOCK        0x10u  /* refused: a slice, count or normalizer that does not fit */
+#define KOF_MTN_B_BAD_BLOCK        0x10u  /* refused: a slice, count or normalizer byte (not RAW) that does not fit */
 #define KOF_MTN_B_NOMEM            0x20u  /* refused: an allocation failed */
 #define KOF_MTN_B_TOO_BIG          0x40u  /* refused: more entries than 32-bit offsets address */
 #define KOF_MTN_B_IN_RAM           0x80u  /* a pack with no index trailer: built in memory under the allowance (repack to avoid) */
-#define KOF_MTN_B_TOO_MANY_CLASSES 0x100u /* refused: more than 256 distinct (region, normalizer, side) */
+#define KOF_MTN_B_TOO_MANY_CLASSES 0x100u /* refused: more than 256 distinct (region, side) */
 #define KOF_MTN_B_REFUSED (KOF_MTN_B_OVER_BUDGET | KOF_MTN_B_TOO_MANY_BLOCKS | \
 			   KOF_MTN_B_BAD_BLOCK | KOF_MTN_B_NOMEM | KOF_MTN_B_TOO_BIG | \
 			   KOF_MTN_B_TOO_MANY_CLASSES)
@@ -166,6 +166,10 @@ void kof_mutation_set_info(const struct kof_mutation_set *set, struct kof_mutati
 #define KOF_MTN_S_IO_BUDGET      0x04u  /* the object's reads of the index file were spent: same effect */
 #define KOF_MTN_S_IO_ERROR       0x08u  /* a read failed (a truncated or vanished pack file): same effect */
 #define KOF_MTN_S_SLICE_CRC      0x10u  /* a 64 KiB slice of the index does not match its checksum: same effect */
+/* A function unit was listed and NOT sketched (kgenome_mutation_signature: no function signature, prototype 2026-10-30): a block cut
+ * from a function scores 0 on this object because nothing was fed for it, not because the object differs. Not a lower bound of
+ * anything else; not an error. */
+#define KOF_MTN_S_FUNC_UNSIGNED  0x20u
 struct kof_mutation_stat {
 	uint32_t status;
 	uint32_t n_chunks, touched;
@@ -176,18 +180,16 @@ struct kof_mutation_stat {
 	uint64_t io_bytes, io_reads;   /* this object's reads of the index file */
 	uint64_t life_io_bytes;        /* over every object this scanner has seen, this one excluded */
 	uint32_t life_io_objects;      /* objects that ended with IO_BUDGET, IO_ERROR or SLICE_CRC */
+	uint32_t life_unsigned_objects; /* objects that ended with FUNC_UNSIGNED */
 };
 struct kof_mutation_ctx;
 void kof_mutation_stat(const struct kof_mutation_ctx *c, struct kof_mutation_stat *out);
 
 /*
- * Which normalizers any block of this set uses, as a bit per enum value.
- *
- * A caller feeds a region once per normalizer in use; asking first is what
- * keeps a pack that only ever hashes raw bytes from paying for two extra
- * passes over every object.
+ * Does any block of this set name a region of `scan_mask` (any region at all when
+ * `scan_mask` is 0)? A caller feeds a region only when some block asks for it.
  */
-uint32_t kof_mutation_set_norms(const struct kof_mutation_set *set, uint32_t scan_mask);
+int kof_mutation_set_asks(const struct kof_mutation_set *set, uint32_t scan_mask);
 
 /*
  * A BLOCK'S NAME AND ITS HASHES.
@@ -236,19 +238,20 @@ struct kof_mutation_ctx {
 	struct mtn_blk *bs;
 	struct mtn_ent *tmap;
 	uint32_t *sv, *sv2;
+	uint32_t *vl;                   /* the blocks the CFG unit in hand got a vote for (kof_mutation_cfg_unit) */
+	uint32_t  vn, vcap, vgen;       /* ... how many, room, and the unit's number (a block's vote is valid when its vgen is this) */
 	uint8_t  *span;
 	uint32_t  bcap, bn, tcap, tn, scap;
 	/*
 	 * THE BATCH SPANS UNITS. Survivors are collected across consecutive units that ask the same
-	 * thing (region, normalizer, side, any-region) and probed together when the batch fills, the
+	 * thing (region, side, any-region) and probed together when the batch fills, the
 	 * call changes, or anything asks for a count: a function is a few thousand windows, and the
 	 * index is read in order only when enough of them wait together (measured: a unit at a time
 	 * read 6.8 GB for an object that matches half the database, a batch of a million read 224 MB).
 	 * `nsv` of them wait now, for the call `pk_*`.
 	 */
-	uint32_t  nsv, pk_norm, pk_side, pk_mask;
+	uint32_t  nsv, pk_side, pk_mask;
 	int       pk_any;
-	uint64_t  span_cap;
 	uint64_t  held, cap;
 	uint64_t  ledgered;             /* what the host has charged to its ledger for `held`: the host's own bookkeeping */
 	uint64_t  fed;                  /* bytes this object has fed: the reads' allowance follows it */
@@ -260,6 +263,7 @@ struct kof_mutation_ctx {
 	struct kof_kix_io io;
 	uint32_t  status;               /* KOF_MTN_S_* for this object */
 	uint32_t  trunc_walks, walks, n_chunks;
+	uint32_t  life_unsigned_objects;  /* objects with KOF_MTN_S_FUNC_UNSIGNED, this one excluded */
 	uint64_t  visits, trunc_pairs, probes;
 	uint64_t  life_visits;          /* over every object this scanner has seen */
 	uint32_t  life_trunc_objects, life_io_objects;
@@ -271,6 +275,13 @@ void kof_mutation_ctx_done(struct kof_mutation_ctx *c);
 
 /* Start a new object. Cheap - it bumps a counter. */
 void kof_mutation_begin(struct kof_mutation_ctx *c);
+
+/* The feed met function units it did not sketch (kgenome_mutation_signature): say so on this object (KOF_MTN_S_FUNC_UNSIGNED). */
+static inline void kof_mutation_note_unsigned(struct kof_mutation_ctx *c)
+{
+	if (c)
+		c->status |= KOF_MTN_S_FUNC_UNSIGNED;
+}
 
 /*
  * What the matcher's state may hold for the object in hand, from the host's ledger. Read by
@@ -306,7 +317,7 @@ void kof_mutation_any_region(struct kof_mutation_ctx *c, int on);
 /*
  * Credit one UNIT of the object - a function, a run of small ones, or a piece of
  * a region cut by kgenome_mutation_cut; see kgenome_mutation_units, which makes the same
- * cuts a block was made from. The unit is sketched with one normalizer and each
+ * cuts a block was made from. The unit is sketched and each
  * hash of its sketch is credited to the blocks that hold it.
  *
  * `scan_mask` is the region bit the bytes are in; only blocks taken from that
@@ -317,8 +328,17 @@ void kof_mutation_any_region(struct kof_mutation_ctx *c, int on);
  * A block's score is the number of its hashes the object held, each counted once
  * (a hash a block names twice counts twice, and the count is clamped at the block's n_hash).
  */
-void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t norm,
+void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask,
 		     uint32_t side, const uint8_t *p, uint64_t n);
+
+/*
+ * Credit one FUNCTION UNIT by its CFG sketch (celllysis/cfg.h): the second scoring kind of this matcher, see kofmutation.c. `sg` is the
+ * signature of the unit's function (KGENOME_CFG_MIN_KEYS..KGENOME_CFG_KEYS keys), `scan_mask`, `side` and `n` as in kof_mutation_unit.
+ * A block's score becomes the better of its window count and the best Jaccard estimate any unit reached against it.
+ */
+struct kgenome_cfg_sign;
+void kof_mutation_cfg_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t side,
+			   const struct kgenome_cfg_sign *sg, uint64_t n);
 
 /*
  * How much of block `b` was found in what was fed, as a percentage.

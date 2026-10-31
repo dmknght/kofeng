@@ -277,5 +277,21 @@ def event_log_symbols_and_find_dialogs_do_not_crash():
         check(v.alive())
 
 
+@case(A)
+def refused_log_says_why_and_not_a_good_log_of_nothing():
+    """KXA-1: a file that carries the log magic but that the log reader refuses (a version it does
+    not know) shows the reader's reason on the status line, not 'event log: ... 0 event(s)'."""
+    d = os.path.join(VT, 'work', 'kxa1_%d' % os.getpid())
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, 'bad_version.ktr')
+    data = bytearray(open(FIX('events.ktr'), 'rb').read())
+    data[4:6] = struct.pack('<H', 999)          # kofevt_log_hdr.version
+    with open(p, 'wb') as f:
+        f.write(data)
+    with Viewer(p, copy=False) as v:
+        check(v.has('a log version this build does not know'), 'the refusal reason is not shown')
+        check(not v.has('0 event(s)'), 'a refused log is reported as a log of 0 events')
+
+
 if __name__ == '__main__':
     main(A)

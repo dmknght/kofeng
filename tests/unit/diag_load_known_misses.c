@@ -124,8 +124,7 @@ static void f13(void)
 	struct he_status s = he_child(f13_child, NULL, 20);
 
 	CK(s.exited && s.code != 3 && s.code != 4, "the controls of F13: A loads with its attributes, B loads (code %d signal %d)", s.code, s.sig);
-	/* KNOWN DEFECT WP9-F13 (2026-10-25, M): this row pins it, green until fixed. */
-	KM_CHECK(s.exited && s.code == 0, "F13 a node array that held a value and a symbol is clean after a record with neither", "kofdiag.c kof_diag_load leaves val and sym");
+	CK(s.exited && s.code == 0, "F13 a node array that held a value and a symbol is clean after a record with neither (code %d signal %d)", s.code, s.sig);
 }
 
 int main(void)

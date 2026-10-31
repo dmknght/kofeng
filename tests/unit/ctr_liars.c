@@ -20,17 +20,13 @@
  *   - the walk's answer is the table's: how many members were opened and whether the engine SAID something (a broken
  *     reason on some object, or a limit hit). The table is the measured behaviour of this tree, so a change in either
  *     number is red and has to be looked at;
- *   - and, written as the expectation, three kinds of defect the matrix found are KM_CHECKs (known_miss.h): green while
- *     the engine has the defect, RED the day it is fixed so the marker comes out.
- *       WP2-D1  a member lost with nothing said (lha, arj: a size past the end ends the walk with broken = 0)
- *       WP2-D2  a member dropped from the table with nothing said (cab, chm: a file whose size runs past its data)
- *       WP2-D3  an archive that opens as nothing with nothing said (zip, cab, chm: a directory offset past the end)
- *       WP2-D4  a stored zip member whose header claims more than the file holds is a child of the bytes up to the END of
- *               the file (the sibling's data and the central directory included) and no anomaly is raised
+ *   - and, written as the expectation, what the matrix found: WP2-D1..D4 (a member or a directory past the end: said as
+ *     KOF_BROKEN_DAMAGED, and a stored zip member's child ends at the next header) are fixed and are rows of the table
+ *     above; the one still open is a KM_CHECK (known_miss.h): green while the engine has the defect, RED the day it is fixed.
  *       WP2-D5  7z: the folder after one whose declared unpack size is over the budget is lost (a bound of ONE entry
  *               ended the walk: kofeng/CLAUDE.md rule 4, "an entry's own bound is not the tree's")
  *
- *       WP2-D13 lha, arj: a member that cannot be decoded ends the module's walk (zip and rar go on to the members after it); see
+ *       WP2-D13 lha, arj: a member that cannot be decoded ends the module's walk (zip and rar go on to the members after it) [fixed]; see
  *               coded_first() below
  *
  * Why the old tests missed them: hostile_engine_archives.c has a lying writer for zip only, and the *_walk tests use
@@ -45,18 +41,18 @@
 enum { S_CLEAN, S_BOTH, S_PACK, S_UNP, S_SHARE, S_COUNT, S_OFFSET, S_CYCLE, S_NOEND, NSC };
 static const char *const sname[NSC] = { "clean", "claimBoth", "claimPack", "claimUnp", "share", "count", "offset", "cycle", "noend" };
 
-/* km: 0 nothing; 1 D1/D2/D3 silent loss; 2 D4 clamp; 3 D5 sibling after a cut */
+/* km: 0 nothing; 2 D4 the clamped child is its own 200 bytes; 3 D5 sibling after a cut (still a known miss) */
 struct exp { signed char found, rep, km; };
 
 #define E(f, r, k) { f, r, k }
 static const struct exp tab[CW_NFORMATS][NSC] = {
-	/* zip  */ { E(3,0,0), E(3,0,2), E(3,0,2), E(3,0,0), E(3,0,0), E(3,0,0), E(0,0,1), E(0,0,1), E(0,0,0) },
+	/* zip  */ { E(3,0,0), E(3,1,2), E(3,1,2), E(3,0,0), E(3,0,0), E(3,0,0), E(0,1,0), E(0,1,0), E(0,0,0) },
 	/* tar  */ { E(3,0,0), E(1,1,0), E(3,0,0), E(1,1,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
 	/* rar  */ { E(3,0,0), E(1,1,0), E(1,1,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
-	/* lha  */ { E(3,0,0), E(1,0,1), E(1,0,1), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
-	/* arj  */ { E(3,0,0), E(1,0,1), E(1,0,1), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
-	/* cab  */ { E(3,0,0), E(2,0,1), E(3,0,0), E(2,0,1), E(3,0,0), E(3,0,0), E(0,0,1), E(3,0,0), E(3,0,0) },
-	/* chm  */ { E(3,0,0), E(2,0,1), E(3,0,0), E(2,0,1), E(3,0,0), E(3,0,0), E(0,0,1), E(3,0,0), E(3,0,0) },
+	/* lha  */ { E(3,0,0), E(1,1,0), E(1,1,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
+	/* arj  */ { E(3,0,0), E(1,1,0), E(1,1,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
+	/* cab  */ { E(3,0,0), E(2,1,0), E(3,0,0), E(2,1,0), E(3,0,0), E(3,1,0), E(0,1,0), E(3,0,0), E(3,0,0) },
+	/* chm  */ { E(3,0,0), E(2,1,0), E(3,0,0), E(2,1,0), E(3,0,0), E(3,1,0), E(0,1,0), E(3,0,0), E(3,0,0) },
 	/* 7z   */ { E(3,0,0), E(2,1,0), E(2,1,0), E(2,1,3), E(3,0,0), E(0,1,0), E(0,1,0), E(3,0,0), E(3,0,0) },
 	/* ole  */ { E(1,0,0), E(1,1,0), E(1,0,0), E(1,1,0), E(1,0,0), E(1,0,0), E(0,1,0), E(1,1,0), E(1,0,0) },
 	/* pdf  */ { E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0), E(3,0,0) },
@@ -139,7 +135,7 @@ static int one_format(void *p)
 		CK(c.found == (unsigned)x.found, "%s/%s: %u members opened, the table says %d (objects %u, broken %llu, limit hits %llu)", F->name,
 		   sname[sc], c.found, x.found, c.r.n, (unsigned long long)c.r.broken, (unsigned long long)c.r.limit_hits);
 		CK(c.rep == (unsigned)x.rep, "%s/%s: reported %u, the table says %d", F->name, sname[sc], c.rep, x.rep);
-		CK(c.maxlen <= c.w.n || x.km == 2, "%s/%s: a child of %llu bytes out of a %zu byte container", F->name, sname[sc],
+		CK(c.maxlen <= c.w.n, "%s/%s: a child of %llu bytes out of a %zu byte container", F->name, sname[sc],
 		   (unsigned long long)c.maxlen, c.w.n);
 		CK(c.r.n == c2.r.n, "%s/%s: two scans, two object counts (%u, %u)", F->name, sname[sc], c.r.n, c2.r.n);
 		for (i = 0; i < c.r.n && i < c2.r.n && i < CS_MAXOBJ; i++)
@@ -147,22 +143,13 @@ static int one_format(void *p)
 				!strcmp(c.r.o[i].name, c2.r.o[i].name);
 		CK(same, "%s/%s: two scans of one input gave different objects", F->name, sname[sc]);
 		CK(c.r.slash_forged == 0, "%s/%s: a forged separator", F->name, sname[sc]);
-		if (x.km == 1) {
-			const char *id = !strcmp(F->name, "zip") || sc == S_OFFSET ? "WP2-D3" : (!strcmp(F->name, "cab") || !strcmp(F->name, "chm")) ? "WP2-D2" : "WP2-D1";
-			char what[128];
-
-			snprintf(what, sizeof what, "%s/%s: members lost (%u of %u) with nothing said", F->name, sname[sc], c.found, c.put);
-			/* KNOWN DEFECT WP2-D1 (2026-10-24, M): this row pins it, green until fixed (the row of WP2-D1b, WP2-D2, WP2-D2b, WP2-D3, WP2-D3b, WP2-D3c too). */
-			KM_CHECK(c.found == c.put || c.rep, what, id);
-		}
 		if (x.km == 2) {
 			const struct cs_obj *b = cs_find(&c.r, ":b.txt");
 			char what[128];
 
 			snprintf(what, sizeof what, "%s/%s: the member's child is %llu bytes, past its own 200", F->name, sname[sc],
 				 b ? (unsigned long long)b->len : 0ull);
-			/* KNOWN DEFECT WP2-D4 (2026-10-24, M): this row pins it, green until fixed. */
-			KM_CHECK(b && b->len == sizeof d1, what, "WP2-D4");
+			CK(b && b->len == sizeof d1, "%s", what);
 		}
 		if (x.km == 3) {
 			char what[128];
@@ -182,14 +169,14 @@ static int one_format(void *p)
  * second place of a three member archive, the others stored and good.
  *   zip (method 8 over bytes that are not deflate) and rar (method 0x33 over the same): the root says DAMAGED and the two stored members
  *   after the failure are walked (2 children)
- *   lha (-lh6-) and arj (method 1) over the same bytes: the root says DAMAGED and NOTHING after it is walked (0 children): the module's
- *   loop ends at the first member it cannot decode instead of at the host's refusal (kofeng/CLAUDE.md rule 4)   [WP2-D13]
+ *   lha (-lh6-) and arj (method 1) over the same bytes: the root says DAMAGED and the stored members after it are walked too (2 children):
+ *   the failed member's DAMAGED ended the opening of the members the container declares (scan_unpack.c) instead of the tree's own stop [WP2-D13, fixed]
  *   tar with the second header's first byte flipped (its checksum is then wrong): still opened, all three members
  */
 static int coded_first(void *unused)
 {
 	static const struct { const char *fmt; unsigned method; int walks_on; } rows[] = {
-		{ "zip", 8, 1 }, { "rar", 0x33, 1 }, { "lha", 6, 0 }, { "arj", 1, 0 }
+		{ "zip", 8, 1 }, { "rar", 0x33, 1 }, { "lha", 6, 1 }, { "arj", 1, 1 }
 	};
 	unsigned k, i;
 
@@ -219,8 +206,7 @@ static int coded_first(void *unused)
 			CK(found == 2, "%s: the two stored members after an undecodable one are walked (%u)", rows[k].fmt, found);
 		} else {
 			snprintf(what, sizeof what, "%s: the walk ended at the first undecodable member: %u of the 2 stored members after it opened", rows[k].fmt, found);
-			/* KNOWN DEFECT WP2-D13 (2026-10-25, M): this row pins it, green until fixed. */
-			KM_CHECK(found == 2, what, "WP2-D13");
+			CK(found == 2, "%s", what);
 		}
 		cs_free(&r);
 		cw_free(&w);

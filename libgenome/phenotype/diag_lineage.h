@@ -117,7 +117,6 @@ struct kgenome_diag_oblig {
 	uint8_t  role;          /* which input (KGENOME_DIAG_ROLE_*) */
 	uint8_t  partial;       /* 1: some producers are known (the links are MAY) and the rest is not; 0: none is */
 	uint32_t why;           /* KGENOME_LINEAGE_W_* */
-	uint64_t fn_va;         /* the entry of the function the consumer is in (0 when the object names none) */
 };
 
 struct kgenome_diag_scan;
@@ -134,7 +133,6 @@ struct kgenome_diag_lineage_stats {
 	uint64_t inputs;                /* inputs of consumer nodes the stages looked at */
 	uint64_t must, may;             /* inputs that ended as one producer / several producers and nothing else, / not all */
 	uint64_t unresolved;            /* inputs left in the unresolved set, none or some of the producers known */
-	uint64_t demanded;              /* ... of which read after all, because a caller's result reached a consumer */
 	uint64_t skipped;               /* functions not read: no node in them and nothing useful in what they call */
 	uint64_t bounded[4];          /* times a bound of the stages fired: [token set of a value, token set of a consumer, steps of one function, rounds of a recursive group] */
 	uint64_t dropped;               /* MAY links that did not fit: a node holds four links; the scan IS flagged (kgenome_diag_note_in_how sets KGENOME_TRUNCATED on the fifth distinct link) */

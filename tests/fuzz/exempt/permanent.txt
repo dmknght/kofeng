@@ -4,3 +4,4 @@ khash_sha256_file	not byte-drivable: it takes a path; the bytes route is khash_s
 kgenome_elf_shape	pure function of the parsed view (segment and section types), no bytes read; hand-built cases in tests/lib/genome/elf_semantics.c
 kgenome_elf_entry_sec	pure function of the parsed view, unsigned range test; hand-built cases incl. UINT64_MAX in tests/lib/genome/elf_semantics.c
 kgenome_arch_title	pure lookup of one 8-bit value, no input bytes; every value asserted in tests/lib/genome/arch_title.c
+kgenome_grow_cap	pure arithmetic on two uint32, no bytes read; every boundary around 2^31 asserted in tests/lib/genome/grow_cap.c

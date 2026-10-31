@@ -60,7 +60,6 @@
 #include <kofmod/reg.h>
 #include <kofmod/rtf.h>
 
-#include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../libkofeng/analyzers/parsers/binaries/funcs.h"
 #include <celllysis/trueline.h>
 #include "../libkofeng/detectors/linkage/kofdiag.h"
@@ -69,16 +68,8 @@
 #include "../libkofeng/scanners/scan.h"
 #include "kofinspect.h"
 #include "kofscfind.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/zip_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/tar_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/sevenzip_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/rar_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/xz_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/rtf_parse.h"
-#include "../libkofeng/analyzers/parsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
 #include "../libkofeng/databases/pack/hexprog.h"

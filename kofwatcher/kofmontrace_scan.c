@@ -93,8 +93,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		s->v->asked    = 1;
 		s->v->examined = res->examined;
 		s->v->broken   = res->broken;
-		s->v->depth    = res->heur_depth;
-		s->v->packed   = (res->heur_depth || res->from_packer) ? 1u : 0u;
+		s->v->packed   = res->from_packer ? 1u : 0u;
 		if (bytes && len)
 			s->v->entropy8 = kentropy_eighths(bytes, len);
 		if (res->has_verdict)

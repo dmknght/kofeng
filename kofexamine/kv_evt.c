@@ -765,7 +765,6 @@ void evt_load(struct view *v)
 	 * from that API is the refusal, and a viewer that joined across a
 	 * dropped chunk would show a script that was never submitted.
 	 */
-	v->evt_join_len = 0;
 	v->evt_text_len = 0;
 	v->evt_wide = 0;
 	v->evt_n_seg = 0;
@@ -819,7 +818,6 @@ void evt_load(struct view *v)
 				}
 				at += (size_t)h->head_size + tl;
 			}
-			v->evt_join_len = j.len;
 			v->evt_wide = kof_evt_text_is_wide(v->evt_join,
 							   j.len);
 			v->evt_text_len = kof_evt_text_of(v->evt_join, j.len,
@@ -971,8 +969,8 @@ void evt_load(struct view *v)
 					kof_scanner *sc2;
 
 					memset(&so, 0, sizeof so);
-					so.report_diag = 1;
 					so.heur_level = KOF_HEUR_LEVEL_MAX;
+					so.reader = 1;
 					sc2 = kscan_new(v->eng);
 					if (sc2) {
 						v->into_obj = (int)sel;

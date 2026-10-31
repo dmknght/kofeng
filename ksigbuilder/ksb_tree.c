@@ -473,7 +473,7 @@ static int tree_collect(const char *base, char (**srcs)[TREE_SRC_MAX],
 				continue;
 			/*
 			 * AND THE TAG SOURCES ARE DATA, not modules: files of
-			 * declarations the tools read (databases/tagsrc.h),
+			 * declarations the tools read (the tag catalog),
 			 * which no pack carries. Walked as modules they would
 			 * be compiled, and refused for naming no target.
 			 */
@@ -510,7 +510,9 @@ static int tree_collect(const char *base, char (**srcs)[TREE_SRC_MAX],
 		}
 	}
 	closedir(d);
-	qsort(*srcs, *n_srcs, TREE_SRC_MAX, tree_src_cmp);
+	/* A tree with no module source (a base of diagnoses alone) has a NULL list: qsort(NULL, 0) is undefined (audit_mem MEM-4). */
+	if (*n_srcs > 1u)
+		qsort(*srcs, *n_srcs, TREE_SRC_MAX, tree_src_cmp);
 	return 0;
 }
 
@@ -536,10 +538,15 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
 	size_t n_recs = 0;
 
 	snprintf(dpath, sizeof dpath, "%s/diagnoses", base);
+	/* THE CATALOG CHECK, FOR EVERY DIAGNOSE FIRST: the build below stops at the first error, and
+	 * this shows all of them (and the collisions between files, which no single build sees). */
+	if (ksb_catalog_check_dir(ksb, dpath, 1))
+		return 1;
 	dd = opendir(dpath);
 	while (dd && (de = readdir(dd)) != NULL) {
 		char in[4300], out[4320], *dot, **grown, **kgrown;
 		char *da[4], *us;
+		unsigned off;
 
 		if (de->d_name[0] == '.' || !ksb_is_c_source(de->d_name))
 			continue;
@@ -563,10 +570,13 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
 		da[1] = (char *)(size_t)"--diagnose";
 		da[2] = in;
 		da[3] = out;
+		off = ksb->diag.n_disabled;
 		if (ksb_diagnose_main(ksb, 4, da) != 0) {
 			closedir(dd);
 			return 1;
 		}
+		if (ksb->diag.n_disabled != off)
+			continue;       /* its variant was deleted: warned, no record, not in the pack */
 		grown = realloc(recs, (n_recs + 1u) * sizeof *recs);
 		if (grown)
 			recs = grown;
@@ -603,7 +613,8 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
  * module that misspells one reads an answer that is always no, and nothing
  * would say so. That is an ERROR.
  *
- * A diagnose nothing calls and that declares no disease is not a mistake in
+ * A diagnose nothing calls and that declares no disease and carries no catalog
+ * facts (family, variant, type, tag) is not a mistake in
  * the build but is one in the tree: the engine will not run it, which is the
  * point, but whoever wrote it should be told it does nothing yet. One that
  * declares a disease is read by the verdict (the diseases an object has make
@@ -611,6 +622,10 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
  *
  * Zero when no call is dangling.
  */
+/* KNOWN DEFECT CAT1-2 (2026-10-31, Inference) [sev L]: a diagnose left out of the pack because its variant was deleted is in no list this reads
+ * (only built ones are). Trigger: a module that calls kof_diag(NAME) of such a diagnose. Effect: reported as "which no source declares" and the
+ * build stops, though the owner wants the build to go on. Reproducer: none yet; no module in bases/ reads a diagnose by name today (R).
+ * Fix: keep the left-out names (ksb->diag, next to n_disabled) and read a call to one of them as a call to a diagnose that exists and is disabled. */
 static int tree_check_uses(const struct ksb_ctx *ksb, const char *base)
 {
 
@@ -700,7 +715,7 @@ int ksb_tree_main(struct ksb_ctx *ksb, int argc, char **argv)
 	/* Nothing at all - no module and no diagnose - is a tree with no content. A tree of
 	 * diagnoses alone is a database too (a set of fixtures, or the day a product ships
 	 * only the diagnoses). */
-	if (!built && !ksb->diag.n_built) {
+	if (!built && !ksb_diag_any(ksb)) {
 		fprintf(stderr, "ksigbuilder: no sources in %s\n", base);
 		return 2;
 	}

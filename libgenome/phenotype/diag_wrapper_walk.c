@@ -11,13 +11,8 @@
 int kgenome_diag_wrapper_push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint64_t x)
 {
 	if (*n == *cap) {
-		/* KNOWN DEFECT REV-D8k (2026-10-25, Inference) [sev L]: kgenome_diag_wrapper_push_u64 (diag_wrapper_walk.c)
-		 * doubles a uint32 capacity (call targets and syscall sites) with no overflow guard and no ledger charge. Trigger:
-		 * an object with 2^31 or more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so
-		 * only a host using the lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards
-		 * the doubling) or test cap against UINT32_MAX / 2 before doubling. */
-		uint32_t nc = *cap ? *cap * 2u : 256u;
-		uint64_t *nv = realloc(*v, (size_t)nc * sizeof **v);
+		uint32_t nc = kgenome_grow_cap(*cap, 256u);
+		uint64_t *nv = nc ? realloc(*v, (size_t)nc * sizeof **v) : NULL;
 
 		if (!nv)
 			return 0;
@@ -28,7 +23,7 @@ int kgenome_diag_wrapper_push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint
 	return 1;
 }
 
-/* The one kernel-entry test is kgenome_diag_kernel_entry (sweep_cand.c); how an instruction is
+/* The one kernel-entry test is kgenome_diag_kernel_entry (diag_sweep_cand.c); how an instruction is
  * put to it - `int 0x80` is the vector in the first operand - is kgenome_diag_wrapper_entry_test
  * (private header), for the walk's cell instruction and for a trace instruction alike. */
 int kgenome_diag_wrapper_is_kernel_entry(const struct kgenome_diag_wrapper_ctx *c, const struct kgenome_diag_wrapper_insn *in)
@@ -212,10 +207,10 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 	}
 	if (first) {
 		if (c->wk->n_ix == c->wk->cap_ix) {
-			uint32_t nc = c->wk->cap_ix ? c->wk->cap_ix * 2u : 1024u;
+			uint32_t nc = kgenome_grow_cap(c->wk->cap_ix, 1024u);
 			struct kgenome_diag_wrapper_index *nx;
 
-			if (!wtrace_charge(c->wk, (uint64_t)(nc - c->wk->cap_ix) * sizeof *nx)) {
+			if (!nc || !wtrace_charge(c->wk, (uint64_t)(nc - c->wk->cap_ix) * sizeof *nx)) {
 				trace_give_up(g);
 				return;
 			}
@@ -272,6 +267,10 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
  * x86's, and only x86's), and operands beyond the three a kgenome_cell_insn holds do not
  * exist. The sweep's cursor is answered by the same function (diag_wrapper_trace.c).
  */
+/* CONSOLIDATION DEC-1 (2026-10-30, M): KEEP (will be the single reader of instructions in address order, serving the trace where held; 5 callers:
+ * codemap, diag_elfimp, objctx xref feed, lineage, callnames). Gap: the trace is x86 only, so every other
+ * arch decodes each reader again. Better logic here than the others: one bounded run with stats (from_trace/decoded/skipped). Prove with: deccnt.c:
+ * x86-64 trace on vs off; ARM/MIPS have no trace (R). */
 void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 {
 	struct kgenome_diag_walk *wk = rq->wk;
@@ -288,11 +287,15 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 	uint64_t at = off, end;
 	unsigned i;
 	int pk_ok = 0;
+	int be;
 	int64_t delta;
 
 	if (!obj || !base || !fn || off >= size)
 		return;
 	end = n > size - off ? size : off + n;
+	/* The byte order of the words, as the cursor reads them (cursor.c: sp->be && !sp->code_le). This loop decoded every object little-endian: a MIPS-BE
+	 * `sw` (0xafc2000c) was read as a `jal` (CN-1, fixed). */
+	be = kgenome_obj_big_endian(obj) && !kgenome_obj_code_little_endian(obj);
 	delta = (int64_t)(va - off);
 	if (wk && wk->built && wk->has_trace && wk->tr && wk->base == base &&
 	    wk->size == size) {
@@ -311,6 +314,10 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 			}
 		}
 	}
+	/* KNOWN DEFECT CN-6 (2026-10-30, M) [sev M]: the same bytes are decoded again by every reader that holds no trace: on 19 x86-64 ELF decodes per offset are 2.02 (codemap alone), 3.02 (walk + codemap), 4.00 (full scan); target 1.0; the fourth reader is unidentified.
+	 * Trigger: any ELF scanned with all routes. Effect: work done twice or more (CLAUDE.md work-once), no wrong result.
+	 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (fix_consol, decode count per offset).
+	 * Fix: as DEC-1 (this routine is the single reader; codemap and the second pass adopt it or its product); find the fourth reader first. */
 	while (at < end) {
 		/* `nx` reads on from the record `pk` was taken from. */
 		while (pk_ok && pk.at < at) {           /* catch up with the run */
@@ -338,7 +345,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 		 */
 		{
 			uint64_t left = end - at;
-			uint32_t len = kgenome_cell_decode(obj->arch, 0, base + at,
+			uint32_t len = kgenome_cell_decode(obj->arch, be, base + at,
 						   left > UINT32_MAX ? UINT32_MAX
 								     : (uint32_t)left,
 						   at + (uint64_t)delta, &ci);
@@ -382,6 +389,11 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
  * fact about alignment and alignment is a decode. Hence one decode of the image,
  * kept (see THE DECODE, ONCE) and read from there.
  */
+/* CONSOLIDATION FUNC-5 (2026-10-30, R): KEEP (the entry evidence: direct call targets and the `jmp X` thunk at a function start, from the walk's one
+ * decode; 1 caller walk_ensure, which has 3). Better logic than byte search and than codemap: thunk targets (the comment above measured 20166 thunks a
+ * byte search misses) and a trace shared by later readers. Lacks: indirect calls through a register (cell_step has no register model), lea/adrp address-
+ * taken starts. Prove with: tests/lib/genome diag wrapper rows; evmix.c column E vs C (C 62.9% vs E 64.3% on x86-64, consistent with the thunks:
+ * Inference). */
 static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct kgenome_cell_cur k;
@@ -407,6 +419,10 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 			continue;
 		}
 		trace_put(c, seg, &in);
+		/* KNOWN DEFECT CN-5 (2026-10-30, M) [sev M]: pass_a makes an entry only of a DIRECT call target or a `jmp X` thunk, so what is called through a register is never an entry; the ARM mode is seeked as 0 (Thumb read as ARM, Inference).
+		 * Trigger: MIPS PIC (15350 indirect `jalr $t9` calls on 11 files), Thumb code. Effect: the walk is nearly blind on MIPS (15.7% of symtab starts with FDE, 0.5% by the walk); ARM precision 80.5%.
+		 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (fix_consol, entry walk vs symtab).
+		 * Fix: take the callee of `jalr $t9` from the GOT/relocation (static or loaded value) and track the Thumb bit; the stronger evidence is CN-4's. */
 		if (in.op == KGENOME_CELL_CALL && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
 		    in.target != KGENOME_BROKEN) {
 			if (!kgenome_diag_wrapper_push_u64(&c->wk->tgt, &c->wk->n_tgt, &c->wk->cap_tgt, in.target))

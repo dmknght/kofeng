@@ -2,13 +2,15 @@
  * codenotes.c - kof_codenotes_build. See codenotes.h for what a note is and why a scan never makes one.
  *
  * Names come from three places and only these: the symbol block (a function that starts at an offset), the relocation table (the symbol a module's
- * call is patched to), and the syscall vocabulary (a number's name). An address nothing names is shown as the address - `sub_<offset>` for an entry
+ * call is patched to), and the syscall vocabulary (a number's name). An address nothing names is shown as the address - `fcn_<offset>` for an entry
  * the code calls, `.L-<offset>` for a jump's landing - and never as a guess at what it is.
  */
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "../kofcore/tabgrow.h"
 #include <string.h>
 
 #include <kofmod/elf.h>
@@ -16,6 +18,7 @@
 #include <genotype/image/elf_image.h>
 #include <phenotype/codemap.h>
 
+#include "callnames.h"
 #include "codenotes.h"
 #include "genome_obj.h"
 #include "parsers/binaries/funcs.h"
@@ -33,6 +36,7 @@ struct nb {
 	const uint8_t *sym;
 	uint32_t sym_n;
 	kof_buf data;
+	const struct kgenome_callnames *names;
 	unsigned arch;
 	int format;
 };
@@ -70,13 +74,8 @@ static void note_add(struct nb *b, uint64_t at, unsigned kind, const char *fmt, 
 		b->pcap = nc;
 	}
 	if (o->n == b->cap) {
-		/* KNOWN DEFECT REV-D8f (2026-10-25, Inference) [sev L]: the note collector (codenotes.c) doubles a uint32 capacity
-		 * (notes) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of this kind
-		 * (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly). Reproducer:
-		 * none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against UINT32_MAX / 2
-		 * before doubling. */
-		uint32_t nc = b->cap ? b->cap * 2u : 256u;
-		struct kof_note *nv = realloc(o->v, (size_t)nc * sizeof *nv);
+		uint32_t nc = kof_cap_double(b->cap, 256u);
+		struct kof_note *nv = nc ? realloc(o->v, (size_t)nc * sizeof *nv) : NULL;
 
 		if (!nv) {
 			b->fail = 1;
@@ -116,12 +115,21 @@ static void func_name(const struct nb *b, uint64_t off, char *out, size_t cap)
 		kof_sym_name_at(b->sym, b->sym_n, b->funcs->v[i].value, (int)b->funcs->v[i].shndx, out, cap);
 }
 
-/* What a place is called: its symbol, else `sub_<offset>` when `entry` (the code calls it), else `.L<offset>`. */
+/* What a place is called: a function of the table by kof_func_name (its symbol, else `fcn_<offset>`: the ONE spelling, the CFG dialog's too); an entry the
+ * code calls that the table lacks by kof_fcn_name; else the jump label `.L-<offset>`, which is not a function and is spelled here. */
 static void place_name(const struct nb *b, uint64_t off, int entry, char *out, size_t cap)
 {
-	func_name(b, off, out, cap);
-	if (!out[0])
-		snprintf(out, cap, entry ? "sub_%llx" : ".L-%llx", (unsigned long long)off);
+	int i;
+
+	if (b->names && kof_callnames_name(b->names, b->data, KOF_CALLNAME_VIA_TARGET, off, out, cap))
+		return;
+	i = func_at(b->funcs, off);
+	if (i >= 0)
+		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, out, cap);
+	else if (entry)
+		kof_fcn_name(off, out, cap);
+	else
+		snprintf(out, cap, ".L-%llx", (unsigned long long)off);
 }
 
 static const char *kind_word(unsigned k)
@@ -161,6 +169,10 @@ static int reloc_name(const struct kgenome_elf_relocs *t, kof_buf d, const struc
 }
 
 /* The label rows: every function the table names, every entry the code calls, and every place a jump lands. */
+/* CONSOLIDATION FUNC-12 (2026-10-30, R): DROP the own entry rule (`entry |= kind == CALL`: a call target is a function, shown as fcn_<off>) -> read the
+ * function set of kgenome_diag_funcs_with_walk; a viewer decides nothing (rule 11). Better logic here that the keeper lacks: none verified; labels for
+ * jump landings (.L-<off>) are not function extents and stay a viewer-side naming of codemap places. Prove with: a stripped ELF: fcn_ rows vs the set
+ * entries; any call target that is not a set start is a disagreement. */
 static void add_places(struct nb *b)
 {
 	const struct kgenome_codemap *m = b->cm;
@@ -186,6 +198,7 @@ static void add_places(struct nb *b)
 		cnt = kgenome_codemap_to(m, r->to, &first);
 		for (j = 0; j < cnt; j++)
 			entry |= m->v[m->by_to[first + j]].kind == KGENOME_CM_CALL;
+		entry |= func_at(b->funcs, r->to) >= 0;     /* a table entry is a function whoever refers to it (add_branch says the same) */
 		func_name(b, r->to, nm, sizeof nm);
 		named = nm[0] != 0;
 		if (named)
@@ -245,6 +258,9 @@ static void add_branch(struct nb *b, const struct kgenome_codemap_ref *r, const 
 
 	if (reloc_name(rel, b->data, r, nm, sizeof nm))
 		note_add(b, r->at, KOF_NOTE_COMMENT, "-> %s", nm);
+	else if (b->names && (r->flags & KGENOME_CMF_INDIRECT) &&
+		 kof_callnames_name(b->names, b->data, KOF_CALLNAME_VIA_SITE, r->at, nm, sizeof nm))
+		note_add(b, r->at, KOF_NOTE_COMMENT, "-> %s", nm);
 	else if (r->to != KGENOME_BROKEN) {
 		place_name(b, r->to, r->kind == KGENOME_CM_CALL || func_at(b->funcs, r->to) >= 0, nm, sizeof nm);
 		note_add(b, r->at, KOF_NOTE_COMMENT, "-> %s%s", nm, loop);
@@ -261,7 +277,8 @@ static int note_cmp(const void *a, const void *c)
 }
 
 int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struct kgenome_func_set *funcs,
-			const uint8_t *sym, uint32_t sym_n, unsigned bits, struct kof_codenotes *out)
+			const uint8_t *sym, uint32_t sym_n, unsigned bits, const struct kgenome_callnames *names,
+			struct kof_codenotes *out)
 {
 	struct kgenome_obj gobj;
 	struct kgenome_codemap cm;
@@ -281,6 +298,10 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 		have_rel = 1;
 		rp = rel.n ? &rel : NULL;
 	}
+	/* CONSOLIDATION DEC-3 (2026-10-30, M): DROP the own codemap and relocation table -> adopt the engine's product (same as D18b below). Measured decode
+	 * calls per distinct offset on 19 static x86-64 ELF: codemap_build alone 2.02, walk + codemap 3.02, full diag scan RUN_ALL 4.00 (target ~1.0,
+	 * CLAUDE.md). Better logic here that the keeper lacks: the relocation table (KGENOME_CMF_RELOC) is passed in; the lineage build passes NULL. Prove
+	 * with: deccnt.c harness (fix_consol/h), -Wl,--wrap=kgenome_cell_decode counting calls per distinct address. */
 	/* KNOWN DEFECT D18b (2026-10-24, R) [sev L]: kof_codenotes_build builds its own codemap (and relocation table) of the
 	 * object; the lineage stage builds another (diag_lineage.c), so a decode sweep runs twice. Trigger: the examiner's
 	 * disasm panel on an object a scan already analysed. Effect: work done twice, and two tables of one fact.
@@ -298,6 +319,7 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 	b.sym = sym;
 	b.sym_n = sym_n;
 	b.data = data;
+	b.names = names;
 	b.arch = gobj.arch;
 	b.format = (int)gobj.format;
 	add_places(&b);

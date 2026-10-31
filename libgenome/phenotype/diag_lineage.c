@@ -64,14 +64,11 @@ const struct kgenome_codemap *kgenome_lineage_codemap(struct kgenome_lineage *L)
 		uint64_t bytes;
 
 		L->cm_done = 1;
-		/* KNOWN DEFECT WP9-F8 (2026-10-25, M) [sev M]: kgenome_lineage_codemap returns NULL on a failed
-		 * kgenome_codemap_build without noting the status. Trigger: allocation refused inside the code map build
-		 * called by the lineage stages. Effect: the map is missing, so are the links the lineage makes through it,
-		 * and the status stays OK (the note below is reached only on success). Reproducer:
-		 * tests/lib/genome/diag_bin_oom.c KNOWN-MISS F8. Fix: before `return NULL` call kgenome_diag_note(L->s,
-		 * L->cm.status ? L->cm.status : KGENOME_NOMEM). */
-		if (!kgenome_codemap_build(L->obj, L->base, L->size, NULL, &L->cm))
+		if (!kgenome_codemap_build(L->obj, L->base, L->size, NULL, &L->cm)) {
+			/* a refused build is a map that is missing, and so are the links made through it: said */
+			kgenome_diag_note(L->s, L->cm.status ? L->cm.status : KGENOME_NOMEM);
 			return NULL;
+		}
 		bytes = (uint64_t)L->cm.n * sizeof *L->cm.v + (uint64_t)L->cm.n_to * sizeof *L->cm.by_to;
 		/* the table is the object's own size and not capped; the ledger says whether the scan may keep it */
 		if (!kgenome_lineage_charge(L, bytes)) {
@@ -164,6 +161,10 @@ static int cmp_ext(const void *a, const void *b)
 }
 
 /* The function of the engine's set that holds `off`, or NULL. */
+/* CONSOLIDATION FUNC-13 (2026-10-30, R): KEEP (the one containing-function lookup over the set: first extent ending above `off`, safe when extents
+ * overlap; will move to funcs.c as kgenome_funcs_at). 1 caller here, 2 other lookups below duplicate it: diag_sweep.c func_at, kofexamine/kv_disasm.c
+ * dis_func_at (and codenotes.c func_at, exact start only). Prove with: overlapping extents (the two names of one address, funcs_finish) with an off
+ * inside the shorter one. */
 static const struct kgenome_func *engine_fn_at(const struct kgenome_func_set *fs, uint64_t off)
 {
 	const uint32_t lo = kof_first_ending_above_u64(fs->v, fs->n, sizeof *fs->v, offsetof(struct kgenome_func, off),
@@ -216,6 +217,10 @@ static uint64_t fn_va(const struct kgenome_lineage *L, uint64_t off)
 	return va == KGENOME_BROKEN && L->obj->format == KGENOME_FMT_ELF && kgenome_obj_elf(L->obj)->e_type == KGENOME_ELF_REL ? off : va;
 }
 
+/* CONSOLIDATION FUNC-7 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk (lineage then reads one list). Better logic here that the keeper lacks:
+ * completes a PE x64 .pdata set with call targets and builds the set of an x86 PE and of a relocatable object (fn_va identity); bounds extents by the
+ * code extents (PE sections) and cuts at the next engine function; drops starts inside an engine function (engine_fn_at). Entry walk is ELF only. Prove
+ * with: tests/lib/genome lineage PE rows; PE x64 with a leaf function (funcs_of vs lineage L->n_fn). */
 static int fns_build(struct kgenome_lineage *L)
 {
 	const struct kgenome_func_set *fs = kgenome_diag_funcs(L->s, L->obj);

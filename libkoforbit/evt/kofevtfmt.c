@@ -37,6 +37,21 @@ static void print_sanitised(FILE *out, const char *p, size_t n, size_t cap)
 	}
 }
 
+/*
+ * A string the SAMPLE chose (a path, an image, a command line, a key), printed
+ * so that it cannot drive the terminal: a control byte (ESC, CR, BEL, ...) is a
+ * dot. Bytes of 0x80 and up are kept, a UTF-8 path stays readable. print_sanitised
+ * above is for content, which is cut and shown as ASCII only.
+ */
+static void put_text(FILE *out, const char *s)
+{
+	for (; *s; s++) {
+		unsigned char c = (unsigned char)*s;
+
+		fputc((c < 0x20u || c == 0x7fu) ? '.' : (int)c, out);
+	}
+}
+
 /* The value's type, as the word winnt.h uses for it. */
 static const char *reg_type_name(uint8_t t)
 {
@@ -183,18 +198,12 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 }
 
 /* Render step: a process start: the image, and the command line on its own line. */
-/* KNOWN DEFECT WP12-24 (2026-10-24, M) [sev M]: kof_evt_render prints
- * object/image/cmdline with %s (render_proc_start and the other render steps).
- * Trigger: a path with ESC / CR chosen by the sample. Effect: it reaches the
- * terminal as written (AMSI and registry data are sanitised). Reproducer:
- * orbit_evt.c case_render_controls. Fix: one escaping put-string used by every
- * render step. */
 static void render_proc_start(const struct kof_evt *e, FILE *out)
 {
 	const char *cl = kof_evt_cmdline(e);
 
-	fprintf(out, "  ppid=%lu  %s", (unsigned long)e->ppid,
-	       kof_evt_image(e));
+	fprintf(out, "  ppid=%lu  ", (unsigned long)e->ppid);
+	put_text(out, kof_evt_image(e));
 	/*
 	 * On its own line and indented, because it is usually longer
 	 * than everything before it and because it is the line that
@@ -202,10 +211,10 @@ static void render_proc_start(const struct kof_evt *e, FILE *out)
 	 * what it was asked to do, and for every living-off-the-land
 	 * technique the second IS the event.
 	 */
-	if (*cl)
-		fprintf(out, "\n                                 cmd: %s",
-		       cl);
-	else if (e->flags & KOF_EF_CMDLINE_RACED)
+	if (*cl) {
+		fputs("\n                                 cmd: ", out);
+		put_text(out, cl);
+	} else if (e->flags & KOF_EF_CMDLINE_RACED)
 		fprintf(out, "  [cmd unread: process gone]");
 }
 
@@ -214,8 +223,10 @@ static void render_proc_detail(const struct kof_evt *e, FILE *out)
 {
 	const char *what = kof_evt_object(e);
 
-	if (*what)
-		fprintf(out, "  %s", what);
+	if (*what) {
+		fputs("  ", out);
+		put_text(out, what);
+	}
 	/* An attach names two processes and the second one is the
 	 * point - see kof_evt.actor_pid on this verb. */
 	if (e->verb == KOF_EVT_PROC_ATTACH && e->actor_pid)
@@ -258,8 +269,8 @@ static void render_file_write(const struct kof_evt *e, FILE *out)
 {
 	const struct kof_evt_file *f = kof_evt_as_file(e);
 
-	fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-	       kof_evt_object(e));
+	fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+	put_text(out, kof_evt_object(e));
 	/*
 	 * THE RANGE AND NOT JUST THE LENGTH. "wrote 64 bytes to hosts"
 	 * and "wrote 64 bytes at 0x1a2 in hosts" are a sentence and a
@@ -277,7 +288,8 @@ static void render_reg(const struct kof_evt *e, FILE *out)
 {
 	const struct kof_evt_reg *r = kof_evt_as_reg(e);
 
-	fprintf(out, "  %s", kof_evt_object(e));
+	fputs("  ", out);
+	put_text(out, kof_evt_object(e));
 	/*
 	 * WHETHER A CREATE CREATED ANYTHING. RegCreateKeyEx opens an
 	 * existing key as readily as it makes one, so an unmarked
@@ -339,7 +351,8 @@ static void render_net(const struct kof_evt *e, FILE *out)
 	 * and an unset address becomes meaningful again.
 	 */
 	if (e->verb == KOF_EVT_DNS_QUERY) {
-		fprintf(out, "  %s", kof_evt_object(e));
+		fputs("  ", out);
+		put_text(out, kof_evt_object(e));
 		if (!kof_evt_ip_is_unset(n->daddr))
 			fprintf(out, "  -> %s",
 				kof_evt_ip_str(n->daddr, ip, sizeof ip));
@@ -388,8 +401,10 @@ static void render_raw(const struct kof_evt *e, FILE *out)
 			fprintf(out, "  addr=0x%llx",
 				(unsigned long long)m->addr);
 	}
-	if (*kof_evt_object(e))
-		fprintf(out, "  %s", kof_evt_object(e));
+	if (*kof_evt_object(e)) {
+		fputs("  ", out);
+		put_text(out, kof_evt_object(e));
+	}
 }
 
 void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
@@ -433,12 +448,12 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		break;
 	}
 	case KOF_EVT_IMAGE_LOAD:
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
+		fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+		put_text(out, kof_evt_object(e));
 		break;
 	case KOF_EVT_IMAGE_UNLOAD:
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
+		fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+		put_text(out, kof_evt_object(e));
 		break;
 	/* Unreachable until type_of() learns the ids - kept so that typing
 	 * them is a one-line change there and not two. */
@@ -469,16 +484,16 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		render_amsi(e, out);
 		break;
 	case KOF_EVT_FILE_NEW:
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
+		fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+		put_text(out, kof_evt_object(e));
 		break;
 	case KOF_EVT_FILE_DELETE:
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
+		fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+		put_text(out, kof_evt_object(e));
 		break;
 	case KOF_EVT_FILE_RENAME:
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
+		fprintf(out, "  [%s] ", kof_loc_name(e->loc));
+		put_text(out, kof_evt_object(e));
 		break;
 	case KOF_EVT_FILE_WRITE:
 		render_file_write(e, out);

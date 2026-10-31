@@ -58,6 +58,11 @@
  * NO SILENT LIMIT. A budget that fires sets the status of the walk's stat and
  * counts what was not visited; nothing is dropped without a number.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #ifndef KGENOME_FNPRINT_H
 #define KGENOME_FNPRINT_H
 
@@ -238,13 +243,11 @@ struct kgenome_fnprint_stat {
 	uint32_t region_peak;
 	uint32_t n_region_over;         /* decided without reachability: the region or its edges did not fit */
 	uint32_t n_advised;             /* UNKNOWN functions a name, the layout or a shape called library: kept, weighed at w_advised */
-	uint32_t n_libwin;              /* functions library by their own windows */
 	uint32_t n_units, n_unit_funcs;
 	uint64_t n_insn;                /* decoded */
 	uint64_t unit_bytes;
 	uint64_t main_off;              /* KGENOME_BROKEN: none found */
 	uint64_t frontier_off;          /* KGENOME_BROKEN: none latched */
-	uint64_t scratch_bytes;         /* what the walk charged to the ledger */
 };
 
 /*
@@ -577,7 +580,6 @@ struct kgenome_fnprint_wctx {
 	uint32_t  policy, decide_pct;   /* enum kgenome_fnprint_retire_policy; the percent that decides a tag */
 	int       stop;                 /* the policy says: stop the pass */
 	uint64_t  n_lookup, n_search, n_credit, n_skip_dead, n_hot_repeat, n_dead_pairs, n_rebuild;
-	uint64_t  n_walked;             /* pairs examined by the equal-range walks (the cost of a hot key, in pairs) */
 	uint64_t  bytes;
 	uint64_t *rfilter;              /* the rebuilt filter once retirement shrank the live set (NULL: db's) */
 	uint64_t  rfilter_mask;
@@ -635,7 +637,6 @@ struct kgenome_fnprint_wpass_stat {
 	uint64_t n_flat;
 	uint64_t n_skip_chunks, skip_bytes;     /* chunks the statistics called data and skipped (opt-in) */
 	uint32_t n_bad_ext;             /* ranges that run past rq->n: skipped, the pass is incomplete and says so */
-	uint64_t bytes_in;              /* bytes of the ranges given */
 	uint64_t n_stop_bytes;          /* bytes not rolled because the policy stopped the pass */
 	uint32_t n_decided;             /* tags decided (retirement policies) */
 	int      stopped;
@@ -810,7 +811,6 @@ struct kgenome_fnprint_sel_stat {
 	uint64_t bytes_hashed;          /* bytes read to nominate duplicates (at most 48 per function) */
 	uint64_t bytes_compared;        /* length of the candidates compared to verify a nomination (an upper bound: a compare stops at the first difference) */
 	uint32_t n_dup_cap;             /* functions kept because DUP_TRIES candidates did not match: counted, never silent */
-	uint64_t scratch_bytes;
 };
 
 struct kgenome_fnprint_sel_req {

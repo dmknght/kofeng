@@ -23,7 +23,7 @@
 
 #include "dbkix.h"
 #include "dbcrc.h"
-#include <celllysis/mutation.h>   /* KGENOME_MUTATION_MIN_HASH, KGENOME_MUTATION_NORM_COUNT */
+#include <celllysis/mutation.h>   /* KGENOME_MUTATION_MIN_HASH */
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofplatform.h"
 
@@ -99,7 +99,7 @@ static int cmp_u64(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
-/* The classes of the blocks, and each block's: the (mask, norm, side) a window's call is
+/* The classes of the blocks, and each block's: the (mask, side) a window's call is
  * matched against. 0 and a status when there are more than a byte can name. */
 static int make_classes(const struct kof_kix_build_in *in, struct kof_kix_class *cls,
 			uint32_t *n_class, uint8_t *of_block)
@@ -109,20 +109,18 @@ static int make_classes(const struct kof_kix_build_in *in, struct kof_kix_class 
 	for (i = 0; i < in->n_blk; i++) {
 		const struct kof_mutation_block *b = &in->blk[i];
 
-		if (n && cls[last].mask == b->scan_mask && cls[last].norm == b->norm &&
-		    cls[last].side == b->side) {
+		if (n && cls[last].mask == b->scan_mask && cls[last].side == b->side) {
 			of_block[i] = (uint8_t)last;
 			continue;
 		}
 		for (j = 0; j < n; j++)
-			if (cls[j].mask == b->scan_mask && cls[j].norm == b->norm &&
-			    cls[j].side == b->side)
+			if (cls[j].mask == b->scan_mask && cls[j].side == b->side)
 				break;
 		if (j == n) {
 			if (n == KOF_KIX_MAX_CLASS)
 				return 0;
 			cls[n].mask = b->scan_mask;
-			cls[n].norm = b->norm;
+			cls[n].norm = 0;       /* the on-disk byte that was the normalizer; the loader refuses any other value */
 			cls[n].side = b->side;
 			cls[n].pad = 0;
 			n++;
@@ -256,9 +254,9 @@ static int validate_blocks(const struct kof_kix_build_in *in, uint64_t *np, uint
 	for (i = 0; i < in->n_blk; i++) {
 		const struct kof_mutation_block *b = &in->blk[i];
 
-		if (b->n_hash < KGENOME_MUTATION_MIN_HASH || b->n_hash > KOF_MUTATION_MAX_HASH ||
+		if (b->n_hash < kgenome_mutation_block_min(b->scan_mask) || b->n_hash > KOF_MUTATION_MAX_HASH ||
 		    b->first_hash > in->n_pool || b->n_hash > in->n_pool - b->first_hash ||
-		    b->norm >= KGENOME_MUTATION_NORM_COUNT) {
+		    b->norm != 0) {
 			*status |= KOF_KIX_B_BAD_BLOCK;
 			return 0;
 		}
@@ -741,7 +739,7 @@ static int kix_parse(struct kof_kix *k, const uint8_t *meta, uint64_t meta_len,
 	}
 	memcpy(k->cls, meta + h->off_class, (size_t)h->n_class * sizeof k->cls[0]);
 	for (i = 0; i < h->n_class; i++)
-		if (k->cls[i].norm >= KGENOME_MUTATION_NORM_COUNT) {
+		if (k->cls[i].norm != 0) {
 			why_set(why, why_len, "index class names a normaliser that does not exist");
 			return 0;
 		}
@@ -1082,7 +1080,7 @@ int kof_kix_block(const struct kof_kix *k, uint32_t b, struct kof_mutation_block
 	}
 	io_count(io, sizeof *out);
 	/* Checked at load, and the file may have changed since: the slice is bounded again. */
-	if (out->n_hash < KGENOME_MUTATION_MIN_HASH || out->n_hash > KOF_MUTATION_MAX_HASH ||
+	if (out->n_hash < kgenome_mutation_block_min(out->scan_mask) || out->n_hash > KOF_MUTATION_MAX_HASH ||
 	    out->first_hash > k->n_pool || out->n_hash > k->n_pool - out->first_hash) {
 		if (io)
 			io->err |= KOF_KIX_E_IO;

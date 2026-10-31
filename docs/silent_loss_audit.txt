@@ -108,7 +108,7 @@ arm64 L1_N (1<<11) first-level index | arm64.c:107 | c | tests/lib/genome/genoty
 cfg.max_insn / KGENOME_EMU_DEF_MAX_INSN (2M) | emu_private.h:42 | a | tests/lib/genome/budget_status.c, emu_limits.c | REPORTS(STOP_BUDGET)
 cfg.max_pages / KGENOME_EMU_DEF_PAGES; page_add NULL | emu.h:52, emu_mem.c:59,104; emu_api.c:27 (clamp 1<<22 pages) | a | silent_loss_genome.c emu_pages | PASS(a guest past max_pages ends in STOP_FAULT, not a clean exit); the 1<<22-page clamp is a table width far above any budget the callers pass (c)
 KGENOME_EMU_IDLE (4M insn without a new page) | emu.h:144 | a | tests/lib/genome/emu_stall.c, emu_progress.c | REPORTS(STOP_STALLED -> KGENOME_TRUNCATED, diag_emu_image.c:246)
-KGENOME_EMU_QUIET (off), KGENOME_EMU_OEP_QUIET, OEP_MIN_PAGES, IDLE_CREDIT_MAX | emu.h:179, emu_private.h:51,63,67 | c | tests/lib/genome/emu_progress.c, emu_oep_stale.c | NOT-EVIDENCE(progress heuristics: they decide when a run is "finished", the stop reason is the signal)
+KGENOME_EMU_OEP_QUIET, OEP_MIN_PAGES, IDLE_CREDIT_MAX | emu.h:179, emu_private.h:51,63,67 | c | tests/lib/genome/emu_progress.c, emu_oep_stale.c | NOT-EVIDENCE(progress heuristics: they decide when a run is "finished", the stop reason is the signal)
 KGENOME_EMU_NULL_CALLS (256) | emu_private.h:48 (emu_interp.c:847) | a | - | REPORTS(past it the call faults: fault_kind "call0", STOP_FAULT)
 KGENOME_EMU_UNHANDLED_MAX (64) | emu_private.h:71 (emu_winapi.c:808) | a | - | REPORTS(past it the run ends with detail "unhandled raise ..."; kgenome_emu_unhandled() counts them)
 WIN_EXC_MAX_DEPTH (4) | emu_win_exc.c:56,343 | a | - | REPORTS(the fault is not dispatched: begin returns 0 and the run ends as an unhandled fault, STOP_FAULT)
@@ -173,7 +173,7 @@ rel_span_too_sparse (function with < 2 nodes is not run) / rel_span_no_producer 
 apply_reloc (only R_X86_64 types 1,2,10,11 applied to the emulated image) | diag_emu_image.c:150-176 | c | - | NOT-EVIDENCE([Inference] other relocation types (GOTPCREL etc.) leave holes in the image: not a size limit, and not seen in the LKM corpus the route is for)
 KGENOME_DIAG_REL_STACK/SLACK/PERCPU/BASE (address-space layout) | diag_emu_private.h:103-114 | c | - | NOT-EVIDENCE(layout constants of the synthetic image)
 KGENOME_DIAG_H_* / KGENOME_DIAG_RUN_* / DOUBT | diag_scan.h:96-276, diag_scan.c:126 | c | - | NOT-EVIDENCE(bit flags)
-KGENOME_DIAG_EMU_FD0 / FORCE_* / DIAG_EMU_FILL (disabled) | diag_emu_private.h:177-180, diag_emu_steer.c:115 | c | - | NOT-EVIDENCE(emulated handle numbering; DIAG_EMU_FILL is compiled out with KGENOME_DIAG_EMU_FILL_ON 0)
+KGENOME_DIAG_EMU_FD0 / FORCE_* | diag_emu_private.h | c | - | NOT-EVIDENCE(emulated handle numbering)
 
 == SECTION 2: libuncoat (tests/lib/uncoat/silent_loss_uncoat.c) ==
 LIMIT_NAME | file:line | class a/b/c | test name or - | status
@@ -314,7 +314,7 @@ EMU_INSN_MAX (256M) / EMU_INSN_MIN / EMU_INSN_PER_BYTE | objctx_emu.c:86-87,104 
 EMU_IDLE_DECLARED (128M stall ceiling), EMU_PAGES_MIN/MAX (4/128 MiB) | objctx_emu.c:90,124-125 | a/b? | - | UNTESTED(budget stops first on a small object, so the stall/page path was not isolated; [Inference] unknown whether a pages-exhausted run is flagged)
 EMU_EXTRA_MAX (32) | objctx_int.h:237; objctx_emu_gather.c:504,634 | a | - | REPORTS(oc_scan_capped LIMIT at gather.c:519,656) UNTESTED(needs an emulated run writing >32 regions)
 KOF_EMU_RGN_MAX (64) | scan_types.h:79; objctx_emu_gather.c:680,692 | c | - | NOT-EVIDENCE([Inference] cannot bind: 1 image + EMU_EXTRA_MAX 32 = 33 < 64)
-EMU_MAX_PACKER_DEPTH (1) | scan_int.h:280; scan_unpack.c:289; scan_heur.c:58 | b | - | UNTESTED([Inference] a payload inside >=3 packer layers gets stance BANNED, and script forms are skipped at pdepth>1, with no flag; needs nested real packers). Candidate loss, severity unknown
+EMU_MAX_PACKER_DEPTH (1) | scan_int.h:280; scan_unpack.c:289; scan_forms.c | b | - | UNTESTED([Inference] a payload inside >=3 packer layers gets stance BANNED, and script forms are skipped at pdepth>1, with no flag; needs nested real packers). Candidate loss, severity unknown
 KOF_SRC_MAX_REGIONS (16) | objsrc.h:127; objctx_child_sink.c:130,152; objsrc.c:204; scan_norm.c:618 | a/c | - | REPORTS(sink.c:152 oc_scan_capped LIMIT when a declared section table needs >16 regions) UNTESTED; objsrc.c:204 and scan_norm.c:618 are NOT-EVIDENCE([Inference] a format has <=7 region kinds)
 KOF_SRC_LABEL_MAX (96) | objsrc.h:76; objctx_child.c:397,481 | c | - | NOT-EVIDENCE(cosmetic label cut)
 DECL_SEC_MAX (96) | objctx_child_image.c:37 oc_section | a | tests/unit/engine_defect2.c e6_full | PASS(the module gets -1 AND oc_scan_capped LIMIT: it was -1 alone, and a module that ignores it built a child without the sections it declared; the table's calloc refusal is said the same way)
@@ -399,7 +399,7 @@ kof_name_span uint16 at/n | kofcore/kofresult.h:~74 | c | - | NOT-EVIDENCE(name 
 KOF_MAX_INFECTED (16) | kofcore/kofresult.h:273, scanners/scan.c:614, scanners/objctx.c:1285 | a | - | UNTESTED(needs a compiled module; the 17th span sets KOF_BROKEN_LIMIT via oc_scan_capped, objctx.c:1285: reported)
 KOF_MAX_REGIONS (16) vs KOF_SRC_MAX_REGIONS (16) | kofcore/kofresult.h:284, scanners/objsrc.h:127, scan_pipeline.c:150 | c | - | NOT-EVIDENCE(equal bounds; the producer side says when it is over: objctx_child_sink.c:152)
 KOF_DIAG_REPORT_NODES (32) | kofcore/kofresult.h:307 | c | - | NOT-EVIDENCE(_Static_assert >= KOF_DB_MAX_DIAG_NODE, scanners/objctx_diag.c:1282)
-kof_result.verdict_incomplete | kofcore/kofresult.h, scanners/scan_verdict.c kof_scan_verdict | a | diag_ledger_e2e.c, silent_loss_sites.c | REPORTS(verdict_incomplete + res->broken = KOF_BROKEN_LIMIT when nothing else was found, sx_verdict_gap)
+kof_result.verdict_incomplete | kofcore/kofresult.h, scanners/scan_verdict.c kof_scan_verdict_cat | a | diag_ledger_e2e.c, silent_loss_sites.c | REPORTS(verdict_incomplete + res->broken = KOF_BROKEN_LIMIT when nothing else was found, sx_verdict_gap)
 KOF_SYM_MAX_RECS (4096) / KOF_SYM_ABS_MAX_RECS (65534) | kofcore/kofmod/kofsym.h:286,302 | a | caps_syms.c (existing) | REPORTS(header `truncated` byte; flows into kof_synd_result.incomplete when a diagnose needed the symbol; [Inference] a rule reading the block directly has no flag - flag_readers.c)
 KOF_SYM_NAME_MAX (4096) | kofcore/kofmod/kofsym.h:85 | a | caps_syms.c (existing) | REPORTS(KOF_SYM_R_NAMECUT)
 KOF_SYM_ABS_MAX_POOL (8 MiB) | kofcore/kofmod/kofsym.h:309 | a | - | UNTESTED(needs an 8 MiB symbol pool image; same truncated byte as KOF_SYM_MAX_RECS per its comment)
@@ -417,12 +417,11 @@ KOFSIG_ABI_MIN / KOF_PACK_MINOR / KOFENG_MINOR | kofabi.h:71, dbcore.h:199, kofe
 KOF_TARGET_SIZE_MIN | kofcore/kofmod/kofdeclare.h:120 | c | scan_logic.c (existing) | NOT-EVIDENCE(a rule's own size plausibility minimum)
 KOF_DEBUG buffers (kofdebug.c) | kofcore/kofdebug.c | c | - | NOT-EVIDENCE(debug notes)
 kofhash / kofentropy / heapsort / kofcmp | kofcore/ | c | - | NOT-EVIDENCE(no size limits found; grep for MAX/CAP/UINT_MAX patterns)
-kofheur.c score clamp (+-0x7fffffff) | detectors/heur/kofheur.c:252 | c | - | NOT-EVIDENCE(saturating arithmetic of a centinat score)
 verdict.c compose buffers / kverdict_target / kof_verdict_make reason | verdictor/verdict.c | c | api_engine_verdict.c | NOT-EVIDENCE(display strings with snprintf cut, callers size them; the finding itself is made; see kof_finding.name row for the one that reaches a result; kof_verdict_make says a cut trace with disease_total/diag_total)
 verdict.c m->cap (grow by doubling) | verdictor/verdict.c:352 | c | - | NOT-EVIDENCE(heap growth, no ceiling; failure is OOM)
 kof_verdict_make trace bound (KOF_VERDICT_TRACE = 16 ids of diseases and of diagnoses) | verdictor/verdict.c | a | verdict_diseases.c the_cut_is_said | REPORTS(disease_total / diag_total beside n_disease / n_diag)
 analyzers/genome_obj.c | libkofeng/analyzers/genome_obj.c | c | - | NOT-EVIDENCE(field copies, no limits)
-kof_db_collect_packs / db_map_packs refusing a bad pack | databases/dbloader_packs.c:~535, dbloader.c:~262 | a | pack_load.c (existing policy test) | REPORTS(stderr names the pack and the reason; kdb_records shows the total; no counter of refused packs)
+kof_db_collect_packs / db_map_packs refusing a bad pack | databases/dbloader_packs.c:~535, dbloader.c:~262 | a | pack_load.c (existing policy test) | REPORTS(stderr names the pack and the reason; kdb_diagnoses and kdb_unpackers show the totals; no counter of refused packs)
 OBSERVATION (not a limit row, outside area, no test) | libkofeng/scanners/objctx_diag.c:112-120 | b | - | UNTESTED(oc_graph allocates sc->diag.gr ONCE (guarded by `if (!sc->diag.gr)`), sized by the FIRST object's node count; a later object with more nodes makes kof_diag_graph_build refuse (need > cap, kofdiag.c:812), gr_n = 0 and kof_diag_graph(np) answers NULL with no signal. [Inference] from reading; no shipped module or test reads the graph block, so it is unconfirmed; the scanner area owner should check)
 
 == SECTION 2: the fnprint window stream and the similarity matcher at scale (tests/lib/genome/fnprint_pred.c, fnprint_scale_synth.c, tests/unit/fnprint_scale_cur.c) ==
@@ -469,7 +468,7 @@ diagnose gate working set not allocated ("a closed gate") | objctx_diag.c:1082 |
 sc_apihash product NULL for a valid PE / NOMEM | objctx_diag.c:943 | b | silent_oom_sweep.c pe stager | PASS(OC_LIMIT)
 view structs of an identified/inherited image (scan_facts.c: object left raw/unidentified on a failed malloc, three sites) | libkofeng/scanners/scan_facts.c:187,313,364 | b | silent_oom_sweep.c (fixtures with views) | PASS(OC_LIMIT)
 normaliser view: boundary table / image description / symbol block allocations | libkofeng/scanners/scan_norm.c (+ norm_work.cut) | a | silent_oom_sweep.c 'pe with a narrowing view' and 'big-endian mips elf' (fix_engine2: the padded-ELF fixture made no view, these two do) | PASS(OC_LIMIT). The sweep found NINE refused allocations of the CHILD TABLE (kid_grow) that changed the answer with every signal at zero: oc_kid_push says oc_scan_broken, the sticky stop of the open stage, which nothing copies into the object's result from the normaliser's stage; norm_send_child now says oc_scan_limit when the view was not made
-the verdict's disease list (kof_scan_verdict: list not allocated) and NOMEM inside the analysis the verdict read | libkofeng/scanners/scan_verdict.c | b | silent_oom_sweep.c pe stager (46 of the 51 sites) | PASS(OC_LIMIT, broken=LIMIT over a finding already made, for NOMEM only: the budget statuses keep their old meaning; verdict_incomplete says it for an object that has a finding)
+the verdict's disease list (kof_scan_verdict_cat: list not allocated) and NOMEM inside the analysis the verdict read | libkofeng/scanners/scan_verdict.c | b | silent_oom_sweep.c pe stager (46 of the 51 sites) | PASS(OC_LIMIT, broken=LIMIT over a finding already made, for NOMEM only: the budget statuses keep their old meaning; verdict_incomplete says it for an object that has a finding)
 script pass buffer / normalisation buffer / paused emulator report | libkofeng/scanners/objctx_script.c:372,457, objctx_emu.c:340 | b | - | PASS(OC_LIMIT) UNTESTED(no script fixture in the sweep)
 PE import module name cut at DLL_ROOM (16) in the "dll!func" record, cut byte left 0 | libkofeng/analyzers/parsers/binaries/pe/pe_sym.c:~165 | b | silent_cuts_names.c | PASS(KOF_SYM_R_NAMECUT set on the record: kof_sym_name_cut)
 LEFT (not in the files this agent may edit, or needing a decision)

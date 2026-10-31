@@ -36,7 +36,7 @@ static int sk_db_make(struct sk_db *s, uint64_t seed, struct kgenome_ledger *led
 		s->len[f] = 200u + hk_below(&g, SK_MAXL - 200u);
 		for (j = 0; j < s->len[f]; j++)
 			s->body[f][j] = (uint8_t)hk_next(&g);
-		n = kgenome_mutation_minhash(s->body[f], s->len[f], KGENOME_MUTATION_RAW, s->pool + s->n_blk * 32u);
+		n = kgenome_mutation_minhash(s->body[f], s->len[f], s->pool + s->n_blk * 32u);
 		s->blk[s->n_blk].first = s->n_blk * 32u;
 		s->blk[s->n_blk].n = n;
 		s->blk[s->n_blk].side = KGENOME_MUTATION_SIDE_USER;

@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * verdictor/verdict.c - how a verdict is spelled: the verdict word, the target, the type
  * and behaviour and what the engine says about how it was reached.
  *
@@ -17,6 +23,7 @@
 #include "../kofcore/koftypes.h"
 #include "../kofcore/kofcore.h"   /* kof_hash_bytes */
 #include "verdict.h"
+#include "catnames.h"
 #include "../kofcore/kofmod/kofsig.h"
 #include "../kofcore/kofmod/script.h"
 #include "../kofcore/kofmod/kofdiagtree.h"   /* KOF_DIAG_DISEASE_LEN */
@@ -218,6 +225,44 @@ static int dis_leads(const struct kof_verdict_disease *a, const struct kof_verdi
 	return a->id < b->id;
 }
 
+/* The types in `mask` (kof_maltype values), by name, joined with '+' in the order the types are listed; cut where `cap` ends. */
+static void types_reason(uint32_t mask, char *rest, size_t cap)
+{
+	uint32_t t;
+	size_t at = 0;
+
+	rest[0] = 0;
+	for (t = 0; t < (uint32_t)KOF_MALTYPE_COUNT; t++) {
+		const char *w;
+
+		if (!((mask >> t) & 1u))
+			continue;
+		w = kof_maltype_name(t);
+		if (at + strlen(w) + 2u >= cap)
+			break;
+		if (at)
+			rest[at++] = '+';
+		memcpy(rest + at, w, strlen(w));
+		at += strlen(w);
+		rest[at] = 0;
+	}
+}
+
+/* The finding carries what it was made of: the diseases and the diagnoses, each bounded by KOF_VERDICT_TRACE with its total. */
+static void fill_trace(const struct kof_verdict_in *in, struct kof_finding *f)
+{
+	uint32_t i;
+
+	f->disease_total = in->n_dis;
+	f->n_disease = in->n_dis < KOF_VERDICT_TRACE ? in->n_dis : KOF_VERDICT_TRACE;
+	for (i = 0; i < f->n_disease; i++)
+		f->disease[i] = in->dis[i].id;
+	f->diag_total = in->n_diag;
+	f->n_diag = in->n_diag < KOF_VERDICT_TRACE ? in->n_diag : KOF_VERDICT_TRACE;
+	for (i = 0; i < f->n_diag; i++)
+		f->diag[i] = in->diag[i];
+}
+
 /*
  * THE OBJECT'S VERDICT, from the diseases it has. Detection is one disease or more
  * (an OR: the first is enough). The name is a function of the diseases' type and
@@ -240,8 +285,7 @@ void kof_verdict_make(const struct kof_verdict_in *in, struct kof_finding *f)
 {
 	const struct kof_verdict_disease *lead = NULL;
 	char family[KOF_DIAG_DISEASE_LEN + 2u], rest[96];
-	uint32_t i, others = 0, t;
-	size_t at = 0;
+	uint32_t i, others = 0;
 
 	memset(f, 0, sizeof *f);
 	f->fmt = in->fmt;
@@ -262,31 +306,46 @@ void kof_verdict_make(const struct kof_verdict_in *in, struct kof_finding *f)
 		if (in->dis[i].type < (uint8_t)KOF_MALTYPE_COUNT &&
 		    in->dis[i].type != f->type)
 			others |= 1u << in->dis[i].type;
-	rest[0] = 0;
-	for (t = 0; t < (uint32_t)KOF_MALTYPE_COUNT; t++) {
-		const char *w;
-
-		if (!((others >> t) & 1u))
-			continue;
-		w = kof_maltype_name(t);
-		if (at + strlen(w) + 2u >= sizeof rest)
-			break;
-		if (at)
-			rest[at++] = '+';
-		memcpy(rest + at, w, strlen(w));
-		at += strlen(w);
-		rest[at] = 0;
-	}
+	types_reason(others, rest, sizeof rest);
 	kof_verdict_name(f, family, rest[0] ? rest : NULL);
 
-	f->disease_total = in->n_dis;
-	f->n_disease = in->n_dis < KOF_VERDICT_TRACE ? in->n_dis : KOF_VERDICT_TRACE;
-	for (i = 0; i < f->n_disease; i++)
-		f->disease[i] = in->dis[i].id;
-	f->diag_total = in->n_diag;
-	f->n_diag = in->n_diag < KOF_VERDICT_TRACE ? in->n_diag : KOF_VERDICT_TRACE;
-	for (i = 0; i < f->n_diag; i++)
-		f->diag[i] = in->diag[i];
+	fill_trace(in, f);
+}
+
+/* The one spelling of a catalog id in a name or a listing: its first 8 hex digits (the catalog file-name rule). */
+void kverdict_catalog_word(char *out, size_t cap, uint64_t id)
+{
+	snprintf(out, cap, "%08x", (unsigned)(id >> 32));
+}
+
+/*
+ * THE VERDICT OF AN OBJECT WHOSE MATCHED DIAGNOSES CARRY CATALOG FACTS (family, variant, tag, one type each), decided by
+ * kof_vdecide over kof_vmatch's numbers. The name keeps the form of kof_verdict_make and changes what the family slot holds:
+ *
+ *   <Infected>#<target>/<Type>:<Family>.<Letter>!Diagnose?<other types>        level VARIANT   (Infected#ELF-x64/Botnet:Mirai.A!Diagnose)
+ *   <Infected>#<target>/<Type>:<tag name>!Diagnose?<other types>               level TAG       (no variant matched)
+ *
+ * The slot is made by kof_catnames_slot (catnames.h), the ONE place that spells a catalog id: with `names` (the catalogs the host gave
+ * the engine) the names, and for an id they do not hold, or with no names at all, the 8 hex digits of the id with the prefixes F, V and
+ * T ("F8f3a51c2.V2c61b7e0", "T5d1c0e79"). A pack carries ids and not names. The diseases of the old model, when diagnoses declared
+ * any, stay in the finding's trace (disease[]).
+ */
+void kof_verdict_make_cat(const struct kof_verdict_in *in, const struct kof_verdict_cat *cat, const struct kof_catnames *names,
+			  struct kof_finding *f)
+{
+	char family[KOF_CATNAMES_SLOT_MAX], rest[96];
+
+	memset(f, 0, sizeof *f);
+	f->fmt = in->fmt;
+	f->arch = in->arch;
+	f->engine = (uint8_t)KOF_ENGINE_DIAGNOSE;
+	f->verdict = (uint8_t)KOF_VERDICT_INFECTED;
+	f->type = (uint8_t)(cat->type < (uint8_t)KOF_MALTYPE_COUNT ? cat->type : (uint8_t)KOF_MALTYPE_COUNT);
+	kof_catnames_slot(names, cat->family_id, cat->level == (uint32_t)KOF_VCAT_VARIANT ? cat->variant_id : 0u, cat->tag_id,
+			  family, sizeof family);
+	types_reason(cat->other_types & ~(1u << (cat->type & 31u)), rest, sizeof rest);
+	kof_verdict_name(f, family, rest[0] ? rest : NULL);
+	fill_trace(in, f);
 }
 
 /* ---- one verdict per top-level file ---------------------------------------- */
@@ -370,6 +429,13 @@ struct kverdict_file *kverdict_filemap_find(kverdict_filemap *m, const char *fil
 	return m->idx[slot] ? &m->arr[m->idx[slot] - 1u] : NULL;
 }
 
+struct kverdict_file *kverdict_filemap_of_file(kverdict_filemap *m, const char *object)
+{
+	if (!object || strstr(object, KOF_OBJ_SEP))
+		return NULL;
+	return kverdict_filemap_find(m, object, strlen(object));
+}
+
 /* Find the file's entry, creating it if new. NULL only on OOM. */
 static struct kverdict_file *file_get(kverdict_filemap *m, const char *file, size_t flen)
 {
@@ -425,6 +491,10 @@ static struct kverdict_file *file_get(kverdict_filemap *m, const char *file, siz
 	return e;
 }
 
+/* KNOWN DEFECT MEM-3 (2026-10-29, M) [sev L]: an object nothing examined (!res->examined) gets an entry of its own and the map keeps every entry until the host frees it. Trigger: a scan of a
+ * directory of many files no module targets (text, scripts). Effect: ~150 bytes a file in the HOST's memory, outside the engine's cap and unbounded by it (40000 .txt files: kofscanner maxrss 12 -> 18 MB);
+ * the summary needs only the count and the names come back only under -v. Reproducer: 40000 one-line .txt files, kofscanner --no-cache --scan-files <dir>, read VmHWM. Fix: a counter `skipped` in the map
+ * for an unexamined file when the host passed keep_clean = 0 (the entry only when it is wanted for a listing); it moves what kofscanner prints for those files, so the owner decides. */
 struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *m, const char *object,
 					    const struct kof_result *res,
 					    int keep_clean)

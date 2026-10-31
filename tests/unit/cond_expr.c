@@ -69,8 +69,10 @@ static void reading(void)
 	/* A matcher the condition does not name is not negated either. */
 	CK(cnd_neg(&E, &c, 2) == 0);
 
-	/* A run of "!" is one negation. */
+	/* P-4: every "!" negates (the file is written with all of them), so "!!1" is two negations and "!!!1" is one. */
 	snprintf(c.expr, sizeof c.expr, "%s", "!!1");
+	CK(cnd_uses(&E, &c, 0) && cnd_neg(&E, &c, 0) == 0);
+	snprintf(c.expr, sizeof c.expr, "%s", "!!!1");
 	CK(cnd_uses(&E, &c, 0) && cnd_neg(&E, &c, 0) == 1);
 
 	/* "!(" negates a GROUP the author typed. The list does not own it, so
@@ -102,12 +104,12 @@ static void rewriting(void)
 	cnd_drop_matcher(&E, &c, 4);
 	EQ(c.expr, "");
 
-	/* The join is the condition's own operator, not whatever was typed. */
+	/* P-1: only the id acted on changes; the join that was typed stays (a list whose op differs is not rewritten to it). */
 	memset(&c, 0, sizeof c);
 	c.op = 1;
 	snprintf(c.expr, sizeof c.expr, "%s", "1&!2&3");
 	cnd_drop_matcher(&E, &c, 2);
-	EQ(c.expr, "1|!2");
+	EQ(c.expr, "1&!2");
 }
 
 static void switching(void)
@@ -409,191 +411,194 @@ static void tabs_tags_names(void)
 	CK(E.dr.n_grp == 2);
 	CK(grp_tab(&E, 0) == DT_BLOCKS && grp_tab_count(&E, DT_BLOCKS) == 2u);
 	CK(grp_tab_count(&E, DT_PATTERNS) == 0u);
-	cnd_add(&E);
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
-	CK(E.dr.cnd[0].tab == DT_BLOCKS);
+	/* Each block matcher is a unit with its OWN type and tag: unticking one
+	 * keeps the other's, and no condition exists on this tab. */
+	E.dr.grp[0].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	snprintf(E.dr.grp[0].tag, sizeof E.dr.grp[0].tag, "%s", "flood");
+	E.dr.grp[1].utype = (uint8_t)(KOF_MALTYPE_TROJAN + 1);
+	snprintf(E.dr.grp[1].tag, sizeof E.dr.grp[1].tag, "%s", "c2");
+	CK(E.dr.n_cnd == 0);
 	blk_set_picked(&E, 1, 0);
 	CK(E.dr.n_grp == 1 && grp_of_block(&E, 1) == MAX_GROUP &&
 	   grp_of_block(&E, 2) == 0);
-	EQ(E.dr.cnd[0].expr, "1");
+	CK(E.dr.grp[0].utype == (uint8_t)(KOF_MALTYPE_TROJAN + 1) &&
+	   !strcmp(E.dr.grp[0].tag, "c2"));
 	blk_set_picked(&E, 2, 0);
 	CK(E.dr.n_grp == 0);
-	EQ(E.dr.cnd[0].expr, "");
 }
 
 /* ---- tags, built in memory ------------------------------------------------- */
 
-static struct kof_tagset TS;
-
-/* An entity of the set; its id is the one the set generated. */
-static uint64_t make(uint8_t kind, const char *name, const uint64_t *typ,
-		     uint32_t n_typ, uint64_t fam)
+static void set_tag(char *dst, size_t cap, const char *name)
 {
-	struct kof_tagent p;
-	const struct kof_tagent *e;
-	const char *why = NULL;
-	uint32_t i;
-
-	memset(&p, 0, sizeof p);
-	p.kind = kind;
-	snprintf(p.name, sizeof p.name, "%s", name);
-	for (i = 0; i < n_typ; i++)
-		p.typ[p.n_typ++] = typ[i];
-	if (fam) {
-		p.has_fam = 1;
-		p.fam = fam;
-	}
-	e = kof_tagset_add(&TS, &p, NULL, NULL, &why);
-	CK(e != NULL);
-	return e ? e->id : 0;
-}
-
-/* Two types, a family and four tags - two of them named alike - and the editor
- * pointed at them. */
-static uint64_t t_botnet, t_trojan, t_rootkit, f_mirai;
-static uint64_t g_flood, g_c2, g_flood2, g_bare;
-
-static void tags_build(void)
-{
-	uint64_t a[2];
-
-	kof_tagset_free(&TS);
-	kof_tagset_init(&TS);
-	snprintf(TS.dir, sizeof TS.dir, "build/kof_cond_expr_unused");
-	t_botnet = make(KOF_TAGSRC_K_TYPE, "botnet", NULL, 0, 0);
-	t_trojan = make(KOF_TAGSRC_K_TYPE, "trojan", NULL, 0, 0);
-	t_rootkit = make(KOF_TAGSRC_K_TYPE, "rootkit", NULL, 0, 0);
-	f_mirai = make(KOF_TAGSRC_K_FAMILY, "mirai", NULL, 0, 0);
-	a[0] = t_botnet;
-	g_flood = make(KOF_TAGSRC_K_TAG, "flood", a, 1, 0);
-	a[0] = t_trojan;
-	a[1] = t_botnet;
-	g_c2 = make(KOF_TAGSRC_K_TAG, "c2", a, 2, f_mirai);
-	a[0] = t_rootkit;
-	g_flood2 = make(KOF_TAGSRC_K_TAG, "flood", a, 1, 0);
-	g_bare = make(KOF_TAGSRC_K_TAG, "bare", NULL, 0, 0);
-	E.tags = &TS;
+	snprintf(dst, cap, "%s", name);
 }
 
 /*
- * THE TAG IS THE DIAGNOSE'S OWN, AND SO IS EVERY WORD OF ITS FILE NAME:
- * `<first type>_<family>_<tag>_<id>.c`, the type the first the tag declares,
- * the family the tag's, nothing from the draft's shared Type or Family. A part
- * a tag has not got is left out without a doubled underscore, an untagged
- * diagnose has `<tag>` in its place, and the id runs per prefix over the
- * conditions and then the block matchers no condition uses.
+ * EVERY WORD OF A UNIT'S FILE NAME IS THE UNIT'S OWN OR THE HEADER'S:
+ * `<type>_<family>_<tag>_<id>.c`, the type the unit's (utype is a kof_maltype
+ * value plus one, 0 is not chosen), the family the header's, the tag the
+ * unit's. A type or tag not chosen is written `<type>` / `<tag>`, no family
+ * leaves no doubled underscore, and the id runs per prefix over the conditions
+ * and then the block matchers.
  */
 static void names_and_tags(void)
 {
-	char fn[160], lab[160];
-
-	tags_build();
-	memset(&E.dr, 0, sizeof E.dr);
-	E.tags = &TS;
-	E.dr.maltype = KOF_MALTYPE_ROOTKIT;             /* shared: no effect */
-	snprintf(E.dr.family, sizeof E.dr.family, "%s", "gafgyt");
-	E.dr.n_cnd = 4;
-	E.dr.cnd[0].tag = g_flood;
-	E.dr.cnd[1].tag = g_c2;
-	E.dr.cnd[2].tag = g_flood;
-	E.dr.cnd[3].tag = g_bare;
-	cnd_file_name(&E, 0, fn, sizeof fn);
-	EQ(fn, "botnet_flood_01.c");
-	cnd_file_name(&E, 1, fn, sizeof fn);
-	EQ(fn, "trojan_mirai_c2_01.c");
-	cnd_file_name(&E, 2, fn, sizeof fn);
-	EQ(fn, "botnet_flood_02.c");          /* running per prefix */
-	cnd_file_name(&E, 3, fn, sizeof fn);
-	EQ(fn, "bare_01.c");                  /* no type and no family */
-	CK(strstr(fn, "__") == NULL);
-	E.dr.maltype = KOF_MALTYPE_BOTNET;
-	E.dr.family[0] = 0;
-	cnd_file_name(&E, 1, fn, sizeof fn);
-	EQ(fn, "trojan_mirai_c2_01.c");       /* the shared Type and Family */
-	E.dr.cnd[3].tag = 0;
-	cnd_file_name(&E, 3, fn, sizeof fn);
-	EQ(fn, "<tag>_01.c");
-	E.dr.cnd[3].tag = 0x7777;             /* a tag that is not there */
-	cnd_file_name(&E, 3, fn, sizeof fn);
-	EQ(fn, "<tag>_01.c");
-	cnd_file_name(&E, 7, fn, sizeof fn);
-	EQ(fn, "");
-
-	/* The Tag cell: the name, and what tells two tags of one name apart. */
-	tag_label(&E, g_c2, lab, sizeof lab);
-	EQ(lab, "c2");
-	tag_label(&E, g_flood, lab, sizeof lab);
-	EQ(lab, "flood (types botnet)");
-	tag_label(&E, g_flood2, lab, sizeof lab);
-	EQ(lab, "flood (types rootkit)");
-	tag_label(&E, 0, lab, sizeof lab);
-	EQ(lab, "");
-	EQ(tag_name(&E, g_c2), "c2");
-	EQ(tag_name(&E, 0x7777), "");
-	E.tags = NULL;
-	EQ(tag_name(&E, g_c2), "");
-	cnd_file_name(&E, 0, fn, sizeof fn);
-	EQ(fn, "<tag>_01.c");
-	E.tags = &TS;
-}
-
-/*
- * A BLOCK MATCHER NO CONDITION USES IS A DIAGNOSE OF ITS OWN, with its own tag,
- * and its file name runs on from the conditions'. One a condition names takes
- * the condition's tag and is not standalone.
- */
-static void standalone_matchers(void)
-{
 	char fn[160];
 
-	tags_build();
 	memset(&E.dr, 0, sizeof E.dr);
-	E.tags = &TS;
-	E.dr.n_grp = 4;
-	E.dr.grp[0].kind = (uint8_t)GRP_KIND_STR;       /* a string matcher */
-	E.dr.grp[1].kind = E.dr.grp[2].kind = E.dr.grp[3].kind =
-		(uint8_t)GRP_KIND_SIM;
-	CK(!grp_standalone(&E, 0));           /* only a block matcher is */
-	CK(grp_standalone(&E, 1) && grp_standalone(&E, 2) &&
-	   grp_standalone(&E, 3));
-	CK(!grp_standalone(&E, 9));
-	/* A condition over the Blocks tab's matcher 1 (grp 1) takes it. */
-	E.dr.n_cnd = 1;
-	E.dr.cnd[0].tab = DT_BLOCKS;
-	E.dr.cnd[0].tag = g_flood;
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
-	CK(!grp_standalone(&E, 1) && grp_standalone(&E, 2));
-	/* Two standalone ones: the first shares the condition's prefix. */
-	E.dr.grp[2].tag = g_flood;
-	E.dr.grp[3].tag = g_flood;
+	snprintf(E.dr.family, sizeof E.dr.family, "%s", "Gafgyt");
+	E.dr.n_cnd = 4;
+	E.dr.cnd[0].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	set_tag(E.dr.cnd[0].tag, sizeof E.dr.cnd[0].tag, "flood");
+	E.dr.cnd[1].utype = (uint8_t)(KOF_MALTYPE_TROJAN + 1);
+	set_tag(E.dr.cnd[1].tag, sizeof E.dr.cnd[1].tag, "c2");
+	E.dr.cnd[2].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	set_tag(E.dr.cnd[2].tag, sizeof E.dr.cnd[2].tag, "flood");
+	E.dr.cnd[3].utype = 0;
+	set_tag(E.dr.cnd[3].tag, sizeof E.dr.cnd[3].tag, "bare");
+	cnd_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "botnet_gafgyt_flood_01.c");
+	cnd_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "trojan_gafgyt_c2_01.c");
+	cnd_file_name(&E, 2, fn, sizeof fn);
+	EQ(fn, "botnet_gafgyt_flood_02.c");   /* running per prefix */
+	cnd_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "<type>_gafgyt_bare_01.c");    /* type not chosen */
+	/* No family: nothing is left in its place and no underscore doubles. */
+	E.dr.family[0] = 0;
 	cnd_file_name(&E, 0, fn, sizeof fn);
 	EQ(fn, "botnet_flood_01.c");
-	grp_file_name(&E, 2, fn, sizeof fn);
-	EQ(fn, "botnet_flood_02.c");
-	grp_file_name(&E, 3, fn, sizeof fn);
-	EQ(fn, "botnet_flood_03.c");
-	grp_file_name(&E, 1, fn, sizeof fn);
-	EQ(fn, "");                           /* not standalone: no name */
-	E.dr.grp[3].tag = 0;
-	grp_file_name(&E, 3, fn, sizeof fn);
-	EQ(fn, "<tag>_01.c");
-	/* A tag change is a change of the draft. */
-	E.dr.saved_hash = draft_hash(&E);
-	E.dr.grp[3].tag = g_c2;
-	CK(draft_hash(&E) != E.dr.saved_hash);
+	CK(strstr(fn, "__") == NULL);
+	E.dr.cnd[3].tag[0] = 0;
+	E.dr.cnd[3].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	cnd_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "botnet_<tag>_01.c");         /* tag not chosen */
+	cnd_file_name(&E, 7, fn, sizeof fn);
+	EQ(fn, "");
 }
 
 /*
- * EACH TAB NUMBERS ITS OWN MATCHERS FROM 1, AND A CONDITION NAMES ONLY ITS
- * OWN TAB'S. Two Patterns matchers then two Blocks ones: the first Blocks
- * matcher is 1, a number past the end of a tab is refused, and removing a
- * matcher renumbers its own tab and no other.
+ * THE UNIT RULE: a PATTERNS CONDITION is a unit and a BLOCKS MATCHER is a unit; nothing else is (a string
+ * matcher is part of the conditions that name it). The list (draft_units) is the one the draw, the hit zones,
+ * the file names, the preview and the writer read. Why the old tests missed the Blocks-condition shape (a
+ * block matcher a condition named lost its cells, and a Graphs condition took an id and was never written):
+ * (b) no test mixed a Blocks condition or a Graphs one with a written one of the same prefix.
  */
+static int has_unit(const struct draft_unit *u, uint32_t n, int is_grp, uint32_t idx)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (!u[i].is_grp == !is_grp && u[i].idx == idx)
+			return 1;
+	return 0;
+}
+
+static void unit_list(void)
+{
+	struct draft_unit u[DRAFT_UNIT_MAX];
+	char fn[160];
+	uint32_t n;
+
+	/* One string matcher, two block matchers, no condition: the two block matchers are the units. */
+	memset(&E.dr, 0, sizeof E.dr);
+	snprintf(E.dr.family, sizeof E.dr.family, "%s", "Mirai");
+	E.dr.n_grp = 3;
+	E.dr.grp[0].kind = (uint8_t)GRP_KIND_STR;
+	E.dr.grp[1].kind = E.dr.grp[2].kind = (uint8_t)GRP_KIND_SIM;
+	E.dr.grp[1].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	set_tag(E.dr.grp[1].tag, sizeof E.dr.grp[1].tag, "flood");
+	E.dr.grp[2].utype = (uint8_t)(KOF_MALTYPE_TROJAN + 1);
+	set_tag(E.dr.grp[2].tag, sizeof E.dr.grp[2].tag, "c2");
+	n = draft_units(&E, u, DRAFT_UNIT_MAX);
+	CK(n == 2u && u[0].is_grp && u[0].idx == 1 && u[1].is_grp && u[1].idx == 2);
+	CK(u[0].utype == (uint8_t)(KOF_MALTYPE_BOTNET + 1) && !strcmp(u[0].tag, "flood"));
+	CK(draft_unit_count(&E) == 2u);
+	CK(draft_units_on_tab(&E, DT_BLOCKS, u, DRAFT_UNIT_MAX) == 2u);
+	CK(draft_units_on_tab(&E, DT_PATTERNS, u, DRAFT_UNIT_MAX) == 0u);
+	CK(draft_units_on_tab(&E, DT_GRAPHS, u, DRAFT_UNIT_MAX) == 0u);
+	CK(draft_unit_find(&E, 1, 0) == -1);                 /* a string matcher is no unit */
+	CK(draft_unit_find(&E, 1, 1) == 0 && draft_unit_find(&E, 1, 2) == 1);
+	grp_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "");
+	grp_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "botnet_mirai_flood_01.c");
+	grp_file_name(&E, 2, fn, sizeof fn);
+	EQ(fn, "trojan_mirai_c2_01.c");
+
+	/* A condition over the string matcher: the output order is the condition, then the block matchers, and the
+	 * running id counts over both within one prefix. */
+	cnd_add(&E);
+	E.dr.cnd[0].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	set_tag(E.dr.cnd[0].tag, sizeof E.dr.cnd[0].tag, "flood");
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
+	n = draft_units(&E, u, DRAFT_UNIT_MAX);
+	CK(n == 3u && !u[0].is_grp && u[0].idx == 0 && u[1].idx == 1 && u[2].idx == 2);
+	CK(draft_units_on_tab(&E, DT_PATTERNS, u, DRAFT_UNIT_MAX) == 1u && !u[0].is_grp);
+	CK(draft_units_on_tab(&E, DT_BLOCKS, u, DRAFT_UNIT_MAX) == 2u && u[0].is_grp);
+	cnd_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "botnet_mirai_flood_01.c");
+	grp_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "botnet_mirai_flood_02.c");
+	/* A block matcher is never part of a condition: naming it is refused, and no edit brings it in. */
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
+	CK(cnd_foreign(&E, &E.dr.cnd[0]) == 3ul);
+	CK(!cnd_uses(&E, &E.dr.cnd[0], 1) && !cnd_uses(&E, &E.dr.cnd[0], 2));
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
+	cnd_drop_matcher(&E, &E.dr.cnd[0], 1);
+	cnd_negate_matcher(&E, &E.dr.cnd[0], 1);
+	EQ(E.dr.cnd[0].expr, "1");
+	cnd_swap_matcher(&E, 0, 0, 1);
+	EQ(E.dr.cnd[0].expr, "1");
+	cnd_swap_matcher(&E, 0, 1, 0);
+	EQ(E.dr.cnd[0].expr, "1");
+	/* Both blocks stay units whatever the condition says: the matcher's pair is its own and never hidden. */
+	CK(has_unit(u, draft_units(&E, u, DRAFT_UNIT_MAX), 1, 1) && has_unit(u, 3u, 1, 2));
+}
+
+/* Removing a block matcher renumbers nothing in a condition and every other matcher keeps its own type and tag;
+ * removing a string matcher renumbers the conditions that name the matchers above it. */
+static void matcher_removal(void)
+{
+	struct draft_unit u[DRAFT_UNIT_MAX];
+	char fn[160];
+
+	memset(&E.dr, 0, sizeof E.dr);
+	snprintf(E.dr.family, sizeof E.dr.family, "%s", "Mirai");
+	E.dr.n_grp = 4;
+	E.dr.grp[0].kind = E.dr.grp[1].kind = (uint8_t)GRP_KIND_STR;
+	E.dr.grp[2].kind = E.dr.grp[3].kind = (uint8_t)GRP_KIND_SIM;
+	E.dr.grp[2].utype = (uint8_t)(KOF_MALTYPE_BOTNET + 1);
+	set_tag(E.dr.grp[2].tag, sizeof E.dr.grp[2].tag, "flood");
+	E.dr.grp[3].utype = (uint8_t)(KOF_MALTYPE_TROJAN + 1);
+	set_tag(E.dr.grp[3].tag, sizeof E.dr.grp[3].tag, "c2");
+	cnd_add(&E);
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
+	grp_remove(&E, 2);                                   /* a block matcher: the condition is untouched */
+	EQ(E.dr.cnd[0].expr, "1&2");
+	CK(E.dr.n_grp == 3 && draft_units(&E, u, DRAFT_UNIT_MAX) == 2u && u[1].is_grp && u[1].idx == 2);
+	EQ(E.dr.grp[2].tag, "c2");
+	CK(E.dr.grp[2].utype == (uint8_t)(KOF_MALTYPE_TROJAN + 1));
+	grp_file_name(&E, 2, fn, sizeof fn);
+	EQ(fn, "trojan_mirai_c2_01.c");
+	grp_remove(&E, 0);                                   /* a string matcher: "1&2" loses 1 and 2 becomes 1 */
+	EQ(E.dr.cnd[0].expr, "1");
+	CK(E.dr.n_grp == 2 && E.dr.grp[1].utype == (uint8_t)(KOF_MALTYPE_TROJAN + 1) && !strcmp(E.dr.grp[1].tag, "c2"));
+	/* Conditions are numbered by position. */
+	cnd_add(&E);
+	cnd_add(&E);
+	cnd_label(&E, 2, fn, sizeof fn);
+	EQ(fn, "3.");
+	cnd_label(&E, 0, fn, sizeof fn);
+	EQ(fn, "1.");
+}
+
+/* EACH TAB NUMBERS ITS OWN MATCHERS FROM 1, and a condition names the Patterns ones only. */
 static void tab_numbers(void)
 {
 	static struct mtn_block blk[2];
-	char fn[160], out[64];
-	struct cond c;
+	char out[64];
 
 	memset(&E.dr, 0, sizeof E.dr);
 	E.dr.blk = blk;
@@ -603,72 +608,24 @@ static void tab_numbers(void)
 	CK(grp_loc(&E, 0) == 1 && grp_loc(&E, 1) == 2);
 	CK(grp_loc(&E, 2) == 1 && grp_loc(&E, 3) == 2);
 	CK(grp_loc(&E, 9) == 0);
-	/* Which tab is open renumbers nothing. */
-	E.dr.tab = DT_BLOCKS;
+	E.dr.tab = DT_BLOCKS;                                /* which tab is open renumbers nothing */
 	CK(grp_loc(&E, 2) == 1);
 	E.dr.tab = DT_PATTERNS;
 	CK(grp_loc(&E, 2) == 1);
+	CK(grp_tab_count(&E, DT_PATTERNS) == 2u && grp_tab_count(&E, DT_BLOCKS) == 2u);
 
-	/* A Blocks condition's "1" is the first Blocks matcher (2 in the
-	 * list), and it does not name the Patterns matcher that is first in
-	 * the list. */
-	memset(&c, 0, sizeof c);
-	c.tab = DT_BLOCKS;
-	snprintf(c.expr, sizeof c.expr, "%s", "1&!2");
-	CK(cnd_uses(&E, &c, 2) && cnd_uses(&E, &c, 3));
-	CK(!cnd_uses(&E, &c, 0) && !cnd_uses(&E, &c, 1));
-	CK(cnd_neg(&E, &c, 3) == 1 && cnd_neg(&E, &c, 2) == 0);
-	CK(cnd_foreign(&E, &c) == 0);
-	E.dr.cnd[0] = c;
 	E.dr.n_cnd = 1;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&!2");
+	CK(cnd_uses(&E, &E.dr.cnd[0], 0) && cnd_uses(&E, &E.dr.cnd[0], 1));
+	CK(!cnd_uses(&E, &E.dr.cnd[0], 2) && !cnd_uses(&E, &E.dr.cnd[0], 3));
+	CK(cnd_neg(&E, &E.dr.cnd[0], 1) == 1 && cnd_neg(&E, &E.dr.cnd[0], 0) == 0);
+	CK(cnd_foreign(&E, &E.dr.cnd[0]) == 0);
 	cnd_canon(&E, 0, out, sizeof out);
 	EQ(out, "1&!2");
-
-	/* A reference past the tab's own list is refused: matcher 3 exists in
-	 * the list but is not on the Blocks tab. */
-	snprintf(c.expr, sizeof c.expr, "%s", "1&3");
-	CK(cnd_foreign(&E, &c) == 4ul);
-	CK(!cnd_uses(&E, &c, 0) && !cnd_uses(&E, &c, 1));
-	snprintf(c.expr, sizeof c.expr, "%s", "0");
-	CK(cnd_foreign(&E, &c) != 0);
-	/* And no edit can bring another tab's matcher in. */
-	snprintf(c.expr, sizeof c.expr, "%s", "1");
-	cnd_drop_matcher(&E, &c, 0);
-	EQ(c.expr, "1");
-	cnd_negate_matcher(&E, &c, 1);
-	EQ(c.expr, "1");
-	E.dr.cnd[0] = c;
-	cnd_swap_matcher(&E, 0, 2, 0);
-	EQ(E.dr.cnd[0].expr, "1");
-	cnd_swap_matcher(&E, 0, 0, 2);
-	EQ(E.dr.cnd[0].expr, "1");
-	cnd_swap_matcher(&E, 0, 2, 3);
-	EQ(E.dr.cnd[0].expr, "2");
-
-	E.dr.n_decl = 0;
-
-	/* Removing the first Patterns matcher renumbers Patterns conditions
-	 * and leaves a Blocks condition's numbers alone. */
-	memset(&E.dr.cnd, 0, sizeof E.dr.cnd);
-	E.dr.n_cnd = 2;
-	E.dr.cnd[0].tab = DT_PATTERNS;
-	E.dr.cnd[1].tab = DT_BLOCKS;
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
-	snprintf(E.dr.cnd[1].expr, sizeof E.dr.cnd[1].expr, "%s", "1&2");
-	grp_remove(&E, 0);
-	EQ(E.dr.cnd[0].expr, "1");
-	EQ(E.dr.cnd[1].expr, "1&2");
-	CK(E.dr.n_grp == 3 && grp_loc(&E, 0) == 1 && grp_loc(&E, 1) == 1);
-
-
-	/* Conditions are numbered within their own tab. */
-	memset(&E.dr, 0, sizeof E.dr);
-	E.dr.n_cnd = 3;
-	E.dr.cnd[1].tab = DT_BLOCKS;
-	cnd_label(&E, 2, fn, sizeof fn);
-	EQ(fn, "2.");
-	cnd_label(&E, 1, fn, sizeof fn);
-	EQ(fn, "1.");
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&3");
+	CK(cnd_foreign(&E, &E.dr.cnd[0]) == 4ul);            /* only two string matchers exist */
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "0");
+	CK(cnd_foreign(&E, &E.dr.cnd[0]) != 0);
 }
 
 int main(void)
@@ -682,10 +639,10 @@ int main(void)
 	block_indices();
 	tabs_tags_names();
 	names_and_tags();
-	standalone_matchers();
 	tab_numbers();
+	unit_list();
+	matcher_removal();
 
-	kof_tagset_free(&TS);
 	printf("condition expressions: read, rewrite, switch, canon, "
 	       "view inputs, the operator word, block indices, tabs, "
 	       "tags, names and per-tab numbers%s\n",

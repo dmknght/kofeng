@@ -13,6 +13,7 @@
 #include "pe/pe_parse.h"
 #include "funcs.h"
 #include "../scripts/script_sym.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -211,4 +212,23 @@ void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value,
 		if (j)
 			return;
 	}
+}
+
+void kof_fcn_name(uint64_t off, char *out, size_t cap)
+{
+	if (cap)
+		snprintf(out, cap, "fcn_%08llx", (unsigned long long)off);
+}
+
+int kof_func_name(const struct kgenome_func *f, const uint8_t *blk, uint32_t n, char *out, size_t cap)
+{
+	if (!cap)
+		return 0;
+	out[0] = 0;
+	if (f && blk)
+		kof_sym_name_at(blk, n, f->value, (int)f->shndx, out, cap);
+	if (out[0])
+		return 1;
+	kof_fcn_name(f ? f->off : 0u, out, cap);
+	return 0;
 }

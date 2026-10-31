@@ -77,7 +77,16 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 		return 0;       /* no lexer for the kind: nothing is guessed */
 
 	*b = kof_src_buf(sc->cur.src);
-	if (!b->p || !b->n || b->n > sc->ledger.obj_cap || b->n > 0xffffffffu)
+	/*
+	 * A SCRIPT OVER THE OBJECT CAP IS NOT FORMED OR FOLDED, AND THE OBJECT SAYS SO: a webshell
+	 * padded past the cap would otherwise hide every decoded layer behind a clean answer
+	 * (BE-8; scan_norm.c's norm_fits says the same for a view).
+	 */
+	if (b->p && b->n && (b->n > sc->ledger.obj_cap || b->n > 0xffffffffu)) {
+		oc_scan_limit(sc);
+		return 0;
+	}
+	if (!b->p || !b->n)
 		return 0;
 	*psc = sc;
 	return 1;

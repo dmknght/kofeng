@@ -1,5 +1,5 @@
-/* arm64_private.h - the layout of the AArch64 decode tables. Shared by arm64.c and
- * arm64_tab.c, and by nobody else. */
+/* arm64_private.h - the layout of the AArch64 decode tables. Shared by arm64.c,
+ * arm64_tab.c and the generator of the lookup (tools/genotype/arm_index_gen.c), and by nobody else. */
 #ifndef KGENOME_GENOTYPE_ARM64_PRIVATE_H
 #define KGENOME_GENOTYPE_ARM64_PRIVATE_H
 
@@ -36,6 +36,12 @@ struct kgenome_arm64_node {
 
 extern const struct kgenome_arm64_node kgenome_arm64_top;
 extern const struct kgenome_arm64_node *const kgenome_arm64_nodes[];
+/* The lookup on the top 11 bits of a word (arm64_l1_tab.c, written by tools/genotype/arm_index_gen.c): the identity every word
+ * with those top bits has, or KGENOME_ARM64_L1_MORE when it depends on the lower bits. */
+#define KGENOME_ARM64_L1_SHIFT 21
+#define KGENOME_ARM64_L1_N (1u << (32 - KGENOME_ARM64_L1_SHIFT))
+#define KGENOME_ARM64_L1_MORE 0xffffu
+extern const uint16_t kgenome_arm64_l1[KGENOME_ARM64_L1_N];
 /* name and attributes, one per identity */
 extern const char *const kgenome_arm64_names[];
 extern const uint8_t kgenome_arm64_lsk[];

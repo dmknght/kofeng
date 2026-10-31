@@ -10,6 +10,7 @@
 #include "kofview.h"
 #include "kv_table.h"
 #include "kv_dash_dialog.h"
+#include "kv_popup.h"
 
 static const char kv_dd_close[] = "[ Close ]";
 #define KV_DD_CLOSE_W ((int)sizeof kv_dd_close - 1)
@@ -112,14 +113,7 @@ void kv_dd_place(const struct kv_dd_in *in, struct kv_dd_geo *g)
 
 	g->left += in->dx;
 	g->top += in->dy;
-	if (g->left + g->w - 1 > in->cols)
-		g->left = in->cols - g->w + 1;
-	if (g->left < 1)
-		g->left = 1;
-	if (g->top + g->h - 1 > in->rows)
-		g->top = in->rows - g->h + 1;
-	if (g->top < 2)
-		g->top = 2;
+	kv_box_fit(&g->top, &g->left, g->h, g->w, 2, in->rows, in->cols);
 	g->dx = g->left - l0;
 	g->dy = g->top - t0;
 }
@@ -244,4 +238,61 @@ int kv_dd_grab_at(const struct kv_dd_geo *g, int y, int x)
 int kv_dd_close_at(const struct kv_dd_geo *g, int y, int x)
 {
 	return g->ok && g->close_y >= 0 && y == g->close_y && x >= g->close_x0 && x <= g->close_x1;
+}
+
+const struct kv_dd_limits kv_dd_catalog_limits = { 69, 12, KV_DD_CATALOG_WIDTH_MAX, KV_DD_CATALOG_HEIGHT_MAX };
+
+void kv_dd_content_size(int widest, uint32_t n_row, const char *add_label, const struct kv_dd_limits *lim, int *w, int *h)
+{
+	int btn = (int)strlen(add_label) + 4 + (int)strlen("[ Save ]") + 2 + (int)strlen("[ Discard ]");
+
+	widest = btn > widest ? btn : widest;
+	widest = widest < lim->min_w ? lim->min_w : widest;
+	*w = widest + 6;                    /* the frame, the margin and the scroll bar column */
+	*h = (int)n_row + 2 + 2 < lim->min_h ? lim->min_h : (int)n_row + 2 + 2;   /* a row each, a blank, the buttons, the frame */
+	if (*w > lim->max_w)
+		*w = lim->max_w;
+	if (*h > lim->max_h)
+		*h = lim->max_h;
+}
+
+uint32_t kv_dd_buttons(const struct kv_dd_geo *g, const char *add_label, int dirty, struct kv_dd_btn out[KV_DD_BTN_COUNT])
+{
+	const char *label[KV_DD_BTN_COUNT] = { add_label, "[ Save ]", "[ Discard ]" };
+	int len[KV_DD_BTN_COUNT], i, y, right, need;
+	uint32_t n;
+
+	if (!g->ok || g->body_rows < 3)
+		return 0;
+	for (i = 0; i < (int)KV_DD_BTN_COUNT; i++)
+		len[i] = (int)strlen(label[i]);
+	y = g->body_y0 + g->body_rows - 1;
+	need = 2 + len[0] + 2 + len[1] + 2 + len[2] + 2;
+	n = g->body_cols >= need ? KV_DD_BTN_COUNT : g->body_cols >= len[0] + 2 ? 1u : 0u;
+	right = g->body_x0 + g->body_cols - 2;
+	for (i = 0; i < (int)n; i++) {
+		out[i].id = (enum kv_dd_btn_id)i;
+		out[i].label = label[i];
+		out[i].y = y;
+		out[i].enabled = i == (int)KV_DD_BTN_ADD || dirty;
+	}
+	if (n)
+		out[0].x0 = g->body_x0 + 2;
+	if (n == KV_DD_BTN_COUNT) {
+		out[KV_DD_BTN_DISCARD].x0 = right - len[KV_DD_BTN_DISCARD] + 1;
+		out[KV_DD_BTN_SAVE].x0 = out[KV_DD_BTN_DISCARD].x0 - 2 - len[KV_DD_BTN_SAVE];
+	}
+	for (i = 0; i < (int)n; i++)
+		out[i].x1 = out[i].x0 + len[i] - 1;
+	return n;
+}
+
+int kv_dd_btn_at(const struct kv_dd_btn *b, uint32_t n, int y, int x)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (b[i].enabled && y == b[i].y && x >= b[i].x0 && x <= b[i].x1)
+			return (int)b[i].id;
+	return -1;
 }

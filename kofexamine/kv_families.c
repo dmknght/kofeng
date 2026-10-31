@@ -23,26 +23,50 @@
  * the same dlg_hold starts its drag.
  */
 
-/* The width of the tick menu: "[x] " and the longest type. */
-#define FAM_MENU_W 16
-#define FAM_MENU_COLS 2         /* the type menu is a grid of two columns */
-#define FAM_WHEEL_ROWS 3
-#define FAM_WHEEL_COLS 8
-/* What the small dialogs are made of; fam_dlg_size derives their one size from these and nothing else. */
-#define FAM_TICK_COLS 2         /* the tick grid: columns, filled down the first and then the next */
-#define FAM_TICK_CELL 14        /* "[x] Hacktool" and a gap */
-#define FAM_TICK_GAP 2
+/* What the small dialogs are made of; fam_dlg_size derives their one size from these and the shared form (kv_form.h). */
 #define FAM_FIELD_COLS 24       /* the name field (names are 1..63 characters; the field scrolls) */
 #define FAM_COMMENT_COLS 40     /* the comment field (up to KOF_FAMCAT_COMMENT_MAX characters; the field scrolls) */
-#define FAM_ERR_COLS 32         /* the widest error line (the texts of kof_famcat_status_text fit) */
 static const char fam_label_name[] = "Name    ";       /* the three labels are one width so the fields line up */
 static const char fam_label_variant[] = "Variant ";
 static const char fam_label_comment[] = "Comment ";
 static const char fam_label_types[] = "Malware types";
-static const char fam_label_ok[] = "[ OK ]";
-static const char fam_label_cancel[] = "[ Cancel ]";
-static const char fam_label_delete[] = "[ Delete ]";
-static const char fam_label_reuse[] = "Reuse a deleted name";
+static const char fam_label_names[] = "Reuse a deleted name";
+
+/* The typing filters and the library's rules, as the three fields use them. */
+static int name_accept(int k)
+{
+	return kof_name_char(k);
+}
+
+static int say_status(const struct kv_fam_ui *u, enum kof_famcat_status st, char *err, size_t cap)
+{
+	kv_fam_error_text(&u->cat, st, err, cap);
+	return st == KOF_FAMCAT_OK;
+}
+
+static int name_check(void *user, const char *text, char *err, size_t cap)
+{
+	return say_status(user, kof_famcat_name_check(text), err, cap);
+}
+
+/* The commit of the comment cell: the library takes the comment of the variant being edited. */
+static int cell_commit(void *user, const char *text, char *err, size_t cap)
+{
+	struct kv_fam_ui *u = user;
+
+	return say_status(u, kof_famcat_set_comment(&u->cat, u->cell_var, text), err, cap);
+}
+
+static void fam_fields_init(struct kv_fam_ui *u)
+{
+	size_t ec = sizeof u->err;
+
+	kv_ft_init(&u->f_name, ED_FAM_NAME, KOF_FAMCAT_NAME_MAX + 3, name_accept, name_check, NULL, u, KV_FT_HELD, 1, u->err, ec);
+	kv_ft_init(&u->f_comment, ED_FAM_COMMENT, KOF_FAMCAT_COMMENT_MAX + 3, kv_form_comment_accept, kv_form_comment_check, NULL, u, KV_FT_HELD, 1,
+		   u->err, ec);
+	kv_ft_init(&u->f_cell, ED_FAM_CELL, KOF_FAMCAT_COMMENT_MAX + 3, kv_form_comment_accept, kv_form_comment_check, cell_commit, u, KV_FT_LIVE, 0,
+		   u->err, ec);
+}
 
 static struct kv_fam_ui *fam_ui(const struct view *v)
 {
@@ -54,33 +78,51 @@ int fam_up(const struct view *v)
 	return v->fam && v->fam->open;
 }
 
-void fam_open(struct view *v)
+/*
+ * THE SESSION'S PATHOGENS CATALOG, made and loaded on first use: by the dialog's first open and by the diagnose panel's family and
+ * variant lists, so there is one catalog and one load. *created is 1 when this call made it (its load note is then on u->store).
+ */
+struct kv_fam_ui *fam_ensure(struct view *v, int *created)
 {
 	struct kv_fam_ui *u = v->fam;
-	int first = !u;
 
-	if (first) {
-		u = calloc(1, sizeof *u);
-		if (!u)
-			return;
-		kof_famcat_init(&u->cat, u->fam, KV_FAM_MAX_FAMILY, u->var, KV_FAM_MAX_VARIANT);
-		kof_famcat_init(&u->snap, u->snap_fam, KV_FAM_MAX_FAMILY, u->snap_var, KV_FAM_MAX_VARIANT);
-		v->fam = u;
-		/* The first time the dialog opens it reads the directory. Later opens keep what is in memory, so an unsaved change
-		 * is not lost by closing the dialog. */
-		kof_famcat_load(&u->cat, &u->store, v->pathdir);
-		kof_famcat_snapshot(&u->cat, &u->snap);
-	}
+	*created = !u;
+	if (u)
+		return u;
+	u = calloc(1, sizeof *u);
+	if (!u)
+		return NULL;
+	kof_famcat_init(&u->cat, u->fam, KV_FAM_MAX_FAMILY, u->var, KV_FAM_MAX_VARIANT);
+	kof_famcat_init(&u->snap, u->snap_fam, KV_FAM_MAX_FAMILY, u->snap_var, KV_FAM_MAX_VARIANT);
+	v->fam = u;
+	fam_fields_init(u);
+	/* The first time it is needed it reads the directory. Later uses keep what is in memory, so an unsaved change is not lost by
+	 * closing the dialog. */
+	kof_famcat_load(&u->cat, &u->store, v->pathdir);
+	kof_famcat_snapshot(&u->cat, &u->snap);
+	return u;
+}
+
+void fam_open(struct view *v)
+{
+	int first;
+	struct kv_fam_ui *u = fam_ensure(v, &first);
+
+	if (!u)
+		return;
 	u->open = 1;
-	u->main_move.dx = u->main_move.dy = 0;      /* a dialog opens centred; where it was dragged is forgotten */
-	u->hoff = 0;
+	u->m.move.dx = u->m.move.dy = 0;      /* a dialog opens centred; where it was dragged is forgotten */
+	u->m.hoff = 0;
 	u->dlg = KV_FAM_DLG_NONE;
 	u->menu_open = 0;
-	u->cedit_on = 0;
-	u->off = 0;
-	u->n_btn = 0;
-	/* The line the load had to say (files not loaded, lines ignored, no directory) is on the bottom rule at the first open. */
-	snprintf(u->err, sizeof u->err, "%s", first ? u->store.note : "");
+	kv_ft_cancel(&u->f_cell);
+	u->m.off = 0;
+	u->m.n_btn = 0;
+	/* The line the load had to say (files not loaded, lines ignored, no directory) is on the bottom rule at the first open OF THE
+	 * DIALOG, whoever loaded the catalog: the diagnose panel's Family list loads it too, and `first` is then 0. */
+	(void)first;
+	snprintf(u->err, sizeof u->err, "%s", u->note_shown ? "" : u->store.note);
+	u->note_shown = 1;
 }
 
 void fam_free(struct view *v)
@@ -94,7 +136,7 @@ static void fam_close(struct view *v)
 	v->fam->open = 0;
 	v->fam->dlg = KV_FAM_DLG_NONE;
 	v->fam->menu_open = 0;
-	v->fam->cedit_on = 0;
+	kv_ft_cancel(&v->fam->f_cell);
 	v->edit = 0;
 }
 
@@ -123,30 +165,28 @@ static void dlg_open(struct view *v, enum kv_fam_dlg d, uint32_t index)
 
 	u->dlg = d;
 	u->dlg_idx = index;
-	u->name[0] = 0;
-	u->name_off = 0;
-	u->comment[0] = 0;
-	u->cmt_off = 0;
+	kv_ft_set(&u->f_name, "");
+	kv_ft_set(&u->f_comment, "");
 	u->types = 0;
 	u->err[0] = 0;
 	u->menu_open = 0;
 	u->vname[0] = 0;
-	u->reuse = 0;
-	u->f.off.dx = u->f.off.dy = 0;
+	u->letter = 0u;
+	u->fm.f.off.dx = u->fm.f.off.dy = 0;
 	v->edit_prev = 0;
 	v->caret = 0;
 	if (d == KV_FAM_DLG_EDIT_FAMILY) {
-		snprintf(u->name, sizeof u->name, "%s", u->cat.fam[index].name);
+		kv_ft_set(&u->f_name, u->cat.fam[index].name);
 	} else if (d == KV_FAM_DLG_EDIT_VARIANT) {
-		snprintf(u->comment, sizeof u->comment, "%s", kof_famcat_comment(&u->cat, index));
+		kv_ft_set(&u->f_comment, kof_famcat_comment(&u->cat, index));
 		snprintf(u->vname, sizeof u->vname, "%s", u->cat.var[index].name);
 		u->types = u->cat.var[index].types;
 	} else if (d == KV_FAM_DLG_VARIANT) {
 		/* The name is the library's: what is shown is what OK creates. A refusal (no next name) is said at once. */
-		kv_fam_error_text(&u->cat, kof_famcat_variant_name(&u->cat, index, 0, u->vname, sizeof u->vname), u->err,
+		kv_fam_error_text(&u->cat, kof_famcat_variant_name(&u->cat, index, 0u, u->vname, sizeof u->vname), u->err,
 				  sizeof u->err);
 	}
-	v->edit = has_name_field(d) ? ED_FAM_NAME : ED_FAM_COMMENT;
+	kv_ftext_focus(v, has_name_field(d) ? &u->f_name : &u->f_comment);
 }
 
 static void dlg_close(struct view *v)
@@ -164,16 +204,16 @@ static void dlg_ok(struct view *v)
 
 	switch (u->dlg) {
 	case KV_FAM_DLG_FAMILY:
-		st = kof_famcat_add_family(&u->cat, u->name, u->comment, u->types, NULL);
+		st = kof_famcat_add_family(&u->cat, u->f_name.buf, u->f_comment.buf, u->types, NULL);
 		break;
 	case KV_FAM_DLG_VARIANT:
-		st = kof_famcat_add_variant(&u->cat, u->dlg_idx, u->comment, u->types, u->reuse, NULL);
+		st = kof_famcat_add_variant(&u->cat, u->dlg_idx, u->f_comment.buf, u->types, u->letter, NULL);
 		break;
 	case KV_FAM_DLG_EDIT_FAMILY:
-		st = kof_famcat_rename_family(&u->cat, u->dlg_idx, u->name);
+		st = kof_famcat_rename_family(&u->cat, u->dlg_idx, u->f_name.buf);
 		break;
 	default:
-		st = kof_famcat_set_variant(&u->cat, u->dlg_idx, u->comment, u->types);
+		st = kof_famcat_set_variant(&u->cat, u->dlg_idx, u->f_comment.buf, u->types);
 		break;
 	}
 	kv_fam_error_text(&u->cat, st, u->err, sizeof u->err);
@@ -195,38 +235,11 @@ static void dlg_delete(struct view *v)
 
 /* ---- the comment cell edited in place --------------------------------------------------------------------- */
 
-/* A click on a variant's comment cell: the cell becomes a field holding the comment (the caret at its end). One edit at a time. */
-static void cedit_open(struct view *v, struct kv_fam_ui *u, uint32_t var)
+/* A click on a variant's comment cell: the cell becomes the LIVE field, holding the comment. One edit at a time. */
+static void cell_open(struct view *v, struct kv_fam_ui *u, uint32_t var)
 {
-	u->cedit_on = 1;
-	u->cedit_var = var;
-	u->cbuf_off = 0;
-	snprintf(u->cbuf, sizeof u->cbuf, "%s", kof_famcat_comment(&u->cat, var));
-	u->err[0] = 0;
-	v->edit = ED_FAM_CELL;
-	v->edit_prev = ED_FAM_CELL;
-	v->caret = (uint32_t)strlen(u->cbuf);
-	fsel_clear(v);
-}
-
-static void cedit_stop(struct view *v, struct kv_fam_ui *u)
-{
-	u->cedit_on = 0;
-	if (v->edit == ED_FAM_CELL)
-		v->edit = 0;
-}
-
-/* Enter, or a click outside the field: the library's comment rules decide. A refusal is ONE line on the bottom rule and the field
- * stays open (0); on success the cell shows the new comment (1). */
-static int cedit_commit(struct view *v, struct kv_fam_ui *u)
-{
-	enum kof_famcat_status st = kof_famcat_set_comment(&u->cat, u->cedit_var, u->cbuf);
-
-	kv_fam_error_text(&u->cat, st, u->err, sizeof u->err);
-	if (st != KOF_FAMCAT_OK)
-		return 0;
-	cedit_stop(v, u);
-	return 1;
+	u->cell_var = var;
+	kv_ftext_open(v, &u->f_cell, kof_famcat_comment(&u->cat, var));
 }
 
 /* ---- the main dialog -------------------------------------------------------------------------------------- */
@@ -239,26 +252,6 @@ static const char *fam_rowattr(void *user, uint32_t row)
 	case KV_FAM_FAMILY: return A_BOLD;
 	case KV_FAM_ADDVAR: return A_ID;
 	default:            return NULL;
-	}
-}
-
-#define FAM_MAX_LINES 64u
-
-/* The bottom row: the buttons' labels at the columns kv_fam_buttons gave, an enabled one in the button colour and a greyed
- * one (Save, Discard while the catalog equals its snapshot) in the viewer's disabled-button style. */
-static void fam_button_row(const struct kv_dd_geo *g, const struct kv_fam_btn *b, uint32_t n, char *out, size_t cap)
-{
-	size_t at = 0;
-	int col = 0;
-	uint32_t i;
-
-	out[0] = 0;
-	for (i = 0; i < n; i++) {
-		int gap = b[i].x0 - g->body_x0 - col;
-
-		at += (size_t)snprintf(out + at, at < cap ? cap - at : 0u, "%*s%s%s" A_OFF, gap > 0 ? gap : 0, "",
-				       b[i].enabled ? A_ID : A_BTN_OFF, b[i].label);
-		col = b[i].x1 - g->body_x0 + 1;
 	}
 }
 
@@ -283,212 +276,90 @@ static void fam_derive(struct kv_fam_ui *u)
 
 static void fam_draw_box(struct out *o, struct view *v, struct kv_fam_ui *u)
 {
-	struct kv_dd_in in;
-	struct kv_dd_geo *g = &u->geo;
 	struct kv_tab_spec t;
 	struct kv_fam_tab ft;
-	struct kv_tab_in ti;
-	char line[FAM_MAX_LINES][KV_TAB_LINE];     /* the visible rows only: FAM_MAX_LINES bounds them, no allocation per frame */
-	char rule[1024], count[32];
-	uint32_t room, nl, y;
-	struct kv_fam_btn btn[KV_FAM_BTN_COUNT];
+	struct kv_main_in in;
+	char count[32];
+	uint32_t y, nl;
 
-	memset(&in, 0, sizeof in);
-	in.cols = g_cols;
-	in.rows = g_rows;
-	in.title = "Pathogens";
 	fam_derive(u);
-	in.want_w = u->want_w;
-	in.want_h = u->want_h;
-	in.dx = u->main_move.dx;
-	in.dy = u->main_move.dy;
-	kv_dd_layout(&in, g);
-	u->main_move.dx = g->dx;            /* what is kept is what the screen allows */
-	u->main_move.dy = g->dy;
-	if (!g->ok)
-		return;
 	kv_fam_spec_widths(&t, &ft, &u->cat, u->row, u->n_row, u->width);
-	ft.edit_var = u->cedit_on ? (int32_t)u->cedit_var : -1;
+	ft.edit_var = u->f_cell.open ? (int32_t)u->cell_var : -1;
 	t.n_sticky = 1;
 	t.colattr[1] = A_S_TYPE;
 	t.colattr[KV_FAM_COL_COMMENT] = A_DIM;
 	t.rowattr = fam_rowattr;
-	/* The last body row holds [ Add family ]; one blank row above it. */
-	room = g->body_rows > 2 ? (uint32_t)g->body_rows - 2u : 0u;
-	if (room > FAM_MAX_LINES)
-		room = FAM_MAX_LINES;
-	u->off = kv_tab_clamp(u->off, u->n_row, room);
 	snprintf(count, sizeof count, u->cat.n_fam == 1u ? "%u family" : "%u families", (unsigned)u->cat.n_fam);
+	memset(&in, 0, sizeof in);
+	in.title = "Pathogens";
+	in.add_label = kv_fam_label_add_family();
 	in.count = count;
 	/* A refused tick (a variant must keep a type, and none may repeat a sibling's set) is said on the bottom rule. */
 	in.act = !u->dlg && u->err[0] ? u->err : NULL;
-	in.act_ok = 0;
-	in.total = u->n_row;
-	in.off = u->off;
-	in.shown = room;
-	kv_dd_fill(&in, g);
-	ti.row0 = u->off;
-	ti.rows = room;
-	ti.hoff = u->hoff;
-	ti.width = g->body_cols;
-	ti.margin = 1;
-	ti.heading = 0;
-	nl = kv_tab_render(&t, &ti, line, FAM_MAX_LINES, &u->tg, NULL);
-	u->hoff = u->tg.hoff;
-	u->tab_y = g->body_y0;
-	u->n_btn = kv_fam_buttons(g, u->dirty, btn);
-	memcpy(u->btn, btn, sizeof btn);
-	out_at(o, g->top, g->left);
-	kv_dd_top(&in, g, rule, sizeof rule);
-	out_str(o, rule);
-	out_at(o, g->top + g->h - 1, g->left);
-	kv_dd_bottom(&in, g, rule, sizeof rule);
-	out_str(o, rule);
-	for (y = 0; y < (uint32_t)g->body_rows; y++) {
-		char left[64], right[64];
-
-		kv_dd_walls(&in, g, (int)y, left, right, sizeof left);
-		out_at(o, g->body_y0 + (int)y, g->left);
-		out_str(o, left);
-		if (y < nl) {
-			prop_put(o, line[y], g->body_cols, -1, -1);
-		} else if (u->n_btn && u->btn[0].y == g->body_y0 + (int)y) {
-			char row[256];
-
-			fam_button_row(g, u->btn, u->n_btn, row, sizeof row);
-			prop_put(o, row, g->body_cols, -1, -1);
-		} else {
-			prop_put(o, "", g->body_cols, -1, -1);
-		}
-		out_str(o, right);
-	}
+	in.spec = &t;
+	in.n_row = u->n_row;
+	in.want_w = u->want_w;
+	in.want_h = u->want_h;
+	in.dirty = u->dirty;
+	if (!kv_main_draw(o, v, &u->m, &in))
+		return;
 	/* The comment being edited: its field is drawn over the (blank) cell, as wide as the cell's visible part. */
-	if (u->cedit_on && u->tg.n_col > KV_FAM_COL_COMMENT && u->tg.cw[KV_FAM_COL_COMMENT] > 0) {
+	nl = u->m.tg.shown;
+	if (u->f_cell.open && u->m.tg.n_col > KV_FAM_COL_COMMENT && u->m.tg.cw[KV_FAM_COL_COMMENT] > 0) {
 		for (y = 0; y < nl; y++) {
-			const struct kv_fam_row *r = &u->row[u->tg.row0 + y];
+			const struct kv_fam_row *r = &u->row[u->m.tg.row0 + y];
 
-			if (r->kind != KV_FAM_VARIANT || (uint32_t)r->variant != u->cedit_var)
+			if (r->kind != KV_FAM_VARIANT || (uint32_t)r->variant != u->cell_var)
 				continue;
-			out_at(o, g->body_y0 + (int)y, g->body_x0 + u->tg.cx[KV_FAM_COL_COMMENT]);
-			o->col_hint = 0;
-			out_str(o, A_SEL);
-			field_draw(o, u->cbuf, v->caret, &u->cbuf_off, u->tg.cw[KV_FAM_COL_COMMENT], 1, "");
-			out_str(o, A_OFF);
+			kv_ftext_draw_at(o, v, &u->f_cell, u->m.geo.body_y0 + (int)y, u->m.geo.body_x0 + u->m.tg.cx[KV_FAM_COL_COMMENT],
+					 u->m.tg.cw[KV_FAM_COL_COMMENT]);
 			break;
 		}
 	}
-	/* The box claims its rectangle, both buttons: a press on it never reaches a pane under it. */
-	hit_zone(v, g->top, g->left, g->top + g->h - 1, g->left + g->w - 1, (uint8_t)(HIT_L | HIT_R), hit_row_none, 0);
 }
 
 /* ---- the small dialogs ------------------------------------------------------------------------------------ */
 
-static int in_span(int y, int x, int y0, int x0, int x1)
-{
-	return y == y0 && x >= x0 && x <= x1;
-}
-
-/* THE SIZE of a small dialog: one width for every mode (the widest of label + field, the tick grid, the button row with [ Delete ]
- * and the error line, plus the frame) and the rows its mode has: the Name field (Add family, Edit family), the variant's name line
- * (every mode but Edit family; Add family's is the first variant's), the Comment field and the "Malware types" title with the grid
- * (every mode but Edit family), the error line, the buttons. dframe_begin clips it to the screen. */
+/* THE SIZE of a small dialog: one width for every mode (the widest of label + field and the shared form's grid, button row and error
+ * line, plus the frame) and the rows its mode has: the Name field (Add family, Edit family), the variant's name line (every mode but
+ * Edit family; Add family's is the first variant's), the deleted-names row (Add variant), the Comment field and the "Malware types" title
+ * with the grid (every mode but Edit family). dframe_begin clips it to the screen. */
 static void fam_dlg_size(enum kv_fam_dlg d, int *w, int *h)
 {
-	int nt = (int)kv_fam_menu_count(), rows = (nt + FAM_TICK_COLS - 1) / FAM_TICK_COLS;
-	int name = (int)strlen(fam_label_name) + FAM_FIELD_COLS + 2;
-	int cmt = (int)strlen(fam_label_comment) + FAM_COMMENT_COLS + 2;
-	int grid = FAM_TICK_COLS * FAM_TICK_CELL - FAM_TICK_GAP;
-	int btn = (int)strlen(fam_label_ok) + 2 + (int)strlen(fam_label_cancel) + 2 + (int)strlen(fam_label_delete);
-	int in = name, form = (d == KV_FAM_DLG_FAMILY ? 2 : 1) + (has_variant_part(d) ? 1 : 0);
+	struct kv_pick tl = kv_fam_types();
+	int row_w[3], n = 0;
+	int form = (d == KV_FAM_DLG_FAMILY ? 2 : 1) + (has_variant_part(d) ? 1 : 0);
+	int rows = form + (has_variant_part(d) ? kv_form_ticks_rows(kv_fam_menu_count()) : 0) + (d == KV_FAM_DLG_VARIANT ? 1 : 0);
 
-	in = cmt > in ? cmt : in;
-	in = grid > in ? grid : in;
-	in = btn > in ? btn : in;
-	in = FAM_ERR_COLS > in ? FAM_ERR_COLS : in;
-	*w = in + 4;
-	*h = 2 + form + (has_variant_part(d) ? 1 + rows : 0) + (d == KV_FAM_DLG_VARIANT ? 1 : 0) + 1 + 1;
-}
-
-/* ONE TICK CELL, for a type of the grid and for the reuse tick under it: "[x] label", its span kept at slot `i` for fam_tick_at.
- * A cell that is not enabled is drawn in the greyed-button style and fam_tick_at still finds it (the click then does nothing). */
-static void fam_tick_cell(struct out *o, struct kv_fam_ui *u, uint32_t i, int y, const char *label, int on, int enabled, int w)
-{
-	u->tick_y[i] = y;
-	u->tick_x0[i] = o->col_base + (int)o->col_hint;
-	out_fmt(o, "%s[%c] %-*s" A_OFF, enabled ? A_ID : A_BTN_OFF, on ? 'x' : ' ', w - 4, label);
-	u->tick_x1[i] = u->tick_x0[i] + (int)strlen(label) + 3;
-}
-
-/* The tick grid of the dialogs with a variant, drawn from row `row` of the frame; the spans of every cell are kept for fam_tick_at.
- * Items run down a column, then the next column. Returns the next row. */
-static int fam_draw_ticks(struct out *o, struct kv_fam_ui *u, int row)
-{
-	const struct dframe *f = &u->f;
-	uint32_t i, nt = kv_fam_menu_count(), rows = (nt + FAM_TICK_COLS - 1) / FAM_TICK_COLS, r, c;
-
-	dframe_row(o, f, row++);
-	out_fmt(o, A_DIM "%s" A_OFF, fam_label_types);
-	dframe_edge(o, f);
-
-	for (r = 0; r < rows; r++) {
-		dframe_row(o, f, row++);
-		for (c = 0; c < FAM_TICK_COLS; c++) {
-			i = c * rows + r;
-			if (i >= nt)
-				break;
-			fam_tick_cell(o, u, i, f->y + row, kv_fam_menu_label(i), kv_fam_mask_has(u->types, i), 1, FAM_TICK_CELL);
-		}
-		dframe_edge(o, f);
+	/* The widths of every row this mode draws that the form cannot bound itself: the Name row, the Comment row and the grid. */
+	row_w[n++] = kv_form_field_w(fam_label_name, FAM_FIELD_COLS);
+	if (has_variant_part(d)) {
+		row_w[n++] = kv_form_field_w(fam_label_comment, FAM_COMMENT_COLS);
+		row_w[n++] = kv_form_grid_w(&tl);
 	}
-	return row;
+	kv_form_size(rows, row_w, (uint32_t)n, w, h);
 }
 
-/* The reuse tick, directly under the Variant row (Add variant only): reuse the smallest deleted name instead of a new one. It is the
- * tick cell after the types', greyed when the family has no deleted name. Returns the next row. */
-static int fam_draw_reuse(struct out *o, struct kv_fam_ui *u, int row)
+/* The deleted-names row, directly under the Variant row (Add variant only): its label opens a menu of the family's DELETED variant names
+ * (kof_famcat_free_letter), and a press on one makes that name the new variant's (u->letter; the Variant row shows it). The label is the
+ * cell after the types' in the form's spans, greyed when the family has no deleted name. Returns the next row. */
+static int fam_draw_names(struct out *o, struct kv_fam_ui *u, int row)
 {
-	const struct dframe *f = &u->f;
+	struct kv_form *fm = &u->fm;
+	uint32_t slot = kv_fam_menu_count();
+	int x0, on = kof_famcat_free_letters(&u->cat, u->dlg_idx) > 0u;
 
-	dframe_row(o, f, row++);
+	dframe_row(o, &fm->f, row++);
 	out_str(o, "  ");
-	fam_tick_cell(o, u, kv_fam_menu_count(), f->y + row, fam_label_reuse, u->reuse,
-		      kof_famcat_free_letters(&u->cat, u->dlg_idx) > 0u, (int)strlen(fam_label_reuse) + 4);
-	dframe_edge(o, f);
+	x0 = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s%s" A_OFF, on ? A_ID : A_BTN_OFF, fam_label_names);
+	if (slot < KV_FORM_SLOTS) {
+		fm->tick_y[slot] = fm->f.y + row;
+		fm->tick_x0[slot] = x0;
+		fm->tick_x1[slot] = x0 + (int)strlen(fam_label_names) - 1;
+	}
+	dframe_edge(o, &fm->f);
 	return row;
-}
-
-/* Which tick cell a screen point is on (a type's index, or the reuse tick's: the number of types), or -1. */
-static int fam_tick_at(const struct kv_fam_ui *u, int y, int x)
-{
-	uint32_t i;
-
-	for (i = 0; i <= kv_fam_menu_count(); i++)
-		if (in_span(y, x, u->tick_y[i], u->tick_x0[i], u->tick_x1[i]))
-			return (int)i;
-	return -1;
-}
-
-/* A labelled read-only line (the first variant's name, the new variant's, the name of what a comment belongs to). */
-static void fam_row_text(struct out *o, struct kv_fam_ui *u, int row, const char *label, const char *text)
-{
-	dframe_row(o, &u->f, row);
-	out_fmt(o, A_DIM "%s" A_OFF "%s%.*s" A_OFF, label, text[0] ? A_ID : A_DIM, FAM_COMMENT_COLS, text[0] ? text : "-");
-	dframe_edge(o, &u->f);
-}
-
-/* A labelled text field, with the span it took kept for the hit test. `ed` is the edit id that says it has the caret. */
-static void fam_row_field(struct out *o, struct view *v, struct kv_fam_ui *u, int row, enum kv_fam_fld i, const char *label,
-			  const char *text, uint32_t *off, int cols, int ed)
-{
-	dframe_row(o, &u->f, row);
-	out_fmt(o, A_DIM "%s" A_OFF, label);
-	u->fld[i].y = u->f.y + 1 + row;
-	u->fld[i].x0 = o->col_base + (int)o->col_hint;
-	out_fmt(o, "%s[", v->edit == ed ? A_SEL : A_ID);
-	field_draw(o, text, v->caret, off, cols, v->edit == ed, "");
-	out_str(o, "]" A_OFF);
-	u->fld[i].x1 = o->col_base + (int)o->col_hint - 1;
-	dframe_edge(o, &u->f);
 }
 
 /* THE ONE FORM of the four small dialogs (fam_dlg_size says which rows a mode has). Add family: Name field, the first variant's
@@ -498,69 +369,37 @@ static void fam_row_field(struct out *o, struct view *v, struct kv_fam_ui *u, in
 static void fam_draw_dlg(struct out *o, struct view *v, struct kv_fam_ui *u)
 {
 	static const char *const title[] = { "", "Add family", "Add variant", "Edit family", "Edit variant" };
-	struct dframe *f = &u->f;
+	struct kv_form *fm = &u->fm;
+	struct kv_pick tl = kv_fam_types();
 	char first[KOF_FAMCAT_NAME_MAX + 1];
 	int row = 0, w, h;
 
 	fam_dlg_size(u->dlg, &w, &h);
-	if (!dframe_begin(o, f, title[u->dlg], w, h, 2))
+	if (!dframe_begin(o, &fm->f, title[u->dlg], w, h, 2))
 		return;
 	if (has_name_field(u->dlg))
-		fam_row_field(o, v, u, row++, FAM_FLD_NAME, fam_label_name, u->name, &u->name_off, FAM_FIELD_COLS, ED_FAM_NAME);
+		kv_form_row_field(o, v, fm, row++, &u->f_name, fam_label_name, FAM_FIELD_COLS);
 	if (u->dlg == KV_FAM_DLG_FAMILY) {
-		const char *shown = !u->name[0] || kof_famcat_first_variant_name(&u->cat, u->name, first, sizeof first) != KOF_FAMCAT_OK
+		const char *shown = !u->f_name.buf[0] || kof_famcat_first_variant_name(&u->cat, u->f_name.buf, first, sizeof first) != KOF_FAMCAT_OK
 				    ? "" : first;
 
 		memcpy(u->vname, shown, strlen(shown) + 1u);
 	} else if (u->dlg == KV_FAM_DLG_VARIANT) {
-		/* The name follows the reuse tick at once: what is shown is what OK creates. */
-		if (kof_famcat_variant_name(&u->cat, u->dlg_idx, u->reuse, u->vname, sizeof u->vname) != KOF_FAMCAT_OK)
+		/* The name follows the chosen deleted name at once: what is shown is what OK creates. */
+		if (kof_famcat_variant_name(&u->cat, u->dlg_idx, u->letter, u->vname, sizeof u->vname) != KOF_FAMCAT_OK)
 			u->vname[0] = 0;
 	}
-	u->tick_y[kv_fam_menu_count()] = -1;      /* the reuse tick's slot: found only when it is drawn */
+	kv_form_reset(fm);                  /* the deleted-names row's span is found only when it is drawn */
 	if (has_variant_part(u->dlg)) {
-		fam_row_text(o, u, row++, fam_label_variant, u->vname);
+		kv_form_row_text(o, fm, row++, fam_label_variant, u->vname, FAM_COMMENT_COLS);
 		if (u->dlg == KV_FAM_DLG_VARIANT)
-			row = fam_draw_reuse(o, u, row);
-		fam_row_field(o, v, u, row++, FAM_FLD_COMMENT, fam_label_comment, u->comment, &u->cmt_off, FAM_COMMENT_COLS,
-			      ED_FAM_COMMENT);
-		row = fam_draw_ticks(o, u, row);
+			row = fam_draw_names(o, u, row);
+		kv_form_row_field(o, v, fm, row++, &u->f_comment, fam_label_comment, FAM_COMMENT_COLS);
+		row = kv_form_ticks(o, fm, row, fam_label_types, &tl, u->types, 0);
 	}
-	dframe_row(o, f, row++);
-	out_fmt(o, "%s%.*s" A_OFF, A_WARN, FAM_ERR_COLS, u->err);
-	dframe_edge(o, f);
-	dframe_row(o, f, row++);
-	u->btn_y = f->y + row;
-	/*
-	 * [ OK ] [ Cancel ] at the left and [ Delete ] alone at the right edge: the one button that destroys something is as
-	 * far from the others as the row allows, so a press that misses OK or Cancel by a little cannot land on it. The row is
-	 * the same in every mode, so OK and Cancel stay where they are whether Delete is there or not.
-	 */
-	{
-		int bw, bh, inner, del = is_edit(u->dlg) ? (int)strlen(fam_label_delete) : 0;
-		int left = (int)strlen(fam_label_ok) + 2 + (int)strlen(fam_label_cancel), pad;
-
-		fam_dlg_size(u->dlg, &bw, &bh);
-		inner = bw - 4;
-		pad = inner - del - left;
-		u->ok_x[0] = o->col_base + (int)o->col_hint;
-		out_fmt(o, A_BTN_OK "%s" A_OFF, fam_label_ok);
-		u->ok_x[1] = o->col_base + (int)o->col_hint - 1;
-		out_str(o, "  ");
-		u->cancel_x[0] = o->col_base + (int)o->col_hint;
-		out_fmt(o, A_BTN_CANCEL "%s" A_OFF, fam_label_cancel);
-		u->cancel_x[1] = o->col_base + (int)o->col_hint - 1;
-		u->delete_x[0] = u->delete_x[1] = -1;
-		if (del) {
-			out_fmt(o, "%*s", pad > 2 ? pad : 2, "");
-			u->delete_x[0] = o->col_base + (int)o->col_hint;
-			out_fmt(o, A_BTN_DEL "%s" A_OFF, fam_label_delete);
-			u->delete_x[1] = o->col_base + (int)o->col_hint - 1;
-		}
-	}
-	dframe_edge(o, f);
-	dframe_end(o, f, NULL);
-	dframe_done(o, f);
+	row = kv_form_footer(o, fm, row, u->err, is_edit(u->dlg));
+	dframe_end(o, &fm->f, NULL);
+	dframe_done(o, &fm->f);
 }
 
 /* ---- the tick menu ---------------------------------------------------------------------------------------- */
@@ -578,34 +417,32 @@ static const char *tm_label(void *ud, int i)
 	return kv_fam_menu_label((uint32_t)i);
 }
 
-static struct kv_menu fam_menu(struct kv_fam_ui *u)
+/* The menu of deleted names: item i is the i-th deleted letter of the dialog's family spelled by the library (variant_name), a plain
+ * list (no tick); the name is written into the state's buffer and copied by the pop-up at once. */
+static const char *dn_label(void *ud, int i)
 {
-	struct kv_menu m;
+	struct kv_fam_ui *u = ud;
+	char *buf = u->mname;
 
-	memset(&m, 0, sizeof m);
-	m.n = (int)kv_fam_menu_count();
-	m.ud = u;
-	m.label = tm_label;
-	m.checked = tm_checked;
-	m.w = FAM_MENU_W;
-	m.cols = FAM_MENU_COLS;
-	m.c_on = BAR_ON;
-	m.c_off = BAR_OFF;
-	m.c_cur = BAR_CUR;
-	return m;
+	if (kof_famcat_variant_name(&u->cat, u->dlg_idx, kof_famcat_free_letter(&u->cat, u->dlg_idx, (uint32_t)i), buf, sizeof u->mname) != KOF_FAMCAT_OK)
+		buf[0] = 0;
+	return buf;
 }
 
-static void menu_place(struct kv_fam_ui *u, int y, int x)
+static struct kv_menu fam_menu(struct kv_fam_ui *u)
 {
-	struct kv_menu m = fam_menu(u);
-	int rows = kv_menu_rows(&m);
+	struct kv_pick l = kv_fam_types();
+	struct kv_menu m;
 
-	u->menu_y = y + rows > g_rows ? g_rows - rows : y;
-	u->menu_x = x + FAM_MENU_W * FAM_MENU_COLS > g_cols ? g_cols - FAM_MENU_W * FAM_MENU_COLS : x;
-	if (u->menu_y < 1)
-		u->menu_y = 1;
-	if (u->menu_x < 1)
-		u->menu_x = 1;
+	if (!u->menu_names)
+		return kv_form_menu(&l, u, tm_label, tm_checked);
+	memset(&m, 0, sizeof m);
+	m.n = (int)kof_famcat_free_letters(&u->cat, u->dlg_idx);
+	m.ud = u;
+	m.label = dn_label;
+	m.w = (int)strlen(u->cat.fam[u->dlg_idx].name) + 2 + 3;   /* "<family>_" and up to three letters: the pop-up widens for a longer one */
+	m.cols = 1;
+	return m;
 }
 
 void draw_fam(struct out *o, struct view *v)
@@ -614,58 +451,28 @@ void draw_fam(struct out *o, struct view *v)
 
 	if (!u || !u->open)
 		return;
-	memset(u->cover, 0, sizeof u->cover);
+	kv_cover_begin(&u->cv);
 	fam_draw_box(o, v, u);
-	if (u->geo.ok) {
-		u->cover[0].y0 = u->geo.top;
-		u->cover[0].x0 = u->geo.left;
-		u->cover[0].y1 = u->geo.top + u->geo.h - 1;
-		u->cover[0].x1 = u->geo.left + u->geo.w - 1;
-	}
+	kv_form_cover_main(&u->cv, &u->m);
 	if (u->dlg) {
 		fam_draw_dlg(o, v, u);
-		u->cover[1].y0 = u->f.y;
-		u->cover[1].x0 = u->f.x;
-		u->cover[1].y1 = u->f.y + u->f.h - 1;
-		u->cover[1].x1 = u->f.x + u->f.w - 1;
+		kv_form_cover_dialog(&u->cv, &u->fm);
 	}
 	if (u->menu_open) {
 		struct kv_menu m = fam_menu(u);
 
-		kv_menu_draw(o, &m, u->menu_y, u->menu_x, -1, -1);
-		u->cover[2].y0 = u->menu_y;
-		u->cover[2].x0 = u->menu_x;
-		u->cover[2].y1 = u->menu_y + kv_menu_rows(&m) - 1;
-		u->cover[2].x1 = u->menu_x + FAM_MENU_W * FAM_MENU_COLS - 1;
+		/* A press goes to the menu first, though the names menu opens over the dialog's focused Comment field, which would otherwise
+		 * take the press (click_field runs before fam_click). */
+		g_fld.room = 0;
+		kv_form_draw_menu(o, &u->cv, &m, u->menu_y, u->menu_x);
 	}
 }
 
-/* Is rectangle `p` (not empty) inside one of the rectangles this frame covers? */
-static int rect_inside(const struct kv_fam_rect *p, const struct kv_fam_rect c[KV_FAM_COVER])
-{
-	int i;
-
-	for (i = 0; i < KV_FAM_COVER; i++)
-		if ((c[i].y1 || c[i].x1) && p->y0 >= c[i].y0 && p->y1 <= c[i].y1 && p->x0 >= c[i].x0 && p->x1 <= c[i].x1)
-			return 1;
-	return 0;
-}
-
-/* What a smaller, moved or closed box uncovers is erased only by what was beneath it, so the panes are painted again on a frame in
- * which a rectangle of the last one is not inside a rectangle of this one. A box that only GROWS (a small dialog or the menu opening
- * over the table) uncovers nothing: every box is drawn whole on every frame. */
 int fam_uncovered(struct view *v)
 {
 	struct kv_fam_ui *u = fam_ui(v);
-	int i, diff = 0;
 
-	if (!u || !u->open)
-		return 0;
-	for (i = 0; i < KV_FAM_COVER; i++)
-		if ((u->painted[i].y1 || u->painted[i].x1) && !rect_inside(&u->painted[i], u->cover))
-			diff = 1;
-	memcpy(u->painted, u->cover, sizeof u->cover);
-	return diff;
+	return u && u->open && kv_cover_uncovered(&u->cv);
 }
 
 /* ---- the mouse -------------------------------------------------------------------------------------------- */
@@ -673,12 +480,16 @@ int fam_uncovered(struct view *v)
 static int click_menu_items(struct view *v, struct kv_fam_ui *u)
 {
 	struct kv_menu m = fam_menu(u);
-	int k = g_my - u->menu_y;
+	int a = kv_form_menu_hit(&m, u->menu_y, u->menu_x, g_my, g_mx);
 
+	/* The names menu: a press on a name takes it and puts the menu away. */
+	if (u->menu_names && a >= 0) {
+		u->letter = kof_famcat_free_letter(&u->cat, u->dlg_idx, (uint32_t)a);
+		u->menu_open = 0;
+		return 1;
+	}
 	/* A tick keeps the menu up, so several types are set in one visit; a press anywhere else puts it away. */
-	if (g_mx >= u->menu_x && g_mx < u->menu_x + FAM_MENU_W * FAM_MENU_COLS && k >= 0 && k < kv_menu_rows(&m)) {
-		int a = kv_menu_at_cell(&m, k, (g_mx - u->menu_x) / FAM_MENU_W);
-
+	if (a != -2) {
 		if (a >= 0)
 			kv_fam_error_text(&u->cat, kv_fam_menu_toggle(&u->cat, u->menu_var, (uint32_t)a), u->err, sizeof u->err);
 		return 1;
@@ -690,56 +501,59 @@ static int click_menu_items(struct view *v, struct kv_fam_ui *u)
 
 static int click_dlg(struct view *v, struct kv_fam_ui *u)
 {
-	const struct dframe *f = &u->f;
 	int t;
 
-	if (dframe_grab(v, &u->f))          /* the title row takes hold of the box, as in Find and Go to */
+	if (dframe_grab(v, &u->fm.f))       /* the title row takes hold of the box, as in Find and Go to */
 		return 1;
-	if (dframe_hit_close(f, g_my, g_mx)) {
+	if (dframe_hit_close(&u->fm.f, g_my, g_mx)) {
 		dlg_close(v);
 		return 1;
 	}
-	if (has_name_field(u->dlg) && in_span(g_my, g_mx, u->fld[FAM_FLD_NAME].y, u->fld[FAM_FLD_NAME].x0, u->fld[FAM_FLD_NAME].x1)) {
-		v->edit = ED_FAM_NAME;
+	if (has_name_field(u->dlg) && kv_ft_hit(&u->f_name, g_my, g_mx)) {
+		kv_ftext_focus(v, &u->f_name);
 		return 1;
 	}
-	if (has_variant_part(u->dlg) &&
-	    in_span(g_my, g_mx, u->fld[FAM_FLD_COMMENT].y, u->fld[FAM_FLD_COMMENT].x0, u->fld[FAM_FLD_COMMENT].x1)) {
-		v->edit = ED_FAM_COMMENT;
+	if (has_variant_part(u->dlg) && kv_ft_hit(&u->f_comment, g_my, g_mx)) {
+		kv_ftext_focus(v, &u->f_comment);
 		return 1;
 	}
-	if (has_variant_part(u->dlg) && (t = fam_tick_at(u, g_my, g_mx)) >= 0) {
+	if (has_variant_part(u->dlg) && (t = kv_form_tick_at(&u->fm, kv_fam_menu_count() + 1u, g_my, g_mx)) >= 0) {
+		struct kv_pick tl = kv_fam_types();
+
 		if ((uint32_t)t < kv_fam_menu_count())
-			u->types = kv_fam_mask_flip(u->types, (uint32_t)t);
-		else if (kof_famcat_free_letters(&u->cat, u->dlg_idx) > 0u)
-			u->reuse = !u->reuse;
+			u->types = kv_pick_flip(&tl, u->types, (uint32_t)t);
+		else if (kof_famcat_free_letters(&u->cat, u->dlg_idx) > 0u) {
+			struct kv_menu m;
+
+			u->menu_names = 1;
+			u->menu_open = 1;
+			m = fam_menu(u);
+			kv_form_menu_place(&m, g_my, g_mx, &u->menu_y, &u->menu_x);
+		}
 		return 1;
 	}
-	if (in_span(g_my, g_mx, u->btn_y, u->cancel_x[0], u->cancel_x[1]))
-		dlg_close(v);
-	else if (in_span(g_my, g_mx, u->btn_y, u->ok_x[0], u->ok_x[1]))
-		dlg_ok(v);
-	else if (is_edit(u->dlg) && in_span(g_my, g_mx, u->btn_y, u->delete_x[0], u->delete_x[1]))
-		dlg_delete(v);
+	switch (kv_form_press(&u->fm, is_edit(u->dlg), g_my, g_mx)) {
+	case KV_FORM_CANCEL: dlg_close(v); break;
+	case KV_FORM_OK:     dlg_ok(v); break;
+	case KV_FORM_DELETE: dlg_delete(v); break;
+	default: break;
+	}
 	return 1;
 }
 
 static int click_table(struct view *v, struct kv_fam_ui *u)
 {
 	uint32_t row, index;
-	int k;
+	int col;
 
-	if (kv_tab_hit(&u->tg, g_my - u->tab_y, g_mx - u->geo.body_x0, &row, &k) != 2)
-		return 0;
-	row += u->tg.row0;
-	if (row >= u->n_row)
+	if (!kv_main_row_at(&u->m, u->n_row, &row, &col))
 		return 0;
 	if (u->row[row].kind == KV_FAM_ADDVAR) {
-		if (kv_fam_button_at(&u->tg, g_mx - u->geo.body_x0))
+		if (kv_fam_button_at(&u->m.tg, col))
 			dlg_open(v, KV_FAM_DLG_VARIANT, u->row[row].family);
 		return 1;
 	}
-	switch (kv_fam_hit_of(&u->cat, &u->row[row], &u->tg, g_mx - u->geo.body_x0, &index)) {
+	switch (kv_fam_hit_of(&u->cat, &u->row[row], &u->m.tg, col, &index)) {
 	case KV_FAM_HIT_FAMILY:
 		dlg_open(v, KV_FAM_DLG_EDIT_FAMILY, index);
 		break;
@@ -747,13 +561,18 @@ static int click_table(struct view *v, struct kv_fam_ui *u)
 		dlg_open(v, KV_FAM_DLG_EDIT_VARIANT, index);
 		break;
 	case KV_FAM_HIT_COMMENT:
-		cedit_open(v, u, index);
+		cell_open(v, u, index);
 		break;
 	case KV_FAM_HIT_TYPES:
+		u->menu_names = 0;
 		u->menu_open = 1;
 		u->err[0] = 0;
 		u->menu_var = index;
-		menu_place(u, g_my, g_mx);
+		{
+			struct kv_menu m = fam_menu(u);
+
+			kv_form_menu_place(&m, g_my, g_mx, &u->menu_y, &u->menu_x);
+		}
 		break;
 	default:
 		break;
@@ -765,7 +584,7 @@ static int click_table(struct view *v, struct kv_fam_ui *u)
  * failure the catalog and the snapshot stay as they were (the buttons stay enabled). */
 static void fam_save(struct kv_fam_ui *u, const char *dir)
 {
-	if (kof_famcat_save(&u->cat, &u->store, dir) == KOF_FAMCAT_IO_OK) {
+	if (kof_famcat_save(&u->cat, &u->store, dir) == KOF_CATSTORE_IO_OK) {
 		kof_famcat_snapshot(&u->cat, &u->snap);
 		u->err[0] = 0;
 	} else {
@@ -783,21 +602,18 @@ int fam_click(struct view *v, int rclick)
 	if (rclick)
 		return 1;
 	/* A press outside the field commits the comment, like Enter; a refused one is said and keeps the field (and the press). */
-	if (u->cedit_on && !u->dlg && !u->menu_open && !cedit_commit(v, u))
+	if (u->f_cell.open && !u->dlg && !u->menu_open && !kv_ftext_commit(v, &u->f_cell))
 		return 1;
 	if (u->menu_open)
 		return click_menu_items(v, u);
 	if (u->dlg)
 		return click_dlg(v, u);
-	if (kv_dd_close_at(&u->geo, g_my, g_mx)) {
+	switch (kv_main_press(v, &u->m)) {
+	case KV_MAIN_CLOSE:
 		fam_close(v);
 		return 1;
-	}
-	if (kv_dd_grab_at(&u->geo, g_my, g_mx)) {
-		dlg_hold(v, &u->main_move);
+	case KV_MAIN_HELD:
 		return 1;
-	}
-	switch (kv_fam_btn_at(u->btn, u->n_btn, g_my, g_mx)) {
 	case (int)KV_FAM_BTN_ADD_FAMILY:
 		dlg_open(v, KV_FAM_DLG_FAMILY, 0);
 		return 1;
@@ -817,57 +633,28 @@ int fam_click(struct view *v, int rclick)
 
 /* ---- the keyboard ----------------------------------------------------------------------------------------- */
 
-/* The typing filter is the engine's name rule, character by character. */
-static int name_accept(int k)
-{
-	return kof_name_char(k);
-}
-
-/* The comment's typing filter is the engine's comment rule, character by character. */
-static int comment_accept(int k)
-{
-	return kof_comment_char(k);
-}
-
 /* -1: not mine. While the dialog is up every key is its own; a press goes on to fam_click through click(). */
 int handle_fam_key(struct view *v, int k)
 {
 	struct kv_fam_ui *u = fam_ui(v);
+	int r;
 
 	if (!u || !u->open)
 		return -1;
-	if (k == K_CLICK || k == K_RCLICK)
-		return -1;
-	if (k == K_DRAG) {
-		if (v->dlg_move)
-			on_drag(v);         /* a box being moved owns the motion; any other drag is swallowed */
-		return 1;
-	}
-	if (k == K_RELEASE) {
-		v->dlg_move = NULL;
-		return 1;
-	}
-	if (k == K_WHEEL_UP || k == K_WHEEL_DOWN) {
-		if (!u->dlg && !u->menu_open) {
-			uint32_t d = g_mod_shift || g_mod_ctrl ? FAM_WHEEL_COLS : FAM_WHEEL_ROWS;
-			uint32_t *at = g_mod_shift || g_mod_ctrl ? &u->hoff : &u->off;
-
-			*at = k == K_WHEEL_UP ? (*at > d ? *at - d : 0u) : *at + d;  /* clamped where it is drawn */
+	r = kv_form_key_prologue(v, &u->m, k, u->dlg != 0, &u->menu_open);
+	if (r)
+		return r;
+	if (u->f_cell.open && !u->dlg) {
+		switch (kv_ftext_key(v, &u->f_cell, k)) {
+		case KV_FT_ESC:
+			kv_ftext_cancel(v, &u->f_cell);
+			break;
+		case KV_FT_ENTER:
+			(void)kv_ftext_commit(v, &u->f_cell);
+			break;
+		default:
+			break;
 		}
-		return 1;
-	}
-	if (u->menu_open) {
-		if (k == 27)
-			u->menu_open = 0;
-		return 1;
-	}
-	if (u->cedit_on && !u->dlg) {
-		if (k == 27)
-			cedit_stop(v, u);
-		else if (k == '\r' || k == '\n')
-			cedit_commit(v, u);
-		else
-			field_key(v, u->cbuf, sizeof u->cbuf, k, comment_accept);
 		return 1;
 	}
 	if (u->dlg) {
@@ -875,12 +662,9 @@ int handle_fam_key(struct view *v, int k)
 			dlg_close(v);
 		else if (k == '\r' || k == '\n')
 			dlg_ok(v);
-		else if (has_name_field(u->dlg) && (v->edit == ED_FAM_NAME || !has_variant_part(u->dlg)))
-			field_key(v, u->name, sizeof u->name, k, name_accept);
-		else {
-			v->edit = ED_FAM_COMMENT;
-			field_key(v, u->comment, sizeof u->comment, k, comment_accept);
-		}
+		else
+			(void)kv_ftext_key(v, has_name_field(u->dlg) && (v->edit == ED_FAM_NAME || !has_variant_part(u->dlg))
+					      ? &u->f_name : &u->f_comment, k);
 		return 1;
 	}
 	if (k == 27 || k == '\r' || k == '\n')

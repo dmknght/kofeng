@@ -1,0 +1,51 @@
+# golden clean_dash_overview: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │ Object                                                                                                                                                             │  │
+ 4| │   name        clean_elf                                                                                                                                            │  │
+ 5| │   folder      /mnt/games/kofscratch/vt/work/golden/  [ Copy full path ]                                                                                            │  │
+ 6| │   sha256      c945505e8d5f1da8d86d382750f6179e2dc05e0de9ad1b9a1b03e6c092f4e03c                                                                                     │  │
+ 7| │   size        46120 bytes (45.0 KiB)                                                                                                                               │  │
+ 8| │   linking     dynamic                                                                                                                                              │  │
+ 9| │ ELF                                                                                                                                                                │  │
+10| │   format      ELF · ET_DYN                                                                                                                                         │  │
+11| │   arch        x86-64 64-bit · little-endian                                                                                                                        │  │
+12| │   symbols     stripped                                                                                                                                             │  │
+13| │   entry       R-X at .text                                                                                                                                         │  │
+14| │               virtual address 0x2e80                                                                                                                               │  │
+15| │               file offset     0x2e80                                                                                                                               │  │
+16| │               section offset  0xa40                                                                                                                                │  │
+17| │   layout      4 loadable segments · 33 sections                                                                                                                    │  │
+18| │ Regions                                                                                                                                                            │  │
+19| │   HEADERS     2960        6.4%  1.4/8 bits                                                                                                                         │  │
+20| │   CODE        22285      48.3%  6.0/8 bits                                                                                                                         │  │
+21| │   DATA        10584      22.9%  4.4/8 bits                                                                                                                         │  │
+22| │   NOLOAD      2998        6.5%  7.6/8 bits                                                                                                                         │  │
+23| │   UNCLAIMED   7293       15.8%  0.0/8 bits                                                                                                                         │  │
+24| │ Anomalies                                                                                                                                                          │  │
+25| │   none                                                                                                                                                             │  │
+26| │                                                                                                                                                                    │  │
+27| │                                                                                                                                                                    │  │
+28| │                                                                                                                                                                    │  │
+29| │                                                                                                                                                                    │  │
+30| │                                                                                                                                                                    │  │
+31| │                                                                                                                                                                    │  │
+32| │                                                                                                                                                                    │  │
+33| │                                                                                                                                                                    │  │
+34| │                                                                                                                                                                    │  │
+35| │                                                                                                                                                                    │  │
+36| │                                                                                                                                                                    │  │
+37|-│                                                                                                                                                                    │---
+38| │                                                                                                                                                                    │ ]
+39| │                                                                                                                                                                    │
+40| │                                                                                                                                                                    │
+41| │                                                                                                                                                                    │
+42| │                                                                                                                                                                    │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-23 of 23 lines ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  no verdict

@@ -624,6 +624,9 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 	 * Everything that is not a regular file - FIFO, socket, device, directory - is
 	 * refused by the fstat, with KOF_ERR_OPEN as kofhash.h defines it.
 	 */
+/* KNOWN DEFECT BE-3 (2026-10-28, M) [sev L]: [accuracy] the open is O_NOFOLLOW whatever the caller asked: kof_scan_option.follow_symlinks (kofoption.h, kofscanner --follow-links) has no reader in libkofeng.
+ * Trigger: --follow-links with a directory holding a symlink, or with a symlink as the path. Effect: the walk reports 0 files and no word about the link; a link named as the path is "could not be read".
+ * Reproducer: sh repro/be3.sh. Fix: remove the option and the flag (the owner decided to never follow, see above), or read it here and in the walk, and count a skipped link. */
 	fd = open(rq->path, O_RDONLY | O_BINARY | O_NONBLOCK | O_NOFOLLOW | O_NOCTTY);
 	if (fd < 0)
 		return NULL;
@@ -988,11 +991,10 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first);
  */
 const char *kof_src_tmpdir(void)
 {
-	/* KNOWN DEFECT R1b (2026-10-24, R) [sev L]: kof_src_tmpdir caches its answer in a writable static buffer filled without
-	 * a lock, against the rule "no writable global state". Trigger: two scanners on two threads make their first
-	 * spill file together. Effect: both write `kept`, a reader can see a half-written path (.bss 0x1000 per the graph_bin audit).
-	 * Reproducer: none (read). Fix: fill it under a once flag, or let the host pass the directory. */
-	static char kept[4096];
+	/* One answer per THREAD, not per process: a buffer shared by two threads that make their first spill file
+	 * together was written by both and read half-written (R1b). The cost is one probe per thread, the same
+	 * probe the first caller paid; the returned path stays valid for the life of the calling thread. */
+	static _Thread_local char kept[4096];
 	int fd;
 
 	if (kept[0])

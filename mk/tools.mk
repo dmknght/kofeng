@@ -164,13 +164,20 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_props_tab.c \
                 kofexamine/kv_screen.c \
                 kofexamine/kv_state.c \
+                kofexamine/kv_cfgbody.c \
+                kofexamine/kv_cfgdlg.c \
                 kofexamine/kv_dash_dialog.c \
+                kofexamine/kv_graph.c \
                 kofexamine/kv_famdata.c \
+                kofexamine/kv_ftext.c \
+                kofexamine/kv_ftext_view.c \
                 kofexamine/kv_families.c \
+                kofexamine/kv_form.c \
+                kofexamine/kv_formdata.c \
+                kofexamine/kv_tags.c \
+                kofexamine/kv_tagdata.c \
                 kofexamine/kv_dlgsel.c \
-                kofexamine/kv_syn.c \
                 kofexamine/kv_table.c \
-                kofexamine/kv_syntable.c \
                 kofexamine/kv_text.c \
                 kofexamine/kv_tree.c \
                 kofexamine/kv_tree_draw.c \

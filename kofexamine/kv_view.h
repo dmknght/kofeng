@@ -10,12 +10,17 @@
 #define KV_VIEW_H
 
 struct kv_fam_ui;
+struct kv_tag_ui;
+struct kv_cfg_ui;
+
+/* What dis_format keeps from one row to the next (kv_disasm.c): the last instruction that set the flags, and where the next one would start. One per walk of rows. */
+struct dis_flow {
+	struct kgenome_x86_insn fl;
+	uint64_t fl_rip, next;
+	uint8_t ok;
+};
 
 struct view {
-	/* The scanner that is running RIGHT NOW, so on_object can ask it what
-	 * the database's blocks scored before it is freed. NULL at every other
-	 * moment, which is what stops anything else from reaching for it. */
-	kof_scanner     *scan_sc;
 	/*
 	 * MUTATION MODE: the same pane, asking a different question.
 	 *
@@ -64,7 +69,7 @@ struct view {
 	 * what carries the control, and a table whose handle vanished when it
 	 * was folded could not be opened again.
 	 */
-	int              blk_fold, diag_fold;
+	int              blk_fold;
 	/* Which object the table was carved from, so moving to another one
 	 * carves that one instead of showing the last one's blocks. */
 	uint32_t         mtn_seg_obj;
@@ -95,6 +100,16 @@ struct view {
 	 * fine for a path that never changes and wrong the moment one does.
 	 */
 	kof_engine *eng;
+	/* The pull of the engine's detection facts (kscan_explain), made when a panel first asks for the root of the selected object and kept until
+	 * the file goes: NULL until then. det_root is the index of the root object it was made for. */
+	kdet_run   *det;
+	uint32_t    det_root;
+	/* The same pull for ONE object the root's run does not hold (a child the emulator made on request, emu_here): its own bytes scanned as a root. */
+	kdet_run   *det_own;
+	uint32_t    det_own_obj;
+	/* The engine's one verdict per top-level file (kverdict_filemap_fold, fed by on_object): the verdict of the object that is the file itself
+	 * is the first one made anywhere in its tree, and that is not always its own result. Made with the first object, freed with the file. */
+	kverdict_filemap *fmap;
 	char        dbdir[256];
 	char        pathbuf[KOF_DUMP_PATH_ROOM];
 
@@ -246,7 +261,6 @@ struct view {
 	 * grow or free while walking a log.
 	 */
 	char                *evt_join;
-	size_t               evt_join_len;
 	char                *evt_text;
 	size_t               evt_text_len;
 
@@ -358,6 +372,9 @@ struct view {
 	/* The process this view is showing, or 0 when it is a file. What makes
 	 * next/prev step through pids instead of through a directory. */
 	uint32_t    proc_pid;
+	/* The process record v->map points at while proc_pid is set: the view's own,
+	 * so two views never overwrite each other's (it was a static in proc_open). */
+	uint8_t     proc_rec[8192];   /* KOF_PROC_REC_MAX, checked in kv_main.c */
 	/* The mapped files already given a row - see proc_seen_path. */
 #define PROC_SEEN_MAX 256u
 	char        seen_path[PROC_SEEN_MAX][256];
@@ -470,9 +487,7 @@ struct view {
 	 * it - or after instructions that leave the flags alone - is explained as the comparison it is. Kept by dis_format as it goes; a row that is not
 	 * the next of the last one starts from nothing known.
 	 */
-	struct kgenome_x86_insn dis_fl;
-	uint64_t    dis_fl_rip, dis_next;
-	uint8_t     dis_fl_ok;
+	struct dis_flow dis_flow;
 	char        dis_line[64][DIS_LINE_MAX];
 	/*
 	 * The bytes each drawn line stands for.
@@ -487,14 +502,13 @@ struct view {
 	uint8_t     dis_line_lbl[64];       /* the row is a label: no bytes, not selectable */
 	int         dis_lines;
 	int         dragging;
-	int         dragged;        /* the pointer moved off the pressed byte */
 
 	/* Which half of the hex pane the menu was opened on. */
 	int         menu_ctx;       /* 1 bytes, 2 the offset column,
 				     * 4 the disassembly, 8 the event box */
 	uint64_t    menu_off;       /* the row offset it was opened on */
 
-	int         menu_open, menu_row, menu_col, menu_sel;
+	int         menu_open, menu_row, menu_col, menu_sel, menu_scroll;
 	struct chooser ch;
 
 	/*
@@ -578,6 +592,8 @@ struct view {
 	char        basedir[256];
 	/* Manage > Pathogens: where the family files are kept (<bases>/pathogens or --pathogens); empty = not known, Save refuses. */
 	char        pathdir[256];
+	/* Manage > Syndromes: where the tag files are kept (<bases>/syndromes or --syndromes); empty = not known, Save refuses. */
+	char        syndir[256];
 
 	/*
 	 * How the conditions combine, written the way ClamAV writes it: numbers
@@ -588,13 +604,13 @@ struct view {
 	 */
 
 
-	int         edit;           /* 0 none, 1 family, 2 variant */
+	int         edit;           /* 0 none, else the code of the box open (see ED_*) */
 
 
 
 
 	/* Where the header's controls landed, recorded as they are drawn. */
-	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
+	int         g_c0, g_c1;
 	int         n_c0, n_c1;     /* the "+ condition" button */
 	int         nw_c0, nw_c1;   /* "New" - empty the panel */
 	int         nt_c0, nt_c1;   /* the module's own note */
@@ -690,8 +706,6 @@ struct view {
 	 * a row added to one and not the other sends every click below it to
 	 * the wrong control. Built once per frame, indexed by both.
 	 */
-	uint8_t     prow_kind[MAX_PROW];
-	uint32_t    prow_idx[MAX_PROW];
 	uint32_t    n_prow, prow_off;
 	/*
 	 * MUTATION MODE SCROLLS THE BLOCK LIST AND NOTHING ELSE.
@@ -728,7 +742,6 @@ struct view {
 	uint64_t    last_click;     /* the byte a click landed on */
 	uint64_t    last_click_ms;  /* and when, so a second one can pair */
 
-	uint32_t    prow_seen;
 	/*
 	 * A DRAFT THAT WAS LOADED OPENS AT ITS BEGINNING.
 	 *
@@ -739,7 +752,7 @@ struct view {
 	 * and the KOF_TARGET_ rows, which are at the top, were off screen. The
 	 * options looked as though the rule had not declared any.
 	 */
-	int         prow_home;      /* how tall the draft was last frame */
+	int         prow_home;      /* the next frame starts the draft at its top */
      /* what the draft was when it was written */
 	uint64_t    obj_held;       /* bytes of recovered objects being kept */
 	int         sizing;
@@ -1052,6 +1065,13 @@ struct view {
 	uint8_t     prop_pg;
 	uint8_t     prop_inf;           /* 1: the dialog is the Infection one (its book has the two PROP_PG_INF_* pages) */
 	struct dlg_off prop_move;       /* where the reader dragged the dashboard dialog; reset when it opens */
+	/* What is on the terminal, kept for the next frame (kv_screen.c): the last frame written (a frame that is byte for byte the same is
+	 * not written again), which full-cover dialog it showed and the dashboard's offset it was drawn with. They describe the TERMINAL, so
+	 * file_open and proc_open carry them across the clear with the rest of the session. */
+	char           *scr_last;
+	size_t          scr_last_n;
+	int             scr_modal;
+	struct dlg_off  scr_prop;
 	struct kv_dd_geo prop_geo;
 	struct kv_dd_in  prop_in;       /* what the dialog was drawn from: the scrollbar is read with its numbers */
 	int         prop_bar_drag;      /* the scrollbar is held */
@@ -1130,7 +1150,7 @@ struct view {
 	/* One offset per field that can hold more than it shows. Separate
 	 * because they scroll independently: a caret in one says nothing about
 	 * where another is being read from. */
-	uint32_t    fam_off, num_off;
+	uint32_t    num_off;
 	uint32_t    cnd_eoff[MAX_GROUP];
 	/* The search's own message. Shared with the draft panel's it produced
 	 * a bare "not found" beside the Generate button, which is an answer to
@@ -1143,19 +1163,11 @@ struct view {
 	char        num[24];        /* the size being typed */
 	int         num_fresh;      /* nothing typed into it yet */
 	int         row_cnd, row_str;
-	int         cnd_tg[MAX_GROUP][2];   /* the tag of each condition */
-	int         grp_tg[MAX_GROUP][2];   /* the tag of a standalone block matcher */
-	/*
-	 * THE TAG SOURCES AND THE VIEWS OVER THEM, owned by the session: they
-	 * outlive the file being looked at, so the clear that opens another one
-	 * keeps the pointer (file_open, proc_open).
-	 */
-	struct kv_syn *syn;
 	/* Manage > Pathogens: the session's catalog and its dialogs (kv_families.h); NULL until first opened. */
 	struct kv_fam_ui *fam;
-	/* Whether the output pane is listed under the tables - what the
-	 * Generate button toggles. Nothing is written either way. */
-	int         gen_preview;
+	/* Manage > Syndromes: the session's tag catalog and its dialogs (kv_tags.h); NULL until first opened. */
+	struct kv_tag_ui *tag;
+	struct kv_cfg_ui *cfgd;         /* the CFG dialog of a function (kv_cfgdlg.c), made when a function's name is pressed */
 	/* The comment boxes, and the condition's own "+ matcher". Recorded per
 	 * row as they are drawn, because a row that is scrolled out has no
 	 * columns and must not answer a click meant for the one in its place. */

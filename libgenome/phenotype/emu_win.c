@@ -518,9 +518,6 @@ uint64_t kgenome_emu_win_miss_thunk(struct kgenome_emu *e)
 	return 0x10u + 0x10u * (e->win_miss++ % 0xfeu);
 }
 
-/* KNOWN DEFECT S2-CTYPE-a (2026-10-24, R) [sev L]: kgenome_emu_win_resolve tests a guest name with isalpha/isalnum, which follow the host's locale (core's kof_is_alpha / kof_is_word_byte do not).
- * Trigger: a host that called setlocale() (the engine never does) and a guest import name with a byte >= 0x80. Effect: such a name is accepted as an import and given a miss thunk, or refused, by the host's locale.
- * Reproducer: none. Fix: kof_is_alpha(c) / kof_is_word_byte(c) from kofcore.h. */
 uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
 {
 	uint64_t a;
@@ -532,10 +529,11 @@ uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
 	n = strlen(name);
 	if (a)
 		return a;
-	if (n < 3u || n > 64u || !(isalpha((unsigned char)name[0]) || name[0] == '_'))
+	/* ASCII classes (core's), not the host's locale: a guest name is the sample's bytes. */
+	if (n < 3u || n > 64u || !(kof_is_alpha((uint8_t)name[0]) || name[0] == '_'))
 		return 0;
 	for (i = 0; i < n; i++)
-		if (!isalnum((unsigned char)name[i]) && name[i] != '_' &&
+		if (!kof_is_alnum((uint8_t)name[i]) && name[i] != '_' &&
 		    name[i] != '@' && name[i] != '?' && name[i] != '$')
 			return 0;
 	return kgenome_emu_win_miss_thunk(e);
@@ -564,9 +562,6 @@ uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
  * off or put on (the loader supplies it), so LoadLibrary("comctl32") and GetModuleHandle("COMCTL32.DLL") name
  * one library. Returns 0 for a name this table does not model (too short or long, odd characters).
  */
-/* KNOWN DEFECT S2-CTYPE-b (2026-10-24, R) [sev L]: fake_key lower-cases and tests a library name with isalnum/tolower, which follow the host's locale.
- * Trigger: a host that called setlocale() (the engine never does) and a library name with a byte >= 0x80. Effect: the key differs between hosts, so a modelled library is found or missed by the locale.
- * Reproducer: none. Fix: kof_is_word_byte(c) and kof_lower_byte(c) from kofcore.h. */
 static int fake_key(const char *name, char *low, size_t cap)
 {
 	size_t i, n = strlen(name);
@@ -576,9 +571,9 @@ static int fake_key(const char *name, char *low, size_t cap)
 	for (i = 0; i < n; i++) {
 		unsigned char c = (unsigned char)name[i];
 
-		if (!isalnum(c) && c != '_' && c != '.' && c != '-')
+		if (!kof_is_alnum(c) && c != '_' && c != '.' && c != '-')
 			return 0;
-		low[i] = (char)tolower(c);
+		low[i] = (char)kof_lower_byte(c);
 	}
 	low[n] = 0;
 	if (n > 4u && !strcmp(low + n - 4u, ".dll"))

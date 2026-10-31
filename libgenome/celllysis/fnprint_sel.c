@@ -18,6 +18,11 @@
  *
  * Nothing here reads a name, a section or a link order: the input is the extents and the bytes.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #include "fnprint.h"
 
 #include <stdlib.h>
@@ -105,7 +110,7 @@ static uint32_t probe(const struct kgenome_fnprint_sel_req *rq, const uint8_t *p
 		uint64_t pos = k > 1u ? span * j / (k - 1u) : span / 2u;
 		uint32_t run;
 
-		if (!kgenome_mtn_win_begin(&it, p + pos, KGENOME_MUTATION_NG, KGENOME_MUTATION_RAW))
+		if (!kgenome_mtn_win_begin(&it, p + pos, KGENOME_MUTATION_NG))
 			continue;
 		st->n_probe++;
 		if (kgenome_mtn_win_flat(&it))
@@ -212,7 +217,6 @@ void kgenome_fnprint_sel_plan(const struct kgenome_fnprint_sel_req *rq)
 			st->status = KGENOME_OVER_BUDGET;
 			goto fail;
 		}
-		st->scratch_bytes += bytes;
 	}
 	if (want_probe && rq->n_fn) {
 		uint64_t b = (uint64_t)rq->n_fn * sizeof *it;
@@ -229,7 +233,6 @@ void kgenome_fnprint_sel_plan(const struct kgenome_fnprint_sel_req *rq)
 			goto fail;
 		}
 		bytes += b;
-		st->scratch_bytes += b;
 	}
 	for (i = 0; i < rq->n_fn; i++) {
 		const struct kof_range *f = &rq->fn[i];

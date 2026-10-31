@@ -298,27 +298,20 @@ typedef struct outcome (*once_fn)(const struct seed *s);
  * KNOWN-MISS and does not fail the test; a silent answer anywhere else FAILS; a known site that no longer answers silently is printed
  * FIXED and counted (remove the row), and does not fail, so that a change of the binary route that lands before this test is updated (the
  * pending fix_gbin2 patch) does not turn the suite red.
- *   F7   scan, kgenome_diag_scan_walk: the wrapper analysis's walk object is not allocated: the wrappers are not analysed, status ok
- *   F8   scan, kgenome_lineage_codemap: the code map the lineage stages read is not built: the links it makes are missing, status ok
- *   F9   funcs, kgenome_diag_funcs_with_walk (its own table and the walk it fills, kgenome_diag_walk_ensure): the function table comes back short with fs.status ok
- *        (struct kgenome_func_set.status is KGENOME_NOMEM for exactly this)
- *   F10  apihash, kgenome_pe_imports: the import table the resolver run builds for itself is cut and its status is not merged into the
- *        product: fewer API calls, status ok
+ * Found here and FIXED (each refused allocation is now a status, and this sweep is the red test: it reported them as KNOWN-MISS on the old code):
+ *   F7   scan, kgenome_diag_scan_walk: the wrapper analysis's walk object was not allocated: the wrappers were not analysed, status ok
+ *   F8   scan, kgenome_lineage_codemap: the code map the lineage stages read was not built: the links it makes were missing, status ok
+ *   F9   funcs, kgenome_diag_funcs_with_walk: the function table came back short with fs.status ok
+ *   F10  apihash: the import table the resolver run built for itself was cut and its status not merged into the product
  */
 struct known {
 	const char *what, *site, *id;
 	long        hits;
 };
 
+/* No known silent site is left (F7-F10 were fixed: each now notes the refusal). The sentinel row keeps the table non-empty; it matches no call and is never "fixed". */
 static struct known known[] = {
-	/* KNOWN DEFECT WP9-F7 (2026-10-25, M): this row pins it, green until fixed. */
-	{ "scan", "kgenome_diag_scan_walk", "F7", 0 },
-	/* KNOWN DEFECT WP9-F8 (2026-10-25, M): this row pins it, green until fixed. */
-	{ "scan", "kgenome_lineage_codemap", "F8", 0 },
-	/* KNOWN DEFECT WP9-F9 (2026-10-25, M): this row pins it, green until fixed. */
-	{ "funcs", "kgenome_diag_funcs_with_walk", "F9", 0 },
-	/* KNOWN DEFECT WP9-F10 (2026-10-25, M): this row pins it, green until fixed. */
-	{ "apihash", "kgenome_pe_imports", "F10", 0 },
+	{ "", "", "-", 1 },
 };
 
 /* the known row of the refused allocation just taken, or NULL */

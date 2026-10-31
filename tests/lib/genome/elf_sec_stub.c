@@ -63,13 +63,16 @@ int main(void)
 	CK(!kgenome_elf_sec_is_stub(&e, 1));
 	CK(kgenome_elf_sec_is_stub(&e, 3));
 
-	/* the entry in no executable section (or none declared): nothing to compare with */
+	/* CN-1: the entry in no executable section, or none (a shared library has e_entry 0): the body is the
+	 * largest executable section, and the others are stubs. Old tests missed it: (c) they pinned "nothing to
+	 * compare with" as the answer, which made the diagnose import route blind to every .so's PLT. */
 	layout(".text", ".init", 0x3010);               /* entry in .data */
-	CK(!kgenome_elf_sec_is_stub(&e, 1) && !kgenome_elf_sec_is_stub(&e, 3));
+	CK(kgenome_elf_sec_is_stub(&e, 1) && kgenome_elf_sec_is_stub(&e, 2) && !kgenome_elf_sec_is_stub(&e, 3));
 	layout(".text", ".init", 0);
-	CK(!kgenome_elf_sec_is_stub(&e, 1) && !kgenome_elf_sec_is_stub(&e, 3));
+	CK(kgenome_elf_sec_is_stub(&e, 1) && kgenome_elf_sec_is_stub(&e, 2) && !kgenome_elf_sec_is_stub(&e, 3));
+	CK(!kgenome_elf_sec_is_stub(&e, 4) && !kgenome_elf_sec_is_stub(&e, 0));
 	layout(".text", ".init", 0x1100 + 0x800);       /* one past the end of the body */
-	CK(!kgenome_elf_sec_is_stub(&e, 1) && !kgenome_elf_sec_is_stub(&e, 3));
+	CK(kgenome_elf_sec_is_stub(&e, 1) && kgenome_elf_sec_is_stub(&e, 2) && !kgenome_elf_sec_is_stub(&e, 3));
 	e.valid = 0;
 	layout(".text", ".init", 0x1100);
 	e.valid = 0;

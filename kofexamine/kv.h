@@ -158,7 +158,6 @@
 /* The disassembler the emulator already carries: the viewer links the same
  * library, so this costs an include path and nothing else. */
 #include <x86/x86.h>
-#include "../libkofeng/detectors/heur/kofheur.h"
 #include "../libkofeng/scanners/scan.h"
 #include "../libkofeng/scanners/objsrc.h"
 #include <phenotype/emu_unpack.h>

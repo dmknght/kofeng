@@ -605,6 +605,24 @@ static void case_net(void)
 	ok(s && strstr(s->net, "TCP6 0000:0000:0000:0000:0000:0000:0000:0001:80 -> ") != NULL,
 	   "a tcp6 row is listed with eight 16-bit groups, each 32-bit word little-endian");
 	ok(s && !strstr(s->net, "8081"), "a row with inode 0 is skipped");
+	/* an address shorter than the family's width, after a row that left its full address in the same stack buffer */
+	fresh();
+	put_stat(100, "a", 1, 0, 1);
+	put_fd(100, "3", "socket:[1001]");
+	put_fd(100, "4", "socket:[1002]");
+	{
+		char t[1024];
+
+		snprintf(t, sizeof t, "%s"
+			 "   0: 0100007F:1F90 0200A8C0:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 1001 1 0000000000000000 100 0 0 10 0\n"
+			 "   1: 0100:1F91 0200A8C0:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 1002 1 0000000000000000 100 0 0 10 0\n",
+			 hdr);
+		put_net(100, "tcp", t);
+	}
+	walk(&o, NULL);
+	s = find(100);
+	ok(s && strstr(s->net, "TCP 127.0.0.1:8080 -> 192.168.0.2:443 ESTABLISHED\n") && strstr(s->net, "TCP ?:8081 -> 192.168.0.2:443 ESTABLISHED\n"),
+	   "a local address of 4 hex digits instead of 8 is '?', not the previous row's bytes read past its NUL");
 	/* a huge, hostile table: more rows than the 4096-byte output holds */
 	fresh();
 	put_stat(100, "a", 1, 0, 1);

@@ -29,6 +29,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "kgenome_status.h"
 
@@ -227,6 +228,45 @@ static inline int kgenome_ledger_try(struct kgenome_ledger *l, uint64_t n)
 static inline void kgenome_ledger_release(struct kgenome_ledger *l, uint64_t n)
 {
 	l->used = n > l->used ? 0 : l->used - n;
+}
+
+/*
+ * GROW A TABLE THE LEDGER PAYS FOR: make room for element `n` (one past the last held) in `*v`, `*cap` elements of `each` bytes, doubling from 256.
+ * Charges the ledger for what it adds and adds it to `*charged`, so the caller gives back exactly that. Returns 1 when there is room, 0 when the ledger refuses (its status is
+ * OVER_BUDGET) or the doubling would pass a uint32, -1 when memory is refused - and then nothing changed: the caller says the table is short.
+ */
+static inline int kgenome_ledger_grow(struct kgenome_ledger *l, void **v, uint32_t *cap, uint32_t n,
+				      size_t each, uint64_t *charged)
+{
+	uint64_t nc;
+	void *nv;
+
+	if (n < *cap)
+		return 1;
+	nc = *cap ? (uint64_t)*cap * 2u : 256u;
+	if (nc > 0xffffffffu || !kgenome_ledger_charge(l, (nc - *cap) * each))
+		return 0;
+	nv = realloc(*v, (size_t)nc * each);
+	if (!nv) {
+		kgenome_ledger_release(l, (nc - *cap) * each);
+		return -1;
+	}
+	*charged += (nc - *cap) * each;
+	*v = nv;
+	*cap = (uint32_t)nc;
+	return 1;
+}
+
+/*
+ * THE NEXT CAPACITY OF A TABLE THAT DOUBLES: `cap * 2`, or `first` for an empty one, and 0 when doubling would pass what a uint32 can count
+ * (`cap` above 2^31 wraps the old `cap * 2u` to a smaller number, and the table is then written past its end). A caller treats 0 as a
+ * refused allocation: the table stays as it is and the status says it is short. (REV-D8*.)
+ */
+static inline uint32_t kgenome_grow_cap(uint32_t cap, uint32_t first)
+{
+	if (!cap)
+		return first;
+	return cap > 0x7fffffffu ? 0u : cap * 2u;
 }
 
 #endif /* KGENOME_BUDGET_H */

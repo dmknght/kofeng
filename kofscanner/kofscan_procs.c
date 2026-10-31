@@ -482,8 +482,7 @@ int ksn_scan_procs(const struct ksn_procs_req *rq)
 	 * Windows only.
 	 */
 	if (p.patches)
-		printf("modified  %llu run(s) in loaded module(s), %llu byte(s)"
-		       " - differs from the file, which is not yet a verdict\n",
+		printf("modified  %llu run(s) in loaded module(s), %llu byte(s)\n",
 		       (unsigned long long)p.patches,
 		       (unsigned long long)p.patch_bytes);
 	/*

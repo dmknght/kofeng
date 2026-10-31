@@ -424,7 +424,6 @@ void prop_object_rows(struct view *v, const struct object *ob, int full)
 		prop_add(A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
 			 top ? "opened by" : "unpacked by",
 			 (ob->heur.from_packer ||
-			  (ob->heur.heur_flags &
-			   KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN,
+			  ob->heur.opened_by_packer) ? A_BAD : A_WARN,
 			 ob->packer);
 }

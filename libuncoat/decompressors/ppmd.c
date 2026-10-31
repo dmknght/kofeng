@@ -1625,25 +1625,32 @@ int kuncoat_ppmd_next(struct kuncoat_ppmd *m)
 		do {
 			m->order_fall++;
 			c = ctx_at(m, m->min_context);
-			/* KNOWN DEFECT WP5-F-PPMD-1 (2026-10-25, M) [sev L]: kuncoat_ppmd_next does not latch -1: m->broken stays 0 and min_context has already moved to the suffix.
-			 * Trigger: an escape out of the root context (or another `return -1` exit), then another call on the same model. Effect: the next call continues from a different
-			 * context and can return a symbol, against ppmd.h ("-1 when the stream or the model gave out"); rar3.c stops at the first -1, so nothing in the tree is hurt.
-			 * Reproducer: tests_wp5/findings/ppmd_next_after_minus1_seed0_text.bin. Fix: set m->broken = 1 before each `return -1` of the escape walk. */
-			if (!c || !c->suffix)
+			/* A -1 from here on is final: min_context moves to the suffix, so
+			 * a call after it would continue from another context. Only
+			 * kuncoat_ppmd_resume or a start clears it. */
+			if (!c || !c->suffix) {
+				m->broken = 1;
 				return -1;
+			}
 			m->min_context = c->suffix;
 			c = ctx_at(m, m->min_context);
-			if (!c)
+			if (!c) {
+				m->broken = 1;
 				return -1;
+			}
 		} while (c->num_stats == (uint16_t)m->num_masked);
 		sym = decode_symbol2(m);
 	}
-	if (sym < 0 || m->broken)
+	if (sym < 0 || m->broken) {
+		m->broken = 1;
 		return -1;
+	}
 
 	fs = st_at(m, m->found_state);
-	if (!fs)
+	if (!fs) {
+		m->broken = 1;
 		return -1;
+	}
 	sym = fs->symbol;
 	if (!m->order_fall && st_succ(fs) > m->text) {
 		m->min_context = m->max_context = st_succ(fs);

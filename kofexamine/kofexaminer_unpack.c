@@ -60,6 +60,7 @@ struct unp_run {
 	const kof_engine *eng;
 	uint32_t    produced;
 	uint32_t    partial;
+	uint32_t    verdicts;     /* objects that came back with a verdict: kex_unpack_pass explains them (print_why) */
 	/*
 	 * Whether the FILE ITSELF was finished, which is a different fact from
 	 * `partial` and was the one missing.
@@ -112,18 +113,24 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value,
  * that matched and the diseases, each named by the engine (kdb_diagnose_name,
  * kdb_disease_name) from the ids the verdict carries. Nothing is composed here.
  */
-static void print_verdict(const struct unp_run *u, const struct kof_result *res)
+static void print_verdict(struct unp_run *u, const struct kof_result *res)
 {
 	const struct kof_finding *f = &res->verdict;
+	struct kdet_info in;
 	uint32_t i;
 
 	if (!res->has_verdict)
 		return;
 	printf("  verdict   %s%s%s\n", kex_C_BAD, f->name, kex_C_OFF);
+	u->verdicts++;
+	kdet_info(u->eng, res, &in);
+	if (in.level)
+		printf("    family=%s variant=%s tag=%s\n", in.family, in.variant, in.tag);
 	for (i = 0; i < f->n_diag; i++) {
-		const char *nm = kdb_diagnose_name(u->eng, f->diag[i]);
+		struct kdet_diag d;
 
-		printf("    diagnose %s\n", nm ? nm : "?");
+		(void)kdet_diag_of(u->eng, f->diag[i], &d);
+		printf("    diagnose %s\n", d.name ? d.name : "?");
 	}
 	if (f->diag_total > f->n_diag)
 		printf("    diagnose (%u more not listed)\n",
@@ -261,18 +268,6 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	}
 	if (res->broken)
 		printf("   %s%s%s", kex_C_BAD, kverdict_broken_name(res->broken), kex_C_OFF);
-	/*
-	 * What the heuristic made of it, on the line that says what it is.
-	 *
-	 * The score is the engine's own - it is in the result, not recomputed -
-	 * and the depth beside it is how many EXECUTABLE PACKER layers stand
-	 * above this object. Printed for every recovered object rather than only
-	 * for the ones that report, because the useful question about a sample
-	 * that got away is how far short it came.
-	 */
-	if (g_debug && res->heur_scored)
-		printf("   %sheur %d%s%s d%u%s", kex_C_NOTE, res->heur_score, kex_C_OFF,
-		       kex_C_DIM, res->heur_depth, kex_C_OFF);
 	printf("\n");
 	print_verdict(u, res);
 
@@ -356,6 +351,79 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 }
 
 /*
+ * WHY EACH DIAGNOSE OF A VERDICT MATCHED, from the pull API: the file is scanned once more with the report on (kscan_explain) and, for
+ * every object that has a verdict, each matched diagnose is listed with what decided it, in the engine's words (kdet_matcher_text).
+ * Asked only when a verdict was printed, so a clean file costs nothing. Nothing is computed here.
+ */
+static void print_why(kof_engine *eng, const char *path)
+{
+	struct stat st;
+	kof_scanner *sc;
+	kdet_run *run;
+	void *map;
+	int fd;
+	uint32_t i, k, m;
+
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
+		return;                 /* a folder is not one object: nothing to explain as a whole */
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return;
+	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
+	close(fd);
+	if (!map)
+		return;
+	sc = kscan_new(eng);
+	if (!sc) {
+		kof_unmap_file(map, (uint64_t)st.st_size);
+		return;
+	}
+	{
+		struct kof_scan_option opt;
+
+		memset(&opt, 0, sizeof opt);
+		opt.heur_level = KOF_HEUR_LEVEL_MAX;
+		run = kscan_explain(sc, map, (uint64_t)st.st_size, path, &opt);
+	}
+	for (i = 0; i < kdet_run_count(run); i++) {
+		const struct kdet_object *o = kdet_run_at(run, i);
+		int head = 0;
+
+		if (!o->res.has_verdict)
+			continue;
+		for (k = 0; k < o->res.n_diag; k++) {
+			const struct kof_diag_report *d = &o->res.diag[k];
+
+			if (d->state != KOF_DIAG_ST_MATCH)
+				continue;
+			if (!head++)
+				printf("  why       %s\n", o->name);
+			printf("    %s  %s\n", d->name ? d->name : "?", d->form ? "form" : "graph");
+			for (m = 0; d->form && m < d->n_match_total && m < KOF_DIAG_REPORT_MATCH; m++) {
+				char t[96];
+
+				(void)kdet_matcher_text(&d->match[m], t, sizeof t);
+				printf("      matcher %u  %s\n", m, t);
+			}
+			for (m = 0; d->form && m < d->n_part; m++) {
+				char t[240];
+
+				(void)kdet_part_text(&d->part[m], t, sizeof t);
+				printf("      part %u  %s\n", m, t);
+			}
+			if (!d->form && d->n_bound)
+				printf("      lineage %u of %u node(s), head at %#llx\n", (unsigned)d->n_bound, (unsigned)d->n_node,
+				       (unsigned long long)d->at[0]);
+		}
+	}
+	if (kdet_run_status(run))
+		printf("  why       incomplete (status %u)\n", (unsigned)kdet_run_status(run));
+	kdet_run_free(run);
+	kscan_free(sc);
+	kof_unmap_file(map, (uint64_t)st.st_size);
+}
+
+/*
  * Run the database's unpackers over one file and report what came out.
  */
 int kex_unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
@@ -378,6 +446,8 @@ int kex_unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	 * are added.
 	 */
 	opt.heur_level = KOF_HEUR_LEVEL_MAX;
+	/* --blocks / --scfind list what the normalised view holds; a pack with no reader of it makes none unless the caller says it is looking (scan_norm.c). */
+	opt.reader = kex_g_blocks || kex_g_scfind;
 	u.dump_dir = dump_dir;
 	u.eng = eng;
 	g_debug = verbose;
@@ -391,6 +461,8 @@ int kex_unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	kscan_on_debug(sc, on_debug, &u);
 	kscan_path(sc, path, &opt, on_unpacked, &u);
 	kscan_free(sc);
+	if (u.verdicts)
+		print_why(eng, path);
 
 	if (u.produced == 0 && !u.root_broken)
 		printf("  unpacked  nothing - no unpacker in the database claimed it\n");

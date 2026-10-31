@@ -43,7 +43,6 @@ static void lwarn(struct ksb_ctx *ksb, int line, const char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
 	fputc('\n', stderr);
-	ksb->lint.warnings++;
 }
 
 static int ident_at(const char *p, char *out, size_t cap)

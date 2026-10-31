@@ -7,8 +7,7 @@
  *
  * WHAT IS PINNED, and why each is a separate failure:
  *   - the sketch IS the k smallest distinct window hashes: checked against a
- *     brute-force reference written here from first principles, for every
- *     normalizer, at lengths on both sides of every threshold. A generator that
+ *     brute-force reference written here from first principles, at lengths on both sides of every threshold. A generator that
  *     differed from what the matcher reads would produce rules that match nothing
  *     and say so nowhere.
  *   - a block is found by the scanner whatever the values of its hashes: the
@@ -52,25 +51,23 @@ static int cmp32(const void *a, const void *b)
 /*
  * THE REFERENCE: every window's hash, sorted, distinct, the first k. Written the
  * obvious way and sharing nothing with the engine but the definition of what a
- * window is - the rolling value, the mix, the normalizer's bytes, and the rule
+ * window is - the rolling value, the mix, the bytes, and the rule
  * that a window of one repeated byte is not content.
  */
-static uint32_t reference(const uint8_t *p, uint64_t n, uint32_t norm,
-			  uint32_t *out, uint32_t k)
+static uint32_t reference(const uint8_t *p, uint64_t n, uint32_t *out, uint32_t k)
 {
 	uint32_t *all, nw = 0, got = 0, i;
-	uint64_t at, len = norm == KGENOME_MUTATION_RAW ? n : n - 1u;
+	uint64_t at, len = n;
 
-	if ((norm != KGENOME_MUTATION_RAW && n < 2u) || len < KGENOME_MUTATION_NG)
+	if (len < KGENOME_MUTATION_NG)
 		return 0;
 	all = malloc((size_t)len * sizeof *all);
 	for (at = 0; at + KGENOME_MUTATION_NG <= len; at++) {
 		uint32_t h = 0;
 
 		for (i = 0; i < KGENOME_MUTATION_NG; i++)
-			h = h * KGENOME_MUTATION_BASE +
-			    (uint32_t)kgenome_mutation_byte(p, at + i, norm);
-		if (!kgenome_mutation_flat(p, at, norm))
+			h = h * KGENOME_MUTATION_BASE + (uint32_t)p[at + i];
+		if (!kgenome_mutation_flat(p, at))
 			all[nw++] = kgenome_mutation_mix(h);
 	}
 	qsort(all, nw, sizeof *all, cmp32);
@@ -95,7 +92,7 @@ static uint32_t score(const struct kof_mutation_block *blocks, uint32_t nb,
 	if (!set || !kof_mutation_ctx_init(&ctx, set))
 		return 999u;
 	kof_mutation_begin(&ctx);
-	kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, hay, hn);
+	kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_SIDE_USER, hay, hn);
 	s = kof_mutation_pct(&ctx, which);
 	kof_mutation_ctx_done(&ctx);
 	kof_mutation_set_free(set);
@@ -181,7 +178,7 @@ int main(void)
 	static const uint32_t lens[] = { 22, 23, 24, 40, 64, 100, 400, 4000, 20000 };
 	static uint8_t hay[16384], fn[20000];
 	uint32_t pool[KOF_MUTATION_MAX_HASH * 2], got[KOF_MUTATION_MAX_HASH], want[KOF_MUTATION_MAX_HASH];
-	uint32_t seed = 0xc0ffee11u, i, norm, l;
+	uint32_t seed = 0xc0ffee11u, i, l;
 	struct kof_mutation_block blk[2];
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -189,30 +186,29 @@ int main(void)
 		fn[i] = (uint8_t)rnd(&seed);
 
 	/* ---- the sketch is the k smallest distinct window hashes -------------- */
-	for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++)
-		for (l = 0; l < sizeof lens / sizeof lens[0]; l++) {
-			uint32_t g = kgenome_mutation_minhash(fn, lens[l], norm, got);
-			uint32_t w = reference(fn, lens[l], norm, want, KGENOME_MUTATION_MINHASH_K);
-			char why[96];
+	for (l = 0; l < sizeof lens / sizeof lens[0]; l++) {
+		uint32_t g = kgenome_mutation_minhash(fn, lens[l], got);
+		uint32_t w = reference(fn, lens[l], want, KGENOME_MUTATION_MINHASH_K);
+		char why[96];
 
-			snprintf(why, sizeof why, "minhash of %u bytes, normalizer %u, is "
-				 "not the k smallest distinct window hashes (%u against %u)",
-				 lens[l], norm, g, w);
-			check(g == w && !memcmp(got, want, w * sizeof *want), why);
-		}
+		snprintf(why, sizeof why, "minhash of %u bytes is "
+			 "not the k smallest distinct window hashes (%u against %u)",
+			 lens[l], g, w);
+		check(g == w && !memcmp(got, want, w * sizeof *want), why);
+	}
 
 	/* ---- the size follows the span only until it is big enough ------------- */
-	check(kgenome_mutation_minhash(fn, 22, KGENOME_MUTATION_RAW, got) < KGENOME_MUTATION_MIN_HASH,
+	check(kgenome_mutation_minhash(fn, 22, got) < KGENOME_MUTATION_MIN_HASH,
 	      "22 bytes holds only 15 windows and cannot be a block");
-	check(kgenome_mutation_minhash(fn, 23, KGENOME_MUTATION_RAW, got) >= KGENOME_MUTATION_MIN_HASH,
+	check(kgenome_mutation_minhash(fn, 23, got) >= KGENOME_MUTATION_MIN_HASH,
 	      "23 bytes is the smallest span that makes a block");
-	check(kgenome_mutation_minhash(fn, 20000, KGENOME_MUTATION_RAW, got) == KGENOME_MUTATION_MINHASH_K,
+	check(kgenome_mutation_minhash(fn, 20000, got) == KGENOME_MUTATION_MINHASH_K,
 	      "a large span yields the same count as a small one");
 
 	/* nothing is capped: a long span is hashed whole */
 	{
-		uint32_t g = kgenome_mutation_minhash(fn, sizeof fn, KGENOME_MUTATION_RAW, got);
-		uint32_t w = reference(fn, sizeof fn, KGENOME_MUTATION_RAW, want, KGENOME_MUTATION_MINHASH_K);
+		uint32_t g = kgenome_mutation_minhash(fn, sizeof fn, got);
+		uint32_t w = reference(fn, sizeof fn, want, KGENOME_MUTATION_MINHASH_K);
 
 		check(g == w && !memcmp(got, want, w * sizeof *want),
 		      "a span is hashed whole");
@@ -222,11 +218,11 @@ int main(void)
 	for (i = 0; i < sizeof hay; i++)
 		hay[i] = (uint8_t)rnd(&seed);
 	{
-		uint32_t n = kgenome_mutation_minhash(fn, 100, KGENOME_MUTATION_RAW, pool);
+		uint32_t n = kgenome_mutation_minhash(fn, 100, pool);
 		uint32_t s;
 
 		memset(&blk[0], 0, sizeof blk[0]);
-		blk[0].n_hash = n; blk[0].scan_mask = RGN; blk[0].norm = KGENOME_MUTATION_RAW;
+		blk[0].n_hash = n; blk[0].scan_mask = RGN;
 
 		check(score(blk, 1, pool, n, hay, 100, 0) < 15u,
 		      "a unit that is not the function scored");
@@ -250,7 +246,7 @@ int main(void)
 		printf("mutation minhash: %d failure(s)\n", failures);
 		return 1;
 	}
-	printf("mutation minhash: the k smallest of every window for each normalizer, "
+	printf("mutation minhash: the k smallest of every window, "
 	       "found wherever its hashes lie, damage costs only what it "
 	       "touches - ok\n");
 	return 0;

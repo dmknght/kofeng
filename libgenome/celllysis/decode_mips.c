@@ -51,6 +51,10 @@ struct mrow {
 #define MF_J    2u
 #define MF_B    3u
 
+/* KNOWN DEFECT CL-3 (2026-10-30, R) [sev M]: g_prim has no row for the branch-likely opcodes 0x14-0x17 (beql, bnel, blezl, bgtzl) nor for COP1 (0x11, bc1t/bc1f when rs is 8): they decode as OTHER and never become branches.
+ * Trigger: MIPS code with a branch-likely or an FP branch (read in the table; not run). Effect: the block boundary and the edge vanish, so every function signature built on the blocks changes.
+ * Reproducer: none (read); tests/lib/genome/cfg_isa.c of fix_cfg_lib has the delay-slot rows.
+ * Fix: add the rows (JCC, MF_B) with the delay-slot rule (a branch-likely annuls the slot when not taken) and a rs == 8 test for COP1. */
 static const struct mrow g_prim[64] = {
 	[MIPS_SPECIAL] = { KGENOME_CELL_OTHER, MF_NONE },
 	[MIPS_REGIMM]  = { KGENOME_CELL_JCC,   MF_B    },
@@ -171,6 +175,9 @@ uint32_t kgenome_cell_decode_mips(const uint8_t *p, uint32_t n, uint64_t va,
 			out->wmask |= 1ull << 31;       /* ra */
 		break;
 	case MF_B:
+		/* KNOWN DEFECT CS-4 (2026-10-30, M) [sev M]: a MIPS branch is given a target and nothing else - no registers, no condition, `b` (beq r,r) and bal look like beq/bne.
+		 * Trigger: every MIPS branch. Effect: a consumer cannot tell an unconditional branch from a conditional one or a branch from a call (bgezal); cfg_isa.c reads the word.
+		 * Reproducer: tests/lib/genome/cfg_isa.c (rows "mips b", "mips bal"). Fix: fill o[1], o[2] with rs and rt and `cond` with the REGIMM rt / the opcode, then drop read_word from the MIPS rows. */
 		out->target_va = va + 4u +
 				 (uint64_t)((int64_t)(int16_t)(x & 0xffffu) * 4);
 		out->target = out->target_va;

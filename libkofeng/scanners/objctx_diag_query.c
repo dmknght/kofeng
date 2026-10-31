@@ -6,6 +6,7 @@
 
 #define _GNU_SOURCE
 
+#include "../databases/pack/diagform.h"
 #include "../detectors/linkage/kofdiag.h"
 
 #include "objctx_int.h"
@@ -172,6 +173,10 @@ static int diag_q(const struct kof_obj_ctx *ctx, uint32_t id, int wide)
 		return 0;
 	oc_diag_trace_scan(sc);
 	oc_diag_trace_ask(sc, i);
+	/* A diagnose that is a detection form is answered by its own stage, not by the analysis' bits (and asked on demand
+	 * here for the strings; a similarity form reads what the SIMILAR stage has scored: it is asked by that stage alone). */
+	if (i < sc->diag.cap && sc->eng->diag[i].form)
+		return sc->eng->diag[i].form->n_sim ? oc_diag_form_hit(sc, i) : oc_diag_form_ask(sc, ctx, i);
 	return (sc->diag.hit[i >> 3] >> (i & 7u)) & 1u;
 }
 

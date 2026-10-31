@@ -55,10 +55,12 @@ static void usage(const char *argv0)
 		"\n"
 		"  --db D            module database: a directory or one blob\n"
 		"  --scan-files P    a file, or a directory scanned recursively\n"
+		"  --bases D         the catalogs of <D>/pathogens and <D>/syndromes: the engine then\n"
+		"                    names a verdict's family, variant and tag (else 8 hex digits)\n"
 		"  --scan-procs      scan what is RUNNING, not what is on disk\n"
 		"  --pid N           only this process; repeatable, up to 64\n"
 		"\n"
-		"  --heur N          0 gather nothing  1 score and descend (default)\n"
+		"  --heur N          0 look, do not descend  1 descend (default)\n"
 		"                    2 also interpret what no unpacker opened\n"
 		"  --emu MODE        never | auto | only; overrides what --heur chose\n"
 		"  --max-depth N     directory depth limit\n"
@@ -180,7 +182,7 @@ static int heur_bad(const char *argv0, const char *v)
  */
 struct cli {
 	const char *argv0;
-	const char *db, *target;
+	const char *db, *target, *bases;
 	struct kof_scan_option opt;
 	struct run  r;
 	/*
@@ -272,6 +274,8 @@ static int cli_parse(struct cli *c, int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--db") == 0 && i + 1 < argc)
 			c->db = argv[++i];
+		else if (strcmp(argv[i], "--bases") == 0 && i + 1 < argc)
+			c->bases = argv[++i];
 		else if (strcmp(argv[i], "--scan-files") == 0 && i + 1 < argc)
 			c->target = argv[++i];
 		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc) {
@@ -464,6 +468,16 @@ static int cli_open(struct cli *c)
 		fprintf(stderr, "%s: cannot load a database from %s\n", c->argv0, c->db);
 		return 2;
 	}
+	/* The names of the catalog ids: the engine reads the directories, this tool only says what it could not. */
+	if (c->bases) {
+		uint32_t fl = keng_catalog_load_bases(c->eng, c->bases);
+
+		if (fl)
+			fprintf(stderr, "%s: warning: the catalogs in %s did not load whole (%s%s%s%s): ids not named are shown in hex\n",
+				c->argv0, c->bases, fl & KENG_CAT_OVER_BUDGET ? "over the memory budget " : "",
+				fl & KENG_CAT_FILES_REFUSED ? "files refused " : "", fl & KENG_CAT_UNREADABLE ? "unreadable " : "",
+				fl & KENG_CAT_NOMEM ? "out of memory" : "");
+	}
 	{
 		/*
 		 * The OLDEST pack's version, which is what the engine reports:
@@ -475,10 +489,10 @@ static int cli_open(struct cli *c)
 		uint32_t mmc = 0;
 
 		kdb_version(c->eng, &dv);
-		printf("database: format %u.%u build %u, %u record(s), "
+		printf("database: format %u.%u build %u, "
 		       "%u unpacker(s), %u diagnose(s)\n",
 		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
-		       kdb_records(c->eng), kdb_unpackers(c->eng),
+		       kdb_unpackers(c->eng),
 		       kdb_diagnoses(c->eng));
 		/* The matcher's footprint is a design claim - bucket counts are
 		 * derived from the marker count and bounded - so it is printed

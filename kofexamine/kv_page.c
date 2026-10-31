@@ -373,3 +373,28 @@ void draw_prop(struct out *o, struct view *v)
 		prop_filter_over(o, v, pg.geo.top, pg.geo.left, pg.geo.top + pg.geo.h - 1, pg.geo.left + pg.geo.w - 1);
 	}
 }
+
+/* ---- the title bar of the diagnose panel ------------------------------------------------ */
+
+size_t tabbar_text(char *out, size_t cap, const char *const *word, uint32_t n,
+		   uint32_t active, int *c0, int *c1)
+{
+	size_t at = 0;
+	int col = 1;
+	uint32_t t;
+
+	at += (size_t)snprintf(out + at, cap - at, A_HEAD " " A_OFF);
+	for (t = 0; t < n && at + 1u < cap; t++) {
+		if (t) {
+			at += (size_t)snprintf(out + at, cap - at,
+					       A_DIM " | " A_OFF);
+			col += 3;
+		}
+		c0[t] = col + 1;
+		at += (size_t)snprintf(out + at, cap - at, "%s %s " A_OFF,
+				       t == active ? A_SEL : A_ID, word[t]);
+		col += (int)strlen(word[t]) + 2;
+		c1[t] = col;
+	}
+	return at < cap ? at : cap - 1u;
+}

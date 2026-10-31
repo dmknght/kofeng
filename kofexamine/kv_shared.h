@@ -23,6 +23,8 @@ uint32_t obj_region_bits(const struct object *o, uint32_t *out,
 				uint32_t cap);
 struct object *cur_obj(struct view *v);
 const struct kgenome_func_set *mtn_funcs(struct view *v, struct object *o);
+const struct kof_diag_report *decided_diags(struct view *v, const struct object *ob, uint32_t *n);
+const char *file_verdict_of(const struct view *v, const struct object *ob);
 int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user);
 void proc_collect(struct view *v, kof_engine *eng, uint32_t pid);
@@ -68,6 +70,8 @@ void view_select(struct view *v);
 void goto_node(struct view *v, uint32_t k);
 const uint8_t *view_bytes(const struct view *v, uint64_t *n);
 uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run);
+/* view_map over any list of extents (a region of the selected view, or the one extent of a function): the file offset of byte `at`, and how much of that run is left. */
+uint64_t ext_map(const struct kof_range *ext, uint32_t n_ext, uint64_t at, uint64_t *run);
 uint64_t view_unmap(const struct view *v, uint64_t off);
 int mtn_kept_any(const struct view *v);
 uint32_t mtn_at_byte(const struct view *v);
@@ -109,10 +113,6 @@ void fsel_set(struct view *v, uint32_t a, uint32_t b);
 int field_room(const char *text, const char *ph, int editing, int max);
 void field_draw(struct out *o, const char *text, uint32_t caret,
 		       uint32_t *off, int room, int editing, const char *ph);
-int heur_of(const struct object *ob, struct kof_heur_facts *out,
-		   int32_t *score, const char **guess);
-int heur_reports(const struct object *ob, int32_t *score,
-			const char **guess);
 uint64_t dis_hex_shown(const struct view *v);
 uint64_t dis_span_of(const struct view *v);
 int64_t dis_max_bias(struct view *v);
@@ -129,17 +129,22 @@ unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 			   uint8_t *bytes_out, unsigned *ix_len_out,
 			   int *ok_out, char *text_out, size_t text_cap);
 uint64_t dis_sync(struct view *v, uint64_t want);
+/* The disassembly of one function of the current object as rows (kv_disasm.c): each row a string with its colours, the same formatter and palette as the panel. */
+struct dis_func_rows {
+	char **row;
+	uint32_t n, width;      /* rows, and the widest in printable columns */
+	uint64_t unlisted;      /* bytes of the function not listed (the bound): the last row says it */
+};
+void dis_func_rows(struct view *v, uint64_t off, uint64_t len, uint64_t max_insn, struct dis_func_rows *r);
+void dis_func_rows_free(struct dis_func_rows *r);
 void draw_evt(struct out *o, struct view *v);
 void draw_disasm(struct out *o, struct view *v);
 void dis_toggle(struct view *v, uint64_t at, uint64_t len);
 void dis_analyse(struct view *v);
 void dis_drop_analysis(struct view *v);
-const char *emu_why_tag(uint8_t why);
-const char *emu_why_reason(uint8_t why);
 void draw_marker_line(struct out *o, struct view *v);
 int menu_enabled(struct view *v, int a);
-int menu_rows(struct view *v);
-int menu_at_row(struct view *v, int row);
+int menu_hit(struct view *v);
 void menu_open_at(struct view *v, int row, int col);
 void menu_step(struct view *v, int d);
 void draw_menu(struct out *o, struct view *v);
@@ -178,6 +183,9 @@ void prop_tabs_free(struct view *v);
 uint32_t obj_ancestors(const struct view *v, const struct object *ob,
 			      const struct object **out, uint32_t cap);
 void prop_build(struct view *v);
+/* The engine's explanation of the object (kscan_explain, run once for its root): NULL when there is nothing to ask - no engine, no
+ * bytes, a log or a process - or the object is not in the run. It also fills ob->diag from the run, once. */
+const struct kdet_object *view_explain(struct view *v, const struct object *ob);
 void page_draw(struct out *o, struct view *v, struct page *p);
 void draw_prop(struct out *o, struct view *v);
 const char *base_name(const char *path);
@@ -195,7 +203,6 @@ void bar_open_menu(struct view *v, int menu);
 void bar_move_item(struct view *v, int dir);
 void bar_run(struct view *v, int i);
 enum kv_nav kv_nav_key(int key);
-int kv_nav_step(int sel, int n, enum kv_nav nav);
 size_t paste_src(int k, const char **out);
 int key_pending(void);
 int read_key(void);
@@ -252,6 +259,8 @@ int dframe_hit_close(const struct dframe *f, int my, int mx);
 void prop_put(struct out *o, const char *s, int room, int sa, int sb);
 /* kv_families.c: Manage > Pathogens. */
 void fam_open(struct view *v);
+/* The catalog made and loaded on first use (the dialog's own load); *created says this call made it. NULL when memory is out. */
+struct kv_fam_ui *fam_ensure(struct view *v, int *created);
 void fam_free(struct view *v);
 int fam_up(const struct view *v);
 void draw_fam(struct out *o, struct view *v);
@@ -259,6 +268,24 @@ void draw_fam(struct out *o, struct view *v);
 int fam_uncovered(struct view *v);
 int fam_click(struct view *v, int rclick);
 int handle_fam_key(struct view *v, int k);
+/* kv_tags.c: Manage > Syndromes (the same contract as the Pathogens functions above). */
+void tags_open(struct view *v);
+struct kv_tag_ui *tags_ensure(struct view *v);
+void tags_free(struct view *v);
+int tags_up(const struct view *v);
+void draw_tags(struct out *o, struct view *v);
+int tags_uncovered(struct view *v);
+int tags_click(struct view *v, int rclick);
+int handle_tags_key(struct view *v, int k);
+/* kv_cfgdlg.c: the CFG dialog of one function (the engine's graph, drawn by kv_graph.c, in the dialog frame): made by cfgd_open from the request hit_plg_cfg fills. */
+struct kof_cfgview_req;
+void cfgd_open(struct view *v, const struct kof_cfgview_req *rq);
+void cfgd_free(struct view *v);
+int cfgd_up(const struct view *v);
+void draw_cfgd(struct out *o, struct view *v);
+int cfgd_uncovered(struct view *v);
+int cfgd_click(struct view *v, int rclick);
+int handle_cfgd_key(struct view *v, int k);
 int find_click(struct view *v);
 int click_menu(struct view *v);
 void hit_reset(struct view *v);

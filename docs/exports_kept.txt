@@ -4,10 +4,13 @@ Every entry below was checked by reading, not assumed: a name with no reference 
 definition and declaration, over .c .h .py .sh Makefile and the docs, with kofexamine/ counted
 as a user.
 
-1. TESTS-ONLY EXPORTS (79). Public functions whose only callers are tests. They are the
+1. TESTS-ONLY EXPORTS (86). Public functions whose only callers are tests. They are the
    surface a test drives (a boundary of the lib or the engine unit), and a function the test
    reaches by a name cannot be made static. Listed by defining file:
 
+  libgenome/celllysis/cfg_sign.c: kgenome_cfg_sign, kgenome_cfg_pct (the per-function shape signature and its similarity; the engine integration is the next step, tests/lib/genome/cfg_*.c drive them)
+  libgenome/celllysis/cfg_anchor.c: kgenome_cfg_anchor (is a function worth hashing; same)
+  libgenome/celllysis/cfg_view.c: kgenome_cfg_view_make, kgenome_cfg_view_free (what the viewer's CFG dialog will draw; same)
   libgenome/celllysis/mutation_pool.c: kgenome_mutation_core, kgenome_mutation_member
   libgenome/celllysis/nucleo_sys.c: kgenome_nucleo_sys_ordered
   libgenome/celllysis/trueline.c: kgenome_true_find_all
@@ -30,7 +33,7 @@ as a user.
   libkofeng/analyzers/normalize/executables.c: kof_exe_norm, kof_exe_norm_map, kof_exe_norm_src_of, kof_exe_unb64, kof_exe_unhex, kof_exe_unwide
   libkofeng/analyzers/normalize/executables_esc.c: kof_exe_unesc
   libkofeng/databases/dbpacker.c: kof_pack_build_opt
-  libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same
+  libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_head (Save writes the header of a new file; the viewer is the only caller), kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same
   libkofeng/databases/pack/dbaccess.c: kof_db_disease, kof_db_disease_at, kof_db_disease_count
   libkofeng/detectors/linkage/kofdiag.c: kof_diag_match
   libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes, kof_mutation_block_copy, kof_mutation_block_id, kof_mutation_probe, kof_mutation_set_info
@@ -45,6 +48,20 @@ as a user.
   libkoforbit/fridge/koffridge.c: koffridge_clear, koffridge_db_stamp, koffridge_describe, koffridge_load, koffridge_save, koffridge_seen_clear, koffridge_stats
   libuncoat/decompressors/bunzip.c: kuncoat_bunzip_sniff
   libuncoat/status.c: kuncoat_status_name
+
+1b. TESTS-ONLY EXPORTS ADDED AFTER MERGES 43-62 (found 2026-10-29: the only references outside the
+   definition and its declaration are in tests/, over .c and .h of every non-test directory). Same
+   rule as section 1; the reason beside each is why it is not deleted. Deleted in the same pass
+   because it was a wrapper for a test only: kof_scan_verdict (the tests call kof_scan_verdict_cat).
+  libgenome/celllysis/disasm.c: kgenome_disasm_max_len (the longest instruction of an architecture: the bound a test of the formatters checks)
+  libkofeng/databases/dbpackcheck.c: kof_db_pack_valid (the pack validator as a function: the loader runs it through kof_db_load, tests ask it alone)
+  libkofeng/detectors/mutations/kofmutflt.c: kof_mflt_open_mem (the filter over a memory region: tests/unit/mutation_flt.c builds filters without a pack)
+  libkofeng/scanners/objctx_spill.c: kof_scan_spill_hook (the seam a test uses to fail the spill file)
+  libkofeng/verdictor/famcat.c: kof_famcat_list, kof_famcat_set_idhash (the id-hash seam is how tests force a collision)
+  libkofeng/verdictor/famcat_store.c: kof_famcat_load_dir, kof_famcat_store_init
+  libkofeng/verdictor/tagcat.c: kof_tagcat_add, kof_tagcat_rename, kof_tagcat_set_comment, kof_tagcat_set_idhash (the viewer edits a tag through kof_tagcat_add_fields / kof_tagcat_edit_fields; these are the single-field forms the catalog tests drive)
+  libkofeng/verdictor/tagcat_store.c: kof_tagcat_load_dir
+  libkofeng/kofeng.c: keng_catalog_info, keng_memory_cap, keng_memory_peak (host API of kofeng.h: a host calls them, the tree's own tools do not)
 
 2. DIAGNOSTIC API OF THE EMULATOR, NO CALLER IN THE TREE. A debugging session turns these on for
    one file (see the notes in libgenome/phenotype/emu.h); a scan never does, so nothing in the

@@ -3,6 +3,7 @@
  */
 
 #include "ksb.h"
+#include <kofdebug.h>
 #include <databases/diagsrc.h>
 
 
@@ -52,7 +53,7 @@ static void diag_users(const struct ksb_ctx *ksb, const char *name,
 
 /* The size of the record, byte for byte. Zero when a section would overflow. */
 static int diag_size(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
-		     unsigned users_len, size_t *need_out)
+		     const struct ksb_meta *meta, unsigned users_len, size_t *need_out)
 {
 	struct kof_dsrc_view v = *vp;
 	struct kof_dsrc_node *nd = v.nd;
@@ -61,9 +62,14 @@ static int diag_size(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 	int n_nd = v.n_nd, n_need = v.n_need, n_ref = v.n_ref;
 	int n_when = v.n_when, has_seq = v.has_seq;
 	const int has_dis = v.disease[0] != 0;
+	const size_t wire_n = v.form ? kof_form_wire_size(v.form) : 0u;
 	size_t need;
 	int i;
 
+	if (v.form && !wire_n) {
+		fprintf(stderr, "FAIL: %s: the detection form does not make a record (kof_form_check)\n", name);
+		return 0;
+	}
 	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
 	for (i = 0; i < n_nd; i++) {
 		if (nd[i].bits & KOF_DIAG_B_VAL)
@@ -86,7 +92,10 @@ static int diag_size(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 	 * stand-alone --diagnose cannot know, and writes nothing: absent means
 	 * unknown, and unknown keeps running.
 	 */
-	if (n_need || n_when || n_ref || ksb->diag.uses_known || has_dis)
+	/* THE CATALOG SECTION IS ONE OF THE THINGS THAT FOLLOW: without it in this condition a
+	 * record whose only extra is the section would have no count byte, and a reader built
+	 * before the section existed would take its tag (9) for a count of nine names. */
+	if (n_need || n_when || n_ref || ksb->diag.uses_known || has_dis || meta || wire_n)
 		need += 1u;                     /* the legacy name count: 0 */
 	if (n_need)
 		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
@@ -123,13 +132,19 @@ static int diag_size(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 		need += 2u + (size_t)n_when * 10u;
 	if (has_dis)
 		need += 2u + 5u;                        /* tag, length, id and type */
+	if (meta)
+		need += 2u + KDIG_META_LEN;             /* tag, length, three ids and the type */
+	/* THE DETECTION FORM: one stream cut into sections of at most 255 bytes (KDIG_SEC_FORM). */
+	if (wire_n)
+		need += kof_form_section_size(wire_n);
 	*need_out = need;
 	return 1;
 }
 
 /* The record itself, into a buffer diag_size sized. */
 static void diag_fill(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
-		      unsigned n_users, unsigned users_len, unsigned char *blob)
+		      const struct ksb_meta *meta, unsigned n_users, unsigned users_len,
+		      unsigned char *blob)
 {
 	struct kof_dsrc_view v = *vp;
 	struct kof_dsrc_node *nd = v.nd;
@@ -188,7 +203,7 @@ static void diag_fill(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 			at += L;
 		}
 	}
-	if (n_need || n_when || n_ref || ksb->diag.uses_known || has_dis)
+	if (n_need || n_when || n_ref || ksb->diag.uses_known || has_dis || meta || v.form)
 		blob[at++] = 0;                 /* no names: see KDIG_SEC_NEEDS */
 	if (n_need) {
 		int k;
@@ -269,6 +284,29 @@ static void diag_fill(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 		blob[at++] = (unsigned char)(dis_id >> 24);
 		blob[at++] = dis_type;
 	}
+	if (meta) {
+		const uint64_t id[3] = { meta->family, meta->variant, meta->tag };
+		unsigned z, q;
+
+		blob[at++] = KDIG_SEC_META;
+		blob[at++] = (unsigned char)KDIG_META_LEN;
+		for (z = 0; z < 3u; z++)
+			for (q = 0; q < 8u; q++)
+				blob[at++] = (unsigned char)(id[z] >> (q * 8u));
+		blob[at++] = meta->type;
+	}
+	if (v.form) {
+		size_t wn = kof_form_wire_size(v.form);
+		uint8_t *wire = malloc(wn);
+
+		/* diag_size sized the record from this very stream; an allocation that fails here leaves the zeros the
+		 * record was made with, which the loader refuses (a form that does not decode), never a half form. */
+		if (wire) {
+			(void)kof_form_wire_write(v.form, wire);
+			at += kof_form_section_write(wire, wn, blob + at);
+			free(wire);
+		}
+	}
 }
 
 int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
@@ -284,6 +322,7 @@ int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
 	FILE *o;
 	unsigned char *blob;
 	size_t need;
+	struct ksb_meta meta_buf, *meta = NULL;
 
 	if (argc != 4 || !src || !out) {
 		fprintf(stderr, "usage: %s --diagnose <src.c> <out.kdig>\n",
@@ -305,21 +344,52 @@ int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
 	kof_dsrc_parse(text, tn, &d, &rep);
 	kof_dsrc_resolve(&d, &v, &rep);
 	free(text);
-	if (ksb->errors)
+	if (ksb->errors) {
+		kof_dsrc_view_free(&v);
 		return 1;
-	if (v.disease[0] && !ksb_disease_note(ksb, v.disease, v.disease_type))
+	}
+	/* THE CATALOG FACTS, NAMES TO IDS: the source carries names (a researcher reads it), the
+	 * record carries ids. A name the catalogs do not have refuses the build with the line. */
+	if (v.meta == KOF_DSRC_META_ALL) {
+		if (!ksb_meta_check(ksb_catalog_get(ksb), &d, &v, &meta_buf, &rep)) {
+			kof_dsrc_view_free(&v);
+			return 1;
+		}
+		if (meta_buf.disabled) {
+			/* Said by ksb_meta_check. Not written, so the pack and names.kdig hold nothing of it. */
+			ksb->diag.n_disabled++;
+			kof_dsrc_view_free(&v);
+			return 0;
+		}
+		meta = &meta_buf;
+		ksb_catalog_use(ksb_catalog_get(ksb), meta_buf.family, meta_buf.variant, meta_buf.tag);
+	}
+	if (v.disease[0] && !ksb_disease_note(ksb, v.disease, v.disease_type)) {
+		kof_dsrc_view_free(&v);
 		return 1;
+	}
 	diag_users(ksb, v.name, &n_users, &users_len);
-	if (!diag_size(ksb, &v, users_len, &need))
+	if (!diag_size(ksb, &v, meta, users_len, &need)) {
+		kof_dsrc_view_free(&v);
 		return 1;
+	}
 	blob = calloc(1, need);
-	if (!blob)
+	if (!blob) {
+		kof_dsrc_view_free(&v);
 		return 1;
-	diag_fill(ksb, &v, n_users, users_len, blob);
+	}
+	diag_fill(ksb, &v, meta, n_users, users_len, blob);
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of ksb_tree_main. */
+	/* KNOWN DEFECT CAT1-1 (2026-10-31, R) [sev L]: built[] holds 64 names; a diagnose built after the 64th is not recorded here.
+	 * Trigger: a tree of more than 64 diagnoses and a module whose kof_diag(NAME) names one of the later ones. Effect: tree_check_uses reports it as
+	 * "which no source declares" (a dangling call) and the build stops; the list is also what the "read by no rule" warning walks.
+	 * Reproducer: not run (read only; bases/ has 5 diagnoses today). Fix: size the list by the number of diagnose sources (a caller-grown array). */
 	if (ksb->diag.n_built < 64u) {
-		ksb->diag.built_dis[ksb->diag.n_built] = (unsigned char)(v.disease[0] != 0);
+		/* The catalog facts (family, variant, type, tag) ARE the declaration of what a match finds: the tag's activities and
+		 * objects and the type make the verdict, so a diagnose that carries them is read by it (a disease of the old kind
+		 * is the other way to say so). */
+		ksb->diag.built_dis[ksb->diag.n_built] = (unsigned char)(v.disease[0] != 0 || meta != NULL);
 		snprintf(ksb->diag.built[ksb->diag.n_built++], sizeof ksb->diag.built[0], "%s", v.name);
 	}
 	o = fopen(out, "wb");
@@ -327,11 +397,30 @@ int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
 		fprintf(stderr, "FAIL: cannot write %s\n", out);
 		if (o) fclose(o);
 		free(blob);
+		kof_dsrc_view_free(&v);
 		return 1;
 	}
 	fclose(o);
-	printf("== %s  %s  %d node, %d sign(s), %d ref(s), %d condition(s), %zu bytes\n",
-	       src, v.name, v.n_nd, v.n_need, v.n_ref, v.n_when, need);
+	if (v.form) {
+		char ex[256];
+		unsigned bq;
+
+		for (bq = 0; bq < v.form->n_block; bq++)
+			KOF_TRACE("[build] %s block %u: mask %x, side %u, %u hash(es) at %u\n", v.name, bq,
+				  (unsigned)v.form->block[bq].mask, (unsigned)v.form->block[bq].side,
+				  (unsigned)v.form->block[bq].n_hash, (unsigned)v.form->block[bq].first);
+		KOF_TRACE("[build] %s: form record %zu byte(s), %u similarity matcher(s)\n", v.name, kof_form_wire_size(v.form),
+			  (unsigned)v.form->n_sim);
+
+		kof_form_expr_text(v.form, ex, sizeof ex);
+		printf("== %s  %s  form: %u string(s), %u block(s), %u matcher(s), expression %s, %d condition(s), %zu bytes\n",
+		       src, v.name, (unsigned)v.form->n_str, (unsigned)v.form->n_block, (unsigned)v.form->n_match, ex,
+		       v.n_when, need);
+	} else {
+		printf("== %s  %s  %d node, %d sign(s), %d ref(s), %d condition(s), %zu bytes\n",
+		       src, v.name, v.n_nd, v.n_need, v.n_ref, v.n_when, need);
+	}
+	kof_dsrc_view_free(&v);
 	free(blob);
 	return 0;
 }

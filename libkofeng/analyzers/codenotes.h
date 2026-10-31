@@ -7,7 +7,7 @@
  * nothing here depends on what it shows. A scan does not build this: it costs a read of the whole code, and only a reader who asked for it pays.
  *
  * THREE KINDS OF NOTE, because they are drawn differently and must never be read as one another:
- *   FUNC     a function's name, where it starts: a named symbol, or `sub_<offset>` for an entry the code itself calls and no symbol names.
+ *   FUNC     a function's name, where it starts: a named symbol, or `fcn_<offset>` (kof_func_name) for an entry the code itself calls or the function table lists and no symbol names.
  *   LABEL    a place a jump lands that is not a function: `.L-<offset>`. A jump label is NOT a function name and never borrows one.
  *   COMMENT  what an instruction does: where a call or jump goes, that a jump goes backward (a loop's back edge is one, but a backward jump is not always a loop: that takes the flow graph), which syscall a syscall is.
  * A FUNC or LABEL text ends with `  ; xrefs: ...` - who refers to the place - and a viewer draws that part as a comment.
@@ -19,6 +19,7 @@
 
 #include <kofmod/kofsig.h>
 #include <genotype/image/funcs.h>
+#include <phenotype/callnames.h>
 
 enum kof_note_kind {
 	KOF_NOTE_FUNC = 1,
@@ -44,11 +45,13 @@ struct kof_codenotes {
 /*
  * Analyse `data` (the object's bytes, `ctx` its context). `funcs` and `sym`/`sym_n` are the object's function table and symbol block as the caller
  * holds them. `bits` is 32 or 64, the width to read an object that does not say (a raw blob); 0 leaves the object's own. Returns 1 when `out` holds
- * the analysis (possibly empty), 0 when there is no decoder for the object's architecture or memory was refused; `out` then owns nothing. Free it
+ * the analysis (possibly empty), 0 when there is no decoder for the object's architecture or memory was refused; `out` then owns nothing. `names`, when not NULL, is the object's call-name table (callnames.h): a call or
+ * jump that lands on a PLT stub or PE thunk, or goes through an import slot, is then named `rand@plt` instead of `fcn_<offset>`. Free it
  * with kof_codenotes_free.
  */
 int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struct kgenome_func_set *funcs,
-			const uint8_t *sym, uint32_t sym_n, unsigned bits, struct kof_codenotes *out);
+			const uint8_t *sym, uint32_t sym_n, unsigned bits, const struct kgenome_callnames *names,
+			struct kof_codenotes *out);
 void kof_codenotes_free(struct kof_codenotes *n);
 
 /* The notes of the instruction at `at`: a pointer to the first and how many (0 and NULL for none). */

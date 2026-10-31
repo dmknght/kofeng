@@ -613,20 +613,17 @@ static int build_dynamic(struct kuncoat_inflate *s)
 		return KUNCOAT_CORRUPT;
 	err = construct(&s->dist, len + nlen, ndist);
 	/*
-	 * An incomplete distance code is tolerated, and only here.
+	 * One incomplete distance code is tolerated, and only here: a single code of one bit.
 	 *
 	 * A block of literals with a single distance code is what several encoders
 	 * emit, zlib accepts it, and files in the wild depend on it. Refusing it
 	 * would make this decoder disagree with every other one on ordinary input,
 	 * which for a scanner means not seeing inside archives that everything else
-	 * can open. Over-subscribed is still refused.
+	 * can open. zlib refuses every other gap (it allows `left > 0` for a distance
+	 * code only when the longest length is 1), and so does this: a stream with two
+	 * 2-bit codes is corrupt. Over-subscribed is still refused.
 	 */
-	/* KNOWN DEFECT WP0-1 (2026-10-24, M) [sev L]: The block header accepts EVERY incomplete distance code; the
-	 * comment says only a single code and zlib refuses the rest. Trigger: a dynamic block whose distance
-	 * lengths leave a gap with more than one code (fuzz seed 7 iter 12407). Effect: a stream zlib calls
-	 * corrupt is decoded. Reproducer: tests_wp0/findings/inflate_incomplete_distance_{a,b}.bin. Fix:
-	 * accept err > 0 only for one code of length 1. */
-	if (err < 0)
+	if (err < 0 || (err > 0 && !(s->dist.count[1] == 1 && err == (1 << 14))))
 		return KUNCOAT_CORRUPT;
 	return -1;
 }

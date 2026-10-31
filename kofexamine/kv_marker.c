@@ -2,44 +2,12 @@
 #include "kv.h"
 
 
-/*
- * What the gate found, as a name and as a reason.
- *
- * The NAME is the whole of what the status line says. A sentence explaining
- * which measurement fired was tried there and was simply too long - it pushed
- * everything else off the row, and "Unknown packer" already tells a reader both
- * that something packed this and that nothing here knows what. The reason
- * belongs on the dashboard, where there is a line for it.
- *
- * Two wordings for two strengths of claim: dense executable segments select
- * nothing across 1 246 clean binaries, so that one is a statement; a header
- * that cannot be loaded is weaker, because every instance of it in the malware
- * corpus turned out to be a truncated file rather than a packed one.
- */
-
-
-const char *emu_why_tag(uint8_t why)
-{
-	return why == KGENOME_EMU_UNP_WHY_DENSE  ? "Unknown packer"
-	     : why == KGENOME_EMU_UNP_WHY_BROKEN ? "Possible packer"
-	     : why == KGENOME_EMU_UNP_WHY_LOADER ? "Possible encryptor" : NULL;
-}
-
-const char *emu_why_reason(uint8_t why)
-{
-	return why == KGENOME_EMU_UNP_WHY_DENSE
-	       ? "executable segments too dense to be code"
-	     : why == KGENOME_EMU_UNP_WHY_LOADER
-	       ? "an encrypted block sits in a non-code segment"
-	       : "header cannot be loaded as written";
-}
-
 void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
 	/* Wide enough for the action slot, which is the longest thing that lands
 	 * here: a dump reports counts, a byte total and a directory name. */
-	char right[200];
+	char right[400];
 	/* The right hand text is not always a readout: while the draft has the
 	 * focus it can be a complaint, and a complaint in the colour of a
 	 * readout is one people scroll past. */
@@ -96,20 +64,19 @@ void draw_marker_line(struct out *o, struct view *v)
 		 *
 		 * TWO FIELDS, because the name beside an object means two
 		 * different things depending on which object it is. On the file
-		 * itself it is the module that OPENED it, and PACKED says
+		 * itself it is the module that OPENED it, and opened_by_packer says
 		 * whether that module was a packer. On a child it is the module
 		 * that PRODUCED it, and from_packer says the same thing about
 		 * that. Either one being true means the name here is a packer's.
 		 */
 		const char *pcol =
-			(ob->heur.from_packer ||
-			 (ob->heur.heur_flags &
-			  KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN;
+			(ob->heur.from_packer || ob->heur.opened_by_packer)
+			? A_BAD : A_WARN;
 
 		/* One field - see where it is filled. */
 		out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
-	} else if (!emu_why_tag(obj_emu_why(ob))) {
+	} else {
 		/*
 		 * NO MODULE OPENED IT, so the object is named by what the engine
 		 * says it is - "Norm" for a normalised view, the language of a
@@ -123,39 +90,20 @@ void draw_marker_line(struct out *o, struct view *v)
 		out_fmt(o, "%s%s" A_OFF, ob->entry_kind == KOF_ENT_NORMALIZED
 					? A_ID : "", label);
 		out_str(o, A_DIM "  |  " A_OFF);
-	} else if (emu_why_tag(obj_emu_why(ob))) {
-		/*
-		 * NO MODULE NAMED IT, AND IT STILL LOOKS PACKED.
-		 *
-		 * The same slot, because it answers the same question - what
-		 * got this object into the shape it is in - and a reader who
-		 * has learnt to look here for "UPX.ELF v13" should find the
-		 * next best answer in the same place rather than nowhere.
-		 */
-		out_fmt(o, "%s%s" A_OFF,
-			obj_emu_why(ob) == KGENOME_EMU_UNP_WHY_DENSE ? A_BAD
-								: A_WARN,
-			emu_why_tag(obj_emu_why(ob)));
-		out_str(o, A_DIM "  |  " A_OFF);
 	}
 
 	{
-		int32_t hsc = 0;
-		const char *hguess = "Unknown";
-
 		/*
 		 * The engine's verdict for the object, spelled as the engine
 		 * spelled it. Nothing else on this line is a verdict: the packer
-		 * tag above is how the object was opened, and the heuristic is
-		 * a score that is on the dashboard.
+		 * tag above is how the object was opened.
 		 */
+		const char *fv = file_verdict_of(v, ob);
+
 		if (ob->heur.has_verdict)
 			out_fmt(o, A_BAD "%s" A_OFF, ob->heur.verdict.name);
-		else if (emu_why_tag(ob->emu_why))
-			out_str(o, A_DIM "no verdict" A_OFF);
-		else if (heur_reports(ob, &hsc, &hguess))
-			out_fmt(o, A_HEUR "Heur:%s#s%d" A_OFF A_DIM
-				"  no verdict" A_OFF, hguess, hsc);
+		else if (fv)
+			out_fmt(o, A_BAD "%s" A_OFF, fv);
 		else
 			out_str(o, A_DIM "no verdict" A_OFF);
 	}

@@ -18,6 +18,11 @@
 
 struct kgenome_pe_info;
 struct kgenome_pe_imptab;
+struct kgenome_pe_imp;
+
+/* The room kof_pe_import_spell writes into: the module cut at 16, '!', the function at its bound, a terminator. */
+#define KOF_PE_SPELL_MAX (16u + 1u + KOF_SYM_NAME_MAX + 2u)
+uint32_t kof_pe_import_spell(kof_buf file, const struct kgenome_pe_imp *e, const char *dll, char *out);
 
 /*
  * Write the block for `file` into `out`, returning the bytes written - at

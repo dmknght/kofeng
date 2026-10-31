@@ -497,7 +497,7 @@ static uint64_t workload(unsigned which)
 		kgenome_xref_free(u);
 		for (k = 0; k < sizeof buf; k++)
 			buf[k] = (uint8_t)hk_next(&r);
-		pool = kgenome_mutation_pool(buf, sizeof buf, KGENOME_MUTATION_RAW, &np);
+		pool = kgenome_mutation_pool(buf, sizeof buf, &np);
 		h = mix(h, np);
 		for (k = 0; k < np; k += 16)
 			h = mix(h, pool[k]);

@@ -91,6 +91,11 @@ const char *kv_tab_rec_cell(const struct kv_tab_rec *r, const struct kv_tab_geo 
 size_t kv_tab_rec_line(const struct kv_tab_rec *r, const struct kv_tab_geo *g, uint32_t row, char *out, size_t cap);
 void kv_tab_rec_free(struct kv_tab_rec *r);
 
+/* The screen columns [*x0, *x1] (from the line's start) of the TEXT of column `k` that a produced row shows, clipped to what the sideways
+ * scroll leaves visible; 0 when none is. Leading and trailing blanks are not text. An empty cell answers over `empty_w` columns from its
+ * start (0: not at all), so it can still be clicked. The ONE click extent of every cell of every dialog table. */
+int kv_tab_extent(const struct kv_tab_geo *g, uint32_t k, const char *text, uint32_t empty_w, int *x0, int *x1);
+
 /* THE ONE CLAMP of a window offset: the largest start of `room` rows over `total` rows. */
 uint32_t kv_tab_clamp(uint32_t off, uint32_t total, uint32_t room);
 

@@ -400,30 +400,16 @@ static uint64_t route_force(struct route *R, uint16_t cap,
 		case KGENOME_DIAG_EMU_FORCE_COUNT:
 			ret = arg[2];
 			/*
-			 * A READ THAT SUCCEEDED PUT BYTES SOMEWHERE,
-			 * and saying it returned n without writing n
-			 * is a state no real machine is ever in. It
-			 * also loses the finding: a stager's jump
-			 * into its mapping is recorded as a hop only
-			 * when the page has been WRITTEN, so a
-			 * mapping that was never filled is one the
-			 * run can enter without anything noticing.
-			 *
-			 * THE CONTENT IS OURS AND NOTHING MAY READ
-			 * IT AS THE PROGRAM'S. Nops, so that control
-			 * entering the region runs forward to its
-			 * end rather than into whatever an
-			 * uninitialised page decodes as. Nothing
-			 * downstream looks at these bytes - a link
-			 * comes from a register at a call site, not
-			 * from memory - and if anything ever does,
-			 * it will be reading this routine's writing.
+			 * THE BUFFER IS NOT WRITTEN. Forcing n bytes read without
+			 * putting them anywhere is a state no real machine is in, and
+			 * filling it with nops was tried and removed: the content would
+			 * be THIS ROUTINE'S, and a stager that looks at what it received
+			 * (a magic byte, a length, a checksum) compares against nops and
+			 * takes the other arm. It was also unnecessary: the jump into the
+			 * mapping is noticed once kgenome_emu_hop_add declares the range
+			 * (measured with the fill off: meter1..4, rc4_1 and
+			 * shikata_ga_nai each still 5 nodes and 4 links).
 			 */
-			/* The buffer is NOT written - see the note on
-			 * KGENOME_DIAG_EMU_FILL_ON. */
-#if KGENOME_DIAG_EMU_FILL_ON
-			kgenome_diag_emu_fill_buffer(R->em, arg[1], arg[2]);
-#endif
 			break;
 		default:
 			break;

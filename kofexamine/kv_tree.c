@@ -42,7 +42,6 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 	 * flag that is only ever SET would stay set on whatever row inherited
 	 * the slot. */
 	n->ent = 0;
-	n->ent_i = 0;
 	n->ent_off = n->ent_len = 0;
 	n->bytes = bytes;
 	snprintf(n->label, sizeof n->label, "%s", label);
@@ -58,15 +57,13 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
  * the whole file.
  */
 static void tree_add_ent(struct view *v, uint32_t depth, uint32_t obj,
-			 uint32_t index, uint64_t off, uint64_t len,
-			 const char *label)
+			 uint64_t off, uint64_t len, const char *label)
 {
 	tree_add(v, depth, obj, KOF_SCAN_ALL, len, label);
 	if (v->n_node) {
 		struct node *n = &v->node[v->n_node - 1u];
 
 		n->ent = 1;
-		n->ent_i = index;
 		n->ent_off = off;
 		n->ent_len = len;
 	}
@@ -1030,13 +1027,11 @@ void tree_build(struct view *v)
 				 * there; what it does not do is claim bytes.
 				 */
 				if (tab[e].flags & KOF_ENT_F_SCATTERED)
-					tree_add_ent(v, o->depth + 1u, i,
-						     tab[e].index, 0, 0,
+					tree_add_ent(v, o->depth + 1u, i, 0, 0,
 						     ent_label(o, &tab[e]));
 				else
 					tree_add_ent(v, o->depth + 1u, i,
-						     tab[e].index, tab[e].off,
-						     tab[e].len,
+						     tab[e].off, tab[e].len,
 						     ent_label(o, &tab[e]));
 			}
 		}
@@ -1063,7 +1058,6 @@ void tree_build(struct view *v)
 		n->mask = KOF_SCAN_ALL;
 		n->sym = 0;
 		n->ent = 0;
-		n->ent_i = 0;
 		n->ent_off = n->ent_len = 0;
 		n->bytes = 0;
 		snprintf(n->label, sizeof n->label,

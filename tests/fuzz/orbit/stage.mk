@@ -13,16 +13,7 @@ ORBIT_FZ_OBJ := $(addprefix $(FZB)/orbit_obj/,$(ORBIT_SRC:.c=.o))
 
 $(FZB)/orbit_obj/%.o: %.c $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(ORBIT_FZ_EXTRA) $(ORBIT_INC) -c $< -o $@
-
-# FINDING WP12-18 (tests_wp12/findings): apev.c reads a struct proc_event (8-byte aligned: its timestamp is a u64) from the
-# connector message at offset 36, which is 4 mod 8, in prefetch() and stream_next() on EVERY record the kernel sends. UBSAN's
-# alignment check aborts on the first one, so the object that holds those reads is built without that one check until the library
-# copies the event out instead of casting. Remove the line to see the report: it fires on the first well-formed message.
-$(FZB)/orbit_obj/libkoforbit/antarc/apev.o: ORBIT_FZ_EXTRA := -fno-sanitize=alignment
-# FINDING WP12-22: afan.c walks the info records of a fanotify event by their own `len` (afan.c:443), which the kernel keeps a
-# multiple of 4 but a record need not: an odd len makes the next header pointer misaligned for a 2-byte-aligned struct.
-$(FZB)/orbit_obj/libkoforbit/antarc/afan.o: ORBIT_FZ_EXTRA := -fno-sanitize=alignment
+	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(ORBIT_INC) -c $< -o $@
 
 FZ_LIB_orbit    := engine
 FZ_LIBS_orbit   := $(ORBIT_FZ_OBJ) $(FZB)/libkofeng.a -lrt

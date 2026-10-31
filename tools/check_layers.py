@@ -388,6 +388,12 @@ def ratchet(name, now, what, exempt=None):
 
 # What cannot be cut today, with the reason. Everything else must pass with none.
 EXEMPT = {
+    'lib public headers': {
+        'tools/genotype/arm_index_gen.c -> libgenome/genotype/arm32/arm32_ids.h': 'the generator of the ARM and AArch64 decoders\' derived tables: it is the lib\'s own table builder, run by `make genotype-arm-index`, and reads the rows the lib keeps private',
+        'tools/genotype/arm_index_gen.c -> libgenome/genotype/arm32/arm32_private.h': 'the generator of the ARM and AArch64 decoders\' derived tables: it is the lib\'s own table builder, run by `make genotype-arm-index`, and reads the rows the lib keeps private',
+        'tools/genotype/arm_index_gen.c -> libgenome/genotype/arm32/thumb_ids.h': 'the generator of the ARM and AArch64 decoders\' derived tables: it is the lib\'s own table builder, run by `make genotype-arm-index`, and reads the rows the lib keeps private',
+        'tools/genotype/arm_index_gen.c -> libgenome/genotype/arm64/arm64_private.h': 'the generator of the ARM and AArch64 decoders\' derived tables: it is the lib\'s own table builder, run by `make genotype-arm-index`, and reads the rows the lib keeps private',
+    },
     'function length': {
         'bases/unp/mpress_pe.c: kof_unpack': 'a module: pack bytes depend on the line numbers of bases/ (CLAUDE.md 12)',
         'bases/unp/upx_elf_00.c: kof_unpack': 'a module: pack bytes depend on the line numbers of bases/ (CLAUDE.md 12)',
@@ -396,6 +402,7 @@ EXEMPT = {
     'file size': {
         'libkoforbit/grille/wevt_decode.c': 'Windows-only, cannot be compiled or checked on this host',
         'libkoforbit/grille/wproc.c': 'Windows-only, cannot be compiled or checked on this host',
+        'libkofeng/detectors/mutations/kofmutation.c': 'cohesive: the similarity matcher (the index probe, the per-object state, and its two scoring kinds - window containment and the CFG sketch\'s votes - share the batch, the filters and the state tables; a cut would export every static of it)',
         'libgenome/celllysis/decode_arm64.c': 'cohesive: the AArch64 decoder, one handler per encoding group; no function is long, nothing in it is read apart from the rest',
         'libgenome/phenotype/emu_interp.c': 'cohesive: the interpreter loop and the inlined step helpers it is kept whole with (the register, flag and operand accessors are emu_state.c)',
         'libgenome/phenotype/emu_private.h': 'cohesive: the interpreter family\'s ONE private header (the machine, its state, and what each part of the interpreter offers another: the vector, x87, integer and syscall parts all read it); a header per part would be several private headers for one family',
@@ -1037,7 +1044,7 @@ def layers_main():
     rc |= ratchet('module includes', module_include_violations(),
                  'a module (bases/) names something other than <kofmod/...> or <kofshared/...>:')
     rc |= ratchet('lib public headers', lib_public_violations(),
-                 'a file outside a lib includes a header the lib\'s umbrella (kgenome.h, uncoat.h) does not name:')
+                 'a file outside a lib includes a header the lib\'s umbrella (kgenome.h, uncoat.h) does not name:', EXEMPT['lib public headers'])
     rc |= ratchet('headers compile alone', header_violations(),
                  'a header of libkofeng/, libgenome/ or libuncoat/ needs something included before it:')
     rc |= ratchet('tests and /tmp', tests_tmp_violations(),

@@ -230,9 +230,6 @@ void sx_need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		    const struct kof_scan_option *opt, uint32_t pdepth);
-void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
-		    const struct kof_scan_option *opt, uint32_t pdepth, uint32_t partial,
-		    struct kof_result *out);
 /*
  * WHERE THE OPEN STAGE IS FOR ONE OBJECT. One value, not a flag per question:
  * FRESH until the first step asks, then REFUSED (the gate said no), ACTIVE
@@ -281,6 +278,9 @@ uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t scan_m
 uint32_t sx_regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
 uint32_t sx_sym_halves_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
 void sx_dense_code_unread(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
+struct kof_scan_cut;
+void sx_feed_cut(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t present, int from_packer,
+		 struct kof_scan_cut *cut);
 void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint32_t present,
 		      int from_packer);
 /* Is any block rule loaded: the one reader of a rendering's functions. */
@@ -332,7 +332,7 @@ enum kof_stage {
 	KOF_STAGE_SCRIPT,       /* the second form of a script                    */
 	KOF_STAGE_SERVE,        /* what the engine completed, declared            */
 	KOF_STAGE_ANALYSE,      /* the analysis a declaration asked for           */
-	KOF_STAGE_MODEL,        /* the scored model's measurement                 */
+	KOF_STAGE_PUBLISH,      /* what the object's own scan leaves in the result */
 	KOF_STAGE_VERDICT,      /* what the diseases make: the object's verdict   */
 	KOF_STAGE_REPORT,       /* what each diagnose made of it - on request     */
 	KOF_STAGE_COUNT
@@ -366,11 +366,9 @@ struct kof_pipeline {
 	enum kof_stage                   stage;
 	enum kof_analyze                 step;
 	struct kof_open                  open;
-	/* What the current GROUP of chain rows has produced is measured from these,
-	 * and `yielded` is the group's answer, decided once when the OPEN stage
-	 * ends: the object was opened into children that are not carves. */
+	/* What the current GROUP of chain rows has produced is measured from these
+	 * (group_yielded: the object was opened into children that are not carves). */
 	uint32_t                         kids0, carved0;
-	int                              yielded;
 };
 
 void sx_obj_begin(struct kof_scanner *sc);

@@ -1111,7 +1111,7 @@ static void t_mutation_window(void)
 	static const uint8_t p[40] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 				       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40 };
 	struct kgenome_mtn_win w;
-	uint32_t norm, count;
+	uint32_t count;
 	uint64_t at;
 	uint8_t flat[24];
 
@@ -1123,70 +1123,58 @@ static void t_mutation_window(void)
 		CK(kgenome_mutation_drop_weight() == d);
 	}
 	/* too short for one window: refused */
-	for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++) {
-		CK(kgenome_mtn_win_begin(&w, p, 0, norm) == 0);
-		CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG - 1u, norm) == 0);
-		CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG, norm) == (norm == KGENOME_MUTATION_RAW));
-		CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG + 1u, norm) == 1);
-	}
+	CK(kgenome_mtn_win_begin(&w, p, 0) == 0);
+	CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG - 1u) == 0);
+	CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG) == 1);
+	CK(kgenome_mtn_win_begin(&w, p, KGENOME_MUTATION_NG + 1u) == 1);
 	/* a window over n bytes advances n - NG + 1 times; the rolling value equals the window recomputed */
-	for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++) {
-		CK(kgenome_mtn_win_begin(&w, p, sizeof p, norm) == 1);
-		count = 1;
-		for (;;) {
-			uint64_t i;
-			uint32_t h = 0;
-			for (i = 0; i < KGENOME_MUTATION_NG; i++)
-				h = h * KGENOME_MUTATION_BASE + kgenome_mutation_byte(p, w.at + i, norm);
-			CK(kgenome_mtn_win_value(&w) == kgenome_mutation_mix(h));
-			if (!kgenome_mtn_win_next(&w))
-				break;
-			count++;
-		}
-		CK(count == (norm == KGENOME_MUTATION_RAW ? sizeof p : sizeof p - 1u) - KGENOME_MUTATION_NG + 1u);
-		CK(kgenome_mtn_win_next(&w) == 0);              /* the end stays the end */
+	CK(kgenome_mtn_win_begin(&w, p, sizeof p) == 1);
+	count = 1;
+	for (;;) {
+		uint64_t i;
+		uint32_t h = 0;
+		for (i = 0; i < KGENOME_MUTATION_NG; i++)
+			h = h * KGENOME_MUTATION_BASE + p[w.at + i];
+		CK(kgenome_mtn_win_value(&w) == kgenome_mutation_mix(h));
+		if (!kgenome_mtn_win_next(&w))
+			break;
+		count++;
 	}
-	/* flat: every byte of the window equal after the normalisation */
+	CK(count == sizeof p - KGENOME_MUTATION_NG + 1u);
+	CK(kgenome_mtn_win_next(&w) == 0);              /* the end stays the end */
+	/* flat: every byte of the window equal */
 	memset(flat, 7, sizeof flat);
-	for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++) {
-		CK(kgenome_mtn_win_begin(&w, flat, sizeof flat, norm) == 1);
-		CK(kgenome_mtn_win_flat(&w) == 1);
-	}
-	CK(kgenome_mtn_win_begin(&w, p, sizeof p, KGENOME_MUTATION_RAW) == 1 && kgenome_mtn_win_flat(&w) == 0);
-	/* an arithmetic run is flat under SUB (a constant step) and a repeating XOR key is flat under XOR */
-	CK(kgenome_mtn_win_begin(&w, p, sizeof p, KGENOME_MUTATION_SUB) == 1 && kgenome_mtn_win_flat(&w) == 1);
+	CK(kgenome_mtn_win_begin(&w, flat, sizeof flat) == 1);
+	CK(kgenome_mtn_win_flat(&w) == 1);
+	CK(kgenome_mtn_win_begin(&w, p, sizeof p) == 1 && kgenome_mtn_win_flat(&w) == 0);
+	/* an arithmetic run and a repeating XOR key are NOT flat: there is no difference form any more */
 	{
 		uint8_t x[24];
 		for (at = 0; at < sizeof x; at++)
 			x[at] = (uint8_t)(0x55u ^ ((at & 1u) ? 0xa7u : 0x13u));
-		CK(kgenome_mtn_win_begin(&w, x, sizeof x, KGENOME_MUTATION_XOR) == 1);
+		CK(kgenome_mtn_win_begin(&w, x, sizeof x) == 1 && kgenome_mtn_win_flat(&w) == 0);
 	}
 	/* the last window never reads past the buffer: place it at a guard page */
 	{
 		struct hk_gb g;
 		uint8_t *q;
+		uint32_t n;
 		gb_init(&g, 64);
-		for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++) {
-			uint32_t n;
-			for (n = 0; n <= 40; n++) {
-				q = gb_put(&g, p, n);
-				if (kgenome_mtn_win_begin(&w, q, n, norm)) {
-					uint32_t c = 0;
-					do {
-						(void)kgenome_mtn_win_value(&w);
-						(void)kgenome_mtn_win_flat(&w);
-						c++;
-					} while (kgenome_mtn_win_next(&w));
-					CK(c >= 1);
-				}
+		for (n = 0; n <= 40; n++) {
+			q = gb_put(&g, p, n);
+			if (kgenome_mtn_win_begin(&w, q, n)) {
+				uint32_t c = 0;
+				do {
+					(void)kgenome_mtn_win_value(&w);
+					(void)kgenome_mtn_win_flat(&w);
+					c++;
+				} while (kgenome_mtn_win_next(&w));
+				CK(c >= 1);
 			}
 		}
 		gb_free(&g);
 	}
-	CK(kgenome_mutation_flat(p, 0, KGENOME_MUTATION_RAW) == 0);
-	CK(kgenome_mutation_byte(p, 0, KGENOME_MUTATION_RAW) == 1);
-	CK(kgenome_mutation_byte(p, 0, KGENOME_MUTATION_XOR) == (1 ^ 2));
-	CK(kgenome_mutation_byte(p, 0, KGENOME_MUTATION_SUB) == 1);
+	CK(kgenome_mutation_flat(p, 0) == 0);
 	CK(kgenome_mutation_mix(0) == 0);
 	CK(kgenome_mutation_mix(1) != 1);
 }

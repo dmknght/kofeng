@@ -345,7 +345,6 @@ struct rar3 {
 	uint32_t old_dist[4];
 	uint32_t last_dist, last_len;
 	uint32_t prev_low_dist, low_dist_rep;
-	int tables_read;
 
 	/*
 	 * The filter table, and the uses of it that are still to be applied.
@@ -836,7 +835,6 @@ static int read_tables(struct rar3 *s)
 				table[i++] = 0u;
 		}
 	}
-	s->tables_read = 1;
 
 	huff_build(&s->LD, table, NC);
 	huff_build(&s->DD, table + NC, DC);

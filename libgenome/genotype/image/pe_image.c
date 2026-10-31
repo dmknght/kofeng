@@ -35,6 +35,7 @@
 #include "pe_image.h"
 #include "clr_image.h"
 #include <rangelist.h>
+#include <kgenome_budget.h>   /* kgenome_grow_cap */
 
 
 /* Offsets within the structures, so the reads below read as the spec does. */
@@ -358,16 +359,14 @@ static void resolve_resource(struct kgenome_pe_info *p, uint64_t obj_size)
  * that points outside the file is a claim the file cannot back, and following
  * it would hand a caller a range that is not there.
  *
- * The metadata version string comes from the metadata root the CLI header
- * points at: magic "BSJB", then two version words, then a length-prefixed
- * string. It is read here rather than left to a caller because reaching it
- * means two more RVA resolutions, which is exactly the work a parser exists to
- * have done once.
+ * The metadata version string is read ONCE, by kgenome_clr_read (clr_image.c),
+ * which walks the metadata root the CLI header points at; the caller below
+ * copies it to clr_version, the field older readers know.
  */
 static void resolve_clr(struct kgenome_pe_info *p, kof_buf file, uint64_t obj_size)
 {
-	uint64_t rva, len, off, mroot;
-	uint32_t tmp32 = 0, vlen = 0;
+	uint64_t rva, len, off;
+	uint32_t tmp32 = 0;
 	uint16_t tmp16 = 0;
 
 	p->clr_off = p->clr_len = 0;
@@ -393,27 +392,6 @@ static void resolve_clr(struct kgenome_pe_info *p, kof_buf file, uint64_t obj_si
 	if (kof_rd_u32(file, off + 16, 0, &tmp32)) p->clr_flags = tmp32;
 	if (kof_rd_u32(file, off + 20, 0, &tmp32)) p->clr_entry_token = tmp32;
 
-	if (!kof_rd_u32(file, off + 8, 0, &tmp32) || !tmp32)
-		return;
-	mroot = kgenome_pe_rva_to_off(p, tmp32);
-	if (mroot == KGENOME_BROKEN || mroot >= obj_size)
-		return;
-	/* "BSJB", then two uint16 versions, a reserved uint32, then the
-	 * length-prefixed version string. */
-	/* KNOWN DEFECT E-CLRDUP (2026-10-24, R) [sev L]: resolve_clr reads the metadata root and its version string a second time;
-	 * kgenome_clr_read (clr_image.c) does the same walk and fills clr.version. Trigger: any managed PE. Effect: two
-	 * readers of one fact (CLAUDE.md rule 2/3) that can disagree on a bound (this one caps at obj_size, the other at
-	 * its stream table). Reproducer: none (read). Fix: drop clr_version here and read info->clr.version. */
-	if (!kof_rd_u32(file, mroot, 0, &tmp32) || tmp32 != 0x424a5342u)
-		return;
-	if (!kof_rd_u32(file, mroot + 12, 0, &vlen) || !vlen)
-		return;
-	if (vlen > sizeof p->clr_version - 1u)
-		vlen = (uint32_t)(sizeof p->clr_version - 1u);
-	if (mroot + 16u + vlen > obj_size)
-		return;
-	memcpy(p->clr_version, file.p + mroot + 16u, vlen);
-	p->clr_version[vlen] = '\0';
 }
 
 /*
@@ -855,6 +833,7 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 	if (info->clr_off)
 		(void)kgenome_clr_read(file, info->clr_off, pe_rva_thunk, info,
 				   &info->clr);
+	memcpy(info->clr_version, info->clr.version, sizeof info->clr_version);
 	last_end = settle_claims(info, file.n);
 	resolve_entry(info, obj);
 
@@ -881,7 +860,7 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 			 * same offset in two regions. */
 			/* KNOWN DEFECT E-CERT (2026-10-24, R) [sev L]: a certificate directory that overlaps an earlier claim (co < last_end) is
 			 * reported KGENOME_PE_ANOM_CERT_PAST_EOF, a name that says "past the end of the file". Trigger: a PE whose security
-			 * directory points into a section. Effect: the anomaly (and heur rule "CertCut", kofheur.c) fires for an overlap, so
+			 * directory points into a section. Effect: the anomaly fires for an overlap, so
 			 * the label over-claims what was measured. Reproducer: none. Fix: its own anomaly bit (CERT_OVERLAP), or reword. */
 			if (co < last_end) {
 				if (co < lim)
@@ -1210,13 +1189,8 @@ static void imptab_add(void *user, uint64_t slot, const char *dll,
 	if (!t->n_dll || strncmp(t->dll[t->n_dll - 1u], dll,
 				 KGENOME_PE_IMP_DLLLEN - 1u)) {
 		if (t->n_dll == t->cap_dll) {
-			/* KNOWN DEFECT REV-D8m (2026-10-25, Inference) [sev L]: imptab_add doubles a uint32 capacity (the import table (dll names))
-			 * with no overflow guard and no ledger charge. Trigger: an import directory of 2^31 or more distinct library names (a file over 40 GiB); the engine caps an object at 512 MiB,
-			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-			 * UINT32_MAX / 2 before doubling. */
-			uint32_t nc = t->cap_dll ? t->cap_dll * 2u : 8u;
-			void *nv = realloc(t->dll, (size_t)nc * sizeof *t->dll);
+			uint32_t nc = kgenome_grow_cap(t->cap_dll, 8u);
+			void *nv = nc ? realloc(t->dll, (size_t)nc * sizeof *t->dll) : NULL;
 
 			if (!nv) {
 				t->status = KGENOME_NOMEM;
@@ -1231,13 +1205,8 @@ static void imptab_add(void *user, uint64_t slot, const char *dll,
 		t->n_dll++;
 	}
 	if (t->n == t->cap) {
-		/* KNOWN DEFECT REV-D8n (2026-10-25, Inference) [sev L]: imptab_add doubles a uint32 capacity (the import table (entries))
-		 * with no overflow guard and no ledger charge. Trigger: an import directory of 2^31 or more entries (input over 8 GiB); the engine caps an object at 512 MiB,
-		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-		 * UINT32_MAX / 2 before doubling. */
-		uint32_t nc = t->cap ? t->cap * 2u : 256u;
-		void *nv = realloc(t->v, (size_t)nc * sizeof *t->v);
+		uint32_t nc = kgenome_grow_cap(t->cap, 256u);
+		void *nv = nc ? realloc(t->v, (size_t)nc * sizeof *t->v) : NULL;
 
 		if (!nv) {
 			t->status = KGENOME_NOMEM;

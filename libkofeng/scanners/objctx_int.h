@@ -38,7 +38,7 @@ int oc_can_produce(const struct kof_scanner *sc);
 
 /* Close what has been emitted as one child. 1 on success. */
 int oc_child(const struct kof_obj_ctx *ctx);
-/* What the next child IS, as the engine's KOF_UNPACK_KIND word. */
+/* What the next child IS, as an entry kind (KOF_ENT_*, kofentry.h). */
 void oc_child_kind(const struct kof_obj_ctx *ctx, uint32_t kind);
 /* Emit all of `n` bytes; 1 when every byte was taken, 0 when a limit refused. */
 int oc_emit_exact(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n);
@@ -99,6 +99,7 @@ uint64_t oc_emit_all(const struct kof_obj_ctx *ctx, const uint8_t *p,
 void oc_scan_capped_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line);
 void oc_scan_limit_at(struct kof_scanner *sc, const char *file, int line);
 void oc_scan_broken_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line);
+void oc_scan_damaged(struct kof_scanner *sc);
 #define oc_scan_capped(sc, reason) oc_scan_capped_at((sc), (reason), __FILE__, __LINE__)
 #define oc_scan_limit(sc)          oc_scan_limit_at((sc), __FILE__, __LINE__)
 #define oc_scan_broken(sc, reason) oc_scan_broken_at((sc), (reason), __FILE__, __LINE__)
@@ -116,6 +117,13 @@ enum { OC_REFUSE_CUT = 1, OC_REFUSE_CUT_OPENED = 2 };
 void oc_entry_cut(struct kof_scanner *sc);
 void oc_entry_cut_close(const struct kof_obj_ctx *ctx);
 void oc_entry_begin(struct kof_scanner *sc);
+/*
+ * A LIB STATUS, SAID ON THE OBJECT: a bound cut what the lib answered (kgenome_status_is_cut:
+ * truncated, over budget, no memory), so the object reads as limited, once. For a product the
+ * engine itself reads (the function set, the PE imports, the view's remapped functions). A
+ * product only a diagnose reads is said by kof_scan_incomplete, and only when one asked (BE-5).
+ */
+#define oc_status_said(sc, st) do { if (kgenome_status_is_cut(st)) oc_scan_limit(sc); } while (0)
 #define OC_LIMIT(sc, why) do { KOF_TRACE("[cut] %s:%d %s\n", __FILE__, __LINE__, (why)); oc_scan_limit(sc); } while (0)
 
 /* ---- the diagnose analysis and symbols (objctx_diag.c) ---- */
@@ -184,9 +192,8 @@ int  oc_names_take(struct kof_scanner *sc, uint64_t n);
 void oc_names_give(struct kof_scanner *sc, uint64_t n);
 void oc_names_give_cb(void *sc, uint64_t n);
 
-/* Charge the memory ceiling, recording WHICH function asked so a refusal can say
- * who ran out of room (kof_scanner.ledger.res_why). A macro for __func__. */
-#define scan_charge(sc, n) (((sc)->ledger.res_why = __func__), oc_scan_charge_(sc, n))
+/* Charge the memory ceiling (the scanner's resident total and its peak). */
+#define scan_charge(sc, n) oc_scan_charge_((sc), (n))
 
 /* ---- what a script puts its own literals through (objctx_script_dec.c) ---- */
 struct oc_script_dec;           /* the decode state of one script object: opaque */
@@ -366,6 +373,19 @@ uint16_t oc_name_cap(const struct kof_obj_ctx *ctx, const char *name);
 struct kgenome_diag_scan *oc_diag_scan_text(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, kof_buf b,
 					    struct kgenome_budget *kb, enum kgenome_status *refused);
 void oc_diag_demand(struct kof_scanner *sc);
+/* THE DETECTION FORMS (objctx_diag_form.c): a diagnose whose record carries KDIG_SEC_FORM is answered here and nowhere in the
+ * analysis of the code. oc_diag_forms asks every form diagnose of one stage (sim 0: the string matchers, at DETECT; 1: the
+ * similarity matchers, at SIMILAR) that is read and whose shape this object has; oc_diag_form_hit reads an answer;
+ * oc_diag_used and oc_diag_when_met are the two questions the graph's gate asks too (objctx_diag.c), one definition. */
+void oc_diag_forms(struct kof_scanner *sc, struct kof_obj_ctx *ctx, int sim, struct kof_result *out);
+int oc_diag_form_hit(const struct kof_scanner *sc, uint32_t i);
+/* The markers and blocks of a MATCHED form, where they are (scan_explain.c): the report's third level, filled only for a report. */
+void oc_explain_parts(const struct kof_obj_ctx *ctx, uint32_t i, struct kof_diag_report *out);
+int oc_diag_form_ask(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t i);
+int oc_diag_used(const struct kof_scanner *sc, const struct kof_diag *d);
+int oc_diag_when_met(const struct kof_obj_ctx *ctx, const struct kof_diag *d);
+/* One marker in one mask, for a caller that is not a module (objctx.c; the module's kof_find_str is the same search). */
+int oc_find_str_mask(const struct kof_obj_ctx *ctx, uint32_t mask, const struct kof_str_ent *e, const uint8_t *bytes);
 /* Which diagnose was called, in one greppable line (objctx_diag_trace.c). */
 void oc_diag_trace_scan(struct kof_scanner *sc);
 void oc_diag_trace_ask(struct kof_scanner *sc, uint32_t i);

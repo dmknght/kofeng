@@ -6,10 +6,9 @@ A = 'menu'
 EXPECT = {
     'File': ['Next File', 'Previous File', 'Quit'],
     'Edit': ['Find...', 'Go to...'],
-    'Analysis': ['Dashboard', 'Infection', 'Decode string', 'Unpack', 'Dump',
-                 'Rebuild database'],
+    'Analysis': ['Dashboard', 'Infection', 'Decode string', 'Unpack', 'Dump'],
     'Help': ['Keyboard', 'About'],
-    'Manage': ['Pathogens', 'Syndromes'],
+    'Manage': ['Pathogens', 'Syndromes', 'Rebuild database'],
 }
 
 
@@ -33,6 +32,19 @@ def each_menu_lists_its_items():
             for it in items:
                 check(any(it in t for t in txt), '%s: %r missing in %r' % (m, it, txt))
             v.esc()
+
+
+@case(A)
+def rebuild_is_in_manage_and_resolve_is_gone():
+    with ko() as v:
+        v.menu_open('Analysis')
+        txt = [t for _, _, t, _ in v.popup()]
+        v.esc()
+        check(not any(t.startswith(('Rebuild database', 'Resolve call symbols')) for t in txt), 'Analysis lists %r' % txt)
+        v.menu_open('Manage')
+        txt = [t for _, _, t, _ in v.popup()]
+        v.esc()
+        check(any(t.startswith('Rebuild database') for t in txt), 'Manage lacks Rebuild database: %r' % txt)
 
 
 @case(A)
@@ -273,7 +285,7 @@ def analysis_rebuild_is_refused_outside_a_source_tree():
     db = os.path.join(REPO, 'build', 'release', 'databases')
     m0 = os.stat(db).st_mtime
     with ko() as v:
-        v.menu_item('Analysis', 'Rebuild database')
+        v.menu_item('Manage', 'Rebuild database')
         v.pump(1.5)
         check('No Makefile above' in last_line(v), last_line(v)[-90:])
     eq(os.stat(db).st_mtime, m0, 'database directory changed')
@@ -356,13 +368,13 @@ if __name__ == '__main__':
 
 
 @case(A)
-def manage_families_is_live_and_syndromes_is_greyed_for_now():
+def manage_pathogens_and_syndromes_are_both_live():
     with ko() as v:
         v.menu_open('Manage')
         it = v.popup_item('Pathogens')
         check(it and it[3], 'Pathogens must be enabled: %r' % (it,))
         it = v.popup_item('Syndromes')
-        check(it and not it[3], 'Syndromes must be listed and greyed (switched off for now): %r' % (it,))
+        check(it and it[3], 'Syndromes must be enabled: %r' % (it,))
         v.esc()
         v.menu_open('Analysis')
         check(not v.popup_item('Syndrome table') and not v.popup_item('Syndromes'), 'the syndrome item is still in Analysis')

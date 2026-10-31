@@ -203,13 +203,13 @@ static void t_arg(void)
 	   "commas inside nested parentheses stay in the argument, to any depth");
 	CK(kof_dsrc_arg("MACRO(a, f(x))", 1, out, sizeof out) == 1 && strcmp(out, "f(x)") == 0,
 	   "a nested call as the last argument keeps its closing parenthesis");
-	CK(kof_dsrc_arg("MACRO(f(x)", 0, out, sizeof out) == 1 && strcmp(out, "f(x)") == 0,
-	   "an unterminated outer call still yields the nested one whole");
+	CK(kof_dsrc_arg("MACRO(f(x)", 0, out, sizeof out) == 0,
+	   "an unterminated outer call is refused, even with a nested one whole (WD-1)");
 	CK(kof_dsrc_arg("MACRO(  spaced \t\n)", 0, out, sizeof out) == 1 && strcmp(out, "spaced") == 0, "leading and trailing whitespace is trimmed");
 	CK(kof_dsrc_arg("MACRO()", 0, out, sizeof out) == 0, "an empty argument is not one");
 	CK(kof_dsrc_arg("MACRO(a,,c)", 1, out, sizeof out) == 0, "an empty middle argument");
 	CK(kof_dsrc_arg("no parenthesis", 0, out, sizeof out) == 0, "no parenthesis at all");
-	CK(kof_dsrc_arg("MACRO(a", 0, out, sizeof out) == 1 && strcmp(out, "a") == 0, "an unterminated call still yields the argument it has");
+	CK(kof_dsrc_arg("MACRO(a", 0, out, sizeof out) == 0, "an unterminated call is refused (WD-1)");
 	CK(kof_dsrc_arg("MACRO(a", 1, out, sizeof out) == 0, "and not another");
 	CK(kof_dsrc_arg("MACRO(\"q,uoted\", b)", 0, out, sizeof out) == 1 && strcmp(out, "\"q") == 0,
 	   "a comma inside quotes splits (the splitter does not know strings)");

@@ -446,9 +446,7 @@ int menu_enabled(struct view *v, int a)
 	 * an item that would say "none" is an item that need not be there. */
 	if (a == M_MUTATION_WHICH)
 		return mtn_at_byte(v) < v->ed.dr.n_blk;
-	/* Not wired to anything yet. Shown because the menu is where they will
-	 * be, and disabled because a menu item that does nothing teaches people
-	 * not to trust the menu. */
+	/* An action no branch above enables is disabled. */
 	return 0;
 }
 
@@ -504,41 +502,43 @@ static struct kv_menu ctx_menu(struct view *v)
 	m.rule_above = cm_rule;
 	m.label = cm_label;
 	m.w = MENU_W;
-	m.c_on  = BAR_ON;
-	m.c_off = BAR_OFF;
-	m.c_cur = BAR_CUR;
 	return m;
 }
 
-/* Rows including the rules between groups, which take a line each. */
-int menu_rows(struct view *v)
+/* The menu as a pop-up, placed at the corner it was opened at (kv_popup_place keeps a placed box where it is). */
+static void ctx_popup(struct view *v, struct kv_popup *p)
 {
 	struct kv_menu m = ctx_menu(v);
+	struct kv_popup_req q;
 
-	return kv_menu_rows(&m);
+	kv_menu_popup(&m, p);
+	kv_menu_req(&m, v->menu_row, v->menu_col, 0, &q);
+	q.off = v->menu_scroll;
+	kv_popup_place(p, &q);
 }
 
-/* The action on a drawn row, or -1 for a rule or past the end. */
-int menu_at_row(struct view *v, int row)
+/* The item under the pointer: its action, -1 on a rule, -2 off the menu. */
+int menu_hit(struct view *v)
 {
-	struct kv_menu m = ctx_menu(v);
+	struct kv_popup p;
+	int r;
 
-	return kv_menu_at_row(&m, row);
+	ctx_popup(v, &p);
+	r = kv_popup_hit(&p, g_my, g_mx);
+	return r < 0 ? r : p.row[r].id;
 }
 
 void menu_open_at(struct view *v, int row, int col)
 {
+	struct kv_popup p;
+
 	v->menu_open = 1;
 	v->menu_row = row;
 	v->menu_col = col;
-	if (v->menu_row + menu_rows(v) > g_rows)
-		v->menu_row = g_rows - menu_rows(v);
-	if (v->menu_row < 1)
-		v->menu_row = 1;
-	if (v->menu_col + MENU_W > g_cols)
-		v->menu_col = g_cols - MENU_W;
-	if (v->menu_col < 1)
-		v->menu_col = 1;
+	v->menu_scroll = 0;
+	ctx_popup(v, &p);
+	v->menu_row = p.box.y;
+	v->menu_col = p.box.x;
 
 	/*
 	 * OPEN WITH NOTHING HIGHLIGHTED.
@@ -559,27 +559,25 @@ void menu_open_at(struct view *v, int row, int col)
 
 void menu_step(struct view *v, int d)
 {
-	struct kv_menu m = ctx_menu(v);
+	struct kv_popup p;
 
+	ctx_popup(v, &p);
 	/*
 	 * FROM NOTHING, EITHER END. The menu opens with no row lit, so the
 	 * first key has to enter the list rather than step within it - down
 	 * from the top, up from the bottom, which is what the key means.
 	 */
-	if (v->menu_sel < 0) {
-		v->menu_sel = d > 0 ? kv_menu_first(&m)
-				    : kv_menu_step(&m, kv_menu_rows(&m), -1);
-		return;
-	}
-	v->menu_sel = kv_menu_step(&m, v->menu_sel, d);
+	v->menu_sel = kv_popup_step(&p, v->menu_sel, d);
+	kv_popup_follow(&p, v->menu_sel);
+	v->menu_scroll = p.box.off;
 }
-
 
 void draw_menu(struct out *o, struct view *v)
 {
-	struct kv_menu m = ctx_menu(v);
+	struct kv_popup p;
 
-	kv_menu_draw(o, &m, v->menu_row, v->menu_col, v->menu_sel, -1);
+	ctx_popup(v, &p);
+	kv_popup_draw(o, &p, v->menu_sel, -1);
 }
 
 void menu_run(struct view *v, int a)

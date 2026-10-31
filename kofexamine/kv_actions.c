@@ -41,7 +41,6 @@ void editor_attach(struct view *v)
 	v->ed.edit     = &v->edit;
 	v->ed.scratch  = v->probe;
 	v->ed.eng      = v->eng;
-	v->ed.tags     = v->syn ? &v->syn->set : NULL;
 }
 
 /*
@@ -50,6 +49,13 @@ void editor_attach(struct view *v)
  * The children it produces are named under that object's own name, so the
  * engine's "//n" convention puts them in the tree exactly where they belong and
  * tree_build needs to know nothing about where they came from.
+ *
+ * FUTURE (owner, 2026-10-29): try this on more than unpacking. The same run
+ * that takes a packer's code out can be used to take out the ENCRYPTED DATA a
+ * malware decrypts at run time (a config, a C2 list, a strings table, a
+ * payload): run the sample's own decryptor in the emulator and read what it
+ * wrote. Experiment on real samples before designing anything; nothing here
+ * supports it yet.
  */
 void emu_here(struct view *v)
 {
@@ -90,24 +96,6 @@ void emu_here(struct view *v)
 		return;
 	}
 	/*
-	 * AND THE GATE, HERE, BECAUSE THIS IS WHERE IT WAS ASKED FOR.
-	 *
-	 * It reads every executable segment to decide whether emulating is
-	 * worth it, and it used to run when an object was merely selected -
-	 * which faulted a spilled object in whole for a status-line tag, and
-	 * put the word "emu" on screen about a file nobody had asked to
-	 * emulate. Once per object; obj_emu_why only reports what this left.
-	 */
-	if (!o->emu_why_done && o->fmt && o->info &&
-	    o->ctx.format == KOF_FMT_ELF) {
-		struct kgenome_obj gobj;
-
-		o->emu_why_done = 1;
-		kof_genome_obj(&o->ctx, &gobj);
-		o->emu_why = (uint8_t)kgenome_emu_unp_gate(&gobj, o->info,
-						       o->buf.p, o->buf.n);
-	}
-	/*
 	 * SAID BEFORE IT STARTS, AND WRITTEN STRAIGHT TO THE STATUS ROW.
 	 *
 	 * Interpreting an object takes as long as it takes - seconds on
@@ -139,11 +127,11 @@ void emu_here(struct view *v)
 		}
 	}
 	memset(&opt, 0, sizeof opt);
-	opt.report_diag = 1;
 	/* The same level as the ordinary collect - see the note there. A node
 	 * re-examined through the interpreter must not lose the heuristics the
 	 * first pass would have run on it. */
 	opt.heur_level = KOF_HEUR_LEVEL_MAX;
+	opt.reader = 1;
 	/*
 	 * AUTO, AND THE ENGINE'S MODULES DECIDE - not this tool.
 	 *
@@ -168,7 +156,6 @@ void emu_here(struct view *v)
 	 * dedup in on_object. Zero afterwards, because an ordinary collect
 	 * starts from an empty list and has nothing to compare against. */
 	v->dedup_from = v->n_obj;
-	v->scan_sc = sc;
 	kscan_bytes(sc, o->buf.p, o->buf.n, o->name, &opt, on_object, v);
 	kscan_free(sc);
 	v->dedup_from = 0;
@@ -805,6 +792,7 @@ void rebuild_db(struct view *v)
 			 "Built, but %.50s will not load", v->dbdir);
 		return;
 	}
+	(void)keng_catalog_load(fresh, v->pathdir[0] ? v->pathdir : NULL, v->syndir);
 	old = v->eng;
 	if (!file_open(v, here, fresh)) {
 		keng_close(fresh);

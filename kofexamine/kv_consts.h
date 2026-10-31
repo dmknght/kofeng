@@ -1,8 +1,8 @@
 /*
  * kv_consts.h - limits, widths and edit codes that more than one unit uses.
  *
- * The draft panel's own (FAM_W, NOTE_W, GEN_BTN_W, ED_GRP_PCT, ED_STR, ED_AT_OFF, MAX_PROW)
- * and the tag sources' (ED_SYN_*) are kept in their original order because struct view
+ * The draft panel's own (NOTE_W, GEN_BTN_W, ED_GRP_PCT, ED_STR, ED_AT_OFF, MAX_PROW)
+ * are kept in their original order because struct view
  * sizes an array from MAX_PROW; they are listed in prototypes.txt.
  * A part of kv.h.
  */
@@ -57,19 +57,8 @@
  * and the comment takes exactly the gap between them. Nothing on the row moves
  * unless the terminal is resized.
  */
-/*
- * The family box, focused or not - and the width the row RESERVES for it,
- * which is what puts the comment box where it sits.
- *
- * Twenty-four was two family names wide. "mirai", "Meterp", "CoinMiner" are
- * what goes in it, so the row carried a dozen blank columns between the name
- * and the comment and the two read as unrelated halves of the row. Fourteen
- * still holds every family name in the tree without scrolling and puts the
- * comment beside the thing it is a comment about.
- */
-#define FAM_W     14
 #define NOTE_W    40    /* the comment box - a remark, not a paragraph */
-#define GEN_BTN_W 12    /* "[ Generate ]" */
+#define GEN_BTN_W 8     /* "[ Save ]" */
 /*
  * Where the string editor's codes live in view.edit.
  *
@@ -93,14 +82,6 @@
  * same fault in a smaller place.
  */
 #define ED_SYMFILT 900
-/*
- * The tag sources' text boxes: the table's search, a form's name and comment,
- * the chooser's search. A band of four above every other, tested as codes.
- */
-#define ED_SYN_SEARCH  1000
-#define ED_SYN_NAME    1001
-#define ED_SYN_COMMENT 1002
-#define ED_SYN_PICK    1003
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
  * counted once: the panel grew three kinds of row after this array was sized,
@@ -143,6 +124,9 @@
 #define ED_FAM_NAME 560
 #define ED_FAM_COMMENT 561
 #define ED_FAM_CELL 562         /* the comment of a variant, edited in its table cell */
+/* Manage > Syndromes: the name and comment fields of its small dialog. */
+#define ED_TAG_NAME 563
+#define ED_TAG_COMMENT 564
 
 /*
  * DLG_ROWS / DLG_COLS - what a dialog's recorded text can hold.

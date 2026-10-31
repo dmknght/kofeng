@@ -42,6 +42,7 @@
 #ifndef KGENOME_GENOTYPE_ARM64_H
 #define KGENOME_GENOTYPE_ARM64_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "arm64_ids.h"
@@ -58,10 +59,10 @@ struct kgenome_arm64_insn {
  * identity is KGENOME_ARM64_I_INVALID. The word is the little-endian read of the four
  * instruction bytes.
  *
- * The first call (from any thread) builds a lookup on the top 11 bits of the
- * word from the tree in arm64_tab.c - see arm64.c - so that most words never
- * walk it. The tree stays the one source of what a word is; the lookup holds
- * nothing it does not.
+ * A lookup on the top 11 bits of the word, written from the tree in arm64_tab.c by
+ * tools/genotype/arm_index_gen.c (const data: arm64_l1_tab.c) answers most words
+ * without walking it. The tree stays the one source of what a word is; the lookup
+ * holds nothing it does not.
  */
 enum kgenome_status kgenome_arm64_decode(struct kgenome_arm64_insn *out, uint32_t word);
 
@@ -230,5 +231,27 @@ unsigned kgenome_arm64_ldst_bytes(const struct kgenome_arm64_insn *in);
  * access. 0 for a form with no offset.
  */
 int64_t kgenome_arm64_ldst_off(const struct kgenome_arm64_insn *in);
+
+/*
+ * ---- TEXT -----------------------------------------------------------------
+ *
+ * The instruction as the GNU assembler's disassembler spells it (arm64_fmt.c).
+ * One request, one result: the decoded instruction, the address it sits at (a
+ * branch and an adr are shown resolved against it), and the caller's buffer;
+ * `res` says whether the text is complete, how control leaves the instruction and
+ * where a direct branch goes (struct kgenome_gt_fmt_res, genotype.h). A word of a
+ * space this formatter does not spell is KGENOME_UNSUPPORTED with the word as
+ * ".inst 0x........". Buffers of KGENOME_ARM64_TEXT bytes are always enough.
+ */
+#define KGENOME_ARM64_TEXT 96u
+
+struct kgenome_arm64_fmt_req {
+	const struct kgenome_arm64_insn *in;
+	uint64_t pc;
+	char    *buf;
+	size_t   cap;
+};
+
+void kgenome_arm64_format(const struct kgenome_arm64_fmt_req *req, struct kgenome_gt_fmt_res *res);
 
 #endif /* KGENOME_GENOTYPE_ARM64_H */

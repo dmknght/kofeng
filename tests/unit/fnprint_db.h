@@ -26,13 +26,12 @@ static int fd_block(struct fd_db *d, const uint8_t *p, uint64_t off, uint64_t le
 
 	if (d->n_blk >= FD_MAX)
 		return -1;
-	n = kgenome_mutation_minhash(p + off, len, KGENOME_MUTATION_RAW, d->pool + d->n_pool);
+	n = kgenome_mutation_minhash(p + off, len, d->pool + d->n_pool);
 	if (n < 8)
 		return -1;
 	d->blk[d->n_blk].first_hash = d->n_pool;
 	d->blk[d->n_blk].n_hash = n;
 	d->blk[d->n_blk].scan_mask = 1u;
-	d->blk[d->n_blk].norm = KGENOME_MUTATION_RAW;
 	d->blk[d->n_blk].side = (uint8_t)side;
 	d->n_pool += n;
 	return (int)d->n_blk++;
@@ -66,10 +65,10 @@ static int fd_unit(void *user, uint64_t off, uint64_t len, uint32_t side, const 
 	struct fd_feed *f = user;
 
 	(void)first;
-	kof_mutation_unit(f->c, 1u, KGENOME_MUTATION_RAW, side, f->p + off, len);
+	kof_mutation_unit(f->c, 1u, side, f->p + off, len);
 	if (f->c2) {
-		kof_mutation_unit(f->c2, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, f->p + off, len);
-		kof_mutation_unit(f->c2, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_LIB, f->p + off, len);
+		kof_mutation_unit(f->c2, 1u, KGENOME_MUTATION_SIDE_USER, f->p + off, len);
+		kof_mutation_unit(f->c2, 1u, KGENOME_MUTATION_SIDE_LIB, f->p + off, len);
 	}
 	f->n_units++;
 	f->bytes += len;

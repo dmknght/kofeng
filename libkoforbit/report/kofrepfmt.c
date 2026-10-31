@@ -617,6 +617,15 @@ static void write_foot(struct kof_report *r, FILE *out,
 		kof_report_count(r), kof_report_count(r));
 }
 
+/* A writer returns 0 only when the sink took everything it was given: stdio
+ * remembers a failed write (a full disk, a closed pipe) in the stream's error
+ * flag, and a caller that is told 0 has no other way to learn the report was
+ * cut. */
+static int kof_report_sink_status(FILE *out)
+{
+	return ferror(out) ? KOF_REPORT_ERR_WRITE : 0;
+}
+
 int kof_report_write_text(struct kof_report *r, FILE *out, int color)
 {
 	struct ink k;
@@ -631,13 +640,7 @@ int kof_report_write_text(struct kof_report *r, FILE *out, int color)
 	write_groups(r, out, &k);
 	write_tagged(r, out, &k);
 	write_foot(r, out, &k);
-	/* KNOWN DEFECT WP12-6 (2026-10-24, M) [sev M]: kof_report_write_text (and _json,
-	 * _candidates below) return 0 whatever the sink did. Trigger: a full
-	 * disk (/dev/full): ferror(out) is set. Effect: the caller learns of a
-	 * truncated report only if it checks ferror itself. Reproducer:
-	 * tests/unit/orbit_store.c case_report. Fix: return ferror(out) ? -1 : 0
-	 * in all three writers. */
-	return 0;
+	return kof_report_sink_status(out);
 }
 
 /* ---- JSON ---------------------------------------------------------------- */
@@ -820,7 +823,7 @@ int kof_report_write_json(struct kof_report *r, FILE *out)
 		fprintf(out, "}%s\n", i + 1u < n ? "," : "");
 	}
 	fputs("  ]\n}\n", out);
-	return 0;
+	return kof_report_sink_status(out);
 }
 
 /* ---- the signature draft ------------------------------------------------- */
@@ -933,5 +936,5 @@ int kof_report_write_candidates(struct kof_report *r, FILE *out)
 		}
 		fputc('\n', out);
 	}
-	return 0;
+	return kof_report_sink_status(out);
 }

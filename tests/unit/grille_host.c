@@ -1781,6 +1781,34 @@ static void t_convert(void)
 	eq_str("conv cmdline", kof_evt_cmdline(&out), "");
 
 	/*
+	 * A text_len ABOVE THE SOURCE ARENA names bytes that are not in the
+	 * record. The record sits in front of a canary; none of it may come out.
+	 */
+	{
+		struct { struct kofw_evt e; char tail[96]; } cc;
+		struct kof_evt o3;
+		size_t i;
+		int leaked = 0;
+
+		memset(&cc, 'Z', sizeof cc);
+		memset(&cc.e, 0, sizeof cc.e);
+		cc.e.type = KOF_EVT_FILE_NEW;
+		cc.e.text_len = (uint16_t)sizeof o3.text;
+		memset(cc.e.text, 'a', sizeof cc.e.text);
+		memset(cc.tail, 'Z', sizeof cc.tail);
+		kofw_evt_to_kof(&cc.e, &o3);
+		for (i = 0; i < sizeof o3.text; i++)
+			if (o3.text[i] == 'Z')
+				leaked++;
+		if (leaked)
+			fail("conv text_len", "bytes past the source arena were copied");
+		if (!(o3.flags & KOF_EF_TRUNCATED))
+			fail("conv text_len", "a text_len past the source arena was not flagged truncated");
+		if (o3.text_len > sizeof cc.e.text)
+			fail("conv text_len", "text_len above what the source holds");
+	}
+
+	/*
 	 * THE ARENA IS SMALLER IN THE NEUTRAL RECORD - its header carries two
 	 * more fields - so text that fit in one may not fit in the other. It
 	 * has to be cut AND flagged: a path shortened without saying so is what

@@ -13,11 +13,14 @@
  *   - a piece of any other region, cut where the window hash has its low bits
  *     clear - see kgenome_mutation_cut - so the same bytes are cut in the same places
  *     whatever was inserted before them.
+ * A function unit is cut and listed and carries a CFG signature when the lib can make one (kgenome_mutation_signature);
+ * every other unit has windows.
  * Each carries its side - see enum kgenome_mutation_side - and a unit never spans a
  * join between the author's code and the static library.
  */
 
 #include "mutation.h"
+#include "cfg.h"
 
 #include <string.h>
 
@@ -31,10 +34,31 @@
 #define FN_GAP   32u
 #define FN_MIN   64u
 
+_Static_assert((unsigned)KGENOME_SCAN_ELF_CODE == (unsigned)KGENOME_SCAN_PE_CODE, "kgenome_mutation_block_min tests one bit for both formats");
+
 int kgenome_mutation_by_function(uint32_t format, uint32_t mask)
 {
 	return (format == KGENOME_FMT_ELF && mask == KGENOME_SCAN_ELF_CODE) ||
 	       (format == KGENOME_FMT_PE && mask == KGENOME_SCAN_PE_CODE);
+}
+
+uint32_t kgenome_mutation_signature(const struct kgenome_func *first)
+{
+	return first ? KGENOME_MUTATION_SIG_CFG : KGENOME_MUTATION_SIG_WINDOWS;
+}
+
+uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const uint8_t *p,
+				       uint64_t n, uint32_t *out)
+{
+	if (kgenome_mutation_signature(first) != KGENOME_MUTATION_SIG_WINDOWS)
+		return 0;
+	return kgenome_mutation_minhash(p, n, out);
+}
+
+uint32_t kgenome_mutation_block_min(uint32_t scan_mask)
+{
+	/* a block whose region is EXACTLY a function region (kgenome_mutation_by_function: CODE of an ELF or of a PE, one bit in both) may be a CFG block */
+	return scan_mask == (unsigned)KGENOME_SCAN_ELF_CODE ? KGENOME_CFG_MIN_KEYS : KGENOME_MUTATION_MIN_HASH;
 }
 
 static int fn_in(const struct kof_range *ext, uint32_t n, const struct kgenome_func *f)
@@ -55,6 +79,10 @@ static int fn_lib(const struct kgenome_true_all *lib, const struct kgenome_func 
 
 /* A function-region walk. A function the library owns is not offered. Answers 1 when the
  * callback said stop, so the caller does not offer it anything else. */
+/* KNOWN DEFECT CS2-1 (2026-10-31, M) [sev M]: a run of small functions (each under FN_GROUP, within FN_GAP of the next) is ONE unit whose `first` is its largest function, and the CFG
+ * signature is of `first` alone (kof_cfgsign_function): the other functions of the group have no signature, no row id and are never held by a block. Trigger: two functions of 12+ blocks
+ * less than 32 bytes apart. Effect: a diagnose made from the smaller one never fires on the object that holds it (the larger one is scored instead). Reproducer: tests/unit/cfg_sig_match.c
+ * (the row `grouped`), cs_build_gap with gap 0. Fix: with a CFG signature a function that reaches the floor is a unit of its own (the grouping was made to give a window sketch enough bytes). */
 static int by_function(const struct kof_range *ext, uint32_t n_ext,
 			const struct kgenome_func_set *funcs,
 			const struct kgenome_true_all *lib,

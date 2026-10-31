@@ -5,7 +5,7 @@
  * WHAT IS PINNED, each a way the pipeline could be wrong while looking fine:
  *
  *   - THE POOL IS THE SET OF DISTINCT, NON-FLAT WINDOW HASHES, ascending, for
- *     every normalizer, at every length from 8 to a megabyte and for data of
+ *     the bytes, at every length from 8 to a megabyte and for data of
  *     every shape that breaks a hash: random, ASCII, zeros, one repeated pair,
  *     long runs with islands, a counter. Checked against a brute force that
  *     recomputes each window from scratch, so the rolling update is what is on
@@ -86,35 +86,29 @@ static int u32_cmp(const void *a, const void *b)
 }
 
 /* Every window recomputed from its eight bytes: no rolling anywhere. */
-static uint32_t window_at(const uint8_t *p, uint64_t at, uint32_t norm)
+static uint32_t window_at(const uint8_t *p, uint64_t at)
 {
 	uint32_t h = 0, i;
 
 	for (i = 0; i < KGENOME_MUTATION_NG; i++)
-		h = h * KGENOME_MUTATION_BASE + (uint32_t)kgenome_mutation_byte(p, at + i, norm);
+		h = h * KGENOME_MUTATION_BASE + (uint32_t)p[at + i];
 	return kgenome_mutation_mix(h);
 }
 
-static uint32_t *ref_pool(const uint8_t *p, uint64_t n, uint32_t norm,
-			  uint32_t *np)
+static uint32_t *ref_pool(const uint8_t *p, uint64_t n, uint32_t *np)
 {
 	uint32_t *v, got = 0, k = 0;
 	uint64_t at, eff = n;
 
 	*np = 0;
-	if (norm != KGENOME_MUTATION_RAW) {
-		if (n < 2)
-			return NULL;
-		eff = n - 1;
-	}
 	if (eff < KGENOME_MUTATION_NG)
 		return NULL;
 	v = malloc((size_t)(eff - KGENOME_MUTATION_NG + 1) * sizeof *v);
 	if (!v)
 		return NULL;
 	for (at = 0; at + KGENOME_MUTATION_NG <= eff; at++)
-		if (!kgenome_mutation_flat(p, at, norm))
-			v[got++] = window_at(p, at, norm);
+		if (!kgenome_mutation_flat(p, at))
+			v[got++] = window_at(p, at);
 	if (!got) {
 		free(v);
 		return NULL;
@@ -149,7 +143,6 @@ static void pool_cases(void)
 	static const size_t sizes[] = { 8, 9, 15, 16, 23, 24, 25, 64, 255, 1000,
 					4096, 65537, 1u << 20 };
 	size_t si;
-	uint32_t norm;
 	int bad_len = 0, bad_val = 0, bad_ord = 0, nulls = 0;
 
 	for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
@@ -162,10 +155,10 @@ static void pool_cases(void)
 		}
 		for (sh = 0; sh < S_COUNT; sh++) {
 			fill(buf, sizes[si], (enum shape)sh);
-			for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT; norm++) {
+			{
 				uint32_t na = 0, nb = 0, i;
-				uint32_t *a = kgenome_mutation_pool(buf, sizes[si], norm, &na);
-				uint32_t *b = ref_pool(buf, sizes[si], norm, &nb);
+				uint32_t *a = kgenome_mutation_pool(buf, sizes[si], &na);
+				uint32_t *b = ref_pool(buf, sizes[si], &nb);
 
 				if ((a == NULL) != (b == NULL)) {
 					nulls++;
@@ -200,9 +193,9 @@ static void pool_cases(void)
 		uint32_t n = 99;
 
 		memset(z, 0x41, sizeof z);
-		check(kgenome_mutation_pool(z, sizeof z, KGENOME_MUTATION_RAW, &n) == NULL && n == 0,
+		check(kgenome_mutation_pool(z, sizeof z, &n) == NULL && n == 0,
 		      "a span of one repeated byte has no pool");
-		check(kgenome_mutation_pool(z, 7, KGENOME_MUTATION_RAW, &n) == NULL,
+		check(kgenome_mutation_pool(z, 7, &n) == NULL,
 		      "seven bytes have no window");
 	}
 }
@@ -215,17 +208,17 @@ static void minhash_cases(void)
 	int bad = 0;
 
 	fill(buf, sizeof buf, S_ASCII);
-	pool = kgenome_mutation_pool(buf, sizeof buf, KGENOME_MUTATION_RAW, &np);
-	got = kgenome_mutation_minhash(buf, sizeof buf, KGENOME_MUTATION_RAW, out);
+	pool = kgenome_mutation_pool(buf, sizeof buf, &np);
+	got = kgenome_mutation_minhash(buf, sizeof buf, out);
 	check(pool && got == KGENOME_MUTATION_MINHASH_K, "a large span yields K hashes");
 	for (i = 0; pool && i < got; i++)
 		if (out[i] != pool[i])
 			bad++;
 	check(bad == 0, "minhash is the first K of the pool - one generator");
 	free(pool);
-	check(kgenome_mutation_minhash(buf, 7, KGENOME_MUTATION_RAW, out) == 0,
+	check(kgenome_mutation_minhash(buf, 7, out) == 0,
 	      "under a window there is no hash");
-	got = kgenome_mutation_minhash(buf, 23, KGENOME_MUTATION_RAW, out);
+	got = kgenome_mutation_minhash(buf, 23, out);
 	check(got == 16, "23 bytes are 16 windows: the smallest block the floor allows");
 }
 
@@ -262,14 +255,14 @@ static void member_cases(void)
 				for (k = 0; k < share / 2; k++)
 					smp[ssz[b] / 3 + k < ssz[b] ? ssz[b] / 3 + k : k] =
 						src[k];
-				pool = kgenome_mutation_pool(src, psz[a], KGENOME_MUTATION_RAW, &np);
-				ref = ref_pool(smp, ssz[b], KGENOME_MUTATION_RAW, &nref);
+				pool = kgenome_mutation_pool(src, psz[a], &np);
+				ref = ref_pool(smp, ssz[b], &nref);
 				if (!pool) {
 					free(ref);
 					continue;
 				}
 				bits = calloc((np + 7) / 8, 1);
-				kgenome_mutation_member(pool, np, smp, ssz[b], KGENOME_MUTATION_RAW, bits);
+				kgenome_mutation_member(pool, np, smp, ssz[b], bits);
 				for (i = 0; i < np; i++) {
 					int got = (bits[i >> 3] >> (i & 7)) & 1;
 					int want = ref && has(ref, nref, pool[i]);
@@ -338,7 +331,7 @@ static uint32_t make_core(const uint8_t *const samples[], uint32_t n_pos,
 			  size_t lo, size_t hi, uint32_t *out)
 {
 	uint32_t np = 0, i, j, k;
-	uint32_t *pool = kgenome_mutation_pool(samples[0] + lo, hi - lo, KGENOME_MUTATION_RAW, &np);
+	uint32_t *pool = kgenome_mutation_pool(samples[0] + lo, hi - lo, &np);
 	uint16_t *pos, *bg;
 	uint8_t *bits;
 	uint32_t got;
@@ -352,7 +345,7 @@ static uint32_t make_core(const uint8_t *const samples[], uint32_t n_pos,
 		const uint8_t *s = j < n_pos ? samples[j] : bgs[j - n_pos];
 
 		memset(bits, 0, (np + 7) / 8);
-		kgenome_mutation_member(pool, np, s, sample_len, KGENOME_MUTATION_RAW, bits);
+		kgenome_mutation_member(pool, np, s, sample_len, bits);
 		for (i = 0; i < np; i++)
 			if ((bits[i >> 3] >> (i & 7)) & 1) {
 				if (j < n_pos)
@@ -498,7 +491,7 @@ static void scan_cases(void)
 			}
 			src = tmp;
 		}
-		got = kgenome_mutation_minhash(src, sl, KGENOME_MUTATION_RAW, pool + np);
+		got = kgenome_mutation_minhash(src, sl, pool + np);
 		free(tmp);
 		if (got < KGENOME_MUTATION_MIN_HASH)
 			got = 0;
@@ -511,7 +504,6 @@ static void scan_cases(void)
 			got = KGENOME_MUTATION_MIN_HASH;
 		}
 		blk[b].scan_mask = RGN;
-		blk[b].norm = KGENOME_MUTATION_RAW;
 		np += got;
 	}
 	set = kof_mutation_build(blk, NBLK, pool, np);
@@ -522,14 +514,14 @@ static void scan_cases(void)
 	}
 	kof_mutation_begin(&ctx);
 	for (u = 0; u < NUNIT; u++)
-		kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER,
+		kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_SIDE_USER,
 				units[u], ulen[u]);
 	/* The reference: every window of every unit, brute force. */
 	{
 		uint32_t *all = NULL, nall = 0, cap = 0;
 
 		for (u = 0; u < NUNIT; u++) {
-			uint32_t n1 = 0, *p1 = ref_pool(units[u], ulen[u], KGENOME_MUTATION_RAW, &n1);
+			uint32_t n1 = 0, *p1 = ref_pool(units[u], ulen[u], &n1);
 
 			if (!p1)
 				continue;
@@ -589,15 +581,14 @@ static void size_cases(void)
 			fill(blkb, bl, S_RANDOM);
 			fill(unit, ul, S_ASCII);
 			memcpy(unit + (ul - bl) / 2, blkb, bl);
-			nh = kgenome_mutation_minhash(blkb, bl, KGENOME_MUTATION_RAW, h);
+			nh = kgenome_mutation_minhash(blkb, bl, h);
 			memset(&pb, 0, sizeof pb);
 			pb.n_hash = nh;
 			pb.scan_mask = RGN;
 			set = kof_mutation_build(&pb, 1, h, nh);
 			if (set && kof_mutation_ctx_init(&ctx, set)) {
 				kof_mutation_begin(&ctx);
-				kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_RAW,
-						KGENOME_MUTATION_SIDE_USER, unit, ul);
+				kof_mutation_unit(&ctx, RGN, KGENOME_MUTATION_SIDE_USER, unit, ul);
 				if (kof_mutation_pct(&ctx, 0) != 100)
 					bad++;
 				n++;

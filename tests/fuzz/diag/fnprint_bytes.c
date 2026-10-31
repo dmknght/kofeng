@@ -183,9 +183,8 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 			FZ_CHECK(c, g.start[i - 1u] < g.start[i], "bsketch starts are not strictly ascending");
 		for (i = 1; i < g.n_edge; i++)
 			FZ_CHECK(c, g.from[i - 1u] <= g.from[i], "bsketch edges are not ascending by origin");
-		/* F14: when the allocation of the reached flags is refused the sketch keeps its starts and edges, status NOMEM, and `reached` NULL with
-		 * n_start non-zero (fnprint_bsketch.c, the end of kgenome_fnprint_bsketch_build): a reader that trusts "reached[] per start" faults. The
-		 * row reads the flags only of a sketch that has them. */
+		/* F14 (fixed, tests/lib/genome/fnprint_bsketch_oom.c): a refused allocation leaves a sketch with its flags, or with no starts and NOMEM. The row reads the
+		 * flags only of a sketch that has them. */
 		if (g.reached) {
 			uint32_t r = 0;
 

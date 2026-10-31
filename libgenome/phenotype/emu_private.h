@@ -286,12 +286,6 @@ struct kgenome_emu {
 		struct kgenome_emu_insn   ix;
 	}       *ic;
 
-	/* A hot-address histogram, built only under KOF_EMU_HOT. It answers one
-	 * question: is a run's time spent in a small loop, or spread out? */
-	struct { uint64_t va; uint64_t n; } *hot;
-	uint64_t ic_hit, ic_miss;
-	uint32_t hot_mask;
-
 	uint64_t trace[KGENOME_EMU_TRACE];
 	/* The instruction trace - see kgenome_emu_itrace. NULL unless asked for. */
 	struct itrace { uint64_t rip; uint64_t gpr[KGENOME_EMU_NGPR]; char txt[96]; }
@@ -458,7 +452,6 @@ struct kgenome_emu {
 	int      oep_watch;        /* the handover test above is armed */
 	int      oep_cand;         /* a transfer from file code into written code, waiting out KGENOME_EMU_OEP_QUIET */
 	uint64_t oep_cand_insn, oep_cand_rip;
-	int      img_dumped;
 	uint64_t stack_lo, stack_hi;
 	struct kgenome_emu_hop { uint64_t lo, hi; uint8_t seen; } *hop;
 	uint32_t n_hop, cap_hop;
@@ -634,50 +627,6 @@ struct kgenome_emu {
 	uint64_t last_new_page;
 	uint64_t last_wr_line;     /* the cache line of the last store that earned an idle credit */
 	uint32_t idle_credit;      /* credits earned since the last new page - see mem_wr */
-
-	/*
-	 * ---- IS THE GUEST DECRYPTING RIGHT NOW --------------------------
-	 *
-	 * WHY A MEMORY PATTERN AND NOT AN OPCODE. A polymorphic generator
-	 * chooses the instructions, the registers and the encoding of its
-	 * decryption loop, and re-chooses all three for every copy - so
-	 * nothing about HOW it is written survives. What does not change is
-	 * what it must DO: read a byte of ciphertext, write the plaintext
-	 * back, and move on to the next address. That trace is the work
-	 * itself, and no re-encoding can avoid producing it.
-	 *
-	 * So an "active instruction" here is a READ of an address followed by
-	 * a WRITE to that same address, where the previous such pair was at a
-	 * NEARBY address - the loop stepping through a buffer. Junk between
-	 * them costs nothing: the pair is recognised whenever it happens, not
-	 * at a fixed distance.
-	 *
-	 * WHAT IT IS FOR is knowing when to stop. A run that has not seen one
-	 * of these for a while is a run whose decryption has finished, and
-	 * everything after that is the payload doing its own work - which this
-	 * exists to recover, not to watch. Measured: the interpreter otherwise
-	 * has only a page-granularity idle test, which is far coarser.
-	 */
-	/*
-	 * A RING AND NOT ONE ADDRESS. The read and the write that make a pair
-	 * are two separate instructions and a generator puts junk between
-	 * them - junk that reads memory of its own. Keeping only the last read
-	 * address let one junk load erase the pair, and measured, that made
-	 * the run stop 272,939 instructions in with the body barely started.
-	 */
-#define KGENOME_EMU_RDRING 8u
-	uint64_t last_read[KGENOME_EMU_RDRING];
-	unsigned last_read_n;
-	uint64_t pair_va;       /* where the last read-then-write pair was */
-	uint64_t active_n;      /* how many active instructions were seen */
-	uint64_t since_active;  /* instructions since the last one */
-	unsigned in_fetch;      /* reads made to FETCH are not data reads */
-	unsigned quiet_on;      /* KGENOME_EMU_QUIET armed - see the run loop */
-	unsigned softread;      /* KOF_EMU_SOFTREAD - see mem_rd */
-	unsigned softwrite;     /* KOF_EMU_SOFTWRITE - see mem_wr */
-	uint64_t soft_reads, soft_writes;
-	uint64_t gap_max;
-	uint64_t m_empty, m_va, m_pg, m_bytes;
 
 	/*
 	 * The SSE control word, remembered and otherwise ignored: scalar

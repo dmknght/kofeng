@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "kv.h"
+#include "kv_tags.h"
+#include "../libkofeng/databases/diagsrc.h"
 
 
 /* How wide the symbol column is. */
@@ -126,12 +128,12 @@ static void hit_row_addmatcher(struct view *v, uint32_t arg);
  * see the note above draw_decl_head on what sharing a field cost. */
 static void hit_plg_tick(struct view *v, uint32_t i);
 static void hit_plg_light(struct view *v, uint32_t i);
-static void hit_plg_goto(struct view *v, uint32_t i);
+static void hit_plg_cfg(struct view *v, uint32_t i);
 static void hit_grp_pct(struct view *v, uint32_t i);
-static void hit_grp_tag(struct view *v, uint32_t g);
-static void hit_plg_rgn(struct view *v, uint32_t i);
-static void hit_head_type(struct view *v, uint32_t arg);
+static void hit_unit_tag(struct view *v, uint32_t unit);
+static void hit_unit_type(struct view *v, uint32_t unit);
 static void hit_head_family(struct view *v, uint32_t arg);
+static void hit_head_variant(struct view *v, uint32_t arg);
 static void hit_head_note(struct view *v, uint32_t arg);
 static void hit_head_gen(struct view *v, uint32_t arg);
 static void hit_head_discard(struct view *v, uint32_t arg);
@@ -165,16 +167,121 @@ static void at_off_edit_open(struct view *v, uint32_t g);
  * read by whatever else happens to be at those columns. A span registered by
  * the row that painted it cannot be read by another row at all.
  */
-static void hit_head_type(struct view *v, uint32_t arg)
-{
-	(void)arg;
-	ch_open(v, CH_TYPE, 0, g_my, g_mx);
-}
-
+/* The family and the variant are CHOSEN from the Pathogens catalog, never typed. */
 static void hit_head_family(struct view *v, uint32_t arg)
 {
 	(void)arg;
-	v->edit = 1;
+	ch_open(v, CH_HFAM, 0, g_my, g_mx);
+}
+
+/* Greyed (no span is registered) until a family is chosen; the list holds only that family's variants. */
+static void hit_head_variant(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	ch_open(v, CH_HVAR, 0, g_my, g_mx);
+}
+
+/*
+ * THE TYPES A UNIT MAY HAVE are the types of the header's variant: its bit mask over enum kof_maltype, 0 while no variant is
+ * chosen (or the catalog no longer has it). One function for the unit's list, its cell and the sync below.
+ */
+uint32_t decl_var_types(const struct view *v)
+{
+	int32_t i;
+
+	if (!v->fam || !v->ed.dr.variant[0])
+		return 0;
+	i = kv_fam_find_variant(&v->fam->cat, v->ed.dr.variant);
+	return i < 0 ? 0u : v->fam->cat.var[i].types;
+}
+
+/* The header names a variant the catalog does not have (renamed or deleted in Manage > Pathogens, or no catalog to ask). The draft keeps
+ * NAMES, so this is a draft whose variant went away: its units keep their types until another variant is chosen, and the header shows
+ * the name in red. */
+static int decl_var_gone(const struct view *v)
+{
+	return v->ed.dr.variant[0] &&
+	       (!v->fam || kv_fam_find_variant(&v->fam->cat, v->ed.dr.variant) < 0);
+}
+
+/* One unit's type against the variant's types: a variant with exactly one type fills it in, one the variant lacks goes back to `?`. */
+static void unit_type_fix(uint8_t *ut, uint32_t mask)
+{
+	uint32_t t, n = 0, one = 0;
+
+	for (t = 0; t < 32u; t++)
+		if (mask & (1u << t)) {
+			n++;
+			one = t;
+		}
+	if (n == 1u)
+		*ut = (uint8_t)(one + 1u);
+	else if (*ut && (*ut - 1u >= 32u || !(mask & (1u << (*ut - 1u)))))
+		*ut = 0;
+}
+
+/* Every unit's type, after the header's variant changed (and each frame: a unit made later gets a one-type variant's type too). */
+void decl_types_sync(struct view *v)
+{
+	uint32_t mask = decl_var_types(v), i;
+
+	if (decl_var_gone(v))
+		return;             /* not "a variant with no types": the units' types are not ours to reset */
+	for (i = 0; i < v->ed.dr.n_cnd; i++)
+		unit_type_fix(&v->ed.dr.cnd[i].utype, mask);
+	for (i = 0; i < v->ed.dr.n_grp; i++)
+		unit_type_fix(&v->ed.dr.grp[i].utype, mask);
+}
+
+/* A family was chosen: another one clears the variant, a family with exactly one variant selects it. */
+/* The variant's own comment is the head's comment, unless the author already wrote one. */
+static void note_from_variant(struct view *v, uint32_t var)
+{
+	if (v->fam && var < v->fam->cat.n_var && !v->ed.dr.note[0])
+		snprintf(v->ed.dr.note, sizeof v->ed.dr.note, "%s", v->fam->cat.var[var].comment);
+}
+
+void decl_pick_family(struct view *v, uint32_t fam)
+{
+	int created;
+	struct kv_fam_ui *u = fam_ensure(v, &created);
+	uint32_t i, n = 0, one = 0;
+
+	if (!u || fam >= u->cat.n_fam)
+		return;
+	if (strcmp(v->ed.dr.family, u->cat.fam[fam].name)) {
+		snprintf(v->ed.dr.family, sizeof v->ed.dr.family, "%s", u->cat.fam[fam].name);
+		v->ed.dr.variant[0] = 0;
+	}
+	for (i = 0; i < u->cat.n_var; i++)
+		if (u->cat.var[i].family == fam) {
+			n++;
+			one = i;
+		}
+	if (n == 1u) {
+		snprintf(v->ed.dr.variant, sizeof v->ed.dr.variant, "%s", u->cat.var[one].name);
+		note_from_variant(v, one);
+	}
+	decl_types_sync(v);
+}
+
+void decl_pick_variant(struct view *v, uint32_t var)
+{
+	if (!v->fam || var >= v->fam->cat.n_var)
+		return;
+	snprintf(v->ed.dr.variant, sizeof v->ed.dr.variant, "%s", v->fam->cat.var[var].name);
+	note_from_variant(v, var);
+	decl_types_sync(v);
+}
+
+/* The variant as the header shows it: its letters ("A"), or the whole name when the catalog no longer has it. */
+static void head_variant_text(const struct view *v, char *out, size_t cap)
+{
+	int32_t i = v->fam ? kv_fam_find_variant(&v->fam->cat, v->ed.dr.variant) : -1;
+
+	if (i >= 0 && kof_famcat_letter_text(v->fam->cat.var[i].letter, out, (uint32_t)cap))
+		return;
+	snprintf(out, cap, "%s", v->ed.dr.variant);
 }
 
 static void hit_head_note(struct view *v, uint32_t arg)
@@ -184,21 +291,27 @@ static void hit_head_note(struct view *v, uint32_t arg)
 }
 
 /*
- * GENERATE LISTS THE OUTPUT, and writes nothing.
- *
- * The backend of a diagnose generator is not settled, so the button lists the
- * output - one entry per condition - under the tables, and pressing it again
- * takes the list away. It needs a condition to list; without one it says so
- * instead of showing an empty pane that reads as a result.
+ * GENERATE WRITES THE OUTPUT: one diagnose source per unit into <bases>/diagnoses
+ * (draft_generate, which owns every rule: the header's family and variant, a type and a
+ * tag on every unit, no file replaced). The outcome - "Wrote N file(s)" or the reason it
+ * refused - is the note. The button asks nothing of its own: no unit is draft_generate's to answer.
  */
+
 static void hit_head_gen(struct view *v, uint32_t arg)
 {
+	char dir[300], msg[400];
+	int rc;
+
 	(void)arg;
-	if (!v->ed.dr.n_cnd) {
-		say_note(&v->ed, "Add a condition first");
+	snprintf(dir, sizeof dir, "%s/diagnoses", v->basedir[0] ? v->basedir : "bases");
+	draft_set_tree_dir(&v->ed, dir);
+	rc = draft_generate(&v->ed, dir, msg, sizeof msg);
+	if (rc < 0) {
+		say_err(&v->ed, "%s", msg);
 		return;
 	}
-	v->gen_preview = !v->gen_preview;
+	draft_mark_saved(&v->ed);
+	say_note(&v->ed, "%s", msg);
 }
 
 static void hit_head_discard(struct view *v, uint32_t arg)
@@ -209,7 +322,6 @@ static void hit_head_discard(struct view *v, uint32_t arg)
 	 * sheet is a step in the way of the thing the button is for. */
 	if (v->ed.dr.n_decl || v->ed.dr.family[0]) {
 		draft_reset(&v->ed);
-		v->gen_preview = 0;
 		v->prow_home = 1;
 	}
 }
@@ -236,62 +348,29 @@ static void draw_decl_head(struct out *o, struct view *v)
 	int c;
 
 	/*
-	 * TYPE FIRST, THEN FAMILY, and the order is the name a verdict is read
-	 * in: "Trojan:mirai" says what KIND before it says which one. The row
-	 * used to lead with the family, so the eye met a name with nothing to
-	 * hang it on.
+	 * FAMILY AND VARIANT, chosen from the Pathogens catalog. They are what every
+	 * diagnose of the rule shares; the TYPE is each unit's own (see
+	 * draw_unit_cells). The variant is greyed until a family is chosen and then
+	 * lists only that family's variants.
 	 */
 	row_start(o, top, 1);
 	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM " Type " A_OFF A_ID "[%s]" A_OFF,
-		maltype_word[v->ed.dr.maltype % MALTYPE_N]);
-	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
-	hit_add(v, top, c, (int)o->col_hint, hit_head_type, 0);
-
-	/*
-	 * THE BRACKETS HUG THE NAME; THE SPACE THEY GIVE BACK IS PADDED AFTER
-	 * THEM.
-	 *
-	 * Two rules that look like one and are not. A family is a word -
-	 * "mirai", "Meterp" - and drawn in a fixed 24 column hole it sat in
-	 * eighteen columns of blank bracket, which reads as a field waiting for
-	 * more rather than a field holding an answer. So the box is as wide as
-	 * the name, up to FAM_W; past that the text scrolls inside it as it
-	 * always has.
-	 *
-	 * What must NOT follow from that is the row moving. This was once
-	 * FAM_W while focused and the text's length otherwise, so clicking the
-	 * field widened it and shoved the comment box and the buttons
-	 * sideways - a control you have to chase. The fix then was to fix the
-	 * width; the fix now is narrower than that: the columns the box does
-	 * not use are emitted as SPACES after its closing bracket, so the row
-	 * consumes exactly FAM_W either way and everything downstream is laid
-	 * out against the same mark it always was. The width also no longer
-	 * depends on focus - only on the name - so pointing at it still changes
-	 * nothing.
-	 *
-	 * One column past the text while editing, because the caret may sit one
-	 * past the last character - the same allowance field_draw makes when it
-	 * decides how far to scroll.
-	 */
+	out_fmt(o, A_DIM " Family " A_OFF "%s[ %s ]" A_OFF, A_ID,
+		v->ed.dr.family[0] ? v->ed.dr.family : "?");
+	hit_add(v, top, c, (int)o->col_hint, hit_head_family, 0);
 	{
-		int fw = field_room(v->ed.dr.family, "?", v->edit == 1, FAM_W);
+		char lt[KOF_NAME_MAX + 1];
 
-		c = 2 + (int)o->col_hint;
-		out_fmt(o, A_DIM "  Family " A_OFF "%s[",
-			v->edit == 1 ? A_SEL : A_ID);
-		field_draw(o, v->ed.dr.family, v->caret, &v->fam_off, fw,
-			   v->edit == 1, "?");
-		out_str(o, "]" A_OFF);
-		/*
-		 * The click range is the box as DRAWN, not the space it
-		 * reserves. A reader clicks what they can see; the blank
-		 * columns past the bracket belong to the row.
-		 */
-		v->f_c0 = c; v->f_c1 = (int)o->col_hint;
-		hit_add(v, top, c, (int)o->col_hint, hit_head_family, 0);
-		while (fw++ < FAM_W)
-			out_str(o, " ");
+		head_variant_text(v, lt, sizeof lt);
+		out_str(o, "  ");
+		c = 2 + (int)o->col_hint - 1;
+		if (v->ed.dr.family[0]) {
+			out_fmt(o, A_DIM "Variant " A_OFF "%s[ %s ]" A_OFF,
+				decl_var_gone(v) ? A_BAD : A_ID, lt[0] ? lt : "?");
+			hit_add(v, top, c, (int)o->col_hint, hit_head_variant, 0);
+		} else {
+			out_fmt(o, "\033[90mVariant [ ? ]" A_OFF);
+		}
 	}
 
 	/* No label: the box says what it is, and the row is already a line of
@@ -361,7 +440,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 *
 		 * Drawn with out_at rather than after whatever the comment box
 		 * left behind, which is what let a long note push it off the
-		 * row. Green when there is a condition to list, lit while the
+		 * row. Always the colour of an enabled button, lit while the
 		 * list is shown.
 		 *
 		 * What is wrong or missing with a draft is the status line's: a
@@ -370,9 +449,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 */
 		c = head_btn_x(v);
 		out_at(o, top, c);
-		out_fmt(o, "%s[ Generate ]" A_OFF,
-			v->gen_preview ? A_SEL :
-			v->ed.dr.n_cnd ? "\033[42;30m" : "\033[47;90m");
+		out_fmt(o, "%s[ Save ]" A_OFF, "\033[42;30m");
 		v->g_c0 = c; v->g_c1 = c + GEN_BTN_W - 1;
 		hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
 	}
@@ -1270,7 +1347,11 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 				 d->cur_hit + 1u, d->n_hits,
 				 d->hits_clipped ? "+" : "");
 			out_at(o, PR(r), g_cols - (int)STR_CNT);
-			out_fmt(o, A_DIM "%5.5s" A_OFF, cnt);
+			/* "cur/total+" is at most "64/64+", six wide: the plus says
+			 * the hit list was clipped (DECL_HITS_MAX) and must show.
+			 * The field is the 19..14 columns from the right, the gap
+			 * to [>] absorbs the sixth. */
+			out_fmt(o, A_DIM "%6.6s" A_OFF, cnt);
 			out_at(o, PR(r), g_cols - (int)STR_BTN_NEXT);
 			out_fmt(o, "%s[>]" A_OFF, A_ID);
 		}
@@ -1331,27 +1412,52 @@ static void draw_grp_note(struct out *o, struct view *v, uint32_t g)
 }
 
 /*
- * A TAG CELL: the name of the tag, and - only when another tag has the same
- * name - what tells them apart (tag_label); "none" while nothing is chosen. A
- * cell that names a tag the sources no longer have says so in red, because the
- * diagnose it would write has nothing to say.
+ * A TAG CELL: the name of the tag, "none" while nothing is chosen. A name the
+ * Syndromes catalog no longer has (renamed or deleted in the dialog) says so in
+ * red, because the diagnose it would write has nothing to say; while the catalog
+ * has not been loaded there is nothing to check against and the name is shown.
  */
-static void draw_tag_cell(struct out *o, struct view *v, uint64_t tag)
+static void draw_tag_cell(struct out *o, struct view *v, const char *tag)
 {
-	char lab[160];
-
-	if (!tag) {
+	if (!tag[0]) {
 		out_str(o, A_DIM "none" A_OFF);
 		return;
 	}
-	tag_label(&v->ed, tag, lab, sizeof lab);
-	if (!lab[0]) {
-		out_str(o, A_BAD "tag not found" A_OFF);
+	if (v->tag && kv_tag_find(&v->tag->cat, tag) < 0) {
+		out_fmt(o, A_BAD "%s (not found)" A_OFF, tag);
 		return;
 	}
-	if (strlen(lab) > 40u)
-		memcpy(lab + 38, "~", 2);
-	out_fmt(o, "%s%s" A_OFF, A_ID, lab);
+	out_fmt(o, "%s%s" A_OFF, A_ID, tag);
+}
+
+/*
+ * THE TYPE AND TAG CELLS OF ONE DIAGNOSE UNIT, `Type: Botnet   Tag: flood`: the ONE function that draws them and
+ * registers their hit zones, for a Patterns condition row and a Blocks matcher row alike (the unit is
+ * `is_grp`/`idx`, the same pair the unit list uses). The type is greyed while the header has no variant (nothing
+ * to choose from) and `?` in the warning colour while a variant is chosen and the unit has none. Call it AFTER the
+ * row's own whole-row zone, so the cells win where they overlap (see hit_at). The zones carry the unit encoded the
+ * way the chooser takes it (CH_UNIT_GRP for a matcher).
+ */
+static void unit_cells(struct out *o, struct view *v, int y, int is_grp, uint32_t idx)
+{
+	uint8_t utype = is_grp ? v->ed.dr.grp[idx].utype : v->ed.dr.cnd[idx].utype;
+	const char *tag = is_grp ? v->ed.dr.grp[idx].tag : v->ed.dr.cnd[idx].tag;
+	uint32_t unit = is_grp ? (CH_UNIT_GRP | idx) : idx;
+	int ty0, ty1, tg0, tg1;
+
+	out_str(o, A_DIM "Type: " A_OFF);
+	ty0 = 1 + (int)o->col_hint;
+	if (utype)
+		out_fmt(o, "%s%s" A_OFF, A_ID, kof_maltype_name((uint32_t)utype - 1u));
+	else
+		out_fmt(o, "%s?" A_OFF, decl_var_types(v) ? A_WARN : "\033[90m");
+	ty1 = (int)o->col_hint;
+	out_str(o, A_DIM "   Tag: " A_OFF);
+	tg0 = 1 + (int)o->col_hint;
+	draw_tag_cell(o, v, tag);
+	tg1 = (int)o->col_hint;
+	hit_add(v, y, ty0, ty1, hit_unit_type, unit);
+	hit_add(v, y, tg0, tg1, hit_unit_tag, unit);
 }
 
 static void glist_begin(struct grp_list *L, struct out *o, struct view *v,
@@ -1461,16 +1567,16 @@ static void grp_spans_off(struct view *v, uint32_t g)
 	v->grp_of[g][0] = v->grp_of[g][1] = -1;
 	v->grp_th[g][0] = v->grp_th[g][1] = -1;
 	v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-	v->grp_tg[g][0] = v->grp_tg[g][1] = -1;
 }
 
 /*
- * A BLOCK MATCHER IS ONE ROW: the block's hash and the threshold it must reach,
- * and the comment box every matcher has.
+ * A BLOCK MATCHER IS TWO ROWS: the block's function's name and hash, and the
+ * threshold it must reach, with the comment box every matcher has; and the
+ * unit's Type and Tag on a row of their own under it.
  *
- * The hash is written the way a comment in the generated file will carry it
- * (`# hash <value>`), because it is what names the block and what a person
- * compares against the block table. The matcher holds nothing else - ticking
+ * The hash is bare, what a person compares against the block table; the name is
+ * the block's own `sym`, the field the blocks table prints (the engine's
+ * kof_func_name). The matcher holds nothing else - ticking
  * the block made it and unticking drops it, so there is no [x], no kind and no
  * list of items to add to. An older rule's matcher may name several blocks; the
  * first is shown and "+N" says how many more.
@@ -1483,10 +1589,14 @@ static int draw_block_matcher(struct out *o, struct view *v, uint32_t g, int r)
 
 	grp_spans_off(v, g);
 	if (!PR_VIS(r))
-		return r + 1;
+		goto unit_row;
 	y = PR(r);
-	ghead_lead(o, v, y, g, "find_sim");
-	out_fmt(o, A_DIM "  # hash " A_OFF "%s%08x" A_OFF, A_ID,
+	/* No word: find_sim is the only kind of the Blocks tab. Name first, then the hash. */
+	ghead_lead(o, v, y, g, "");
+	if (blk < v->ed.dr.n_blk && v->ed.dr.blk[blk].sym[0])
+		out_fmt(o, A_DIM "%.*s: " A_OFF, (int)MTN_SYM_COL,
+			v->ed.dr.blk[blk].sym);
+	out_fmt(o, "%s%08x" A_OFF, A_ID,
 		blk < v->ed.dr.n_blk ? v->ed.dr.blk[blk].id : 0u);
 	if (q->n_sim > 1u)
 		out_fmt(o, A_DIM " +%u" A_OFF, q->n_sim - 1u);
@@ -1501,23 +1611,20 @@ static int draw_block_matcher(struct out *o, struct view *v, uint32_t g, int r)
 		out_fmt(o, "%3u", q->pct);
 	out_str(o, "]" A_OFF A_DIM "%" A_OFF);
 	v->grp_th[g][1] = (int)o->col_hint;
-	/*
-	 * A MATCHER NO CONDITION USES CARRIES ITS OWN TAG: it is a diagnose of
-	 * its own. One a condition names takes the condition's, and has no cell.
-	 */
-	v->grp_tg[g][0] = v->grp_tg[g][1] = -1;
-	if (grp_standalone(&v->ed, g)) {
-		out_str(o, A_DIM "   Tag: " A_OFF);
-		v->grp_tg[g][0] = 1 + (int)o->col_hint;
-		draw_tag_cell(o, v, q->tag);
-		v->grp_tg[g][1] = (int)o->col_hint;
-	}
 	draw_grp_note(o, v, g);
 	/* After the row, so it wins where they overlap - see hit_at. */
 	hit_add(v, y, c0, v->grp_th[g][1],   /* not past the comment box */
 		hit_grp_pct, g);
-	if (v->grp_tg[g][0] > 0)
-		hit_add(v, y, v->grp_tg[g][0], v->grp_tg[g][1], hit_grp_tag, g);
+unit_row:
+	/* A block matcher IS a diagnose unit (the Blocks tab has no conditions): its own Type and Tag, under the row. */
+	r++;
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		/* Not hit_row_matcher: its comment-box span is a column range of the first row. */
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
+		out_fmt(o, "%7s", "");
+		unit_cells(o, v, PR(r), 1, g);
+	}
 	return r + 1;
 }
 
@@ -1683,11 +1790,10 @@ static int draw_str_matcher(struct out *o, struct view *v, uint32_t g, int r)
  * One section of the draft panel. `r` is the panel's running row number and it
  * is passed in and handed back rather than shared.
  *
- * THE LIST IS ONE AND EACH TAB NUMBERS ITS OWN KIND OF IT FROM 1. A condition
- * names a matcher by its number on its own tab (grp_loc), so the Blocks tab
- * opens at 1 whatever Patterns holds, and a tab switch renumbers nothing.
- * Patterns lists find_str and find_at, Blocks lists the find_sim that ticking a
- * block made.
+ * THE LIST IS ONE AND EACH TAB NUMBERS ITS OWN KIND OF IT FROM 1 (grp_loc), so
+ * the Blocks tab opens at 1 whatever Patterns holds, and a tab switch renumbers
+ * nothing. Patterns lists find_str and find_at, which its conditions name;
+ * Blocks lists the find_sim that ticking a block made, and each IS a unit.
  */
 static int draw_decl_matchers(struct out *o, struct view *v, int r)
 {
@@ -1729,7 +1835,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 }
 
 /*
- * draw_decl_conds - the open tab's conditions, each one a block of its own.
+ * draw_decl_conds - the Patterns tab's conditions (the Blocks tab has none), each one a block of its own.
  *
  * One section of the draft panel. A condition is independent: its own matchers
  * (numbered on this tab), its own tag, one file. Nothing joins one condition to
@@ -1752,12 +1858,10 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 		const struct cond *c2 = &v->ed.dr.cnd[ci];
 
 		if (!PR_VIS(r)) {
-			if (v->cseq_kind[g] == CS_COND) {
-				v->cnd_tg[ci][0] = v->cnd_tg[ci][1] = -1;
+			if (v->cseq_kind[g] == CS_COND)
 				v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
-			} else if (v->cseq_kind[g] == CS_MATCH) {
+			else if (v->cseq_kind[g] == CS_MATCH)
 				v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
-			}
 			r++;
 			continue;
 		}
@@ -1768,15 +1872,9 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 			/* Under the label of the block's first row. */
 			out_fmt(o, "%7s", "");
 
-			out_str(o, A_DIM "Tag: " A_OFF);
-			v->cnd_tg[ci][0] = 1 + (int)o->col_hint;
-			/*
-			 * THE TAG, chosen from the table of tags and never
-			 * typed, so nothing here can be misspelt. Not chosen
-			 * yet is plain "none".
-			 */
-			draw_tag_cell(o, v, c2->tag);
-			v->cnd_tg[ci][1] = (int)o->col_hint;
+			/* THE TYPE AND THE TAG, each chosen from a list and never typed
+			 * (the same cells as a block matcher's row). */
+			unit_cells(o, v, PR(r), 0, ci);
 			r++;
 			continue;
 		}
@@ -1837,7 +1935,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 					goto ids_done;
 				}
 			}
-			if (grp_tab_count(&v->ed, v->ed.dr.tab)) {
+			if (grp_tab_count(&v->ed, DT_PATTERNS)) {
 				uint32_t m;
 				int first2 = 1;
 
@@ -1877,7 +1975,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 			}
 ids_done:
 			v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
-			if (grp_tab_count(&v->ed, v->ed.dr.tab)) {
+			if (grp_tab_count(&v->ed, DT_PATTERNS)) {
 				v->cnd_mt[ci][0] = 1 + (int)o->col_hint;
 				out_fmt(o, "   " A_ID "[+ Matcher]" A_OFF);
 				v->cnd_mt[ci][1] = (int)o->col_hint;
@@ -1919,7 +2017,7 @@ ids_done:
 		row_start(o, PR(r), 1);
 		v->a_c0 = 2;
 		out_fmt(o, " %s[+ Condition]" A_OFF,
-			grp_tab_count(&v->ed, v->ed.dr.tab) ? A_ID : A_DIM);
+			grp_tab_count(&v->ed, DT_PATTERNS) ? A_ID : A_DIM);
 		v->a_c1 = (int)o->col_hint;
 		v->b_c0 = v->b_c1 = -1;
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addcond, 0);
@@ -1957,18 +2055,11 @@ ids_done:
  * independent questions - a block may be worth looking at and not worth
  * shipping, and the common case while choosing is exactly that.
  */
-/*
- * The fold handle, on the column row of each table. `which` is 0 for the block
- * table and 2 for the diagnoses - one control, because they fold for the same
- * reason and a reader should not learn two gestures. (1 was the similarity table,
- * which went with the measure it listed.)
- */
+/* The fold handle, on the column row of the block table. */
 static void hit_fold(struct view *v, uint32_t which)
 {
-	if (which == 2u)
-		v->diag_fold = !v->diag_fold;
-	else
-		v->blk_fold = !v->blk_fold;
+	(void)which;
+	v->blk_fold = !v->blk_fold;
 }
 
 /*
@@ -2001,6 +2092,17 @@ static void hit_plg_tick(struct view *v, uint32_t i)
 {
 	if (mtn_foreign(v)) {
 		say_err(&v->ed, "These blocks are not in this object");
+		return;
+	}
+	/* A function the engine did not sign (mtn_block.nosig: below the floor, undecodable, ...) has no keys: a rule made of it would carry no hash, so it
+	 * is not offered for ticking, and the status line says which reason the engine gave. A signed function row is ticked like every other row. */
+	if (i < v->ed.dr.n_blk && v->ed.dr.blk[i].nosig && !v->ed.dr.blk[i].picked) {
+		char why[160];
+
+		snprintf(why, sizeof why, "This function has no similarity signature (%s%s): it cannot be ticked",
+			 kof_cfgsign_state_name((enum kof_cfgsign_state)v->ed.dr.blk[i].why),
+			 v->ed.dr.blk[i].why == KOF_CFGSIGN_BELOW_FLOOR ? ": fewer reachable blocks than the floor" : "");
+		say_err(&v->ed, "%s", why);
 		return;
 	}
 	if (i < v->ed.dr.n_blk)
@@ -2096,35 +2198,27 @@ static uint32_t mtn_n_picked(const struct view *v)
 
 
 /*
- * GO TO THE BLOCK WITHOUT MARKING IT.
- *
- * The offset is a PLACE, so pointing at it means "show me there" and nothing
- * more. The colour belongs to the hash beside it - that cell is the block's
- * name and lighting it is what ties the name to the bytes - so a jump that also
- * lit would take the one gesture that says "mark this" and give it to the one
- * that says "look at this".
+ * A press on the NAME of a function row (signed or not): the engine's CFG of that function (kof_cfgview_build, on request, nothing cached) is drawn by the CFG dialog (kv_cfgdlg.c: the
+ * frame of the catalog dialogs, the graph laid out by kv_graph.c). Nothing here lays out or computes anything of the graph; a function the engine cannot make a graph of
+ * gets the engine's own sentence in the dialog.
  */
-static void hit_plg_goto(struct view *v, uint32_t i)
+static void hit_plg_cfg(struct view *v, uint32_t i)
 {
-	if (i >= v->ed.dr.n_blk || !v->ed.dr.blk[i].len)
-		return;
-	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym,
-		     v->ed.dr.blk[i].off, 0);
-}
+	struct object *o = cur_obj(v);
+	struct kof_cfgview_req rq;
 
-/*
- * GO TO THE DIAGNOSE'S HEAD. Only a match has a place: a diagnose that was seen
- * and did not match found no node to point at, and a jump to 0 would be a lie.
- */
-static void hit_diag_goto(struct view *v, uint32_t i)
-{
-	struct object *ob = cur_obj(v);
-
-	if (!ob || i >= ob->n_diag || ob->diag[i].state != KOF_DIAG_ST_MATCH ||
-	    !ob->diag[i].n_bound)
+	if (!o || !o->buf.p || i >= v->ed.dr.n_blk)
 		return;
-	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym,
-		     ob->diag[i].at[0], 0);
+	memset(&rq, 0, sizeof rq);
+	rq.ctx = &o->ctx;
+	rq.data = o->buf;
+	rq.func_off = v->ed.dr.blk[i].fn_off;
+	rq.func_len = v->ed.dr.blk[i].fn_len;
+	rq.funcs = mtn_funcs(v, o);
+	rq.sym = o->sym;
+	rq.sym_n = o->sym_n;
+	rq.names = o->calls_done ? &o->calls : NULL;
+	cfgd_open(v, &rq);
 }
 
 static void hit_plg_light(struct view *v, uint32_t i)
@@ -2214,13 +2308,36 @@ static void at_off_edit_open(struct view *v, uint32_t g)
 	fsel_set(v, v->caret > 2u ? 2u : 0u, v->caret);
 }
 
-/* The Tag cell of a standalone block matcher opens the table of tags. */
-static void hit_grp_tag(struct view *v, uint32_t g)
+/* The Tag cell of a unit (a condition, or a block matcher with CH_UNIT_GRP) opens the list of the Syndromes catalog's tags. */
+static void hit_unit_tag(struct view *v, uint32_t unit)
 {
-	if (g >= v->ed.dr.n_grp)
+	if (unit & CH_UNIT_GRP) {
+		if ((unit & 0xffffu) >= v->ed.dr.n_grp)
+			return;
+		v->ed.dr.cur_grp = unit & 0xffffu;
+	} else {
+		if (unit >= v->ed.dr.n_cnd)
+			return;
+		v->ed.dr.cur_cnd = unit;
+	}
+	ch_open(v, CH_UTAG, unit, g_my, g_mx);
+}
+
+/* The Type cell: the header variant's types; greyed (does nothing) while the header has no variant. */
+static void hit_unit_type(struct view *v, uint32_t unit)
+{
+	if (!decl_var_types(v))
 		return;
-	v->ed.dr.cur_grp = g;
-	syn_pick_tag(v, PK_TAG_GRP, g);
+	if (unit & CH_UNIT_GRP) {
+		if ((unit & 0xffffu) >= v->ed.dr.n_grp)
+			return;
+		v->ed.dr.cur_grp = unit & 0xffffu;
+	} else {
+		if (unit >= v->ed.dr.n_cnd)
+			return;
+		v->ed.dr.cur_cnd = unit;
+	}
+	ch_open(v, CH_UTYPE, unit, g_my, g_mx);
 }
 
 /* Clicking the threshold puts the caret in it - see the note where it is
@@ -2261,25 +2378,6 @@ static void hit_grp_pct(struct view *v, uint32_t g)
 	fsel_set(v, 0, v->caret);
 }
 
-
-/*
- * And the region cell turns the anchor off and on.
- *
- * Nothing is re-hashed: the block's hashes are the same bytes either way, and
- * only the question of WHERE they must be found changes - so this costs a
- * rescore and not a re-carve.
- */
-static void hit_plg_rgn(struct view *v, uint32_t i)
-{
-	if (mtn_foreign(v)) {
-		say_err(&v->ed, "These blocks are not in this object");
-		return;
-	}
-	if (i >= v->ed.dr.n_blk)
-		return;
-	v->ed.dr.blk[i].anywhere = (uint8_t)!v->ed.dr.blk[i].anywhere;
-	v->mtn_scored = 0;
-}
 
 /*
  * THE LIST READS IN FILE ORDER.
@@ -2359,36 +2457,120 @@ static void mtn_order(struct view *v)
  * the score also moves when a block's normalizer is changed by hand, which is
  * not a re-carve.
  */
+/*
+ * ON ARRIVAL AT AN OBJECT THE ENGINE SAYS MATCHED: its blocks that decided a matched form are ticked, the way a reader would tick them (so
+ * they become matchers), and the header's Family and Variant take the catalog's names of the diagnose (only while the header holds none).
+ * What matched is the engine's report (decided_diags); nothing is worked out here.
+ */
+static void mtn_from_match(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t n = 0, i;
+	const struct kof_diag_report *dd = decided_diags(v, ob, &n);
+	const struct kof_diag_report *first = NULL;
+
+	struct { uint32_t g; uint32_t id; char name[KDET_TEXT_MAX]; } made[MAX_GROUP];
+	uint32_t n_made = 0;
+
+	/* What was loaded for the previous object is not this object's: links and the loaded list start empty on every arrival. */
+	draft_links_reset(&v->ed);
+	if (!dd || mtn_foreign(v))
+		return;
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		const struct kof_diag_report *d = NULL;
+		const struct kof_diag_part *part = kdet_block_part(dd, n, v->ed.dr.blk[i].id, &d);
+
+		if (part) {
+			struct kdet_diag kd = { 0 };
+			uint32_t g;
+
+			if (!first)
+				first = d;
+			blk_set_picked(&v->ed, i, 1);
+			/* The matcher that ticking made takes the catalog's tag of the diagnose that decided the block. */
+			g = grp_of_block(&v->ed, i);
+			if (g < MAX_GROUP && kdet_diag_of(v->eng, d->id, &kd) && kd.has_catalog) {
+				snprintf(v->ed.dr.grp[g].tag, sizeof v->ed.dr.grp[g].tag, "%.*s", KOF_NAME_MAX, kd.tag);
+				/* And its type, which the diagnose declares: a unit that is to be recognised as that diagnose has to say the same. */
+				if (kd.type >= 0)
+					v->ed.dr.grp[g].utype = (uint8_t)(kd.type + 1);
+			}
+			/* The link is the diagnose's id value; the name is what the engine turns that id into (the file stem). */
+			if (g < MAX_GROUP && n_made < MAX_GROUP && d->id && kd.name) {
+				made[n_made].g = g;
+				made[n_made].id = d->id;
+				snprintf(made[n_made++].name, sizeof made[0].name, "%s", kd.name);
+			}
+			/* And the threshold the diagnose demands of that block, not the editor's default. */
+			if (g < MAX_GROUP && kdet_part_need(d, part))
+				v->ed.dr.grp[g].pct = (uint8_t)kdet_part_need(d, part);
+		}
+	}
+	if (first && !v->ed.dr.family[0]) {
+		struct kdet_diag kd;
+		int created;
+		struct kv_fam_ui *u = fam_ensure(v, &created);
+		int32_t f;
+
+		if (u && kdet_diag_of(v->eng, first->id, &kd) && kd.has_catalog) {
+			/* By the ids the diagnose carries: the engine's text of a variant ("Mirai.A") is not the catalog's name ("Mirai_A"). */
+			f = kv_fam_find_family_id(&u->cat, kdb_diagnose_family(v->eng, first->id));
+			if (f >= 0) {
+				int32_t w;
+
+				decl_pick_family(v, (uint32_t)f);
+				w = kv_fam_find_variant_id(&u->cat, kdb_diagnose_variant(v->eng, first->id));
+				if (w >= 0)
+					decl_pick_variant(v, (uint32_t)w);
+			}
+		}
+	}
+	/*
+	 * THE LINKS, last: a matcher is linked to the diagnose it was made from only when the draft - family, variant, format, type, tag,
+	 * block, threshold - regenerates exactly what that file says (draft_link_unit decides; nothing is compared here). The format the
+	 * rule targets is seeded on arrival as well (draft_seed_target, idempotent), because it is part of what the file says.
+	 */
+	if (n_made) {
+		char dir[300];
+
+		draft_seed_target(v);
+		snprintf(dir, sizeof dir, "%s/diagnoses", v->basedir[0] ? v->basedir : "bases");
+		for (i = 0; i < n_made; i++)
+			(void)draft_link_unit(&v->ed, 1, made[i].g, dir, made[i].id, made[i].name);
+	}
+}
+
 void mtn_sync(struct view *v)
 {
 	if (!v->mtn_segged || v->mtn_seg_obj != v->node[v->sel_node].obj) {
+		/*
+		 * WHAT THE ENGINE OFFERS ON ARRIVAL IS NOT THE READER'S EDIT (DR-2).
+		 *
+		 * mtn_from_match writes the header's family, variant and note, ticks blocks and sets their tag and
+		 * threshold, all of which the draft hash mixes, so an untouched draft read as edited at once and
+		 * every guard that asks draft_edited (next/previous file, unpack, dump, rebuild) refused with
+		 * "Finish or undo the draft first". A draft that was not edited BEFORE the arrival takes the
+		 * seeded state as its baseline; one the reader had edited keeps its baseline, so the seeding is
+		 * added to a real edit and cannot hide it. Chosen over a flag per field (the opt_auto shape):
+		 * the seeding writes six kinds of field, each also written by a reader's click, and a flag would
+		 * have to be cleared in every one of those writers.
+		 */
+		int was_edited = draft_edited(&v->ed);
+
 		mtn_segment(v);
 		mtn_order(v);
 		v->mtn_segged = 1;
 		v->mtn_seg_obj = v->node[v->sel_node].obj;
+		mtn_from_match(v);
+		if (!was_edited)
+			draft_mark_saved(&v->ed);
 		/* The rows just moved; a box open on one of them is open on a
 		 * different block now. */
 		if (v->edit >= ED_GRP_PCT &&
 		    v->edit < ED_GRP_PCT + (int)MAX_GROUP)
 			v->edit = 0;
-		/*
-		 * A NEW LIST STARTS AT ITS TOP, and says so the way every
-		 * other caller does.
-		 *
-		 * It set prow_seen to the number of BLOCKS. prow_seen is
-		 * compared against the number of PANEL ROWS, and the panel is
-		 * the head, the block table, the matchers and the conditions -
-		 * always more rows than there are blocks. So the very next
-		 * frame read "the draft just grew" and jumped the panel to its
-		 * end: opening any object with more blocks than fit showed the
-		 * block table already scrolled, its heading and the Format,
-		 * Region and Option rows above the window.
-		 *
-		 * The row count is not known here - prow_build has not run yet
-		 * - and it does not need to be: prow_home is the flag that
-		 * means this, and the frame records prow_seen from the count it
-		 * has just built.
-		 */
+		/* A NEW LIST STARTS AT ITS TOP: prow_home says so (the row count is not
+		 * known here, prow_build has not run yet, and the scroll does not need it). */
 		v->prow_off = 0;
 		v->prow_home = 1;
 	}
@@ -2472,100 +2654,26 @@ static int decl_table_head(struct out *o, struct view *v, int r,
 
 
 
-/*
- * HOW MANY DIAGNOSES MATCHED THIS FILE - the rows of the table, and nothing
- * else is one. What the engine says about the diagnoses that did not match is
- * shown where it belongs; here a row is a diagnose the file carries.
- */
-uint32_t diag_shown_n(struct view *v)
+/* Whether any block row of this object was decided by a matched form: the table then has the match column. */
+static int blk_any_decided(const struct view *v, const struct kof_diag_report *dd, uint32_t n)
 {
-	struct object *ob = cur_obj(v);
-	uint32_t i, n = 0;
+	uint32_t i;
 
-	if (ob)
-		for (i = 0; i < ob->n_diag; i++)
-			n += ob->diag[i].state == KOF_DIAG_ST_MATCH;
-	return n;
+	for (i = 0; i < v->ed.dr.n_blk; i++)
+		if (kdet_block_part(dd, n, v->ed.dr.blk[i].id, NULL))
+			return 1;
+	return 0;
 }
 
-/*
- * LINEAGE - the diagnoses this file matches, on the Graphs tab. Each row says
- * how many of its nodes were found and where its head is - clicking goes there.
- * All of it is the engine's answer, read from the scan that produced the
- * verdict: nothing here analyses the object again.
- *
- * THE TAB IS ON HOLD, and so is what the table is for: generating a graph
- * diagnose is not built, so the table is drawn - it is what the tab is made of
- * - and says so in its title and in its empty state, rather than offering a
- * control that leads nowhere.
- */
-static int draw_decl_diag(struct out *o, struct view *v, int r)
-{
-	struct object *ob = cur_obj(v);
-	uint32_t i, n = diag_shown_n(v);
-	char sum[64];
-
-	snprintf(sum, sizeof sum, " %u matched", n);
-	r = decl_table_head(o, v, r, " Lineage (on hold)", v->diag_fold, 2u,
-			    "         diagnose                  nodes  head",
-			    sum);
-	if (v->diag_fold)
-		return r;
-	if (!n) {
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			out_str(o, A_DIM "      none - graph diagnoses are on "
-				"hold" A_OFF);
-		}
-		return r + 1;
-	}
-	for (i = 0; i < ob->n_diag; i++) {
-		const struct kof_diag_report *d = &ob->diag[i];
-		int y, c0;
-
-		if (d->state != KOF_DIAG_ST_MATCH)
-			continue;
-		if (!PR_VIS(r)) {
-			r++;
-			continue;
-		}
-		y = PR(r);
-		row_start(o, y, 1);
-		/* Past the fold gutter - see decl_table_head. */
-		out_str(o, "    ");
-		c0 = 2 + (int)o->col_hint;
-		out_fmt(o, " %s%-28.28s" A_OFF, A_HIT1,
-			d->name ? d->name : "?");
-		out_fmt(o, A_DIM " %2u/%-2u " A_OFF, d->n_bound, d->n_node);
-		out_fmt(o, "%s0x%llx" A_OFF, A_WARN,
-			(unsigned long long)d->at[0]);
-		hit_add(v, y, c0, (int)o->col_hint, hit_diag_goto, i);   /* the whole row */
-		r++;
-	}
-	return r;
-}
-
-/* The Graphs tab's Conditions: a heading and the reason there is nothing under
- * it. A condition over graph diagnoses cannot be written until they can. */
-static int draw_decl_conds_hold(struct out *o, struct view *v, int r)
-{
-	if (PR_VIS(r)) {
-		sec_bar(o, v, PR(r), " Conditions (on hold)");
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
-	}
-	r++;
-	if (PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		out_str(o, A_DIM "      none - nothing to combine until graph "
-			"diagnoses can be generated" A_OFF);
-	}
-	return r + 1;
-}
+#define BAND_BG "\033[48;5;236m"   /* a faint background for every second pair of block rows: a long table reads across */
 
 static int draw_decl_blocks(struct out *o, struct view *v, int r)
 {
 	uint32_t i;
 	char hdr[96];
+	struct object *cob = cur_obj(v);
+	uint32_t ndd = 0, nshown = 0;
+	const struct kof_diag_report *dd = decided_diags(v, cob, &ndd);
 
 	/*
 	 * THE TITLE ROW CARRIES THE ACTIONS.
@@ -2606,12 +2714,12 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		return r + 1;
 	}
 	{
-		char cols[112], sum[48];
+		char cols[160], sum[48];
 
 		snprintf(cols, sizeof cols,
 			 " use  %-10s  %-8s  %-*s  %6s  %-6s%s",
 			 "offset", "hash", (int)MTN_SYM_COL, "name", "size", "region",
-			 mtn_kept_any(v) ? "  score" : "");
+			 mtn_kept_any(v) || blk_any_decided(v, dd, ndd) ? "  score" : "");
 		snprintf(sum, sizeof sum, " %u block(s), %u ticked",
 			 v->ed.dr.n_blk, mtn_n_picked(v));
 		snprintf(hdr, sizeof hdr, " Mutation blocks");
@@ -2630,14 +2738,21 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	for (i = 0; i < v->ed.dr.n_blk; i++) {
 		struct mtn_block *b = &v->ed.dr.blk[i];
 		int y, c0;
+		uint32_t band;
 		if (!blk_row_shown(v, i))
 			continue;
+		band = (nshown++ / 2u) & 1u;
 		if (!PR_VIS(r)) {
 			r++;
 			continue;
 		}
 		y = PR(r);
 		row_start(o, y, 1);
+		/* Two rows shaded, two plain: out_add puts the background back after each colour reset of the row. */
+		if (band) {
+			o->bg = BAND_BG;
+			out_str(o, BAND_BG "\033[K");
+		}
 		/* Past the fold gutter - see decl_table_head. */
 		out_str(o, "    ");
 		/* The tick. */
@@ -2666,18 +2781,18 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 			out_str(o, A_DIM " " "          " A_OFF);
 		} else {
 			/*
-			 * AND THE OFFSET GOES THERE TOO.
-			 *
-			 * It is the one cell on the row that IS a place, so it
-			 * is the one a reader points at to be taken there -
-			 * lighting the block on the way, because a jump that
-			 * left the bytes unmarked would put the pane somewhere
-			 * without saying what at.
+			 * THE OFFSET LIGHTS THE BLOCK: pressing it does what pressing the hash does for now (hit_plg_light) - the block's bytes in the hex
+			 * pane take the block's colour and the pane scrolls to them, a second press puts them out. The cell takes the block's colour
+			 * while lit, as the hash does. (On a function row the NAME opens its CFG instead.)
 			 */
+			out_str(o, " ");
 			c0 = 1 + (int)o->col_hint;
-			out_fmt(o, A_DIM " 0x%08llx" A_OFF,
-				(unsigned long long)b->off);
-			hit_add(v, y, c0, (int)o->col_hint, hit_plg_goto, i);
+			if (b->lit)
+				out_str(o, mtn_colour[b->colour % MTN_COLOURS]);
+			else
+				out_str(o, A_DIM);
+			out_fmt(o, "0x%08llx" A_OFF, (unsigned long long)b->off);
+			hit_add(v, y, c0, (int)o->col_hint, hit_plg_light, i);
 		}
 		/*
 		 * THE HASH, right after the offset, so the two columns that find a
@@ -2694,7 +2809,11 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		c0 = 1 + (int)o->col_hint;
 		if (b->lit)
 			out_str(o, mtn_colour[b->colour % MTN_COLOURS]);
-		out_fmt(o, "%08x", b->id);
+		/* A function unit has no signature (mtn_block.nosig): a dash, never a zero that reads as a hash. */
+		if (b->nosig)
+			out_str(o, "-       ");
+		else
+			out_fmt(o, "%08x", b->id);
 		if (b->lit)
 			out_str(o, A_OFF);
 		hit_add(v, y, c0, (int)o->col_hint, hit_plg_light, i);
@@ -2703,8 +2822,21 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		 * for data and for anything else. Display only: it is not part of
 		 * what the rule matches.
 		 */
-		out_fmt(o, A_DIM "  %-*.*s" A_OFF, (int)MTN_SYM_COL, (int)MTN_SYM_COL,
-			b->sym);
+		/*
+		 * THE NAME OF A FUNCTION IS A CONTROL: pressing it asks the engine for that function's CFG and shows it in the CFG dialog (hit_plg_cfg). Only the text of the
+		 * name is the target - not the padding after it - and only on a function row (a unit cut from a function; a data row has no name to press).
+		 * It looks like every other name: plain. A press there did nothing before.
+		 */
+		{
+			const int fn_row = b->fn_len != 0;
+			const int nlen = (int)strnlen(b->sym, MTN_SYM_COL);
+
+			out_str(o, "  ");
+			c0 = 1 + (int)o->col_hint;
+			out_fmt(o, A_DIM "%-*.*s" A_OFF, (int)MTN_SYM_COL, (int)MTN_SYM_COL, b->sym);
+			if (fn_row && nlen)
+				hit_add(v, y, c0, c0 + nlen - 1, hit_plg_cfg, i);
+		}
 		/*
 		 * AND ITS SIZE IN THIS FILE, which a carried block also has
 		 * none of. A dash says the same thing the blank offset beside
@@ -2715,20 +2847,8 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		else
 			out_fmt(o, A_DIM "  %6llu" A_OFF,
 				(unsigned long long)b->len);
-		/*
-		 * WHERE IT IS LOOKED FOR, and it is a control because that is a
-		 * choice - see mtn_block.anywhere. "any" is the whole file;
-		 * anything else is the region the block was cut from, which is
-		 * the anchor and the default.
-		 */
-		{
-			int rc = 2 + (int)o->col_hint;
-
-			out_fmt(o, "%s  %-6.6s" A_OFF,
-				b->anywhere ? A_ID : A_DIM,
-				b->anywhere ? "any" : b->rgn);
-			hit_add(v, y, rc, (int)o->col_hint, hit_plg_rgn, i);
-		}
+		/* The region the block was cut from: a fact of the block, shown as it is. */
+		out_fmt(o, A_DIM "  %-6.6s" A_OFF, b->rgn);
 		/*
 		 * HOW MUCH OF IT IS IN THE OBJECT ON SCREEN - the number the
 		 * mode is for. Dim at nothing, plain otherwise: a column of
@@ -2759,11 +2879,18 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 			 * for it, which is why the heading appears at all only
 			 * when there is something to measure.
 			 */
-			if (b->kept)
+			/* A block a matched form decided says what the ENGINE found of it; one number, in this column. */
+			{
+				const struct kof_diag_part *part = kdet_block_part(dd, ndd, b->id, NULL);
+
+				if (part)
+					out_fmt(o, A_ID "  %3u%%" A_OFF, (unsigned)part->pct);
+				else if (b->kept)
 				out_fmt(o, "%s  %3u%%" A_OFF,
 					blk_clears(&v->ed, (uint32_t)i)
 					? "\033[42;30m"
 					: b->score ? "" : A_DIM, b->score);
+			}
 			/*
 			 * AND NOTHING ELSE ON THE ROW.
 			 *
@@ -2774,6 +2901,10 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 			 * draw_mutation_cond - because that is the line that
 			 * becomes the rule.
 			 */
+		}
+		if (band) {
+			o->bg = NULL;
+			out_str(o, A_OFF);
 		}
 		r++;
 	}
@@ -2821,217 +2952,6 @@ static int draw_decl_tabs(struct out *o, struct view *v, int r)
 	return r + 1;
 }
 
-/* ---- the output pane ------------------------------------------------ */
-
-/*
- * THE OUTPUT, listed and not written: one entry per condition,
- * because a diagnose file is one condition.
- *
- *     Output - PREVIEW, nothing is written
- *       Shared   type Botnet  family mirai  format ELF  arch x86_64
- *       1. botnet_mirai_network-flood_01.c
- *            if 1&2
- *            tag network-flood
- *            1  find_str >= 2 of 7  markers 1, 2, 3
- *            2  find_sim  # hash 3a7f21c9  threshold 60
- *
- * The name, the id and the tag come from the editor (cnd_file_name, tag_name)
- * and the rest from the draft as the tables hold it. The Graphs tab has no
- * condition to list while it is on hold.
- *
- * ROWS ARE COUNTED BY ONE FUNCTION and drawn from the same loop shape: the row
- * model has to know how tall this pane is before it is drawn, and a count kept
- * apart from the drawing is how the panel's rows once came out one off.
- */
-static uint32_t cnd_matchers(const struct view *v, uint32_t ci)
-{
-	uint32_t g, n = 0;
-
-	for (g = 0; g < v->ed.dr.n_grp; g++)
-		n += cnd_uses(&v->ed, &v->ed.dr.cnd[ci], g) != 0;
-	return n;
-}
-
-uint32_t preview_rows(const struct view *v)
-{
-	uint32_t ci, g, n = 2;
-
-	if (!v->gen_preview)
-		return 0;
-	for (ci = 0; ci < v->ed.dr.n_cnd; ci++)
-		if (v->ed.dr.cnd[ci].tab != DT_GRAPHS)
-			n += 3u + cnd_matchers(v, ci);
-	/* A block matcher no condition uses: its file, its tag, itself. */
-	for (g = 0; g < v->ed.dr.n_grp; g++)
-		n += 3u * (grp_standalone(&v->ed, g) != 0);
-	return n;
-}
-
-/* The tag as the output lists it: the cell's own words. */
-static void preview_tag(const struct view *v, uint64_t tag, char *out,
-			size_t cap)
-{
-	if (!tag) {
-		snprintf(out, cap, "none");
-		return;
-	}
-	tag_label(&v->ed, tag, out, cap);
-	if (!out[0])
-		snprintf(out, cap, "not found");
-}
-
-/* One matcher as the output lists it. */
-static void preview_matcher(struct view *v, uint32_t g, char *out, size_t cap)
-{
-	const struct group *q = &v->ed.dr.grp[g];
-	uint32_t i, n = 0;
-	size_t at;
-
-	if (q->kind == GRP_KIND_SIM) {
-		uint32_t b = q->n_sim ? q->sim[0].blk : v->ed.dr.n_blk;
-
-		snprintf(out, cap, "%u  find_sim  # hash %08x  threshold %u",
-			 grp_loc(&v->ed, g),
-			 b < v->ed.dr.n_blk ? v->ed.dr.blk[b].id : 0u, q->pct);
-		return;
-	}
-	at = (size_t)snprintf(out, cap, "%u  %s", grp_loc(&v->ed, g),
-			      grp_is_at(q->rule) ? "find_at" : "find_str");
-	if (!grp_is_at(q->rule) && at < cap)
-		at += (size_t)snprintf(out + at, cap - at, " >= %u of %u",
-				       grp_thresh_eff(&v->ed, g),
-				       grp_count(&v->ed, g));
-	if (at < cap)
-		at += (size_t)snprintf(out + at, cap - at, "  markers");
-	for (i = 0; i < v->ed.dr.n_decl && at < cap; i++)
-		if (v->ed.dr.decl[i].grp & (1u << g))
-			at += (size_t)snprintf(out + at, cap - at, "%s %u",
-					       n++ ? "," : "", i + 1u);
-}
-
-/* The shared declaration, once: what every file below it carries. */
-static void preview_head(struct view *v, char *out, size_t cap)
-{
-	size_t at;
-	uint32_t i, f;
-
-	at = (size_t)snprintf(out, cap, "type %s  family %s",
-			      maltype_word[v->ed.dr.maltype % MALTYPE_N],
-			      v->ed.dr.family[0] ? v->ed.dr.family : "?");
-	for (f = 0; f < KOF_FMT_COUNT && at < cap; f++)
-		if (v->ed.dr.fmt_mask & (1u << f))
-			at += (size_t)snprintf(out + at, cap - at,
-					       "  format %s",
-					       kof_format_name((uint8_t)f));
-	for (i = 0; i < (uint32_t)OPT_COUNT && at < cap; i++) {
-		char val[40];
-
-		if (!v->ed.dr.opt_on[i])
-			continue;
-		opt_text(v, i, val, sizeof val);
-		at += (size_t)snprintf(out + at, cap - at, "  %s %s",
-				       opt_word[i], val);
-	}
-}
-
-static int draw_decl_preview(struct out *o, struct view *v, int r)
-{
-	uint32_t ci, g, listed = 0;
-	/* How much of a row a field may take: negative would be "no limit"
-	 * to the %.*s below, so a narrow terminal gets a floor. */
-	int w = g_cols - 8;
-
-	if (!v->gen_preview)
-		return r;
-	if (w < 20)
-		w = 20;
-	if (PR_VIS(r)) {
-		sec_bar(o, v, PR(r), " Output - PREVIEW, nothing is written");
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
-	}
-	r++;
-	if (PR_VIS(r)) {
-		char hd[200];
-
-		preview_head(v, hd, sizeof hd);
-		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM "  Shared   " A_OFF "%.*s", w, hd);
-	}
-	r++;
-	for (ci = 0; ci < v->ed.dr.n_cnd; ci++) {
-		const struct cond *c = &v->ed.dr.cnd[ci];
-		char fn[200], ln[160];
-
-		if (c->tab == DT_GRAPHS)
-			continue;
-		cnd_file_name(&v->ed, ci, fn, sizeof fn);
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			out_fmt(o, "  %s%2u." A_OFF " %s%.*s" A_OFF, A_DIM,
-				listed + 1u, c->tag ? A_ID : A_WARN, w - 6, fn);
-		}
-		listed++;
-		r++;
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			out_fmt(o, A_DIM "        if " A_OFF "%s%.*s" A_OFF
-				"%s", A_WARN, w - 40,
-				c->expr[0] ? c->expr : "-",
-				cnd_foreign(&v->ed, c)
-				? A_BAD "  REFUSED: names a matcher not on "
-				  "this tab" A_OFF : "");
-		}
-		r++;
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			preview_tag(v, c->tag, ln, sizeof ln);
-			out_fmt(o, A_DIM "        tag " A_OFF "%s%.*s" A_OFF,
-				c->tag ? A_ID : A_DIM, w, ln);
-		}
-		r++;
-		for (g = 0; g < v->ed.dr.n_grp; g++) {
-			if (!cnd_uses(&v->ed, c, g))
-				continue;
-			if (PR_VIS(r)) {
-				preview_matcher(v, g, ln, sizeof ln);
-				row_start(o, PR(r), 1);
-				out_fmt(o, "        %.*s", w, ln);
-			}
-			r++;
-		}
-	}
-	/* One diagnose for each block matcher that no condition uses. */
-	for (g = 0; g < v->ed.dr.n_grp; g++) {
-		const struct group *q = &v->ed.dr.grp[g];
-		char fn[200], ln[160];
-
-		if (!grp_standalone(&v->ed, g))
-			continue;
-		grp_file_name(&v->ed, g, fn, sizeof fn);
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			out_fmt(o, "  %s%2u." A_OFF " %s%.*s" A_OFF, A_DIM,
-				listed + 1u, q->tag ? A_ID : A_WARN, w - 6, fn);
-		}
-		listed++;
-		r++;
-		if (PR_VIS(r)) {
-			row_start(o, PR(r), 1);
-			preview_tag(v, q->tag, ln, sizeof ln);
-			out_fmt(o, A_DIM "        tag " A_OFF "%s%.*s" A_OFF,
-				q->tag ? A_ID : A_DIM, w, ln);
-		}
-		r++;
-		if (PR_VIS(r)) {
-			preview_matcher(v, g, ln, sizeof ln);
-			row_start(o, PR(r), 1);
-			out_fmt(o, "        %.*s", w, ln);
-		}
-		r++;
-	}
-	return r;
-}
-
 void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -3073,8 +2993,8 @@ void draw_decl(struct out *o, struct view *v)
 	 * else to be called.
 	 */
 	draw_decl_head(o, v);
+	decl_types_sync(v);
 	r = draw_decl_fmts(o, v, r);
-	r = draw_decl_ranges(o, v, r);
 	r = draw_decl_optbtn(o, v, r);
 	r = draw_decl_opts(o, v, r);
 	r = draw_decl_tabs(o, v, r);
@@ -3085,20 +3005,17 @@ void draw_decl(struct out *o, struct view *v)
 	switch (v->ed.dr.tab) {
 	case DT_BLOCKS:
 		r = draw_decl_blocks(o, v, r);
-		r = draw_decl_matchers(o, v, r);
-		r = draw_decl_conds(o, v, r);
+		r = draw_decl_matchers(o, v, r);       /* no conditions: each matcher is a unit */
 		break;
 	case DT_GRAPHS:
-		r = draw_decl_diag(o, v, r);
-		r = draw_decl_conds_hold(o, v, r);
 		break;
 	default:
 		r = draw_decl_strings(o, v, r);
+		r = draw_decl_ranges(o, v, r);
 		r = draw_decl_matchers(o, v, r);
 		r = draw_decl_conds(o, v, r);
 		break;
 	}
-	r = draw_decl_preview(o, v, r);
 
 	/*
 	 * THE ROW MODEL AND THE DRAWING MUST AGREE, and they say so here.

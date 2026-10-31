@@ -14,35 +14,22 @@
  * routing wrong.
  */
 /*
- * Enough rows for the longest list any menu builds, which is CH_MARKER's: one
- * per declared marker, and MAX_DECL of those. At sixteen, a draft with more
- * than sixteen unused markers simply ended - ch_add drops what does not fit and
- * the list has no scroll - so the markers past the sixteenth could not be put
- * into a matcher from the menu at all. Two spare for the rows a list adds
- * around its items.
+ * Rows a list may hold. The longest lists come from the two catalogs the panel
+ * reads: the variants of a family (KV_FAM_MAX_VARIANT = 256, the Pathogens
+ * table the viewer allocates; a family may own all of them) and the tags
+ * (KV_TAG_MAX = 64); CH_MARKER's is MAX_DECL + 2. kv_chooser.c asserts the
+ * number against those, so a catalog that grows cannot cut a list silently.
+ * What is still too long is counted in `more` and said on the last row.
  */
-#define CH_ITEMS (MAX_DECL + 2)
-
-/*
- * ONE PALETTE FOR EVERY POPUP - the menu bar's, which is the darker one.
- *
- * The choosers and the right-click menu were drawn on white (47), the bar on
- * bright black (100). Side by side on a dark terminal the white ones glare,
- * and two panels that do the same job should not look like two different
- * programs. Defined here rather than beside the bar because the popups are
- * drawn first and a define is only visible below itself.
- */
-#define BAR_ON   "\033[100;97m"    /* an item that can be used */
-#define BAR_OFF  "\033[100;37m"    /* the same panel, dimmer text */
-#define BAR_CUR  "\033[107;30m"    /* the row under the cursor */
+#define CH_ITEMS 256
 
 /*
  * The widest a list may get. It is a CAP, not the width: the drawn width is
- * chooser.w, measured from the longest row, so a list of "ELF / PE / MachO"
+ * chooser.box.w (kv_popup_place), measured from the longest row, so a list of "ELF / PE / MachO"
  * is three columns wider than "MachO" rather than thirty-eight wide with
  * thirty columns of empty highlight after it.
  */
-#define CH_W     38
+#define CH_W     64
 #define CH_W_MIN 12
 
 enum ch_what {
@@ -77,7 +64,10 @@ enum ch_what {
 	CH_FMT_LANG,    /* which scripting language - format and subtype at once */
 	CH_RANGE_EXT,   /* which region to extend the subject range with */
 	CH_RANGE_DROP,  /* which region to drop off the subject range */
-	CH_TYPE,        /* enum kof_maltype */
+	CH_HFAM,        /* the header's family: the Pathogens catalog's families */
+	CH_HVAR,        /* the header's variant: the chosen family's variants and their types */
+	CH_UTYPE,       /* a diagnose unit's type: the types of the header's variant */
+	CH_UTAG,        /* a diagnose unit's tag: the Syndromes catalog's tags */
 	CH_MARKER,      /* which unused marker to put in a matcher */
 	CH_THRESH,      /* how many of the matcher's markers must be present */
 	CH_OPT,         /* which optional declaration to add */
@@ -121,34 +111,26 @@ enum ch_what {
  * arg2 came through as zero and the menu never opened. Both indices are bounded
  * by MAX_GROUP, which is 8.
  */
+/* The unit a CH_UTYPE or CH_UTAG list is about: a condition's index, or a block matcher's with this bit. */
+#define CH_UNIT_GRP 0x10000u
+
 #define CH_PAIR(ci, m)  ((uint32_t)(ci) | ((uint32_t)(m) << 16))
 #define CH_PAIR_C(x)    ((x) & 0xffffu)
 #define CH_PAIR_M(x)    ((x) >> 16)
 
 struct chooser {
 	int      open;
-	int      row, col;
 	int      what;
 	uint32_t arg;               /* which group it is about */
 	int      n, sel;
+	int      more;              /* rows past CH_ITEMS that were not added; the last row says so */
 	/*
-	 * THE FIRST ROW DRAWN, when the list is taller than the room under it.
-	 *
-	 * A chooser used to paint from item zero and stop at the bottom of the
-	 * screen - so on a short terminal the tail of a long list was invisible
-	 * AND unclickable, which is how a draft with many markers ended up with
-	 * the last ones unreachable from "+ marker". The cap on CH_ITEMS was
-	 * raised for the same symptom once already; the cap was never the
-	 * problem.
+	 * THE BOX - where the list is on the screen, how wide, how many rows are drawn, how far it is scrolled and which side of its
+	 * control it opened on. Decided ONCE, by kv_popup_place when the list opened; the draw, the click test and the place a
+	 * submenu opens beside all read this one record, so a list cannot be drawn one width and clicked at another. A list taller
+	 * than the room scrolls (box.off): the tail of a long list was once invisible and unclickable.
 	 */
-	int      off;
-	/*
-	 * THE DRAWN WIDTH, measured from the rows once they are all added.
-	 * Every place that asks how wide the list is - the draw, the click
-	 * test, and where a submenu is opened beside it - reads this, so a
-	 * list cannot be drawn one width and clicked at another.
-	 */
-	int      w;
+	struct kv_popup_box box;
 	uint32_t arg2;              /* the narrowest range, for CH_RANGE */
 	char     item[CH_ITEMS][CH_W];
 	/*

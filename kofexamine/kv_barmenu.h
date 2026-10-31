@@ -75,10 +75,10 @@ enum bar_item {
 	 * question, everything below writes something or re-runs the scan.
 	 */
 	BI_DASH,
-	/* MANAGE menu, in the order it shows: the malware families, then the syndrome table. */
+	/* MANAGE menu, in the order it shows: the malware families, then the tag catalog. */
 	BI_FAMILIES,
-	/* The tag sources, as four tables: this is what the diagnose panel's Tag cells pick from. It needs no object: it is
-	 * about the directory. SWITCHED OFF for now and moved out of Analysis into Manage (owner); the code stays. */
+	/* Manage > Syndromes: the tag catalog's dialog (tags_open, kv_tags.c); what the diagnose panel's Tag cells pick from. It needs no
+	 * object: it is about the directory. */
 	BI_SYNTAB,
 	/* Label replaced at draw time by the mode's own wording - a menu that
 	 * offers "Show" and "Hide" side by side always has one of them wrong. */

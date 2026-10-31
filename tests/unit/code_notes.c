@@ -12,6 +12,7 @@
 
 #include <kofeng.h>
 #include "../../libkofeng/analyzers/codenotes.h"
+#include "../../libkofeng/analyzers/parsers/binaries/funcs.h"
 
 static int fails;
 
@@ -62,13 +63,13 @@ static void t_blob(void)
 	memset(&ctx, 0, sizeof ctx);
 	memset(&none, 0, sizeof none);
 	ctx.obj_size = sizeof blob;
-	CK(kof_codenotes_build(&ctx, kof_buf_make(blob, sizeof blob), &none, NULL, 0, 32, &n) == 1);
+	CK(kof_codenotes_build(&ctx, kof_buf_make(blob, sizeof blob), &none, NULL, 0, 32, NULL, &n) == 1);
 
 	CK(is(note(&n, 7, KOF_NOTE_LABEL), ".L-7:  ; xrefs: 9 jcc"));
 	CK(note(&n, 7, KOF_NOTE_FUNC) == NULL);                 /* a jump's landing is a label and never a function */
 	CK(is(note(&n, 9, KOF_NOTE_COMMENT), "-> .L-7 (backward)"));
-	CK(is(note(&n, 11, KOF_NOTE_COMMENT), "-> sub_10"));
-	CK(is(note(&n, 16, KOF_NOTE_FUNC), "sub_10:  ; xrefs: b call"));
+	CK(is(note(&n, 11, KOF_NOTE_COMMENT), "-> fcn_00000010"));
+	CK(is(note(&n, 16, KOF_NOTE_FUNC), "fcn_00000010:  ; xrefs: b call"));
 	CK(note(&n, 16, KOF_NOTE_LABEL) == NULL);
 	CK(is(note(&n, 24, KOF_NOTE_COMMENT), "linux: execve (11)"));  /* a blob: whose table is said */
 	CK(note(&n, 26, KOF_NOTE_COMMENT) == NULL);             /* ret says nothing */
@@ -94,19 +95,108 @@ static void t_other_reads(void)
 	memset(&ctx, 0, sizeof ctx);
 	memset(&none, 0, sizeof none);
 	ctx.obj_size = sizeof sys;
-	CK(kof_codenotes_build(&ctx, kof_buf_make(sys, sizeof sys), &none, NULL, 0, 64, &n) == 1);
+	CK(kof_codenotes_build(&ctx, kof_buf_make(sys, sizeof sys), &none, NULL, 0, 64, NULL, &n) == 1);
 	CK(is(note(&n, 0, KOF_NOTE_COMMENT), "syscall, number not known here"));   /* never a guess */
 	kof_codenotes_free(&n);
 
 	/* no code to read at all: an answer, with nothing in it */
 	ctx.obj_size = 0;
-	CK(kof_codenotes_build(&ctx, kof_buf_make(sys, 0), &none, NULL, 0, 64, &n) == 0 && n.n == 0);
+	CK(kof_codenotes_build(&ctx, kof_buf_make(sys, 0), &none, NULL, 0, 64, NULL, &n) == 0 && n.n == 0);
 	kof_codenotes_free(&n);
+}
+
+
+/*
+ * THE NAME OF A FUNCTION NO SYMBOL NAMES IS ONE WORD, kof_func_name's. The disassembly said `sub_<offset>` and the CFG dialog `fcn_<offset>` for the same
+ * function: two spellings, in codenotes.c and sym_any.c. Old tests missed it (a) no test put the two surfaces side by side, and (c) each pinned only its
+ * own spelling. Here every small offset is the target of a call, of a jump, and (with a table entry) of both: the FUNC note, the xref text and the comment
+ * must be the API's string, character for character.
+ */
+static void t_one_spelling(void)
+{
+	uint32_t t;
+	char want[48], text[96];
+
+	for (t = 0; t < 40; t++) {
+		/* 32-bit raw code: 0..39 are nops, then a call/jmp to `t` at 40 and 45 */
+		uint8_t code[51];
+		struct kof_obj_ctx ctx;
+		struct kof_codenotes n;
+		struct kgenome_func_set none, fs;
+		struct kgenome_func f;
+		int with_table;
+
+		memset(code, 0x90, sizeof code);
+		code[40] = 0xe8; code[45] = 0xe9;
+		{
+			const int32_t r1 = (int32_t)t - 45, r2 = (int32_t)t - 50;
+
+			memcpy(code + 41, &r1, 4);
+			memcpy(code + 46, &r2, 4);
+		}
+		code[50] = 0xc3;
+		memset(&f, 0, sizeof f);
+		f.off = t;
+		f.len = 1;
+		kof_fcn_name(t, want, sizeof want);
+		CK(kof_func_name(&f, NULL, 0, text, sizeof text) == 0 && !strcmp(text, want));
+		for (with_table = 0; with_table < 2; with_table++) {
+			memset(&ctx, 0, sizeof ctx);
+			memset(&none, 0, sizeof none);
+			fs = none;
+			if (with_table) {
+				fs.v = &f;
+				fs.n = 1;
+			}
+			ctx.obj_size = sizeof code;
+			CK(kof_codenotes_build(&ctx, kof_buf_make(code, sizeof code), &fs, NULL, 0, 32, NULL, &n) == 1);
+			snprintf(text, sizeof text, "-> %s", want);
+			CK(is(note(&n, 40, KOF_NOTE_COMMENT), text));         /* a call to it */
+			snprintf(text, sizeof text, "-> %s (backward)", want);
+			if (with_table)
+				CK(is(note(&n, 45, KOF_NOTE_COMMENT), text));  /* a jump to a table entry: a function, named as one */
+			snprintf(text, sizeof text, "%s:  ; xrefs: ", want);
+			{
+				const char *fn = note(&n, t, KOF_NOTE_FUNC);
+
+				CK(fn && !strncmp(fn, text, strlen(text)));
+				CK(note(&n, t, KOF_NOTE_LABEL) == NULL);
+				CK(fn == NULL || strstr(fn, "sub_") == NULL);
+			}
+			kof_codenotes_free(&n);
+		}
+	}
+	/* the API itself: offset 0, a 64-bit offset, every capacity; the made-up name alone is the table's name with no symbol */
+	{
+		static const uint64_t offs[] = { 0, 1, 0xfffffffful, 0x100000000ull, 0x123456789abcdef0ull, UINT64_MAX };
+		uint32_t i, cap;
+
+		for (i = 0; i < sizeof offs / sizeof offs[0]; i++)
+			for (cap = 1; cap < 24; cap++) {
+				struct kgenome_func f;
+				char a[24], b[24];
+
+				memset(&f, 0, sizeof f);
+				f.off = offs[i];
+				kof_fcn_name(offs[i], a, cap);
+				CK(kof_func_name(&f, NULL, 0, b, cap) == 0 && !strcmp(a, b) && strlen(a) < cap);
+				CK(!strncmp(a, "fcn_", cap < 5 ? cap - 1u : 4u));
+			}
+		{
+			char a[24];
+
+			kof_fcn_name(0, a, sizeof a);
+			CK(!strcmp(a, "fcn_00000000"));
+			kof_fcn_name(0x123456789abcdef0ull, a, sizeof a);
+			CK(!strcmp(a, "fcn_123456789abcdef0"));
+		}
+	}
 }
 
 int main(void)
 {
 	t_blob();
+	t_one_spelling();
 	t_other_reads();
 	if (fails) {
 		printf("code_notes: %d failure(s)\n", fails);

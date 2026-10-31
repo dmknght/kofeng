@@ -15,6 +15,11 @@
  * The relevance of each function is kgenome_fnprint_decide (fnprint_rel.c); the units the
  * credit reads are built here from the pieces the walk visits, a run at a time.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (verified R: the end-of-body rules body_ends/skip_pad, see FUNC-9 and FUNC-10).
+ * Do not delete before that decision. */
 #include "fnprint_private.h"
 
 #include <stdlib.h>
@@ -95,6 +100,10 @@ struct body {
 /* How a body ended: the kind matters to what may follow it (see split_after). */
 enum { TERM_NONE = 0, TERM_RET, TERM_JMP, TERM_IND };
 
+/* CONSOLIDATION FUNC-9 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk (the logic moves; no scan path calls this file, STATUS D19). Better logic
+ * here that the keeper lacks: the end of a body = first RET/terminal jump past the furthest forward target; an indirect jump ends it only past the reach
+ * (jump tables stay inside); the entry-walk tail is cut. The keeper ends an extent at the next entry or the segment end. Prove with:
+ * tests/lib/genome/fnprint_gcc.c body_len vs symtab size per function; same stripped files as evmix.c. */
 static int body_ends(const struct kgenome_cell_insn *in, uint64_t at, uint64_t flen, struct body *b)
 {
 	uint64_t after = at + in->len;
@@ -368,7 +377,6 @@ static void count(struct kgenome_fnprint_stat *sx, const struct kgenome_fnprint_
 	else if (f->cls == KGENOME_FNP_LIB) sx->n_lib++;
 	else sx->n_unknown++;
 	if (f->reason & KGENOME_FNP_R_ADVISED) sx->n_advised++;
-	if (f->reason & KGENOME_FNP_R_LIBWIN) sx->n_libwin++;
 	if (f->reason & KGENOME_FNP_R_BAD) sx->n_bad++;
 	if (f->reason & KGENOME_FNP_R_OVERLAP) sx->n_overlap++;
 	if (f->reason & KGENOME_FNP_R_HUGE) sx->n_huge++;
@@ -425,6 +433,9 @@ static void flush_region(const struct kgenome_fnprint_req *rq, const struct kgen
  * `main`, whose address the entry stub names: it is an entry whether or not any
  * call enters it.
  */
+/* CONSOLIDATION FUNC-10 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk (merge with body_ends). Better logic here that the keeper lacks: skips
+ * zero bytes, nop and int3 between a function and the next piece, so the next start is not guessed inside padding. The keeper has no padding rule. Prove
+ * with: tests/lib/genome/fnprint_danger.c padding rows; symtab-vs-extent exactness on x86-64 stripped copies. */
 static uint64_t skip_pad(const struct kgenome_fnprint_req *rq, uint64_t lo, uint64_t hi)
 {
 	while (lo < hi) {
@@ -588,7 +599,6 @@ void kgenome_fnprint_walk(const struct kgenome_fnprint_req *rq)
 		sx->n_skipped = sx->n_funcs;
 		return;
 	}
-	sx->scratch_bytes = rq->led ? scratch : 0;
 	o = rq->opt;
 	kgenome_fnprint_opts_resolve(&o);
 	if (rq->budget)

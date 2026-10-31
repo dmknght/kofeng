@@ -77,6 +77,18 @@ void kverdict_target(char *out, size_t cap, uint8_t format, uint8_t arch);
 void kof_verdict_make(const struct kof_verdict_in *in, struct kof_finding *f);
 
 /*
+ * THE VERDICT OF AN OBJECT WHOSE MATCHED DIAGNOSES CARRY CATALOG FACTS: `cat` is what kof_vdecide decided (the lead family and
+ * variant, the tag and the type). The name is the same form as above with the family slot "<Family>.<Letter>" ("Mirai.A") or, at
+ * level TAG, the tag's name; `names` (verdictor/catnames.h, the engine's id -> name table, may be NULL) gives the names, and an id it
+ * does not hold is spelled "F<8 hex>.V<8 hex>" / "T<8 hex>" as before. `in` supplies the target and the diagnose / disease ids of the
+ * trace (n_dis may be 0).
+ */
+struct kof_catnames;
+void kverdict_catalog_word(char *out, size_t cap, uint64_t id);   /* "%08x" of the id's top 32 bits: the hex spelling, `cap` >= 9 */
+void kof_verdict_make_cat(const struct kof_verdict_in *in, const struct kof_verdict_cat *cat, const struct kof_catnames *names,
+			  struct kof_finding *f);
+
+/*
  * ONE VERDICT PER TOP-LEVEL FILE, rolled up from every object inside it.
  *
  * A packed or carrying file is scanned as a tree - the file, then whatever the
@@ -148,6 +160,9 @@ struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *, const char *obje
 /* An entry by its file name (`flen` bytes, not NUL terminated), or NULL when there is none. */
 struct kverdict_file *kverdict_filemap_find(kverdict_filemap *, const char *file,
 					    size_t flen);
+
+/* The entry of the file an object IS: `object` is a top-level name (it has no KOF_OBJ_SEP); NULL for a child, or when the file has no entry. */
+struct kverdict_file *kverdict_filemap_of_file(kverdict_filemap *, const char *object);
 
 /* How many entries there are, and the i-th in the order they were first made. */
 size_t                kverdict_filemap_count(const kverdict_filemap *);

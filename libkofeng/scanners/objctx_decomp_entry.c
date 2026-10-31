@@ -283,7 +283,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		return 0;
 	}
 	{
-		struct expand_sink snk;
+		struct expand_sink snk = { 0 };
 		enum kuncoat_status st;
 		const uint8_t *p = mid;
 		uint64_t n = len;

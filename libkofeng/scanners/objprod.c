@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 
 
+#include "../kofcore/kofdebug.h"
 #include "scan_int.h"
 #include "objctx_int.h"
 #include <phenotype/diag_scan.h>
@@ -23,13 +24,14 @@ struct kof_prod {
 	struct kgenome_diag_walk *walk;
 	struct kgenome_diag_apihash_set   *apihash;
 
-	uint8_t diag_done;      /* the parent latched KOF_OL_DIAG      */
-	uint8_t gate_done;      /* ... and KOF_OL_DIAG_GATE            */
-	uint8_t apihash_done;   /* ... and KOF_OL_APIHASH              */
 	uint32_t n_diag, bm;
 	uint8_t *bits;          /* hit, gate, unk - bm bytes each      */
 	uint8_t *n_bind;
 	uint16_t (*bind)[KOF_DB_MAX_DIAG_NODE];
+	/* What the record cost the scan's ledger (the memory cap is one number, kofeng/CLAUDE.md), and whose,
+	 * so it goes back when the last view that holds it is destroyed (E-PROD). */
+	struct kof_scanner *sc;
+	uint64_t held;
 };
 
 void kof_prod_unref(struct kof_prod *p)
@@ -44,6 +46,10 @@ void kof_prod_unref(struct kof_prod *p)
 	free(p->n_bind);
 	free(p->bind);
 	kof_src_unref(p->src);
+	if (p->held) {
+		KOF_TRACE("[mem] parent product released: %llu bytes\n", (unsigned long long)p->held);
+		oc_scan_release(p->sc, p->held);
+	}
 	free(p);
 }
 
@@ -57,10 +63,20 @@ static struct kof_prod *prod_take(struct kof_scanner *sc)
 	p->refs = 1;
 	p->n_diag = sc->diag.cap;
 	p->bm = bm;
-	/* KNOWN DEFECT E-PROD (2026-10-24, R) [sev M]: prod_take allocates the product record (bits 3*bm, n_bind n, bind n*sizeof)
-	 * with calloc/malloc and never charges it to the scan's ledger (the engine memory cap, CLAUDE.md "one number").
-	 * Trigger: a database with many diagnoses and a normalised view that lives while other objects scan. Effect: resident
-	 * bytes exceed the cap by this record. Reproducer: none (read). Fix: scan_charge it and return it in kof_prod_unref. */
+	/* The record is charged like every other allocation of a scan, and refused when it does not fit: the
+	 * caller says so (kof_prod_publish) and the view goes without the parent's analysis. */
+	{
+		const uint64_t cost = (uint64_t)sizeof *p + 3u * (uint64_t)bm + n + (uint64_t)n * sizeof *p->bind;
+
+		if (cost > oc_scan_room(sc)) {
+			free(p);
+			return NULL;
+		}
+		scan_charge(sc, cost);
+		p->sc = sc;
+		p->held = cost;
+		KOF_TRACE("[mem] parent product taken for the view: %llu bytes charged (graph moved, not copied)\n", (unsigned long long)cost);
+	}
 	p->bits = malloc(3u * (size_t)bm);
 	p->n_bind = malloc(n);
 	p->bind = malloc((size_t)n * sizeof *p->bind);
@@ -73,9 +89,6 @@ static struct kof_prod *prod_take(struct kof_scanner *sc)
 	memcpy(p->bits + 2u * bm, sc->diag.unk, bm);
 	memcpy(p->n_bind, sc->diag.n_bind, n);
 	memcpy(p->bind, sc->diag.bind, (size_t)n * sizeof *p->bind);
-	p->diag_done = sc->obj.latch[KOF_OL_DIAG];
-	p->gate_done = sc->obj.latch[KOF_OL_DIAG_GATE];
-	p->apihash_done = sc->obj.latch[KOF_OL_APIHASH];
 	/*
 	 * MOVED, NOT COPIED. These are the parent's products and the parent has
 	 * no further use for them: its pipeline is over, its result is built,

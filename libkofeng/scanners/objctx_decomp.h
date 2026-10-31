@@ -80,6 +80,9 @@ struct sink_carry {
 struct expand_sink {
 	const struct kof_obj_ctx *ctx;
 	uint64_t left;
+	/* The sink REFUSED a byte: a write was cut to what was left. `left == 0` does not say it
+	 * (an entry that ends exactly where the allowance does leaves 0 too: BE-2). */
+	uint8_t refused;
 };
 
 /*

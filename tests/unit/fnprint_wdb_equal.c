@@ -57,7 +57,7 @@ static void one(uint32_t trial, uint32_t fbits, uint32_t bbits)
 
 		mb[i].first_hash = n; mb[i].n_hash = 32; mb[i].scan_mask = 1u; mb[i].norm = 0;
 		mb[i].side = (uint8_t)(i % 7u == 0 ? KGENOME_MUTATION_SIDE_LIB : KGENOME_MUTATION_SIDE_USER);
-		if (kgenome_mtn_win_begin(&w, src + at, 2000, 0))
+		if (kgenome_mtn_win_begin(&w, src + at, 2000))
 			do {
 				if (!kgenome_mtn_win_flat(&w) && (rnd() % 60u) == 0 && k < 32u)
 					pool[n + k++] = kgenome_mtn_win_value(&w);
@@ -90,8 +90,8 @@ static void one(uint32_t trial, uint32_t fbits, uint32_t bbits)
 	ext[1].off = OBJ / 2u; ext[1].len = OBJ / 2u;
 	kof_mutation_begin(&kc);
 	kof_mutation_any_region(&kc, 1);
-	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, obj, ext[0].len);
-	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_USER, obj + ext[1].off, ext[1].len);
+	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_SIDE_USER, obj, ext[0].len);
+	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_SIDE_USER, obj + ext[1].off, ext[1].len);
 	kgenome_fnprint_wctx_begin(&c);
 	memset(&rq, 0, sizeof rq);
 	rq.p = obj; rq.n = OBJ; rq.ext = ext; rq.n_ext = 2; rq.c = &c; rq.stat = &st;
@@ -106,12 +106,12 @@ static void one(uint32_t trial, uint32_t fbits, uint32_t bbits)
 	/* the LIB side from the same bytes: a second object part fed as library on both */
 	kof_mutation_begin(&kc);
 	kof_mutation_any_region(&kc, 1);
-	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_RAW, KGENOME_MUTATION_SIDE_LIB, obj, OBJ);
+	kof_mutation_unit(&kc, 1u, KGENOME_MUTATION_SIDE_LIB, obj, OBJ);
 	kgenome_fnprint_wctx_begin(&c);
 	for (j = 0, bad = 0; j < 1; j++) {
 		struct kgenome_mtn_win w;
 
-		if (kgenome_mtn_win_begin(&w, obj, OBJ, 0))
+		if (kgenome_mtn_win_begin(&w, obj, OBJ))
 			do {
 				if (!kgenome_mtn_win_flat(&w))
 					kgenome_fnprint_wctx_credit(&c, kgenome_mtn_win_value(&w), KGENOME_MUTATION_SIDE_LIB);

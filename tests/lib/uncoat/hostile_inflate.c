@@ -876,7 +876,48 @@ static void reuse(void)
 	CK(r.st == KUNCOAT_OK && r.consumed == len_e && r.produced == want_e_n);
 }
 
+/* WP0-1: an incomplete distance code is tolerated only as one code of length 1 (zlib's rule);
+ * every other gap is a corrupt header. Old tests missed it: (b) the only incomplete distance
+ * code any test built was dl = {1}. */
+static void incomplete_distance(void)
+{
+	uint8_t ll[257], b[400];
+	struct hv_bw w;
+	struct hv_dyn t;
+	struct ires r;
+	static const uint8_t two_two[2] = { 2, 2 }, one_two[2] = { 1, 2 }, zero_one[2] = { 0, 1 }, one[1] = { 1 };
+
+	memset(ll, 0, sizeof ll);
+	ll[0] = 1;
+	ll[256] = 1;                                        /* a complete literal code */
+	hv_bw_init(&w, b, sizeof b);
+	hv_dyn_begin(&w, &t, 1, ll, 257, two_two, 2, 0);
+	hv_dyn_sym(&w, &t, 256);
+	AT();
+	r = inf(b, hv_defl_end(&w), 0, 0, NULL);
+	CKF(r.st == KUNCOAT_CORRUPT, "two codes of 2 bits (a gap): %s", kuncoat_status_name(r.st));
+	hv_bw_init(&w, b, sizeof b);
+	hv_dyn_begin(&w, &t, 1, ll, 257, one_two, 2, 0);
+	hv_dyn_sym(&w, &t, 256);
+	AT();
+	r = inf(b, hv_defl_end(&w), 0, 0, NULL);
+	CKF(r.st == KUNCOAT_CORRUPT, "lengths 1,2 (a gap): %s", kuncoat_status_name(r.st));
+	hv_bw_init(&w, b, sizeof b);
+	hv_dyn_begin(&w, &t, 1, ll, 257, zero_one, 2, 0);
+	hv_dyn_sym(&w, &t, 256);
+	AT();
+	r = inf(b, hv_defl_end(&w), 0, 0, NULL);
+	CKF(r.st == KUNCOAT_OK, "one code of 1 bit among two: %s", kuncoat_status_name(r.st));
+	hv_bw_init(&w, b, sizeof b);
+	hv_dyn_begin(&w, &t, 1, ll, 257, one, 1, 0);
+	hv_dyn_sym(&w, &t, 256);
+	AT();
+	r = inf(b, hv_defl_end(&w), 0, 0, NULL);
+	CKF(r.st == KUNCOAT_OK, "single code of 1 bit: %s", kuncoat_status_name(r.st));
+}
+
 HV_GROUP(headers)
+HV_GROUP(incomplete_distance)
 HV_GROUP(header_lies)
 HV_GROUP(deep_codes)
 HV_GROUP(single_eob)
@@ -899,6 +940,7 @@ int main(void)
 	hv_expect_clean("inflate sweeps", sweeps, NULL, 25);
 	hv_expect_clean("dynamic header: code-length code", hv_grp_headers, NULL, 10);
 	hv_expect_clean("dynamic header: lies", hv_grp_header_lies, NULL, 10);
+	hv_expect_clean("incomplete distance code (WP0-1)", hv_grp_incomplete_distance, NULL, 10);
 	hv_expect_clean("deep codes", hv_grp_deep_codes, NULL, 10);
 	hv_expect_clean("single EOB code", hv_grp_single_eob, NULL, 10);
 	hv_expect_clean("symbols", hv_grp_symbols, NULL, 10);

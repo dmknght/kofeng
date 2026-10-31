@@ -1,12 +1,18 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * diagsrc_parse.c - reading a diagnose source: the line handlers. Split from diagsrc.c; the text is unchanged. See diagsrc.h.
  */
 
 #include "diagsrc_int.h"
 
-static struct kof_dsrc_item *add_item(struct kof_dsrc *d, int *errs,
-				      const struct kof_dsrc_report *r,
-				      unsigned line, unsigned kind)
+struct kof_dsrc_item *kof_dsrc_add_item(struct kof_dsrc *d, int *errs,
+					const struct kof_dsrc_report *r,
+					unsigned line, unsigned kind)
 {
 	struct kof_dsrc_item *it;
 
@@ -28,7 +34,7 @@ struct dsrc_cx {
 	const struct kof_dsrc_report   *r;
 	int                             errs;
 	unsigned                        lineno;
-	char                            a[5][96];
+	char                            a[5][KOF_DSRC_WORDS_LEN];
 };
 
 /* KOF_DIAG_NAME(name) */
@@ -42,7 +48,7 @@ static void dsrc_name(struct dsrc_cx *x, char *p)
 			"KOF_DIAG_NAME wants a name");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_NAME)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_NAME)))
 		return;
 	memcpy(it->s1, x->a[0], strlen(x->a[0]) + 1u);
 	x->d->n++;
@@ -61,7 +67,7 @@ static void dsrc_disease(struct dsrc_cx *x, char *p)
 		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, why);
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_DISEASE)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_DISEASE)))
 		return;
 	it->a = dd.type;
 	memcpy(it->s1, dd.name, strlen(dd.name) + 1u);
@@ -73,7 +79,7 @@ static void dsrc_use_emu(struct dsrc_cx *x)
 {
 	struct kof_dsrc_item *it;
 
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_USE_EMU)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_USE_EMU)))
 		return;
 	x->d->n++;
 }
@@ -102,7 +108,7 @@ static void dsrc_analysis(struct dsrc_cx *x, char *p)
 			"KOF_DIAG_ANALYSIS names no analysis");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_ANALYSIS)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_ANALYSIS)))
 		return;
 	it->a = (uint16_t)bits;
 	x->d->n++;
@@ -129,7 +135,7 @@ static void dsrc_head(struct dsrc_cx *x, char *p)
 		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, "not a node flag");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_HEAD)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_HEAD)))
 		return;
 	it->a = cap;
 	it->b = fl;
@@ -161,7 +167,7 @@ static void dsrc_tail(struct dsrc_cx *x, char *p)
 			"or KOF_DIAG_B_SHARED");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_TAIL)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_TAIL)))
 		return;
 	it->a = cap;
 	it->b = kb;
@@ -195,7 +201,7 @@ static void dsrc_action(struct dsrc_cx *x, char *p)
 			"KOF_DIAG_ACTION wants a constant");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_ACTION)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_ACTION)))
 		return;
 	it->a = hc;
 	it->b = ac;
@@ -229,7 +235,7 @@ static void dsrc_symbol(struct dsrc_cx *x, char *p)
 			"label and a quoted symbol name");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_SYMBOL)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_SYMBOL)))
 		return;
 	memcpy(it->s1, x->a[0], strlen(x->a[0]) + 1u);
 	memcpy(it->s2, x->a[1] + 1, L - 2u);
@@ -256,7 +262,7 @@ static void dsrc_field(struct dsrc_cx *x, char *p)
 			"no symbol declared with that label");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_FIELD)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_FIELD)))
 		return;
 	it->a = cap;
 	memcpy(it->s1, x->a[1], strlen(x->a[1]) + 1u);
@@ -282,7 +288,7 @@ static void dsrc_target(struct dsrc_cx *x, char *p, const char *line)
 			"want a constant or words joined by |");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno,
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno,
 			    is_fmt ? KDS_FORMAT : KDS_SUBTYPE)))
 		return;
 	it->v = vv;
@@ -319,7 +325,7 @@ static void dsrc_attrb(struct dsrc_cx *x, char *p)
 			"or words joined by |");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_ATTRB)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_ATTRB)))
 		return;
 	it->a = (uint16_t)fv;
 	it->v = vv;
@@ -342,11 +348,127 @@ static void dsrc_sequence(struct dsrc_cx *x, char *p)
 			"wants two KOF_NUCLEO_* capabilities");
 		return;
 	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_SEQUENCE)))
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_SEQUENCE)))
 		return;
 	it->a = cap[0];
 	it->b = cap[1];
 	x->d->n++;
+}
+
+/*
+ * KOF_DIAG_FAMILY("name") / KOF_DIAG_VARIANT("name") / KOF_DIAG_TAG("name"): a catalog name in
+ * quotes. Letters, digits, '_' and '-' only, so the line splits like every other declaration
+ * (an argument ends at ',' or ')') and a name round-trips through the printer; a name the
+ * catalogs do not have is the build's error, not the reader's.
+ */
+int kof_dsrc_catalog_word_ok(const char *w)
+{
+	size_t i, n = strlen(w);
+
+	if (!n || n >= KOF_DSRC_NAME_LEN)
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)w[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '-'))
+			return 0;
+	}
+	return 1;
+}
+
+int kof_dsrc_variant_word_ok(const char *w)
+{
+	size_t i, n = strlen(w);
+
+	if (!n || n > 8u)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (w[i] < 'A' || w[i] > 'Z')
+			return 0;
+	return 1;
+}
+
+static void dsrc_meta_word(struct dsrc_cx *x, char *p, unsigned kind,
+			   const char *macro)
+{
+	struct kof_dsrc_item *it;
+	size_t L;
+	char msg[80];
+
+	snprintf(msg, sizeof msg, "%s wants one quoted name (letters, digits, _ and -)", macro);
+	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0])) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, msg);
+		return;
+	}
+	L = strlen(x->a[0]);
+	if (L < 3u || x->a[0][0] != '"' || x->a[0][L - 1u] != '"' ) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, msg);
+		return;
+	}
+	x->a[0][L - 1u] = 0;
+	if (kind == KDS_VARIANT && kof_dsrc_catalog_word_ok(x->a[0] + 1) &&
+	    !kof_dsrc_variant_word_ok(x->a[0] + 1)) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
+			"KOF_DIAG_VARIANT wants the variant's letters only (\"A\"): the family is "
+			"already named by KOF_DIAG_FAMILY, so \"Mirai_A\" is refused");
+		return;
+	}
+	if (!(kind == KDS_VARIANT ? kof_dsrc_variant_word_ok(x->a[0] + 1)
+				  : kof_dsrc_catalog_word_ok(x->a[0] + 1))) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, msg);
+		return;
+	}
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, kind)))
+		return;
+	memcpy(it->s1, x->a[0] + 1, strlen(x->a[0] + 1) + 1u);
+	x->d->n++;
+}
+
+/* KOF_DIAG_TYPE(KOF_MALTYPE_x) */
+static void dsrc_type(struct dsrc_cx *x, char *p)
+{
+	struct kof_dsrc_item *it;
+	int t = 0;
+
+	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0]) ||
+	    !kof_maltype_from_name(x->a[0], &t)) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
+			"KOF_DIAG_TYPE wants one KOF_MALTYPE_* identifier");
+		return;
+	}
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_TYPE)))
+		return;
+	it->a = (uint16_t)t;
+	x->d->n++;
+}
+
+/* A line that calls a KOF_ macro nobody here reads: said, with its line, and not an error. The
+ * name is the first KOF_ identifier directly followed by '(' - blanked comments and string
+ * literals have no such call in them that matters, a mention in a comment is already blank. */
+static void dsrc_unknown(struct dsrc_cx *x, const char *line)
+{
+	const char *p = line;
+
+	for (; *p; p++) {
+		const char *q = p;
+		char msg[120];
+		size_t n;
+
+		if (strncmp(p, "KOF_", 4u) || (p > line && (p[-1] == '_' ||
+		    (p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= '0' && p[-1] <= '9') ||
+		    (p[-1] >= 'a' && p[-1] <= 'z'))))
+			continue;
+		while ((*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || *q == '_')
+			q++;
+		if (*q != '(')
+			continue;
+		n = (size_t)(q - p);
+		snprintf(msg, sizeof msg, "line %u: unknown declaration %.*s, not read",
+			 x->lineno, n > 60u ? 60 : (int)n, p);
+		kof_dsrc_say_warn(x->r, msg);
+		return;
+	}
 }
 
 /* ONE LINE OF THE SOURCE: which declaration it carries, if any, and that declaration's
@@ -355,6 +477,10 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 {
 	char *p;
 
+	/* The form's declarations are read where the line STARTS with the macro (a marker's text may hold any
+	 * macro's name) and before every other, for the same reason. */
+	if (kof_dsrc_form_line(x->d, x->r, &x->errs, x->lineno, line))
+		return;
 	if ((p = strstr(line, "KOF_DIAG_NAME(")) != NULL) {
 		dsrc_name(x, p);
 	} else if ((p = strstr(line, "KOF_DECLARE_DISEASE(")) != NULL) {
@@ -380,6 +506,16 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 		dsrc_attrb(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SEQUENCE(")) != NULL) {
 		dsrc_sequence(x, p);
+	} else if ((p = strstr(line, "KOF_DIAG_FAMILY(")) != NULL) {
+		dsrc_meta_word(x, p, KDS_FAMILY, "KOF_DIAG_FAMILY");
+	} else if ((p = strstr(line, "KOF_DIAG_VARIANT(")) != NULL) {
+		dsrc_meta_word(x, p, KDS_VARIANT, "KOF_DIAG_VARIANT");
+	} else if ((p = strstr(line, "KOF_DIAG_TYPE(")) != NULL) {
+		dsrc_type(x, p);
+	} else if ((p = strstr(line, "KOF_DIAG_TAG(")) != NULL) {
+		dsrc_meta_word(x, p, KDS_TAG, "KOF_DIAG_TAG");
+	} else {
+		dsrc_unknown(x, line);
 	}
 }
 

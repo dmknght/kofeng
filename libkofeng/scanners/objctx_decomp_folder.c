@@ -390,7 +390,7 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 {
 	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
 	struct kof_range *ext;
-	struct expand_sink snk;
+	struct expand_sink snk = { 0 };
 	enum kuncoat_status st = KUNCOAT_OK;
 	kof_buf b;
 	uint64_t skip, take, got = 0;
@@ -501,7 +501,7 @@ uint64_t oc_unpack_lzx(struct kof_scanner *sc,
 {
 	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
 	struct kof_range *ext;
-	struct expand_sink snk;
+	struct expand_sink snk = { 0 };
 	enum kuncoat_status st;
 	kof_buf b;
 	uint8_t *in;

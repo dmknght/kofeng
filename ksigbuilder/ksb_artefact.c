@@ -384,16 +384,16 @@ static int strs_row_range(struct artefact *a, struct strs_acc *acc, char *p)
 	return 1;
 }
 
-/* b <id> <mask> <norm> <side> <n> <hashes, 8 hex each> */
+/* b <id> <mask> <side> <n> <hashes, 8 hex each> */
 static int strs_row_block(struct artefact *a, char *p)
 {
-	unsigned long v[4];
+	unsigned long v[3];
 	char *hex, *tab;
 	uint32_t k;
 	struct kof_mutation_block *nb;
 	uint32_t *np;
 
-	if (strs_cols(&p, v, 4u) != 4u)
+	if (strs_cols(&p, v, 3u) != 3u)
 		return 1;
 	tab = strchr(p, '\t');
 	if (!tab)
@@ -403,7 +403,7 @@ static int strs_row_block(struct artefact *a, char *p)
 		unsigned long n_hash = strtoul(p, 0, 10);
 
 		hex = tab + 1;
-		if (n_hash < KGENOME_MUTATION_MIN_HASH ||
+		if (n_hash < kgenome_mutation_block_min((uint32_t)v[1]) ||
 		    n_hash > KOF_MUTATION_MAX_HASH ||
 		    strlen(hex) < n_hash * 8u)
 			return 0;
@@ -422,8 +422,7 @@ static int strs_row_block(struct artefact *a, char *p)
 		nb->first_hash = a->n_pool;
 		nb->n_hash = (uint32_t)n_hash;
 		nb->scan_mask = (uint32_t)v[1];
-		nb->norm = (uint8_t)v[2];
-		nb->side = (uint8_t)v[3];
+		nb->side = (uint8_t)v[2];
 		for (k = 0; k < n_hash; k++) {
 			char one[9];
 

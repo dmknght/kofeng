@@ -352,7 +352,7 @@ static void t_debug(void)
 	KOF_TIME_BEGIN(KOF_T_PARSE);
 	KOF_TIME_END(KOF_T_PARSE);
 	KOF_TIME_REPORT();
-	CK(KOF_TRACING == 0 && KOF_T_COUNT == 13 && KOF_T_DB_LOAD == 0, "time slots");
+	CK(KOF_TRACING == 0 && KOF_T_COUNT == 16 && KOF_T_DB_LOAD == 0, "time slots");
 	CK(KOFENG_BUILD >= 0u, "the build stamp has a default");
 }
 

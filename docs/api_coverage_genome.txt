@@ -152,7 +152,6 @@ celllysis/mutation.h               macro  KGENOME_MUTATION_MINHASH_K            
 celllysis/mutation.h               macro  KGENOME_MUTATION_SEG_AVG                     UNTESTED                           api_constants.c
 celllysis/mutation.h               type   struct kgenome_mtn_win                       UNTESTED                           api_celllysis.c
 celllysis/mutation.h               type   struct kgenome_mutation_req                  mutation_units.c                   hostile_analysis.c
-celllysis/mutation_window.h        func   kgenome_mutation_byte                        mutation_minhash.c, mutation_pool.c api_celllysis.c
 celllysis/mutation_window.h        func   kgenome_mutation_drop_weight                 UNTESTED                           api_celllysis.c
 celllysis/mutation_window.h        func   kgenome_mutation_flat                        mutation_minhash.c, mutation_pool.c api_celllysis.c
 celllysis/mutation_window.h        func   kgenome_mutation_mix                         mutation_minhash.c, mutation_pool.c api_celllysis.c
@@ -161,7 +160,6 @@ celllysis/mutation_window.h        macro  KGENOME_MUTATION_MIN_HASH             
 celllysis/mutation_window.h        macro  KGENOME_MUTATION_MIX                         UNTESTED                           api_constants.c
 celllysis/mutation_window.h        macro  KGENOME_MUTATION_NG                          mutation_minhash.c, mutation_pool.c api_celllysis.c, api_constants.c, hostile_analysis.c
 celllysis/mutation_window.h        macro  KGENOME_MUTATION_WINDOW_H                    UNTESTED                           (include guard: tools/check_layers.py)
-celllysis/mutation_window.h        type   enum kgenome_mutation_norm                   UNTESTED                           (through its members)
 celllysis/mutation_window.h        type   enum kgenome_mutation_side                   mutation_match.c                   -
 celllysis/nucleo.h                 func   kgenome_nucleo_abi_of                        UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_arg_is_flags                  UNTESTED                           api_celllysis.c
@@ -255,17 +253,12 @@ genotype/arm32/arm32_common.h      func   kgenome_arm_sext                      
 genotype/arm32/arm32_common.h      macro  KGENOME_GENOTYPE_ARM32_COMMON_H              UNTESTED                           (include guard: tools/check_layers.py)
 genotype/arm32/arm32_ids.h         macro  KGENOME_GENOTYPE_ARM32_IDS_H                 UNTESTED                           (include guard: tools/check_layers.py)
 genotype/arm32/arm32_ids.h         type   enum kgenome_arm32_id                        UNTESTED                           (through its members)
-genotype/arm32/arm32_table.h       func   kgenome_arm32_build                          UNTESTED                           api_decoders.c
-genotype/arm32/arm32_table.h       func   kgenome_arm32_ensure                         UNTESTED                           api_decoders.c
 genotype/arm32/arm32_table.h       func   kgenome_arm32_key                            UNTESTED                           api_decoders.c
 genotype/arm32/arm32_table.h       func   kgenome_arm32_key12                          UNTESTED                           api_decoders.c
-genotype/arm32/arm32_table.h       func   kgenome_thumb_build                          UNTESTED                           api_decoders.c
-genotype/arm32/arm32_table.h       func   kgenome_thumb_ensure                         UNTESTED                           api_decoders.c
 genotype/arm32/arm32_table.h       func   kgenome_thumb_narrow_key                     UNTESTED                           api_decoders.c
 genotype/arm32/arm32_table.h       func   kgenome_thumb_wide_key                       UNTESTED                           api_decoders.c
 genotype/arm32/arm32_table.h       macro  KGENOME_ARM32_DIRECT                         UNTESTED                           api_constants.c
 genotype/arm32/arm32_table.h       macro  KGENOME_ARM32_KEYS                           UNTESTED                           api_constants.c, api_decoders.c
-genotype/arm32/arm32_table.h       macro  KGENOME_ARM32_UNLIKELY                       UNTESTED                           api_constants.c
 genotype/arm32/arm32_table.h       macro  KGENOME_GENOTYPE_ARM32_TABLE_H               UNTESTED                           (include guard: tools/check_layers.py)
 genotype/arm32/arm32_table.h       macro  KGENOME_THUMB_NARROW_KEYS                    UNTESTED                           api_constants.c, api_decoders.c
 genotype/arm32/arm32_table.h       macro  KGENOME_THUMB_WIDE_KEYS                      UNTESTED                           api_constants.c, api_decoders.c
@@ -769,7 +762,6 @@ phenotype/emu.h                    macro  KGENOME_EMU_ITRACE_MAX                
 phenotype/emu.h                    macro  KGENOME_EMU_MAX_SNAP                         emu_limits.c, silent_loss_genome.c api_constants.c, api_emu.c
 phenotype/emu.h                    macro  KGENOME_EMU_MAX_VMA                          silent_loss_genome.c               api_constants.c, hostile_emu.c
 phenotype/emu.h                    macro  KGENOME_EMU_PAGE                             emu_limits.c, kgenome_header.c     api_constants.c, api_emu.c
-phenotype/emu.h                    macro  KGENOME_EMU_QUIET                            UNTESTED                           api_constants.c
 phenotype/emu.h                    macro  KGENOME_EMU_R                                budget_status.c, emu_core.c, emu_delay_loop.c... api_celllysis.c, api_constants.c, api_emu.c, hostile_emu.c...
 phenotype/emu.h                    macro  KGENOME_EMU_SAY                              UNTESTED                           api_constants.c
 phenotype/emu.h                    macro  KGENOME_EMU_SHIM_MAX                         emu_decl.c, silent_loss_genome.c   api_constants.c, api_emu.c, api_unpack.c

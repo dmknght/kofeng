@@ -339,10 +339,6 @@ static int child_close(const struct kof_obj_ctx *ctx)
  * 1. A close that really cannot make a child (quota, allocation) leaves the latch
  * unset and answers 0 as before.
  */
-/* KNOWN DEFECT WP2-D13 (2026-10-25, Inference) [sev M]: oc_child (kunp_rcstruct_done) answers 0 for more than "the host will take no more", and bases/decomp/lha.c and arj.c `break` on that 0.
- * Trigger: an lha (-lh6-) or arj (method 1) member that cannot be decoded, first in the archive. Effect: the module walk ends there, the stored members after it
- * are not opened (0 of 2; zip and rar go on) and the root reads DAMAGED. The exact path that answers 0 here is read, not traced; the loops are in the modules (not annotated).
- * Reproducer: tests/unit/ctr_liars.c coded_first (green until fixed). Fix: make the module loops end only on the host's refusal (sticky stop), and go on after a failed member. */
 int oc_child(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -952,6 +948,17 @@ void kof_scan_sink_discard(struct kof_scanner *sc)
 }
 
 /*
+ * A structure that lies, said: the parse found a member or a directory that points past
+ * the end of the file (or the like), so what the object holds is less than it declares.
+ * The result reads KOF_BROKEN_DAMAGED when nothing earlier explains it. A report and no
+ * control flow (see oc_scan_limit); no bound fired, so limit_hits does not move.
+ */
+void oc_scan_damaged(struct kof_scanner *sc)
+{
+	sc->obj.open.damaged = 1;
+}
+
+/*
  * A bound that cut evidence of THIS object, said and counted.
  *
  * For a limit that exists against a hostile input and was met by one the engine
@@ -969,7 +976,8 @@ void oc_scan_limit_at(struct kof_scanner *sc, const char *file, int line)
 {
 	KOF_TRACE("[cut] %s:%d limit\n", file, line);
 	(void)file; (void)line;
-	if (!sc->obj.open.cut)
+	/* Counted once for the object: not again when a sticky stop already reads LIMIT. */
+	if (!sc->obj.open.cut && sc->obj.open.broken != KOF_BROKEN_LIMIT)
 		sc->st.limit_hits++;
 	sc->obj.open.cut = 1;
 }

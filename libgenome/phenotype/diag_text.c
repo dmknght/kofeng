@@ -158,9 +158,7 @@ static int is_bare_var(const struct kgenome_dtx *x, uint32_t off, uint32_t len)
  * a block as often as a literal, and what is inside a literal ends at a comma. The token is dropped again when the next one is such a
  * continuation (kgenome_dtx_sink).
  */
-/* KNOWN DEFECT REV-D4 (2026-10-24, R) [sev L]: ends_statement decides vb's "_" continuation again (a one-byte I/V token "_" before the break) while the lexer already decided it in kgenome_textual_vb_cont.
- * Trigger: `a = b _ 'note` (a "_" before a comment is no continuation for the lexer) or "_" closed up on a name. Effect: the graph row may keep a statement open that the lexer ended, or end one it continued.
- * Reproducer: none yet (needs a red test over a vbs/aspx text with "_ '"). Fix: read the lexer's decision (a span flag for the continuation) and delete the byte test here. */
+/* A vb "_" ends a line that goes on only where the LEXER says it does (kgenome_textual_vb_cont: a whole-word "_" that is the last thing on its line): one decision, read here. */
 static int ends_statement(const struct kgenome_dtx *x)
 {
 	const struct kgenome_dtx_tok *t;
@@ -172,7 +170,7 @@ static int ends_statement(const struct kgenome_dtx *x)
 		return 0;
 	if (t->k == 'P')
 		return !kof_byte_in_set(x->in[t->off], "+-*/%=<>&|^,.([{!?:~\\");
-	return !(x->lang->cont_us && (t->k == 'I' || t->k == 'V') && t->len == 1u && x->in[t->off] == '_');
+	return !(x->lang->cont_us && (t->k == 'I' || t->k == 'V') && t->len == 1u && kgenome_textual_vb_cont(x->in, x->n_in, t->off));
 }
 
 int kgenome_dtx_push_term(struct kgenome_dtx *x, uint32_t off)

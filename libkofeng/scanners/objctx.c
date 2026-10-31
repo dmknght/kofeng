@@ -223,6 +223,18 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 	return 0;
 }
 
+/* Resolve the mask into the object's extents and let the matcher answer: the part of a search that is the same for a
+ * module and for a diagnose. `slot` is the memo cell, or KOF_MEMO_NONE. */
+static int find_extents(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, struct kof_ext_buf *eb,
+			uint32_t mask, const uint8_t *bytes, const struct kof_str_ent *e, uint32_t slot)
+{
+	uint32_t n = kof_scan_resolve_range(ctx, mask, eb);
+
+	return (kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
+			.slot = slot, .ext = eb->v, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
+			.answered = &sc->st.gram_answers }));
+}
+
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
@@ -231,7 +243,6 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	const uint8_t *bytes;
 	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 0);
-	uint32_t n;
 
 	uint32_t mask, slot, uid;
 
@@ -298,11 +309,7 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		mask &= ~KOF_SCAN_SYM;
 		if (!mask)
 			return 0;
-		n = kof_scan_resolve_range(ctx, mask, eb);
-		return (kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
-				.slot = KOF_MEMO_NONE, .ext = eb->v, .next = n,
-				.pat = { bytes, e->len, e->kind, e->flags },
-				.answered = &sc->st.gram_answers }));
+		return find_extents(sc, ctx, eb, mask, bytes, e, KOF_MEMO_NONE);
 	}
 
 	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
@@ -334,10 +341,30 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		}
 	}
 
-	n = kof_scan_resolve_range(ctx, mask, eb);
-	return (kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
-			.slot = slot, .ext = eb->v, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
-			.answered = &sc->st.gram_answers }));
+	return find_extents(sc, ctx, eb, mask, bytes, e, slot);
+}
+
+/*
+ * ONE MARKER IN ONE MASK, for a caller that is not a module: a diagnose's matcher (objctx_diag_form.c) asks what a
+ * module's kof_find_str asks, of the same extents and the same matcher, and the symbol halves go through the same
+ * search - not a second copy of "resolve the range, then look". No memo cell: a marker a diagnose declares has no id in
+ * the packs' tables, so the answer is kept by the caller for the object (once per matcher).
+ */
+int oc_find_str_mask(const struct kof_obj_ctx *ctx, uint32_t mask, const struct kof_str_ent *e,
+		     const uint8_t *bytes)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !e || !bytes)
+		return 0;
+	if (mask & KOF_SCAN_SYM) {
+		if (c_find_str_sym(ctx, mask, bytes, e))
+			return 1;
+		mask &= ~KOF_SCAN_SYM;
+		if (!mask)
+			return 0;
+	}
+	return find_extents(sc, ctx, kof_scan_ext_buf(sc, 0), mask, bytes, e, KOF_MEMO_NONE);
 }
 
 /*
@@ -407,18 +434,19 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
  * that met an unsupported coding stops producing, and the budget it then fails to
  * spend is a consequence rather than a second problem.
  */
-/* KNOWN DEFECT WP5-ENG-1 (2026-10-25, R) [sev L]: oc_scan_broken_at records a sticky KOF_BROKEN_LIMIT but never counts kof_stats.limit_hits (objctx_child.c and objctx_child_sink.c do).
- * Trigger: a chain over the resident allowance (PDF /ASCII85Decode + /FlateDecode of 1 MiB under max_resident_bytes 1.5-2 MiB). Effect: the root reads LIMIT, limit_hits stays 0,
- * while kofresult.h says it counts the object (same family as WP2-D7). Reproducer: tests/unit/suite_decomp_objects.c `ceiling` (accepts either).
- * Fix: count once on the first sticky LIMIT (if (!open.broken && reason == KOF_BROKEN_LIMIT) st.limit_hits++), or reword kofresult.h. */
 void oc_scan_broken_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line)
 {
 	KOF_TRACE("[cut] %s:%d broken=%u\n", file, line, (unsigned)reason);
 	(void)file; (void)line;
+	if (reason == KOF_BROKEN_LIMIT) {
+		/* The object reads LIMIT from here, counted once: not when a cut (oc_scan_limit)
+		 * or an earlier reason already made it say something. */
+		if (!sc->obj.open.broken && !sc->obj.open.cut)
+			sc->st.limit_hits++;
+		sc->obj.open.stop = 1;
+	}
 	if (!sc->obj.open.broken)
 		sc->obj.open.broken = reason;
-	if (reason == KOF_BROKEN_LIMIT)
-		sc->obj.open.stop = 1;
 }
 
 /*

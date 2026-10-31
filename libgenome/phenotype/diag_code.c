@@ -200,10 +200,13 @@ uint64_t kgenome_diag_extent(const struct kgenome_obj *obj, uint32_t i, uint64_t
  * anything else - a payload lifted out of a variable has no header and is all
  * code. Never zero for a non-empty object.
  */
+#define DIAG_UNION_MAX 256u
+
 uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 {
+	struct { uint64_t at, len; } ext[DIAG_UNION_MAX];
 	uint64_t total = 0;
-	uint32_t i, n;
+	uint32_t i, n, m = 0;
 	int valid;
 
 	if (!obj || !size)
@@ -219,15 +222,38 @@ uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 	} else {
 		return size;
 	}
+	/* The UNION of the extents: segments that overlap (a hostile header can put three over the same
+	 * kilobyte) count a byte once, so the bound a budget scales from never exceeds the object. Past
+	 * DIAG_UNION_MAX extents the rest are summed and the total is capped at the object's size. */
 	for (i = 0, n = valid ? kgenome_diag_extent_count(obj) : 0; i < n; i++) {
-		uint64_t at;
+		uint64_t at, len = kgenome_diag_extent(obj, i, size, &at);
 
-		total += kgenome_diag_extent(obj, i, size, &at);
+		if (!len)
+			continue;
+		if (m < DIAG_UNION_MAX) {
+			uint32_t j = m++;
+
+			while (j && ext[j - 1u].at > at) {     /* insertion sort by start */
+				ext[j] = ext[j - 1u];
+				j--;
+			}
+			ext[j].at = at;
+			ext[j].len = len;
+		} else {
+			total += len;
+		}
 	}
-	/* KNOWN DEFECT WP9-F1 (2026-10-25, M) [sev M]: kgenome_diag_code_bytes returns the SUM of the executable
-	 * extents, so overlapping segments count twice. Trigger: 3 PT_LOAD RX over the same 1 KiB. Effect:
-	 * code_bytes 3 KiB for a 1 KiB file; max_insn (64 x code) and max_nodes (code/8) follow it, so a hostile
-	 * file buys a bound larger than its size. Reproducer: tests/lib/genome/diag_known_misses.c f1 (green until
-	 * fixed). Fix: `return total ? (total < size ? total : size) : size;` (better: the union of the extents). */
+	for (i = 0; i < m; i++) {
+		uint64_t lo = ext[i].at, hi = lo + ext[i].len;
+
+		while (i + 1u < m && ext[i + 1u].at <= hi) {
+			i++;
+			if (ext[i].at + ext[i].len > hi)
+				hi = ext[i].at + ext[i].len;
+		}
+		total += hi - lo;
+	}
+	if (total > size)
+		total = size;
 	return total ? total : size;
 }

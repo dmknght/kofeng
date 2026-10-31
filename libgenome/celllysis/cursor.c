@@ -57,14 +57,20 @@ static uint64_t off_to_va(struct kgenome_cell_cur *k, const struct kgenome_cell_
 static uint64_t va_to_off(const struct kgenome_cell_cur *k,
 			  const struct kgenome_cell_space *sp, uint64_t va)
 {
+	uint64_t off = KGENOME_BROKEN;
+
 	if (k->seg_ok) {
 		uint64_t lo = k->seg.lo + (uint64_t)k->seg.delta;
 		uint64_t hi = k->seg.hi + (uint64_t)k->seg.delta;
 
 		if (va >= lo && va < hi)
-			return va - (uint64_t)k->seg.delta;
+			off = va - (uint64_t)k->seg.delta;
 	}
-	return sp->off_of_va ? sp->off_of_va(sp->priv, va) : KGENOME_BROKEN;
+	if (off == KGENOME_BROKEN && sp->off_of_va)
+		off = sp->off_of_va(sp->priv, va);
+	/* BROKEN means "outside the object" (cell.h): a segment that says it is longer than the file,
+	 * or an ELF with no program header (one flat space), must not name a byte past the buffer. */
+	return off < sp->size ? off : KGENOME_BROKEN;
 }
 
 /* ---- the cursor ---------------------------------------------------------- */
@@ -160,12 +166,6 @@ static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 	out->at = k->at;
 	n = out->n_op;
 	if (out->target_va != KGENOME_BROKEN)
-		/* KNOWN DEFECT WP9-F4 (2026-10-25, M) [sev M]: kgenome_cell_next stores va_to_off() as insn.target without
-		 * clamping it to the buffer (second call site likewise; space.c elf_seg gives a flat space [0, 2^64) to an
-		 * ELF with no program header). Trigger: a segment size past the file (or no program header) and a branch
-		 * landing past the buffer. Effect: target is a file offset past the object and not KGENOME_BROKEN (cell.h);
-		 * a consumer indexing by it reads past the object. Reproducer: tests/lib/genome/diag_known_misses.c f4.
-		 * Fix: after the assignment clamp `target >= sp->size` to KGENOME_BROKEN. */
 		out->target = va_to_off(k, sp, out->target_va);
 	return 1;
 }
@@ -177,25 +177,37 @@ static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
  * x86's `call L; db "text"; L: pop reg` is a call that never returns to the call: the callee takes its own
  * return address off the stack and carries on in the same function, so nothing was overwritten (the same
  * decision the sweep's callee reader makes, CALLEE_GETPC). One decode of the callee's first instruction
- * answers it, asked only when the map holds a register a call could take away and only for a direct call.
+ * answers it, asked for a direct call (an indirect one has no callee to read) - and the same answer says whether the
+ * call's pushed return address is kept for the walked function's next `pop` (call_plain).
  */
-static uint16_t call_keeps(const struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
-			   const struct kgenome_cell_insn *call)
+/* CONSOLIDATION GETPC-1 (2026-10-30, R): KEEP (will be the single "call next / callee begins with pop" test, one decode of the callee's first
+ * instruction; 1 caller kgenome_cell_next). x86 only: ARM `bl .+4` / MIPS `bal` get-pc idioms are not seen (Inference). Better logic here than
+ * diag_origin.c: it also says whether the pushed return address is kept for a later pop (call_plain), which the origin map does not model. Prove with:
+ * tests/lib/genome cell rows for call $+5; pop reg. */
+static void call_facts(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		       const struct kgenome_cell_insn *call)
 {
 	const uint16_t keeps = kgenome_cell_call_keeps(sp->arch);
 	struct kgenome_cell_cur t;
 	struct kgenome_cell_insn first;
 
-	if (!(k->st.known & (uint16_t)~keeps) || (call->flags & KGENOME_CELL_F_INDIRECT) ||
-	    call->target == KGENOME_BROKEN || call->target == call->at + call->len ||   /* `call next` is not a call at all */
+	k->st.call_keeps = keeps;
+	k->st.call_plain = 1;
+	if (call->target == call->at + call->len)       /* `call next` is not a call at all: its push is the point */
+		k->st.call_plain = 0;
+	if ((call->flags & KGENOME_CELL_F_INDIRECT) || call->target == KGENOME_BROKEN ||
+	    call->target == call->at + call->len ||
 	    (sp->arch != KGENOME_ARCH_X86 && sp->arch != KGENOME_ARCH_X86_64))
-		return keeps;
+		return;
+	/* One decode of the callee's first instruction answers both questions: nothing was overwritten
+	 * (keeps every register) and the pushed address is kept for the pop (not a plain call). */
 	memset(&t, 0, sizeof t);
 	t.at = call->target;
 	t.open = 1;
-	if (cell_fetch(&t, sp, &first) && first.op == KGENOME_CELL_POP)
-		return 0xffffu;
-	return keeps;
+	if (cell_fetch(&t, sp, &first) && first.op == KGENOME_CELL_POP) {
+		k->st.call_keeps = 0xffffu;
+		k->st.call_plain = 0;
+	}
 }
 
 int kgenome_cell_step(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
@@ -239,7 +251,7 @@ int kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 	}
 
 	if (out->op == KGENOME_CELL_CALL)
-		k->st.call_keeps = call_keeps(k, sp, out);
+		call_facts(k, sp, out);
 	kgenome_cell_state_track(&k->st, out);
 	k->at += out->len;
 	return 1;

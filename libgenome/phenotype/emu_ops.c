@@ -252,7 +252,7 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	 * with STATUS_INTEGER_DIVIDE_BY_ZERO or STATUS_INTEGER_OVERFLOW, a guest with none - and
 	 * every ELF guest, because no signal is delivered here - ends the run with a FAULT stop
 	 * that names "divzero" or "divovf"). The 64-bit divide takes the full RDX:RAX dividend
-	 * (kgenome_emu_div128) and does not read it as a 64-bit one. tests/lib/genome/diff_div.c
+	 * (div128 in emu_state.c) and does not read it as a 64-bit one. tests/lib/genome/diff_div.c
 	 * runs the cases on the host CPU and compares, SIGFPE included.
 	 */
 	case KGENOME_X86_I_DIV: case KGENOME_X86_I_IDIV: {

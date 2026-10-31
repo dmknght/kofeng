@@ -245,6 +245,27 @@ static void read_zip64(struct zw *s, uint64_t eocd)
  * where the central directory said. Zero is unambiguous: offset zero is where a
  * local header itself would be, so no entry's DATA can legitimately start there.
  */
+/* How many members whose claim runs past the file are given an exact end (zip_next_start). */
+#define ZIP_LIAR_EXACT 16u
+
+/* Where the next structure begins after `from`: the nearest local header or the directory
+ * that starts after it, or the end of the file. One pass over the entries. */
+static uint64_t zip_next_start(const struct kof_zip_info *z, uint64_t n, uint64_t from)
+{
+	uint64_t end = n;
+	uint32_t i;
+
+	if (z->cd_off > from && z->cd_off < end)
+		end = z->cd_off;
+	for (i = 0; i < z->n_entries; i++) {
+		uint64_t lo = z->entry[i].local_off;
+
+		if (lo > from && lo < end)
+			end = lo;
+	}
+	return end;
+}
+
 static uint64_t place_entry(struct zw *s, struct kof_zip_entry *e)
 {
 	kof_buf f = s->f;
@@ -304,13 +325,58 @@ KOF_RUNS_RESOLVER(zip, struct kof_zip_info, zip_cls_bit, KOF_SCAN_ZIP_UNCLAIMED)
 
 /* ---- the parse ---------------------------------------------------------------- */
 
+/*
+ * AN ARCHIVE WITH BYTES IN FRONT OF IT (an SFX stub, a junk prefix, a carve): no signature at
+ * offset 0, but an end record at the end that reaches the end of the file exactly and a
+ * central directory where it says (or where its size puts it, for a shifted archive: see
+ * the base_delta in kof_zip_parse). Both checks, because "PK\5\6" alone is four bytes any
+ * file may hold; with them a file that is not an archive does not pass. The probe is
+ * the same window find_eocd reads (the comment is at most 64 KiB), walked with memchr on
+ * the one byte the record's tail has, so a file with no such byte costs one pass of a vector
+ * search (BE-9: unzip, 7z and python zipfile list such a file, and its members were never
+ * scanned with nothing said).
+ */
+static int zip_tail_probe(kof_buf f)
+{
+	uint64_t span, start, lo, len, best = UINT64_MAX;
+	const uint8_t *p, *end;
+
+	if (f.n < EOCD_LEN)
+		return 0;
+	span = f.n < KOF_ZIP_EOCD_SEARCH ? f.n : KOF_ZIP_EOCD_SEARCH;
+	start = f.n - span;
+	lo = start + 2u;                      /* index of the record's third byte, the first candidate */
+	len = f.n - EOCD_LEN + 1u - start;    /* candidates: at = start .. n - EOCD_LEN */
+	p = f.p + lo;
+	end = p + len;
+	while (p < end && (p = memchr(p, 5, (size_t)(end - p))) != NULL) {
+		uint64_t at = (uint64_t)(p - f.p) - 2u;
+
+		if (kof_rd32_or0(f, at) == SIG_EOCD &&
+		    at + EOCD_LEN + kof_rd16_or0(f, at + E_CMT_LEN) == f.n)
+			best = at;              /* the last consistent one, as find_eocd takes it */
+		p++;
+	}
+	if (best != UINT64_MAX) {
+		uint64_t cd_size = kof_rd32_or0(f, best + E_CD_SIZE);
+		uint64_t cd_off = kof_rd32_or0(f, best + E_CD_OFF);
+
+		if (cd_size && cd_size <= best && kof_rd32_or0(f, best - cd_size) == SIG_CENTRAL)
+			return 1;
+		return cd_off < f.n && kof_rd32_or0(f, cd_off) == SIG_CENTRAL;
+	}
+	return 0;
+}
+
 int kof_zip_sniff(kof_buf file)
 {
 	uint32_t sig;
 
 	if (file.n < 4 || !kof_rd_u32(file, 0, 0, &sig))
 		return 0;
-	return sig == SIG_LOCAL || sig == SIG_EOCD || sig == SIG_EOCD64;
+	if (sig == SIG_LOCAL || sig == SIG_EOCD || sig == SIG_EOCD64)
+		return 1;
+	return zip_tail_probe(file);
 }
 
 void kof_zip_release(struct kof_zip_info *z)
@@ -350,7 +416,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 {
 	struct zw s;
 	uint64_t eocd, at, room, rows_limit;
-	uint32_t i, cap_entry = 0;
+	uint32_t i, cap_entry = 0, n_liars = 0;
 	int full = 0;
 
 	/*
@@ -451,10 +517,6 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		}
 	}
 
-	/* KNOWN DEFECT WP2-D3 (2026-10-24, M) [sev M]: kof_zip_parse opens a zip whose directory offset is past EOF
-	 * as NOTHING (anomaly bit only). Trigger: EOCD offset 0x7ffffff0, or entries that cycle. Effect: rc
-	 * 1, broken 0. Reproducer: tests/unit/ctr_liars.c zip/offset, zip/cycle (row of WP2-D1). Fix: a
-	 * sniffed archive with its directory past EOF sets KOF_BROKEN_DAMAGED. */
 	if (z->cd_off >= file.n) {
 		z->anomalies |= KOF_ZIP_ANOM_CD_PAST_EOF;
 		goto done;
@@ -521,6 +583,10 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 			int64_t lo = (int64_t)kof_rd32_or0(file, at + C_LOCAL_OFF) +
 				     z->base_delta;
 
+			/* KNOWN DEFECT DF-1 (2026-10-30, M) [sev H]: kof_zip_parse: local_off comes from the 32-bit slot only; the per-entry zip64 extra (0x0001) is never read (same sink as HD-1, see HD-1).
+			 * Trigger: an entry whose slots are 0xFFFFFFFF. Effect: local_off lands at 4 GiB + base_delta, no member is opened, the root is reported Damaged.
+			 * Reproducer: /mnt/games/normtest/fix_detacc2_fmt/defects/df_repro.c (prints "DF-1 REPRODUCED").
+			 * Fix: as HD-1, read the 0x0001 extra of the record before this line; the same read gives csize and usize. */
 			e->local_off = lo >= 0 ? (uint64_t)lo : UINT64_MAX;
 		}
 		nlen = kof_rd16_or0(file, at + C_NAME_LEN);
@@ -575,14 +641,17 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		if (!data)
 			continue;
 		e->data_off = data;
-		/* KNOWN DEFECT WP2-D4 (2026-10-24, M) [sev M]: A STORED member claiming more bytes than the file
-		 * holds becomes a child to EOF: the anomaly bit is set but not reported, and the extent is
-		 * not ended at the next header. Trigger: member b (200 bytes) claims more. Effect: a 710 byte
-		 * child holding the next member and the directory. Reproducer: tests/unit/ctr_liars.c
-		 * zip/claimBoth (green until fixed). Fix: end the extent at the next local header or
-		 * directory offset, mark the entry. */
-		if (!kof_in_range(file, data, e->csize))
+		if (!kof_in_range(file, data, e->csize)) {
 			z->anomalies |= KOF_ZIP_ANOM_DATA_PAST_EOF;
+			/* A claim past the end cannot be true: the member's bytes end where the next
+			 * structure starts, not at the end of the file (the sibling's data and the
+			 * directory are not this member's). Work bound, not an evidence bound: the
+			 * exact end costs one pass over the entries, so it is looked for the first
+			 * ZIP_LIAR_EXACT liars; a file of more of them keeps the clip to EOF it had
+			 * (more bytes, never fewer), and the object is DAMAGED either way. */
+			if (n_liars++ < ZIP_LIAR_EXACT)
+				e->csize = zip_next_start(z, file.n, data) - data;
+		}
 		add(&s, data, e->csize,
 		    e->method == KOF_ZIP_M_STORE && !(e->suspicious &
 						      KOF_ZIP_ENT_ENCRYPTED)

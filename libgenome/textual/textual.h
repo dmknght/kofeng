@@ -463,6 +463,10 @@ uint32_t kgenome_textual_cmd_assigns(uint32_t lang, const uint8_t *in, const str
 /* Does the language have command-word rows (a reader of words)? */
 int kgenome_textual_has_words(uint32_t lang);
 
+/* The vb line continuation at `i` ("_", blanks, a line break; "_" a word of its own): its length, or 0.
+ * The lexer, the form (lang row `vb_lines`) and the graph row's end of a statement all ask it, so they cannot disagree on what one is. */
+uint32_t kgenome_textual_vb_cont(const uint8_t *p, uint32_t n, uint32_t i);
+
 /* One argument of a call: its VALUE as bytes (a number is its decimal text, which is how a program writes it). */
 struct kgenome_textual_arg {
 	const uint8_t *p;

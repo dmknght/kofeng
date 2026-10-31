@@ -8,6 +8,22 @@
  * RETURNS strings to draw and the geometry (struct kv_dd_geo). draw_prop (kv_page.c) only places them on the
  * screen and keeps the geometry in the view; a click, the wheel, a drag and the copy read that geometry and
  * nothing else. Nothing here knows what a page says (that is kv_dashdata.c) and nothing here reads a view.
+ *
+ * LATER, NOT NOW (owner, 2026-10-28; first the features are finished, then the code is restructured and improved in one go).
+ * What makes the dialogs (the dashboard, Manage > Pathogens and its small dialogs, the dframe dialogs Find / Go to / Decode)
+ * easy to test and to fuzz, and lets another front end inherit them:
+ *   1. A screen dump for developers: an argument `--dump-screen <file>` (no getenv; the build-choice variant would be
+ *      `make DEBUG=1`, undecided) writes each frame as plain text - the character grid, a style grid (one letter per cell:
+ *      b bold, r reverse, d dim, colours) and the list of hit zones. A small decoder turns the escape stream of struct out
+ *      into the cell grid, so no drawing code changes. Uses: reading a frame without a terminal, golden-file tests,
+ *      the oracle of the fuzz below, replacing the throwaway pyte scripts.
+ *   2. The input as a parameter: a struct kv_event (key, mouse press / release / drag / wheel with the modifiers, resize)
+ *      handed to the handlers, which return the actions, instead of reading g_mx / g_my / g_cols / g_rows. The rest of the
+ *      viewer keeps a thin adapter at the boundary that packs the globals into an event, so dframe users that are not
+ *      converted yet (Find, Go to, Decode) are not rewritten at the same time.
+ *   3. A fuzz adapter over event streams and screen sizes 1..200 in both directions, checked on the dump grid: no crash, no
+ *      write outside the grid, every zone inside the screen and not overlapping another, every button reachable, no leak.
+ * Start with Pathogens (it has the data layer already), then the dashboard, then the dframe dialogs.
  */
 #ifndef KV_DASH_DIALOG_H
 #define KV_DASH_DIALOG_H
@@ -67,5 +83,36 @@ uint32_t kv_dd_bar_offset(const struct kv_dd_in *in, const struct kv_dd_geo *g, 
 /* The tab under a screen point, or -1. */
 int kv_dd_tab_at(const struct kv_dd_geo *g, int y, int x);
 int kv_dd_close_at(const struct kv_dd_geo *g, int y, int x);
+
+/* ---- what the catalog dialogs (Manage > Pathogens, Manage > Syndromes) share: the content size and the bottom row of buttons ---- */
+
+/* The size a dialog needs for `n_row` table rows whose widest line is `widest` columns: never narrower than the button row
+ * of `add_label`, `lim->min_w` or shorter than `lim->min_h`, never past `lim->max_w` / `lim->max_h` (the table scrolls sideways and down
+ * past them: a long cell must never make the box overflow the screen). Adds the frame, the margin and the scroll bar column. */
+struct kv_dd_limits {
+	int min_w, min_h;       /* content width and box height the dialog is never smaller than */
+	int max_w, max_h;       /* the box is never bigger than this, whatever the content holds */
+};
+/* The limits both catalog dialogs use: 69 columns of content (75 with the frame: the bottom rule carries a refusal of 32 characters and the
+ * count; about one and a half times the first size, owner), never shorter than 12 rows, never past 100 x 32 whatever a cell holds. */
+#define KV_DD_CATALOG_WIDTH_MAX 100
+#define KV_DD_CATALOG_HEIGHT_MAX 32
+extern const struct kv_dd_limits kv_dd_catalog_limits;
+void kv_dd_content_size(int widest, uint32_t n_row, const char *add_label, const struct kv_dd_limits *lim, int *w, int *h);
+
+/* The buttons of the last body row: [ <add_label> ] at the left, [ Save ] and [ Discard ] at the right. Save and Discard are enabled
+ * exactly when `dirty`; otherwise they are drawn GREYED and kv_dd_btn_at never answers them. One table serves the drawing and the hit test. */
+enum kv_dd_btn_id { KV_DD_BTN_ADD = 0, KV_DD_BTN_SAVE, KV_DD_BTN_DISCARD, KV_DD_BTN_COUNT };
+struct kv_dd_btn {
+	enum kv_dd_btn_id id;
+	const char *label;
+	int y, x0, x1;
+	int enabled;
+};
+/* Fills `out` left to right; returns how many fit in the box (all three, or only Add, or none). `add_label` is the caller's (it is
+ * not in `out` copied: it must outlive the buttons). */
+uint32_t kv_dd_buttons(const struct kv_dd_geo *g, const char *add_label, int dirty, struct kv_dd_btn out[KV_DD_BTN_COUNT]);
+/* The id of the ENABLED button under a screen point, or -1 (a greyed button answers nothing). */
+int kv_dd_btn_at(const struct kv_dd_btn *b, uint32_t n, int y, int x);
 
 #endif /* KV_DASH_DIALOG_H */

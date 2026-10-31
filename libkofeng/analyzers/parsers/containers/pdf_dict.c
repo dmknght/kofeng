@@ -103,6 +103,9 @@ uint32_t pdf_filter_bit(int i)
  * separately meant twenty three passes over every dictionary in the document to
  * answer a question the first pass already had the position for.
  */
+/* KNOWN DEFECT BE-11 (2026-10-28, Inference) [sev L]: [accuracy] MARKERS sets KOF_PDF_ANOM_OPENACTION on the key /OpenAction whatever its value, and pdf_dict_scan sets NAME_ESCAPED on any #xx; both are ordinary PDF syntax (a destination array, /Preformatted#20Text).
+ * Trigger: a plain LibreOffice PDF (`/OpenAction[1 0 R /XYZ null null 0]`): anomalies OPENACTION LENGTH_INDIR NAME_ESCAPED (M). Effect: three benign documents bits read as evidence; whether a rule or heuristic weighs them is not measured.
+ * Reproducer: kofexaminer --no-color repro/be11_libreoffice.pdf. Fix: set OPENACTION only for an action dictionary (/S /JavaScript, /Launch, ...) or a reference to one, and keep escapes of printable bytes out of the anomaly word. */
 void pdf_dict_scan(kof_buf f, uint64_t off, uint64_t len,
 		      struct kof_pdf_object *o, struct kof_pdf_info *p,
 		      uint64_t *declared_len)

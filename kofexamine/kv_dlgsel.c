@@ -292,24 +292,18 @@ int dlg_at(const struct view *v, int row, int col, int *r, int *c)
  * row selected whole ends in a run of spaces that is part of the layout and
  * not part of what the reader picked out.
  */
-void dlg_copy(struct view *v)
+/*
+ * THE SELECTED TEXT, built once for Copy and for the Decoder's Declare: the rows of the selection joined by newlines, a row's trailing
+ * blanks dropped, a character's every byte (dlg_bx maps a cell to its bytes). Returns 0 when there is no selection, else 1 with
+ * `d` holding the text and `*rows` the rows that were on the screen.
+ */
+static int dlg_sel_build(const struct view *v, struct out *d, int *rows)
 {
-	int r0, c0, r1, c1, r, rows = 0;
-	struct out d = { 0 };
+	int r0, c0, r1, c1, r;
 
+	*rows = 0;
 	if (!dlg_span(v, &r0, &c0, &r1, &c1))
-		return;
-	/* A double or triple click took text that is not all on the screen: while the selection is still exactly that one,
-	 * the copy is that text. */
-	if (v->dlg_full && v->dlg_ar == v->dlg_full_end[0] && v->dlg_ac == v->dlg_full_end[1] &&
-	    v->dlg_br == v->dlg_full_end[2] && v->dlg_bc == v->dlg_full_end[3]) {
-		if (v->dlg_full_n) {
-			copy_osc52(v->dlg_full, v->dlg_full_n);
-			snprintf(v->act_msg, sizeof v->act_msg, "Copied 1 line(s)");
-			v->act_ok = 1;
-		}
-		return;
-	}
+		return 0;
 	for (r = r0; r <= r1; r++) {
 		int row = dlg_row_of_src(v, r);
 		int len, from, to;
@@ -329,14 +323,56 @@ void dlg_copy(struct view *v)
 		while (to > from &&
 		       v->dlg_line[row][v->dlg_bx[row][to - 1]] == ' ')
 			to--;
-		if (rows)
-			out_str(&d, "\n");
+		if (*rows)
+			out_str(d, "\n");
 		if (to > from)
-			out_add(&d, v->dlg_line[row] + v->dlg_bx[row][from],
+			out_add(d, v->dlg_line[row] + v->dlg_bx[row][from],
 				(size_t)(v->dlg_bx[row][to] -
 					 v->dlg_bx[row][from]));
-		rows++;
+		(*rows)++;
 	}
+	return 1;
+}
+
+/* The selected plaintext, as bytes in `out` (NUL ended, at most cap - 1). The same text dlg_copy takes, handed back instead of being
+ * put on the clipboard - so Copy and Declare cannot disagree about what was picked. */
+size_t enc_sel_text(struct view *v, char *out, size_t cap)
+{
+	struct out d = { 0 };
+	int rows;
+	size_t n = 0;
+
+	if (!dlg_sel_build(v, &d, &rows))
+		return 0;
+	if (cap) {
+		n = d.n < cap - 1u ? d.n : cap - 1u;
+		if (n)
+			memcpy(out, d.p, n);
+		out[n] = 0;
+	}
+	free(d.p);
+	return n;
+}
+
+void dlg_copy(struct view *v)
+{
+	int r0, c0, r1, c1, rows = 0;
+	struct out d = { 0 };
+
+	if (!dlg_span(v, &r0, &c0, &r1, &c1))
+		return;
+	/* A double or triple click took text that is not all on the screen: while the selection is still exactly that one,
+	 * the copy is that text. */
+	if (v->dlg_full && v->dlg_ar == v->dlg_full_end[0] && v->dlg_ac == v->dlg_full_end[1] &&
+	    v->dlg_br == v->dlg_full_end[2] && v->dlg_bc == v->dlg_full_end[3]) {
+		if (v->dlg_full_n) {
+			copy_osc52(v->dlg_full, v->dlg_full_n);
+			snprintf(v->act_msg, sizeof v->act_msg, "Copied 1 line(s)");
+			v->act_ok = 1;
+		}
+		return;
+	}
+	(void)dlg_sel_build(v, &d, &rows);
 	if (d.n) {
 		copy_osc52(d.p, d.n);
 		snprintf(v->act_msg, sizeof v->act_msg, "Copied %d line(s)",

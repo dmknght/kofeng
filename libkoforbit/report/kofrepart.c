@@ -71,20 +71,22 @@
  * still reads. Paths that came from the TRACE are never rewritten - those are
  * the sample's own spelling and are evidence.
  */
-static void joinp(char *out, size_t cap, const char *a, const char *b)
+/* 0 when the joined path fits `cap`, -1 when it was cut: a cut path names a
+ * file that is not the one the report would then say was written. */
+static int joinp(char *out, size_t cap, const char *a, const char *b)
 {
 	size_t n = a ? strlen(a) : 0;
+	int w;
 
 	if (!cap)
-		return;
-	if (!n) {
-		snprintf(out, cap, "%s", b ? b : "");
-		return;
-	}
-	if (a[n - 1u] == '/' || a[n - 1u] == '\\')
-		snprintf(out, cap, "%s%s", a, b ? b : "");
+		return -1;
+	if (!n)
+		w = snprintf(out, cap, "%s", b ? b : "");
+	else if (a[n - 1u] == '/' || a[n - 1u] == '\\')
+		w = snprintf(out, cap, "%s%s", a, b ? b : "");
 	else
-		snprintf(out, cap, "%s/%s", a, b ? b : "");
+		w = snprintf(out, cap, "%s/%s", a, b ? b : "");
+	return (w < 0 || (size_t)w >= cap) ? -1 : 0;
 }
 
 /* mkdir that is content with the directory already being there, which is the
@@ -510,12 +512,13 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 	}
 
 	snprintf(rel, sizeof rel, "files/%s", f->bytes.file_sha256);
-	/* KNOWN DEFECT WP12-14 (2026-10-24, M) [sev M]: collect_file cuts the 512-byte
-	 * store path in joinp but the report names the untruncated path.
-	 * Trigger: a report directory of 460 bytes. Effect: the copy is written
-	 * under a shortened name. Reproducer: orbit_store.c case_report_finish.
-	 * Fix: refuse (why_not) when joinp truncates. */
-	joinp(store, sizeof store, dir, rel);
+	/* A store path that does not fit its buffer would be written under a
+	 * shortened name while the report named the whole one: not copied, and
+	 * said so. */
+	if (joinp(store, sizeof store, dir, rel) != 0) {
+		f->bytes.why_not = KOF_FP_WHY_IO;
+		return -1;
+	}
 
 	/*
 	 * ALREADY THERE IS A SUCCESS, not a collision. Content addressing
@@ -576,13 +579,10 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 		 * digest it does not have, which is the one thing content
 		 * addressing must never allow. */
 		remove(store);
-		/* KNOWN DEFECT WP12-15 (2026-10-24, M) [sev L]: collect_file reports
-		 * every failed copy as KOF_FP_WHY_DENIED ("could not be
-		 * opened"). Trigger: ENOSPC on the copy. Effect: a disk failure
-		 * reads as a permission one. Reproducer:
-		 * tests/unit/orbit_store.c (KM_CHECK). Fix: a KOF_FP_WHY_IO
-		 * value, set from errno of the failed write/fclose. */
-		f->bytes.why_not = KOF_FP_WHY_DENIED;
+		/* Not DENIED: the file WAS opened, it is the write that failed
+		 * (a full disk), and a reader sent to look at permissions would
+		 * look in the wrong place. */
+		f->bytes.why_not = KOF_FP_WHY_IO;
 		return -1;
 	}
 
@@ -659,22 +659,24 @@ static void read_written(struct kof_report *r, struct kof_fingerprint *f,
 			 */
 			snprintf(rel, sizeof rel, "evidence/%04u.bin",
 				 (unsigned)seq);
-			joinp(path, sizeof path, dir, rel);
-			/* Sequence-numbered, so the name is predictable and
-			 * the same reasoning applies - see the store above. */
-			out = kof_fopen_new(path);
+			out = joinp(path, sizeof path, dir, rel) == 0 ?
+				kof_fopen_new(path) : NULL;
 			if (out) {
-				/* KNOWN DEFECT WP12-16 (2026-10-24, M) [sev M]:
-				 * read_written ignores the failing fclose of
-				 * evidence/NNNN.bin. Trigger: full disk. Effect:
-				 * the fingerprint names a copy the disk never
-				 * got. Reproducer: orbit_store.c. Fix: check
-				 * fclose. */
-				if (fwrite(buf, 1, (size_t)got, out) == got)
+				/* The copy is stored only when the bytes AND the
+				 * close made it: stdio buffers, so on a full disk
+				 * fwrite succeeds and the failure is the fclose's.
+				 * A file that did not make it is removed, not
+				 * left under a name the report does not carry. */
+				int wrote = fwrite(buf, 1, (size_t)got, out) == got;
+
+				if (fclose(out) != 0)
+					wrote = 0;
+				if (wrote)
 					snprintf(f->bytes.stored,
 						 sizeof f->bytes.stored, "%s",
 						 rel);
-				fclose(out);
+				else
+					remove(path);
 			}
 		}
 	}
@@ -722,10 +724,13 @@ int kof_report_finish(struct kof_report *r, const struct kof_report_stage *st)
 		if (st->collect) {
 			char sub[512];
 
-			joinp(sub, sizeof sub, dir, "files");
-			(void)kofrep_ensure_dir(sub);
-			joinp(sub, sizeof sub, dir, "evidence");
-			(void)kofrep_ensure_dir(sub);
+			/* a cut path would make a directory that is not
+			 * dir's: not made, and the copies then fail with
+			 * KOF_FP_WHY_IO as their own joinp tells */
+			if (joinp(sub, sizeof sub, dir, "files") == 0)
+				(void)kofrep_ensure_dir(sub);
+			if (joinp(sub, sizeof sub, dir, "evidence") == 0)
+				(void)kofrep_ensure_dir(sub);
 		}
 	}
 

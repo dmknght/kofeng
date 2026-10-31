@@ -1,0 +1,51 @@
+# golden dlg_help_about: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*ELF-x64                64608  | 00000000   7F 45 4C 46 02 01 01 00 00 00 00 00 00 00 00 00  .ELF............                                                            ╿
+ 3|  HEADERS                2600  | 00000010   03 00 3E 00 01 00 00 00 B0 33 00 00 00 00 00 00  ..>......3......                                                            │
+ 4|  CODE                  30141  | 00000020   40 00 00 00 00 00 00 00 E0 F4 00 00 00 00 00 00  @...............                                                            │
+ 5|  DATA                  17984  | 00000030   00 00 00 00 40 00 38 00 0B 00 40 00 1E 00 1D 00  ....@.8...@.....                                                            │
+ 6|  NOLOAD                 7331  | 00000040   06 ╭─ About ───────────────────────────────────────────────────── [ Close ]─╮                                                │
+ 7|  UNCLAIMED              6552  | 00000050   40 │ KOFViewer  -  a TUI file examiner built on the KOF engine.             │                                                │
+ 8|  SYM_IMP                1432  | 00000060   68 │                                                                        │                                                │
+ 9|  SYM_EXP                1801  | 00000070   08 │   - a hex view of any region, with the strings a draft declares        │                                                │
+10|  //0:norm ELF-x64      54249  | 00000080   A8 │     lit where they sit                                                 │                                                │
+11|   HEADERS               2600  | 00000090   A8 │   - disassembly beside it, and which code refers to which data         │                                                │
+12|   CODE                 29988  | 000000a0   1C │   - the file's structure as the engine parsed it - headers,            │                                                │
+13|   DATA                 15954  | 000000b0   01 │     sections, regions, symbols                                         │                                                │
+14|   NOLOAD                5557  | 000000c0   00 │   - the unpackers, so a packed or archived payload is examined         │                                                │
+15|   UNCLAIMED                6  | 000000d0   88 │     as an object of its own                                            │                                                │
+16|   SLIB_CODE              140  | 000000e0   00 │   - a diagnose draft, from marked bytes to a preview of its conditions │                                                │
+17|   SLIB_DATA                4  | 000000f0   00 │                                                                        │                                                │
+18|   SYM_IMP               1432  | 00000100   00 │ Versions                                                               │                                                │
+19|   SYM_EXP               1731  | 00000110   BD │   Engine      3.0   build <stamp>                                   │                                                │
+20|                               | 00000120   01 │   Database    2.0   build <stamp>                                   │                                                │
+21|                               | 00000130   00 │   Module ABI  4                                                        │                                                │
+22|                               | 00000140   10 │                                                                        │                                                │
+23|                               | 00000150   00 │ Database                                                               │                                                │
+24|                               | 00000160   E8 │   Diagnoses   8                                                        │                                                │
+25|                               | 00000170   E8 │   Unpackers   40                                                       │                                                │
+26|                               | 00000180   D0 │                                                                        │                                                │
+27|                               | 00000190   02 │ File formats                                                           │                                                │
+28|                               | 000001a0   F8 │   Executable  ELF PE                                                   │                                                │
+29|                               | 000001b0   E0 │   Script      REG AMSI                                                 │                                                │
+30|                               | 000001c0   08 │               Shell PHP Python Perl Ruby JavaScript                    │                                                │
+31|                               | 000001d0   C4 │               PowerShell Lua Tcl ASP ASP.NET JSP Batch                 │                                                │
+32|                               | 000001e0   C4 │               VBScript ColdFusion                                      │                                                │
+33|                               | 000001f0   44 │   Document    DocOLE CHM RTF PDF DocZip                                │                                                │
+34|                               | 00000200   50 │   Archive     Gzip Zip Tar 7z RAR xz ARJ LHA CAB bzip2                 │                                                │
+35|                               | 00000210   34 │   Other       LNK                                                      │                                                │
+36|                               | 00000220   E4 │                                                                        │                                                │
+37|-----------------------------------------------│ Project                                                                │-------------------------------------------------
+38| Family [ Mirai ]  Variant [ A ]  [Well known I│   Author        DmKnght                                                │                       [ Generate ]  [ Discard ]
+39| Format  ELF  [+ Formats]                      │   License       MIT                                                    │
+40| Option  [+ Options]                           │                                                                        │
+41|  Patterns  |  Blocks  |  Graphs               │                                                                        │
+42| Intron      attr       region [r] size  bytes ╰─  Esc closes  ─────────────────────────────────────────────────────────╯
+43| [+ String]
+44| Region  None  [+ Scan region]
+45| Matchers
+46| [+ Matcher]
+47| Conditions
+48| [+ Condition]
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

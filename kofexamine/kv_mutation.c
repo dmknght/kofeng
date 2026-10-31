@@ -79,11 +79,6 @@ uint32_t mtn_at_byte(const struct view *v)
 	return v->ed.dr.n_blk;
 }
 
-static uint32_t mtn_mask(const struct mtn_block *b)
-{
-	return b->anywhere ? (uint32_t)KOF_SCAN_ALL : b->mask;
-}
-
 /*
  * Is this REGION offset inside a lit block, and in what colour.
  *
@@ -118,13 +113,15 @@ const char *mtn_lit_at(const struct view *v, uint64_t rgn_off)
  * hashes cannot be a rule - KGENOME_MUTATION_MIN_HASH is sixteen - and the honest
  * moment to say so is while the selection is still there to widen.
  */
-static int mtn_mark(struct view *v, const uint8_t *base, uint64_t base_n,
+static int mtn_mark(struct view *v, const struct object *o,
 		    uint64_t lo, uint64_t hi, uint32_t mask, const char *rgn,
-		    const char *rgn_enum, uint32_t norm, uint8_t side,
-		    const char *sym)
+		    const char *rgn_enum, uint8_t side,
+		    const char *sym, const struct kgenome_func *first)
 {
 	struct mtn_block *b;
 	uint64_t len;
+	const uint8_t *base = o->buf.p;
+	const uint64_t base_n = o->buf.n;
 
 	if (v->ed.dr.n_blk >= MTN_MAX_BLOCK || lo >= hi || lo >= base_n)
 		return 0;
@@ -145,11 +142,43 @@ static int mtn_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 	snprintf(b->rgn, sizeof b->rgn, "%s", rgn ? rgn : "ALL");
 	snprintf(b->rgn_enum, sizeof b->rgn_enum, "%s",
 		 rgn_enum ? rgn_enum : "KOF_SCAN_ALL");
-	b->norm = (uint8_t)norm;
 	if (sym)
 		snprintf(b->sym, sizeof b->sym, "%s", sym);
-	b->n_hash = kgenome_mutation_minhash(base + lo, len, norm, b->hash);
-	if (b->n_hash < KGENOME_MUTATION_MIN_HASH) {
+	/*
+	 * A FUNCTION UNIT IS A ROW WITH A CFG SIGNATURE, or the reason it has none. The engine signs it (kof_cfgsign_function: the same function
+	 * the scanner's feed calls, with the same floor), and this only keeps what it answered: the keys as the row's hashes, the fold as its id.
+	 * A unit below the floor (or undecodable, or of an architecture with no rules) stays listed and unsigned: `nosig`, no hashes, no id, and
+	 * `why` says which state the engine reported. It is never a duplicate of another row and cannot be ticked into a rule.
+	 */
+	if (first) {
+		b->fn_off = first->off;
+		b->fn_len = first->len;
+	}
+	if (kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG) {
+		struct kof_cfgsign cs;
+		struct kof_cfgsign_req rq;
+
+		memset(&rq, 0, sizeof rq);
+		rq.ctx = &o->ctx;
+		rq.data = o->buf;
+		rq.off = first->off;
+		rq.len = first->len;
+		(void)kof_cfgsign_function(&rq, &cs);
+		b->why = (uint8_t)cs.state;
+		b->fn_blk = cs.sign.n_blk;
+		if (cs.state == KOF_CFGSIGN_SIGNED) {
+			memcpy(b->hash, cs.sign.key, (size_t)cs.sign.n_key * sizeof *cs.sign.key);
+			b->n_hash = cs.sign.n_key;
+			b->id = kof_mutation_fold(b->hash, b->n_hash);
+		} else {
+			b->nosig = 1;
+		}
+		b->colour = (uint8_t)(v->ed.dr.n_blk % MTN_COLOURS);
+		v->ed.dr.n_blk++;
+		return 1;
+	}
+	b->n_hash = kgenome_mutation_unit_minhash(first, base + lo, len, b->hash);
+	if (b->n_hash < kgenome_mutation_block_min(mask)) {
 		/*
 		 * A SPAN THAT CANNOT BE SCORED IS NOT A BLOCK.
 		 *
@@ -348,10 +377,13 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
 	rn = (c->fp && c->fp->region_name && mask != KOF_SCAN_ALL)
 	   ? c->fp->region_name(mask) : NULL;
 	lbl = rn ? kof_region_label(rn) : "ALL";
-	kof_sym_name_at(c->o->sym, c->o->sym_n, first ? first->value : 0,
-		    first ? (int)first->shndx : -1, sym, sizeof sym);
-	mtn_mark(c->v, c->o->buf.p, c->o->buf.n, off, off + len, mask, lbl, rn,
-		 KGENOME_MUTATION_RAW, (uint8_t)side, sym);
+	/* A function is named by the engine: its symbol, or `fcn_<offset>` for one nothing names (kof_func_name). A piece that is not a function has no name. */
+	if (first)
+		(void)kof_func_name(first, c->o->sym, c->o->sym_n, sym, sizeof sym);
+	else
+		sym[0] = 0;
+	mtn_mark(c->v, c->o, off, off + len, mask, lbl, rn,
+		 (uint8_t)side, sym, first);
 	return 0;
 }
 
@@ -486,7 +518,7 @@ void mtn_segment(struct view *v)
 	cut.v = v; cut.o = o; cut.fp = fp;
 	{
 		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
-		const struct kof_scan_cut basis = { mtn_funcs(v, o), &lib, o->fixed, o->n_fixed };
+		const struct kof_scan_cut basis = { .funcs = mtn_funcs(v, o), .lib = &lib, .fixed = o->fixed, .n_fixed = o->n_fixed };
 
 		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, &basis, &eb, mtn_count_cb, &cut);
 		mtn_share(&cut, o->ctx.format);
@@ -519,7 +551,7 @@ void mtn_segment(struct view *v)
  * THROUGH THE ENGINE'S OWN MATCHER, not a second implementation. The set is
  * built from the blocks this view holds and thrown away again - a few hundred
  * hashes, indexed in microseconds - and then fed exactly the way scan.c feeds
- * it: one pass per (region, normalizer) a block asked for, and the region
+ * it: one pass per region a block asked for, and the region
  * resolved by the object's own parse.
  *
  * That matters more than it sounds. A viewer that computed a percentage its own
@@ -570,13 +602,12 @@ void mtn_rescore(struct view *v)
 		v->ed.dr.blk[i].score = 0;
 		/* A block too thin to score is not put in the set: the matcher
 		 * refuses one and would refuse the whole set with it. */
-		if (b->n_hash < KGENOME_MUTATION_MIN_HASH)
+		if (b->n_hash < kgenome_mutation_block_min(b->mask))
 			continue;
 		memset(&blk[nb], 0, sizeof blk[nb]);
 		blk[nb].first_hash = np;
 		blk[nb].n_hash = b->n_hash;
-		blk[nb].scan_mask = mtn_mask(b);
-		blk[nb].norm = b->norm;
+		blk[nb].scan_mask = b->mask;
 		/* And the side, or a library block would be scored here by
 		 * author-code windows and read as a number the engine will
 		 * never reproduce - see enum kgenome_mutation_side. */
@@ -616,13 +647,13 @@ void mtn_rescore(struct view *v)
 		obj_lib_find(o, &slib);
 	{
 		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
-		const struct kof_scan_cut basis = { mtn_funcs(v, o), o->n_rgn ? NULL : &slib,
-						    o->fixed, o->n_fixed };
+		const struct kof_scan_cut basis = { .funcs = mtn_funcs(v, o), .lib = o->n_rgn ? NULL : &slib,
+						    .fixed = o->fixed, .n_fixed = o->n_fixed };
 
 		kof_scan_mutation_feed(&ctx, &o->ctx, o->buf, ~0u, 0, &basis, &eb);
 	}
 	for (i = 0, nb = 0; i < v->ed.dr.n_blk; i++) {
-		if (v->ed.dr.blk[i].n_hash < KGENOME_MUTATION_MIN_HASH)
+		if (v->ed.dr.blk[i].n_hash < kgenome_mutation_block_min(v->ed.dr.blk[i].mask))
 			continue;
 		v->ed.dr.blk[i].score = (uint8_t)kof_mutation_pct(&ctx, nb);
 		nb++;

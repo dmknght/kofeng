@@ -1,10 +1,11 @@
-"""Mutation block table: tick, offset -> bytes, region toggle, hash highlight,
+"""Mutation block table: tick, offset -> bytes, hash highlight,
 folding, scrolling hundreds of rows; and a loaded rule's table."""
 from tui import *
 from dl import *
 
 A = 'mutation'
-BLK = re.compile(r'^\s+\[( |x)\]\s+0x([0-9a-f]{8})\s+([0-9a-f]{8})\s+(\S.*?)?\s+(\d+)\s+(\S+)(?:\s+(\d+)%)?')
+# A function unit is signed by the shape of its function (CFG step 2c): its hash cell is the unit id, or a dash when the engine did not sign it (below the floor).
+BLK = re.compile(r'^\s+\[( |x)\]\s+0x([0-9a-f]{8})\s+([0-9a-f]{8}|-)\s+(\S.*?)?\s+(\d+)\s+(\S+)(?:\s+(\d+)%)?')
 
 
 def blk_rows(v):
@@ -14,6 +15,11 @@ def blk_rows(v):
         if m:
             out.append((y, m.group(1) == 'x', int(m.group(2), 16), m.group(6), m.group(3)))
     return out
+
+
+def signed(v):
+    """The rows that carry a hash: a function unit has none (a dash), a data unit does."""
+    return [b for b in blk_rows(v) if b[4] != '-']
 
 
 def head(v):
@@ -48,6 +54,10 @@ def table_columns_header_and_rows():
         check(len(r) >= 5, 'rows: %d' % len(r))
         for (_, _, a, _, _), (_, _, b, _, _) in zip(r, r[1:]):
             check(b > a, 'rows not sorted by offset')
+        # a function unit is signed whatever its size (the floor of 12 reachable blocks is gone): its row carries a hash; a data unit keeps its hash
+        check(not [b for b in r if b[3] == 'CODE' and b[4] == '-'], 'a function row shows a dash in the hash column')
+        check([b for b in r if b[3] == 'CODE' and re.match(r'[0-9a-f]{8}$', b[4])], 'no function row carries a hash')
+        check([b for b in r if b[3] == 'DATA' and re.match(r'[0-9a-f]{8}$', b[4])], 'no data row with a hash')
 
 
 @case(A)
@@ -59,12 +69,14 @@ def rows_are_aligned_to_header_columns():
         eq(r.index('0x'), h.index('offset'), 'offset column')
         m = BLK.match(r)
         eq(r.index(m.group(3)), h.index('hash'), 'hash column misaligned')
+        d = v.row(signed(v)[0][0])
+        eq(d.index(BLK.match(d).group(3)), h.index('hash'), 'hash column misaligned on a data row')
 
 
 @case(A)
 def tick_toggles_and_updates_status():
     with ko() as v:
-        y = blk_rows(v)[3][0]
+        y = signed(v)[0][0]
         v.click(v.row(y).index('[ ]') + 2, y)
         check(v.row(y).lstrip().startswith('[x]'), 'tick did not take: %r' % v.row(y)[:30])
         v.click(v.row(y).index('[x]') + 2, y)
@@ -76,18 +88,31 @@ def tick_makes_a_find_sim_matcher_and_the_folded_view_lists_the_row():
     # Ticking a block makes its matcher (and unticking drops it): see t_diagnose.
     with ko(rows=70) as v:
         enlarge(v, 10)
-        r = blk_rows(v)
-        y, off, h = r[3][0], r[3][2], r[3][4]
+        r = signed(v)
+        y, off, h = r[0][0], r[0][2], r[0][4]
         v.click(v.row(y).index('[ ]') + 2, y)
         fold_mutation(v)
         t = '\n'.join(v.row(yy) for yy in panel(v))
         check('1 ticked' in t, 'summary does not count the tick')
-        check(re.search(r'1\.\s+find_sim\s+# hash %s' % h, t), 'the tick made no matcher: %r' % t[-300:])
+        check(re.search(r'1\.\s+(?:\S+: )?%s\b' % h, t), 'the tick made no matcher: %r' % t[-300:])
         check(re.search(r'\[x\]\s+0x%08x' % off, t), 'ticked row not listed in the folded view')
 
 
 @case(A)
+def a_function_row_below_the_floor_has_no_signature_and_cannot_be_ticked():
+    # A small function (it was below the floor of 12 reachable blocks, which is gone) is signed: its row shows a hash and ticking it takes.
+    with ko() as v:
+        y = [b for b in blk_rows(v) if b[2] == 0x36bc0][0][0]
+        r = v.row(y)
+        check(re.fullmatch('[0-9a-f]{8}', BLK.match(r).group(3)), 'a small function row must show its hash: %r' % r[:40])
+        v.click(r.index('[ ]') + 2, y)
+        v.pump_quiet()
+        check(v.row(y).lstrip().startswith('[x]'), 'the tick of a small function row did not take: %r' % v.row(y)[:30])
+
+
+@case(A)
 def offset_click_scrolls_hex_to_block():
+    # The offset now LIGHTS the block as well as scrolling to it (hit_plg_light, like the hash); the scroll is what is asserted here.
     with ko() as v:
         y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
         v.click(v.row(y).index('0x00036aa0') + 3, y)
@@ -107,33 +132,32 @@ def offset_click_keeps_the_object_selected():
 
 
 @case(A)
-def region_cell_toggles_scope_of_a_ticked_block():
+def region_cell_is_not_a_control():
+    # The region cell shows where the block was cut from; the engine decides where it is matched, so a press on it changes nothing: the row, the
+    # summary and the screen stay as they were (the table is not rescored), and the other cells of the same row still work.
     with ko() as v:
-        y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
+        for off in (0x3222, 0x36aa0):        # a data block (CODE/DATA cell) and a function row
+            y = [b for b in blk_rows(v) if b[2] == off][0][0]
+            row, fp = v.row(y), v.fingerprint()
+            region = [b for b in blk_rows(v) if b[2] == off][0][3]
+            x = row.index(region, row.index(region) + 0) + 1
+            v.click(x, y)
+            v.pump_quiet()
+            eq(v.row(y), row, 'a press on the region cell changed the row of 0x%x' % off)
+            eq(v.fingerprint(), fp, 'a press on the region cell changed the screen (0x%x)' % off)
+            check('any' not in v.row(y).split()[-3:], 'the region cell turned to any: %r' % v.row(y)[:70])
+        y = [b for b in blk_rows(v) if b[2] == 0x3222][0][0]
         v.click(v.row(y).index('[ ]') + 2, y)
-        x = v.row(y).index('CODE') + 1
-        v.click(x, y)
-        check(' any ' in v.row(y) or 'any' in v.row(y), 'region did not toggle to any: %r' % v.row(y)[:70])
-        v.click(v.row(y).index('any') + 1, y)
-        check('CODE' in v.row(y), 'region did not toggle back: %r' % v.row(y)[:70])
-
-
-@case(A)
-def region_cell_toggles_even_for_an_unticked_block():
-    with ko() as v:
-        y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
-        v.click(v.row(y).index('CODE') + 1, y)
-        check('any' in v.row(y), 'region did not toggle on an unticked block: %r' % v.row(y)[:70])
+        check(v.row(y).lstrip().startswith('[x]'), 'the tick no longer works after a press on the region cell: %r' % v.row(y)[:30])
 
 
 @case(A)
 def hash_click_lights_block_bytes_in_hex():
     with ko() as v:
         y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
-        v.click(v.row(y).index('0x00036aa0') + 3, y)        # bring it into view
-        fp = v.fingerprint()
+        fp = v.fingerprint()            # no offset click first: it would light the block, and the hash click would then put it out
         y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
-        v.click(v.row(y).index('84ff1c96') + 3, y)
+        v.click(v.row(head(v)).index('hash') + 1, y)        # a function row's hash cell is a dash: the cell is still the row's light
         check(v.fingerprint() != fp, 'hash click changed nothing')
         lit = [yy for yy in range(2, 40) if any(v.cell(x, yy).bg != 'default' for x in range(48, 70))]
         check(len(lit) >= 10, 'only %d hex rows lit for a 284-byte block' % len(lit))
@@ -143,9 +167,7 @@ def hash_click_lights_block_bytes_in_hex():
 def hash_click_again_clears_or_moves_highlight():
     with ko() as v:
         y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
-        v.click(v.row(y).index('0x00036aa0') + 3, y)
-        y = [b for b in blk_rows(v) if b[2] == 0x36aa0][0][0]
-        x = v.row(y).index('84ff1c96') + 3
+        x = v.row(head(v)).index('hash') + 1
         v.click(x, y)
         a = v.fingerprint()
         v.click(x, y)
@@ -169,6 +191,7 @@ def fold_header_hides_rows_and_shows_summary():
 
 @case(A)
 def fold_summary_counts_ticks():
+    # The first rows are one data row and two function rows: all three can be ticked (a small function is signed too).
     with ko() as v:
         for b in blk_rows(v)[:3]:
             v.click(v.row(b[0]).index('[ ]') + 2, b[0])
@@ -202,7 +225,7 @@ def scroll_hundreds_of_rows_wheel_top_to_bottom():
 def scroll_keeps_tick_state():
     with ko() as v:
         enlarge(v, 6)
-        b = blk_rows(v)[2]
+        b = signed(v)[0]
         v.click(v.row(b[0]).index('[ ]') + 2, b[0])
         v.wheel(60, grip(v) + 10, n=100)
         v.wheel(60, grip(v) + 10, up=True, n=200)
@@ -212,16 +235,18 @@ def scroll_keeps_tick_state():
 
 @case(A)
 def tick_every_visible_row_then_scroll_and_tick_more():
-    with ko() as v:
+    # Only rows that carry a hash can be ticked (a function unit has none), so the sample is one with many data units.
+    with Viewer(SAMPLES['gafgyt'], rows=60, cols=200) as v:
+        open_tab(v, 'Blocks')
+        open_table(v)
         enlarge(v, 6)
         n = 0
-        for b in blk_rows(v):
-            v.click(v.row(b[0]).index('[ ]') + 2, b[0], settle=0.1)
-            n += 1
-        v.wheel(60, grip(v) + 10, n=50)
-        for b in blk_rows(v)[:5]:
-            v.click(v.row(b[0]).index('[ ]') + 2, b[0], settle=0.1)
-            n += 1
+        for _ in range(8):          # a page of rows, then the wheel: the hashed rows are among the function rows
+            for b in [b for b in signed(v) if not b[1]]:
+                v.click(v.row(b[0]).index('[ ]') + 2, b[0], settle=0.1)
+                n += 1
+            v.wheel(60, grip(v) + 10, n=50)
+        check(n >= 10, 'only %d hashed rows were ticked' % n)
         v.wheel(60, grip(v) + 10, up=True, n=500)
         v.click(3, head(v))
         m = re.match(r'\[\+\] \d+ block\(s\), (\d+) ticked', v.row(head(v)).lstrip())
@@ -344,12 +369,17 @@ def open_table(v):
 
 
 def table_rows(v, limit=40):
-    """(region, hash) of every row, scrolling the panel through the table."""
+    """(region, identity) of every row, scrolling the panel through the table. The identity is the hash; a function unit has none
+    (a dash), so it is (name, size): the same function in the view is the same name and length."""
     seen = []
     for _ in range(limit):
-        for (_, _, _, reg, h) in blk_rows(v):
-            if (reg, h) not in seen:
-                seen.append((reg, h))
+        for y in panel(v):
+            m = BLK.match(v.row(y))
+            if not m:
+                continue
+            h = m.group(3) if m.group(3) != '-' else 'fn:%s:%s' % (m.group(4), m.group(5))
+            if (m.group(6), h) not in seen:
+                seen.append((m.group(6), h))
         v.wheel(10, v.rows - 6, n=1)
     return seen
 

@@ -18,14 +18,15 @@
 #include <time.h>
 
 static const char *const slot_name[KOF_T_COUNT] = {
-	"db load", "parse", "unpack", "heur", "emulate", "match",
+	"db load", "parse", "unpack", "emulate", "match",
 	"diag syscall", "diag symbol", "diag emulate", "diag apihash",
-	"diag text", "diag lineage", "diag match"
+	"diag text", "diag lineage", "diag match", "recover", "normalise",
+	"similarity", "script form"
 };
 
 /*
  * THE TABLE IS TOUCHED AT SCAN TIME, from every scan thread (the scanner's
- * --jobs): KOF_TIME_BEGIN/END sit in the unpack, heuristic, emulation, diag and
+ * --jobs): KOF_TIME_BEGIN/END sit in the unpack, emulation, diag and
  * match stages, which run per object. It only exists in a DEBUG build, but a
  * measurement taken with several jobs must not be a data race.
  *

@@ -692,16 +692,13 @@ static void case_render_controls(void)
 	mk(&e, KOF_EVT_FILE_NEW, 1);
 	e.off_object = kof_evt_text_put(&e, "/tmp/a\033[2Jb\r.txt");
 	s = render_to_str(&e, &t);
-	/* KNOWN DEFECT WP12-24 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(s && !strchr(s, '\033') && !strchr(s, '\r'), "kof_evt_render prints a file name with ESC and CR as written: a terminal escape in a path the sample chose reaches the screen (the AMSI content and the registry data ARE sanitised)",
-		 "WP12-24: kofevtfmt.c prints kof_evt_object / image / cmdline with %s");
+	ok(s && !strchr(s, '\033') && !strchr(s, '\r') && strstr(s, "/tmp/a.[2Jb..txt"), "kof_evt_render shows a file name with ESC and CR as dots: a terminal escape in a path the sample chose does not reach the screen");
 	free(s);
 	mk(&e, KOF_EVT_PROC_START, 1);
 	e.off_image = kof_evt_text_put(&e, "/bin/x\033]0;owned\007");
 	e.off_cmdline = kof_evt_text_put(&e, "x \033[31m");
 	s = render_to_str(&e, &t);
-	/* KNOWN DEFECT WP12-24 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(s && !strchr(s, '\033') && !strchr(s, '\007'), "the same for a process image and its command line", "WP12-24");
+	ok(s && !strchr(s, '\033') && !strchr(s, '\007') && strstr(s, "x .[31m"), "the same for a process image and its command line");
 	free(s);
 }
 
@@ -834,8 +831,7 @@ static void case_hostile(void)
 			char w[200];
 
 			snprintf(w, sizeof w, "verb %u, arena of 540 'A' and no NUL: render and field listing run off the end of the record (child rc %d)", verbs[i], rc);
-			/* KNOWN DEFECT WP12-10 (2026-10-24, M): this row pins it, green until fixed. */
-			KM_CHECK(rc == 0, w, "WP12-10: the record readers assume a NUL the channel does not guarantee");
+			ok(rc == 0, w);
 		}
 	}
 	/* lying offsets with a proper NUL are fine: the accessors bound the offset */
@@ -853,11 +849,9 @@ static void case_hostile(void)
 	e.off_image = 0;
 	e.off_cmdline = 0;
 	rc = in_guarded_child(use_accessors, &e);
-	/* KNOWN DEFECT WP12-10 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(rc == 0, "kof_evt_object() on a record whose arena has no NUL is a string that runs off the end of the record (child died with signal)",
-		 "WP12-10: kof_chan_next hands back the record unterminated; kofevtlog_read forces the NUL, the channel does not");
+	ok(rc == 0, "kof_evt_object() on a record whose arena has no NUL answers an empty string and does not run off the record");
 	rc = in_guarded_child(use_render, &e);
-	(void)rc;
+	ok(rc == 0, "kof_evt_render on a record whose arena has no NUL does not run off the record");
 }
 
 /* ------------------------------------------------------------------------------------------------- evtlog */
@@ -1119,9 +1113,7 @@ static void case_evtlog_truncated(void)
 	ok(rd == 39, "a file cut 5 bytes short: 39 whole records read, the cut one is refused");
 	cnt = kofevt_log_count(r);
 	printf("       cut file: %u records read, count says %llu\n", rd, (unsigned long long)cnt);
-	/* KNOWN DEFECT WP12-8 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(cnt == rd, "count of a file whose last record is cut says 40 while 39 can be read (skip_one seeks past the end without checking)",
-		 "WP12-8: kofevt_log_count counts a record whose text is past the end of the file");
+	ok(cnt == rd, "count of a file whose last record is cut agrees with what can be read (skip_one checks the record ends inside the file)");
 	kofevt_log_free(r);
 	/* hdr_size smaller than the header: where do the records start */
 	{
@@ -1136,12 +1128,7 @@ static void case_evtlog_truncated(void)
 		patch(path, (long)offsetof(struct kofevt_log_hdr, n_records), &zero, 8);
 		patch(path, (long)offsetof(struct kofevt_log_hdr, hdr_size), &small, 2);
 		r = kofevt_log_open(path, 0, KOFEVT_REC_KOF, NULL);
-		for (rd = 0; r && kofevt_log_read(r, &g, sizeof g) == 1; rd++)
-			;
-		printf("       hdr_size 32: %u records read from byte 64, the index counts %llu\n", rd, (unsigned long long)(r ? kofevt_log_count(r) : 0));
-		/* KNOWN DEFECT WP12-7 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(r != NULL && kofevt_log_count(r) == rd, "a header that declares hdr_size 32: read starts at byte 64 and the index at byte 32, so count and read disagree",
-			 "WP12-7: kofevt_log_open does not seek to hdr_size when it is smaller than the struct, build_index always does");
+		ok(r == NULL, "a header that declares hdr_size 32 (less than the header itself) is refused at open: read and the index would start at different bytes");
 		kofevt_log_free(r);
 	}
 	/* a log whose record claims a text longer than its record */

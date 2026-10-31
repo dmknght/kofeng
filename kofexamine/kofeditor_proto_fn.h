@@ -3,7 +3,7 @@
  *
  * THE DIAGNOSE GENERATOR'S DRAFT, A PROTOTYPE (see kofeditor_proto_types.h): struct kof_editor and
  * every prototype kofeditor.c defines, moved verbatim from kofeditor.h. The object facts
- * (obj_sha256, obj_emu_why) and the notes (say_err, say_note) sit among them as they did.
+ * (obj_sha256) and the notes (say_err, say_note) sit among them as they did.
  * A part of kofeditor.h, included by it and by nothing else.
  */
 #ifndef KOF_KOFEDITOR_PROTO_FN_H
@@ -32,12 +32,6 @@ struct kof_editor {
 	 */
 	int               *edit;
 	/*
-	 * THE TAG SOURCES, borrowed from the host like the tables above: what a
-	 * tag id in the draft means. NULL when the host has none, and then no
-	 * tag has a name.
-	 */
-	const struct kof_tagset *tags;
-	/*
 	 * WHICH OBJECT THE DRAFT IS BEING WRITTEN ABOUT.
 	 *
 	 * The one piece of UI state the model genuinely needs: a rule is
@@ -52,7 +46,6 @@ struct kof_editor {
 void say_err(struct kof_editor *e, const char *fmt, ...);
 /* ---- what an object IS, worked out once - see the definitions ---- */
 void    obj_sha256(struct object *o);
-uint8_t obj_emu_why(const struct object *o);
 
 void say_note(struct kof_editor *e, const char *fmt, ...);
 
@@ -91,6 +84,7 @@ uint32_t draft_hash(struct kof_editor *e);
  * without a second list to keep in step with the first.
  */
 int draft_edited(struct kof_editor *e);
+void draft_mark_saved(struct kof_editor *e);
 /* `near_miss` and not `near`: mingw's headers still #define near and far as the
  * empty macros 16-bit compilers needed, so a parameter with that name compiles
  * everywhere except Windows, where it vanishes and the call site stops parsing. */
@@ -211,33 +205,37 @@ void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
  *
  *   DT_PATTERNS  strings, their matchers (find_str, find_at) and conditions
  *   DT_BLOCKS    similarity blocks, one find_similar matcher per ticked block
- *   DT_GRAPHS    on hold: the diagnoses table and conditions over it
+ *   DT_GRAPHS    the diagnoses that matched, as a table
  *
  * The type, the family and the options are declared once for the whole draft.
  */
 enum draft_tab { DT_PATTERNS = 0, DT_BLOCKS, DT_GRAPHS, DT_COUNT };
 
 /* The tab a matcher belongs to, which follows from its kind alone, and how many
- * matchers a tab holds - what a condition on that tab can be made of. */
+ * matchers a tab holds. Only Patterns has conditions, so a condition is made of
+ * DT_PATTERNS matchers. */
 uint8_t grp_tab(const struct kof_editor *e, uint32_t g);
 uint32_t grp_tab_count(const struct kof_editor *e, uint8_t tab);
 /*
- * THE TAGS, as the panel reads them: the tag sources the host loaded (`tags` of
- * the editor), asked by id. tag_name is the tag's name, "" for no tag or one
- * that is not there. tag_label is what a Tag cell shows: the name, and - only
- * when more than one tag has that name - its family and types, to tell them
- * apart.
+ * THE DIAGNOSE UNITS - one list for everything that needs to know which exist and where their Type and
+ * Tag cells are: the draw, the hit zones made from what was drawn, the file names, the preview and the
+ * writer. THE RULE: a Patterns CONDITION is a unit and a Blocks MATCHER is a unit; nothing else is.
+ * draft_units: the output order (conditions, then block matchers). draft_units_on_tab: the ones the tab
+ * lists (Patterns: conditions, Blocks: matchers, Graphs: none). draft_unit_find: the position in the
+ * output order, -1 for a non-unit (a string matcher). draft_unit_name: its file name ("" for a non-unit).
  */
-const struct kof_tagent *tag_find(const struct kof_editor *e, uint64_t id);
-const char *tag_name(const struct kof_editor *e, uint64_t id);
-void tag_label(const struct kof_editor *e, uint64_t id, char *out, size_t cap);
-
-/*
- * WHAT THE DRAFT WRITES: one diagnose per condition, and one per block matcher
- * that no condition uses. grp_standalone says which matchers are the second
- * kind.
- */
-int grp_standalone(const struct kof_editor *e, uint32_t g);
+struct draft_unit {
+	uint8_t     is_grp;   /* 0: struct cond cnd[idx] (Patterns), 1: struct group grp[idx] (Blocks) */
+	uint32_t    idx;
+	uint8_t     utype;    /* a copy of the unit's own */
+	const char *tag;      /* points into the draft */
+};
+#define DRAFT_UNIT_MAX 16u   /* a condition and a matcher each, MAX_GROUP of both (checked in kofeditor.c) */
+uint32_t draft_units(const struct kof_editor *e, struct draft_unit *out, uint32_t cap);
+uint32_t draft_unit_count(const struct kof_editor *e);
+uint32_t draft_units_on_tab(const struct kof_editor *e, uint8_t tab, struct draft_unit *out, uint32_t cap);
+int draft_unit_find(const struct kof_editor *e, int is_grp, uint32_t idx);
+void draft_unit_name(const struct kof_editor *e, int is_grp, uint32_t idx, char *out, size_t cap);
 
 /*
  * THE FILE NAME a diagnose would have, in the form
@@ -245,7 +243,7 @@ int grp_standalone(const struct kof_editor *e, uint32_t g);
  * type in the order the tag declares them, its family, its name. Lower case,
  * only [a-z0-9_-]; a type or family a tag does not have is left out, so no
  * underscore is doubled. The id is a running number per prefix, at least two
- * digits, counted over the conditions in order and then the standalone block
+ * digits, counted over the conditions in order and then the block
  * matchers in order - the order a Save would write them in. A diagnose with no
  * tag has `<tag>` in its place, so the gap is in the name itself. Nothing is
  * written anywhere.
@@ -254,6 +252,42 @@ void cnd_file_name(const struct kof_editor *e, uint32_t ci, char *out,
 		   size_t cap);
 void grp_file_name(const struct kof_editor *e, uint32_t g, char *out,
 		   size_t cap);
+/* The generator's output: the declarations of one unit (shared by the preview and the writer), and the writer. */
+struct kof_dsrc;
+void draft_unit_items(const struct kof_editor *e, const char *stem, uint8_t utype,
+		      const char *tag, struct kof_dsrc *d);
+/*
+ * SAVE: what was ADDED is written and what was REMOVED is deleted, both by the LINK between a unit and the diagnose it was loaded
+ * from (struct group.link, struct cond.link; the loaded list is kof_draft.loaded). A unit with no link is new; a loaded link that no
+ * unit carries any more is removed (its file is deleted); a linked unit that still equals its file is untouched; a linked unit that no
+ * longer equals its file is MODIFIED - reported in the status line, neither written nor the cause of a deletion (editing is not done).
+ * All or nothing: the plan is made first and a failure part way puts the tree back. Returns the files written, or -1 (msg says why).
+ */
+int draft_generate(struct kof_editor *e, const char *dir, char *msg, size_t cap);
+int draft_generate_with(struct kof_editor *e, const char *dir, char *msg, size_t cap, int with_form);
+/* The file system the Save acts through: the writer's own tests swap it to make a step fail part way. Create is fopen "wbx". */
+struct draft_fs {
+	void *ud;
+	FILE *(*create)(void *ud, const char *path);
+	int   (*unlink)(void *ud, const char *path);
+};
+int draft_generate_fs(struct kof_editor *e, const char *dir, char *msg, size_t cap, int with_form, const struct draft_fs *fs);
+/*
+ * THE LINKS. draft_link_unit links unit (is_grp, idx) to the diagnose of db id `id` (kof_diag_report.id, a value) whose name the engine gave as `name`, a file of the tree `dir`, only when the
+ * draft regenerates exactly what the file says (1), else nothing changes (0). draft_links_reset forgets every link and the loaded list
+ * (a new object, a discarded draft). draft_unit_link is the link of a unit (0 for new); draft_links_loaded how many diagnoses are
+ * loaded; draft_links_removed how many of them no unit carries any more (what a Save would delete).
+ */
+int draft_link_unit(struct kof_editor *e, int is_grp, uint32_t idx, const char *dir, uint32_t id, const char *name);
+/* The diagnoses directory the names of new units are numbered against (the viewer's bases/diagnoses): the name the panel shows is the name Save writes. */
+void draft_set_tree_dir(struct kof_editor *e, const char *dir);
+void draft_links_reset(struct kof_editor *e);
+uint32_t draft_unit_link(const struct kof_editor *e, int is_grp, uint32_t idx);
+uint32_t draft_links_loaded(const struct kof_editor *e);
+uint32_t draft_links_removed(const struct kof_editor *e);
+/* The detection declarations of unit (is_grp, idx) appended to `d` (NULL, or why the unit has no source). */
+const char *draft_unit_form(const struct kof_editor *e, int is_grp, uint32_t idx, struct kof_dsrc *d);
+
 
 void draft_clear(struct kof_editor *e);
 
@@ -268,13 +302,13 @@ int decl_pattern(const struct decl *d, uint8_t *prog,
 			uint8_t *kind, uint8_t *flags);
 int rng_holds(uint32_t rmask, uint32_t region);
 /*
- * The matcher numbers of a condition's expression are the numbers of its own
+ * The matcher numbers of a condition's expression are the numbers of the Patterns
  * tab: grp_loc is the number of matcher `g` on its tab (0 if there is none),
  * cnd_has_id the
  * plain question "is this number written in the expression" and cnd_uses the
  * one the panel asks - is matcher `g` one this condition names. cnd_foreign is
- * 0 for an expression whose every number is on the condition's tab, else the
- * first number that is not, plus one: a reference to another tab's matcher or
+ * 0 for an expression whose every number is a Patterns matcher's, else the
+ * first number that is not, plus one: a reference to a block matcher or
  * to none, which is refused rather than read as something else.
  */
 uint32_t grp_loc(const struct kof_editor *e, uint32_t g);

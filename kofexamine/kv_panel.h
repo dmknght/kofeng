@@ -196,26 +196,6 @@ struct fmt_cat {
  */
 enum cseq_kind { CS_COND = 0, CS_MATCH };
 
-enum prow_kind {
-	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDS, RW_ADDM,
-	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
-	RW_MATHDR, RW_CNDHDR, RW_CJOIN,
-	/* The block table's heading, its column names and its rows - see
-	 * draw_decl_blocks, which draws TWO rows before the first block. */
-	RW_BLKHDR, RW_BLKCOL, RW_BLK,
-	/*
-	 * THE SIMILARITY TABLE: its heading, its column names and its three
-	 * rows - one per measure. See draw_decl_sim.
-	 */
-	/* THE DIAGNOSES this file carries - see draw_decl_diag. */
-	RW_DIAGHDR, RW_DIAGCOL, RW_DIAG,
-	/* The format row and the [+ Options] button - see prow_build. */
-	RW_FMTS, RW_OPTBTN,
-	/* The title bar of tabs, and the output pane's rows - see
-	 * draw_decl_tabs and draw_decl_preview. */
-	RW_TABS, RW_PREV
-};
-
 #define MENU_W 24
 
 #define PROP_MAX  600

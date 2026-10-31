@@ -171,9 +171,8 @@ int cmatch_ok(struct view *v, uint32_t c, uint32_t m)
 {
 	if (cnd_uses(&v->ed, &v->ed.dr.cnd[c], m))
 		return 0;
-	/* A condition is made of its own tab's matchers: a string condition
-	 * naming a block matcher would be a diagnose of two kinds at once. */
-	if (grp_tab(&v->ed, m) != v->ed.dr.cnd[c].tab)
+	/* A condition is made of string matchers: a block matcher is a unit of its own. */
+	if (grp_tab(&v->ed, m) != DT_PATTERNS)
 		return 0;
 	return 1;
 }

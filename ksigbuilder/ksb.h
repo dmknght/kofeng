@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * ksigbuilder - the C half of the signature toolchain.
  *
  *   ksigbuilder --extract <signature.c> <out.pat.h> <out.names> <out.pre> <out.strs>
@@ -34,6 +40,9 @@
  *                   the raw blob.
  *   ksb_check.c     --module, the refusals: what each kind of module may not
  *                   be, checked in the source.
+ *   ksb_catalog.c   the Pathogens and Syndromes catalogs, the ONE place that calls them.
+ *   ksb_catcheck.c  a diagnose's family, variant, type and tag against the catalogs,
+ *                   and --catalog (every diagnose of a directory).
  *   ksb_diag.c      --diagnose: one diagnose source in, one record out.
  *   ksb_diagpack.c  The diagnoses of a database, in packs by kind:
  *                   diag-<kind>.kdig.
@@ -91,6 +100,7 @@
 #include <analyzers/diseases/kofdisease.h>
 #include <databases/pack/dbcore.h>
 #include <databases/pack/hexprog.h>
+#include <celllysis/mutation.h>
 
 /* The process API the compiler run and the tree runner share. */
 #ifdef _WIN32
@@ -158,7 +168,6 @@ struct blk {
 	int      line;
 	char     name[64];
 	uint32_t mask;
-	uint32_t norm;
 	uint32_t side;                  /* enum kgenome_mutation_side */
 	uint32_t hash[KOF_MUTATION_MAX_HASH];
 	uint32_t n_hash;
@@ -403,7 +412,6 @@ struct ksb_decl {
 };
 
 struct ksb_lint {
-	int warnings;
 	struct use uses[MAX_PATTERNS];
 	int rng_used[MAX_PATTERNS];
 };
@@ -429,6 +437,10 @@ struct ksb_opts {
 	const char *basedir;
 	const char *triple;
 	const char *tmpdir;
+	/* The two catalogs the diagnoses' family, variant and tag names are resolved from
+	 * (--pathogens, --syndromes): directories of the catalogs' own source files. */
+	const char *pathogens;
+	const char *syndromes;
 	int         keep_work;
 };
 
@@ -443,8 +455,12 @@ struct ksb_diaguse {
 	unsigned        n_uses;
 	int             uses_known;    /* only a tree build knows them all */
 	char            built[64][64];
-	unsigned char   built_dis[64]; /* 1: it declares a disease, which the verdict reads */
+	unsigned char   built_dis[64]; /* 1: it declares a disease or carries catalog facts, which the verdict reads */
 	unsigned        n_built;
+	unsigned        n_disabled;    /* diagnoses left out of the pack because their family, variant or tag is not in the catalog */
+	/* The catalogs, opened by the first diagnose that names one (ksb_catalog_get). */
+	struct ksb_catalog *cat;
+	int             cat_tried;
 };
 
 /* The registry of diseases the database is made of. */
@@ -463,6 +479,12 @@ struct ksb_ctx {
 	struct ksb_diaguse  diag;
 	struct ksb_diseases diseases;
 };
+
+/* 1 when the run met any diagnose, built or left out of the pack (its variant was deleted): a tree or a pack of only those is content, not a run that forgot to build. */
+static inline int ksb_diag_any(const struct ksb_ctx *ksb)
+{
+	return ksb->diag.n_built != 0 || ksb->diag.n_disabled != 0;
+}
 
 /* The words an option may be written with; n2 is NULL for a two-way option. */
 struct ksb_enum_names {
@@ -493,6 +515,53 @@ int ksb_do_build(struct ksb_ctx *ksb, const char *src, const char *pat,
 int ksb_check_format_headers(struct ksb_ctx *ksb);
 int ksb_kind_checks(struct ksb_ctx *ksb, int kind);
 int ksb_check_size_body(struct ksb_ctx *ksb);
+
+/* ksb_catalog.c - the ONE place that calls the catalogs (tagcat, famcat); everything below asks it. */
+struct ksb_catalog;
+struct ksb_catalog *ksb_catalog_open(const char *pathogens, const char *syndromes,
+				     char *why, size_t cap);
+void ksb_catalog_close(struct ksb_catalog *c);
+uint64_t ksb_catalog_tag(const struct ksb_catalog *c, const char *tag);
+uint64_t ksb_catalog_family(const struct ksb_catalog *c, const char *family);
+enum { KSB_VAR_OK = 0, KSB_VAR_NONE };
+/* The variant of `family` with these LETTERS: on KSB_VAR_OK *id and *types (a mask over kof_maltype). */
+int ksb_catalog_variant(const struct ksb_catalog *c, const char *family, const char *letters,
+			uint64_t *id, uint32_t *types);
+
+/* 1 when the variant is one the family issued and no longer has (kof_famcat_variant_state: the one decision), 0 otherwise. */
+int ksb_catalog_variant_deleted(const struct ksb_catalog *c, const char *family, const char *letters);
+/* A diagnose that built uses these ids: the catalog items they are made from are what names.kdig will carry. */
+void ksb_catalog_use(struct ksb_catalog *c, uint64_t family, uint64_t variant, uint64_t tag);
+/* One row of names.kdig; a variant's name is "Family.A" (at most 63 + 1 + 5 characters). */
+struct ksb_name_row {
+	uint8_t  kind;
+	uint64_t id;
+	char     name[72];
+};
+/* The rows of names.kdig (malloc'd in *rows, kind 'F' < 'V' < 'T', by id) and their count. */
+uint32_t ksb_catalog_names(const struct ksb_catalog *c, struct ksb_name_row **rows);
+/* ksb_names.c: write <db>/names.kdig from the catalog items the diagnoses of this run used; no file when none (an old one is removed). */
+int ksb_write_names(struct ksb_ctx *ksb, const char *db);
+
+/* ksb_catcheck.c - the checks of a diagnose's catalog references, for the build and for --catalog. */
+struct kof_dsrc;
+struct kof_dsrc_view;
+struct kof_dsrc_report;
+struct ksb_meta {
+	uint64_t family, variant, tag;
+	uint8_t  type;
+	uint8_t  disabled;   /* a family, a tag or a variant the catalog lacks (said as a warning): the diagnose is not built into the pack */
+};
+/* The catalogs of this run, opened on first use; NULL when neither directory was given or they could not be read (said). */
+struct ksb_catalog *ksb_catalog_get(struct ksb_ctx *ksb);
+/* 1 when every reference of the view exists and fits; else the errors are reported on `r` with the declaration's line. */
+int ksb_meta_check(const struct ksb_catalog *cat, const struct kof_dsrc *d,
+		   const struct kof_dsrc_view *v, struct ksb_meta *m,
+		   const struct kof_dsrc_report *r);
+/* --catalog <diagnoses-dir>: check every diagnose source of a directory; non-zero on an error. */
+int ksb_catalog_main(struct ksb_ctx *ksb, int argc, char **argv);
+/* The same check over a directory, for the build: errors counted in ksb->errors. Returns the number of errors. */
+int ksb_catalog_check_dir(struct ksb_ctx *ksb, const char *dir, int quiet);
 
 /* ksb_diag.c */
 int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv);
@@ -573,8 +642,6 @@ int ksb_read_ident(struct ksb_ctx *ksb, const char *p, int line, char *out,
 int ksb_str_name_taken(struct ksb_ctx *ksb, const char *nm);
 int ksb_rng_name_taken(struct ksb_ctx *ksb, const char *nm);
 int ksb_blk_name_taken(struct ksb_ctx *ksb, const char *nm);
-int ksb_read_norm(struct ksb_ctx *ksb, const char *p, int line,
-		  struct blk *out);
 int ksb_read_hashes(struct ksb_ctx *ksb, const char *p, int line,
 		    struct blk *out);
 int ksb_read_name(struct ksb_ctx *ksb, const char *p, int line, char *out,
@@ -591,9 +658,6 @@ void ksb_resolve_decls(struct ksb_ctx *ksb);
 
 /* ksb_scan.c */
 void ksb_scan_line(struct ksb_ctx *ksb, char *at, size_t line_len, int lineno);
-
-/* ksb_tags.c */
-int ksb_tags_main(int argc, char **argv);
 
 /* ksb_tree.c */
 int ksb_is_c_source(const char *name);

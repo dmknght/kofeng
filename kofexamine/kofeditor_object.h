@@ -132,19 +132,6 @@ struct object {
 	 */
 	int               emu_done;
 	/*
-	 * What the scanner's own gate makes of this object, when no module
-	 * claimed it: KOF_EMU_UNP_* .
-	 *
-	 * ONCE, AND NOT UNTIL SOMETHING SHOWS IT - see obj_emu_why. It reads
-	 * every executable segment, so computing it beside the parse faulted a
-	 * spilled object in whole to fill one row; and computing it while
-	 * drawing would do that on every keystroke. `emu_why_done` separates
-	 * "not worked out yet" from "worked out, and the answer is zero",
-	 * which a single field cannot say.
-	 */
-	uint8_t           emu_why;
-	uint8_t           emu_why_done;
-	/*
 	 * SHA-256 OF THIS OBJECT'S BYTES, hex, or "" before it is computed.
 	 *
 	 * OF THE BYTES AND NOT OF THE FILE, which is the whole reason it is
@@ -154,7 +141,7 @@ struct object {
 	 * the IOC for the thing that was hidden, not for the wrapper anybody
 	 * can rebuild. For the top-level object the two are the same.
 	 *
-	 * COMPUTED ONCE, BESIDE THE PARSE, for the reason emu_why is: the
+	 * COMPUTED ONCE, BESIDE THE PARSE: the
 	 * property pane is repainted on every keystroke, and hashing a
 	 * hundred-megabyte mapping per frame is not a slow feature, it is an
 	 * unusable one.
@@ -187,10 +174,11 @@ struct object {
 	/*
 	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT - an owned copy of
 	 * kof_result.diag, which the engine lends only for the callback. Empty
-	 * when the scan did not ask. See draw_decl_diag.
+	 * until a panel pulls it (view_explain: kscan_explain). See draw_decl_diag.
 	 */
 	struct kof_diag_report *diag;
 	uint32_t                n_diag;
+	uint8_t                 explained;   /* diag was taken from the pull (view_explain), whether or not it held a row */
 	/*
 	 * THE FUNCTIONS ITS SYMBOLS NAME, built once beside the symbol block - see
 	 * funcs.h. Empty for an object with none, and for a normalised view, whose
@@ -201,6 +189,9 @@ struct object {
 	/* What Analysis > Analyze disassembly found: labels and comments by file offset, from the engine (kof_codenotes_build). Empty until asked. */
 	struct kof_codenotes        notes;
 	uint8_t                 notes_done;
+	/* What Analysis > Analyze disassembly found: the places that stand for an import, by file offset, from the engine (kof_callnames_build). Built once. */
+	struct kgenome_callnames    calls;
+	uint8_t                 calls_done;
 
 	/*
 	 * The object's symbol records, in the KSYM layout kofsym.h fixes.

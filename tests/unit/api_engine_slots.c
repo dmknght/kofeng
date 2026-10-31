@@ -465,7 +465,7 @@ static void aliases(void)
 	CK(sizeof(struct cell_operand) == sizeof(struct kgenome_cell_operand), "cell_operand is the lib's struct");
 	CK(sizeof(struct kof_diag_str) == sizeof(struct kgenome_diag_str), "kof_diag_str is the lib's struct");
 	CK(sizeof(enum kof_diag_kind) == sizeof(enum kgenome_diag_kind) && sizeof(enum kof_diag_role) == sizeof(enum kgenome_diag_role) &&
-	   sizeof(enum kof_arch) == sizeof(enum kgenome_arch) && sizeof(enum kof_mutation_norm) == sizeof(enum kgenome_mutation_norm) &&
+	   sizeof(enum kof_arch) == sizeof(enum kgenome_arch) &&
 	   sizeof(enum kof_mutation_side) == sizeof(enum kgenome_mutation_side), "the enums are the lib's");
 	{
 		enum kof_diag_kind k = KGENOME_DIAG_KIND_SHARED;

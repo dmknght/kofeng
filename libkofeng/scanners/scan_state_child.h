@@ -18,7 +18,7 @@
  * the object is begun.
  *
  * Owner: scan_walk.c and scan_pipeline.c (set), scan_facts.c (regions, library
- * spans), scan_feed.c / scan_unpack.c / scan_heur.c (read). Files that touch
+ * spans), scan_feed.c / scan_unpack.c / scan_forms.c (read). Files that touch
  * it: scan_facts.c, scan_pipeline.c, scan_walk.c, objprod.c, objctx_emu.c,
  * scan_feed.c, objctx.c, objctx_child.c, scan_norm.c, objctx_decrypt.c,
  * objctx_diag.c, objctx_decomp_folder.c, objctx_script.c, scan_unpack.c,
@@ -90,10 +90,10 @@ struct kof_scan_cur {
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.
 	 *
-	 * Kept here because the two most expensive similarity measures are
-	 * gated on it and the content hooks that answer them have no option
-	 * to read - see c_mutation_blocks and c_pth_match. Set once per object,
-	 * beside the two ready flags and for the same reason.
+	 * Kept here because the code that reads it (today the emulator's vouched
+	 * runs, objctx_emu.c) has no option to read. The two similarity measures
+	 * that were gated on it (c_mutation_blocks, c_pth_match) are retired.
+	 * Set once per object, beside the two ready flags and for the same reason.
 	 */
 	uint32_t heur_lvl;
 	/* The module-facing code reader's cursor - see libgenome/celllysis/celllysis.h.
@@ -374,9 +374,9 @@ struct kof_scan_pend {
  * child is reached.
  *
  * Owner: objctx_child.c (kid_push appends), scan_walk.c (drains and pushes
- * onto the work list), scan_unpack.c / scan_heur.c / scan_pipeline.c (the
+ * onto the work list), scan_unpack.c / scan_forms.c / scan_pipeline.c (the
  * counts). Files that touch it: objctx_child.c, scan_walk.c, scan_unpack.c,
- * scan.c, scan_pipeline.c, scan_norm.c, scan_heur.c, objprod.c, objctx_emu.c,
+ * scan.c, scan_pipeline.c, scan_norm.c, scan_forms.c, objprod.c, objctx_emu.c,
  * tests/unit/child_fuzz.c.
  */
 struct kof_scan_child {
@@ -453,7 +453,7 @@ struct kof_scan_child {
  * that asked for the run returns.
  *
  * Owner: objctx_emu.c. Files that touch it: objctx_emu.c, scan_unpack.c,
- * objctx_child.c, scan.c, scan_heur.c.
+ * objctx_child.c, scan.c, scan_forms.c.
  */
 struct kof_scan_emu {
 	/* A run a module asked to be paused on, and the report it will be

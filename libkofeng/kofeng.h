@@ -66,18 +66,12 @@ kof_engine *keng_open(const char *db_path);
 void        keng_close(kof_engine *);
 
 /*
- * What the database holds, counted as two numbers because it is two things.
+ * What the database holds: the UNPACKERS (what can be seen inside) and the diagnoses (below). There is no count of
+ * detector modules: a detection is a diagnose now, and a number of modules answers no question anybody has.
  *
- * A RECORD is one detector module. An UNPACKER opens containers and names nothing. Adding them gives a number
- * that answers no question anybody has - "how much do I detect" is the records,
- * and "what can I see inside" is the unpackers - and a database of ten unpackers
- * and no detections would report ten and find nothing.
- *
- * Neither is the number of literals. That is larger, moves when a signature is
- * rewritten without any signature being added, and is a fact about the engine's
- * internals rather than about the database.
+ * Nor is it the number of literals. That is larger, moves when a signature is rewritten without any signature being
+ * added, and is a fact about the engine's internals rather than about the database.
  */
-uint32_t    kdb_records(const kof_engine *);
 uint32_t    kdb_unpackers(const kof_engine *);
 /*
  * HOW MANY DIAGNOSES THE DATABASE HOLDS. Introspection, like the two counts above:
@@ -89,6 +83,9 @@ uint32_t    kdb_unpackers(const kof_engine *);
  *
  *   kdb_diagnose_name     the diagnose's name, or NULL for an id the database does not hold
  *   kdb_diagnose_disease  the id of the disease it declares, 0 when it declares none
+ *   kdb_diagnose_family / _variant / _tag   the catalog ids the diagnose was built with (u64, 0 when it
+ *                         carries none: an old pack or a diagnose that declares none)
+ *   kdb_diagnose_type     its ONE kof_maltype, -1 when it carries no catalog facts or the id is not held
  *   kdb_disease_name      the disease's behaviour ("flood-network/raw-header"), or NULL
  *   kdb_disease_type      the kof_maltype it was declared with, -1 when the id is not named
  *
@@ -98,9 +95,68 @@ uint32_t    kdb_unpackers(const kof_engine *);
  */
 const char *kdb_diagnose_name(const kof_engine *, uint32_t id);
 uint32_t    kdb_diagnose_disease(const kof_engine *, uint32_t id);
+uint64_t    kdb_diagnose_family(const kof_engine *, uint32_t id);
+uint64_t    kdb_diagnose_variant(const kof_engine *, uint32_t id);
+uint64_t    kdb_diagnose_tag(const kof_engine *, uint32_t id);
+int         kdb_diagnose_type(const kof_engine *, uint32_t id);
 const char *kdb_disease_name(const kof_engine *, uint32_t id);
 int         kdb_disease_type(const kof_engine *, uint32_t id);
 uint32_t    kdb_diagnoses(const kof_engine *);
+/*
+ * THE NAMES OF THE CATALOG IDS. A diagnose's record carries the ids of its family, variant and tag (made by the build from the catalog names,
+ * verdictor/catstore.h) and the database directory carries their NAMES in names.kdig, beside diseases.kdig: the families, variants and tags its
+ * diagnoses use. keng_open reads it, so a verdict reads "Infected#ELF-x64/Botnet:Mirai.A!Diagnose" with only the database. A database without
+ * the file (or with a damaged one: said on stderr and counted in kdb_diag_packs_refused) names nothing and the id is spelled in hex. A host that
+ * keeps the catalogs can give them to the engine, once, before it scans; what they hold is added to the database's names and overrides them:
+ *
+ *   keng_catalog_load(e, pathogens_dir, syndromes_dir)   either may be NULL; the directories are what Manage > Pathogens and
+ *                         Manage > Syndromes write (<bases>/pathogens, <bases>/syndromes). The files are read by the catalogs' own
+ *                         loaders; a second call replaces the first; one engine's table is its own, so two engines may hold two
+ *                         catalogs. Not safe against a scan running on the same engine (as keng_set_memory_cap).
+ *   keng_catalog_load_bases(e, bases)   the same with "<bases>/pathogens" and "<bases>/syndromes"; NULL or "" loads nothing.
+ *
+ * They answer a set of flags, 0 when every file was read: KENG_CAT_OVER_BUDGET (the table is charged to the engine's memory budget and
+ * stops at 32 MiB or an eighth of what the budget has left; files that did not fit are left unread), KENG_CAT_FILES_REFUSED (files that
+ * do not read as a catalog, counted in `files_refused`), KENG_CAT_UNREADABLE (a directory could not be read) and KENG_CAT_NOMEM. A
+ * directory that does not exist is an empty catalog, not an error. An id the table does not hold is spelled in hex wherever a name is
+ * made: nothing is lost by not loading a catalog, and a database built with names needs none. keng_catalog_info reads what is held (counts, bytes charged).
+ *
+ * kdb_family_name / kdb_variant_name / kdb_tag_name write the text of an id into out[cap], always: the name when the catalog has it
+ * ("Mirai", "Mirai.A", "Mirai-flood", answer 1), else the 8 hex digits of the id (answer 0). One spelling: the verdict's name is made
+ * of the same.
+ */
+enum {
+	KENG_CAT_OVER_BUDGET = 1u,
+	KENG_CAT_FILES_REFUSED = 2u,
+	KENG_CAT_UNREADABLE = 4u,
+	KENG_CAT_NOMEM = 8u
+};
+struct keng_catalog_info {
+	uint32_t flags;
+	uint32_t families, variants, tags;
+	uint32_t files_refused;
+	uint64_t bytes;
+};
+uint32_t    keng_catalog_load(kof_engine *, const char *pathogens_dir, const char *syndromes_dir);
+uint32_t    keng_catalog_load_bases(kof_engine *, const char *bases);
+void        keng_catalog_info(const kof_engine *, struct keng_catalog_info *out);
+int         kdb_family_name(const kof_engine *, uint64_t id, char *out, size_t cap);
+int         kdb_variant_name(const kof_engine *, uint64_t id, char *out, size_t cap);
+int         kdb_tag_name(const kof_engine *, uint64_t id, char *out, size_t cap);
+/*
+ * THE DETECTION FORM OF A DIAGNOSE (KDIG_SEC_FORM): the string markers, similarity blocks and matchers a diagnose is made
+ * of when it is not a graph, and the expression over them. kdb_diagnose_form answers 1 and fills `out` for a diagnose
+ * that carries one, 0 for a graph diagnose or an id the database does not hold. `similarity` is 1 when the diagnose is
+ * answered by the similarity stage (its matchers are blocks) and 0 by the detect stage (its matchers are strings).
+ * kdb_diagnose_form_expr writes the expression with the matchers' numbers ("0 & !1 | (2 & 3)", & for and, | for or, ! for
+ * not), NUL terminated and cut at `cap`, and answers the length it wanted (0 for a diagnose with no form).
+ */
+struct kdb_diag_form {
+	uint32_t strings, blocks, matchers, nodes;
+	int      similarity;
+};
+int         kdb_diagnose_form(const kof_engine *, uint32_t id, struct kdb_diag_form *out);
+size_t      kdb_diagnose_form_expr(const kof_engine *, uint32_t id, char *out, size_t cap);
 /*
  * DID EVERY DIAGNOSE THE PACKS CARRY LOAD. kdb_diagnoses counts what loaded and
  * cannot tell "256 of 300" from "256": this says the database had more than the
@@ -482,6 +538,102 @@ void kscan_on_debug(kof_scanner *, kof_on_debug, void *user);
 int kscan_bytes(kof_scanner *, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *,
 		   kof_on_object, void *user);
+
+/*
+ * ---- DETECTION: WHAT A TOOL ASKS ABOUT A VERDICT (kdet_*) ----------------------------------------------------
+ *
+ * One family, two questions, and nothing a scan computes for it:
+ *
+ *  1. WHAT THE VERDICT IS MADE OF. kdet_info / kdet_diag turn a kof_result the scan already delivered into named facts: the
+ *     verdict, the catalog family / variant / tag it was decided from (names as the engine spells them, kdb_family_name...),
+ *     the basis (cover, jaccard, groups) and each matched diagnose with its own family / variant / tag / type / disease and
+ *     the form it is made of. They read only the result and the database: no scan, no allocation, no cost.
+ *
+ *  2. WHY EACH DIAGNOSE MATCHED OR DID NOT. kscan_explain asks the engine to scan the given bytes once more with the
+ *     report on (every diagnose is answered, each matcher of a detection form records what it came to: markers found, the
+ *     lowest block percentage against what was demanded) and returns, per object of the tree, the verdict and one
+ *     kof_diag_report per diagnose. It is a question: a scan that nobody explains pays nothing, the engine pushes no report
+ *     into a scan, and what the result holds is the scan's own answer for that object (the same pipeline, the same
+ *     verdict), found by the object's name (kdet_run_find). The bytes are the root object's: a child is explained by the
+ *     run of its root. kdet_run_free gives it back; the run belongs to the host's memory, not to the engine's budget.
+ *
+ * There is no option of the scan for the report: kscan_explain turns it on in the scanner it is given, for its own call, and off again.
+ */
+/* A catalog name is at most 63 characters (KOF_NAME_MAX); an id the catalog lacks is spelled in 8 hex digits. */
+#define KDET_TEXT_MAX 76u
+
+struct kdet_info {
+	uint8_t  has_verdict;
+	uint8_t  incomplete;               /* the set of diseases may be missing one (kof_result.verdict_incomplete) */
+	const char *verdict;               /* the engine's name; NULL without a verdict. Borrowed from the result. */
+	uint8_t  level;                    /* KOF_VCAT_*: 0 none, tag, variant */
+	uint32_t cover, jaccard, groups, fired;
+	uint8_t  cut;
+	char     family[KDET_TEXT_MAX], variant[KDET_TEXT_MAX], tag[KDET_TEXT_MAX];
+	uint32_t n_diag, diag_total;       /* the matched diagnoses the verdict lists, and how many there were */
+};
+
+enum { KDET_KIND_FORM = 1, KDET_KIND_GRAPH = 2 };
+
+struct kdet_diag {
+	const char *name;                  /* NULL for an id the database does not hold */
+	uint32_t id, disease;
+	int      type;                     /* kof_maltype, -1 when the diagnose carries no catalog facts */
+	int      has_catalog;              /* 1 when it carries family / variant / tag / type (the text fields are meaningful) */
+	char     family[KDET_TEXT_MAX], variant[KDET_TEXT_MAX], tag[KDET_TEXT_MAX];
+	int      kind;                     /* KDET_KIND_FORM (strings / similarity blocks / expression) or KDET_KIND_GRAPH (a lineage); 0 for an id not held */
+	int      has_form;                 /* 1 when `form` and `expr` are the diagnose's detection form (kind == KDET_KIND_FORM) */
+	struct kdb_diag_form form;
+	char     expr[160];
+};
+
+void kdet_info(const kof_engine *, const struct kof_result *, struct kdet_info *out);
+/* The i-th matched diagnose of the verdict (i < kdet_info.n_diag): 1 and filled (name NULL when the database does not hold the id);
+ * 0 for an index past the list. */
+int  kdet_diag(const kof_engine *, const struct kof_result *, uint32_t i, struct kdet_diag *out);
+/* The same facts for a diagnose named by its id (a kof_diag_report row). */
+int  kdet_diag_of(const kof_engine *, uint32_t id, struct kdet_diag *out);
+
+/* What one matcher of a detection form came to, in words: "similarity 100% of the 1 block(s), 70% demanded", "2 of 3 marker(s) found,
+ * regions 0x..", "not asked (the expression did not need it)". One spelling for every tool; answers the matcher's `result`
+ * (KDET_M_NO / YES / NOT_ASKED) so a tool can colour it. Cut at `cap`. */
+int  kdet_matcher_text(const struct kof_diag_match *, char *out, size_t cap);
+
+/* One part (a marker or a block) of a matched form in words, e.g.
+ *   "marker 0 found at 0x7a4 (8 bytes)", "marker 1 not found in CODE",
+ *   "block 5c0a91e2 yes: holds 32 of 32 hashes (100%), cut from ALL; place 0x1240 +4096 in CODE holds 32".
+ * Answers the part's `hit` (1 or 0) so a tool can colour it. Cut at `cap`. */
+int  kdet_part_text(const struct kof_diag_part *, char *out, size_t cap);
+
+/* The run kscan_explain returns: one entry per object the scan reported. */
+typedef struct kdet_run kdet_run;
+struct kdet_object {
+	const char *name;                  /* as the scan named the object */
+	struct kof_result res;             /* the scan's result for it; its borrowed pointers (syms, fixed, packer_build, opened_by) are NULL */
+	/* res.diag / res.n_diag: one kof_diag_report per diagnose, owned by the run */
+};
+
+kdet_run *kscan_explain(kof_scanner *, const void *bytes, uint64_t n, const char *name, const struct kof_scan_option *base);
+/* NULL answers: bad arguments or no memory for the run. A run of a scan that was cut says so in kdet_run_status. */
+uint32_t  kdet_run_count(const kdet_run *);
+const struct kdet_object *kdet_run_at(const kdet_run *, uint32_t i);
+const struct kdet_object *kdet_run_find(const kdet_run *, const char *name);
+/* The matched diagnoses that decided what an object IS to its file: the object's own when it has any, and for a top-level object (a name without
+ * KOF_OBJ_SEP) those of the object the verdict was made on (kdet_run_verdict). NULL and *n 0 when there are none. Owned by the run. */
+const struct kof_diag_report *kdet_run_decided(const kdet_run *, const struct kdet_object *obj, uint32_t *n);
+/* The part of a matched form whose place in the object is the unit with this id (kof_diag_part.unit_id: the id kofexaminer --blocks and the
+ * viewer's block rows carry; the same on an object and on its normalised view, where the offsets are not; found even when the unit holds only
+ * 70% of the diagnose's block, whose own hash differs), and the diagnose it belongs to in *from (may be NULL). NULL when none. */
+const struct kof_diag_part *kdet_block_part(const struct kof_diag_report *diag, uint32_t n, uint32_t block_id, const struct kof_diag_report **from);
+/* The percentage the matcher of this part demands (kof_diag_match.need), 0 when the report does not hold it. */
+unsigned kdet_part_need(const struct kof_diag_report *from, const struct kof_diag_part *part);
+/* The object the file's verdict was made on: the first object of the run, in the order the scan reported them (parent first), whose result has a
+ * verdict (the same rule as kverdict_filemap_fold). NULL when no object has one. */
+const struct kdet_object *kdet_run_verdict(const kdet_run *);
+/* KDET_RUN_* flags: the run is complete when 0. */
+enum { KDET_RUN_NOMEM = 1, KDET_RUN_SCAN_ERR = 2 };
+uint32_t  kdet_run_status(const kdet_run *);
+void      kdet_run_free(kdet_run *);
 
 int kscan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
 		  kof_on_object cb, void *user);

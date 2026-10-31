@@ -221,7 +221,7 @@ enum kof_str_word {
 /*
  * Declare a SIMILARITY BLOCK this module measures against.
  *
- *     KOF_MUTATION_BLOCK(cfg, KOF_SCAN_ELF_CODE, KOF_MUTATION_RAW,
+ *     KOF_MUTATION_BLOCK(cfg, KOF_SCAN_ELF_CODE,
  *                      0x1a2b3c4d, 0x5e6f7a8b, ...);
  *
  *     if (kof_mutation_score(cfg) >= 50)
@@ -232,26 +232,26 @@ enum kof_str_word {
  * person's choice and not a computation. They are written out by the generator
  * in kofviewer; nobody types them.
  *
- * THE REGION AND THE NORMALIZER ARE PROPERTIES OF THE BLOCK, so they are here
- * rather than at the call site - unlike a string, which is worth looking for in
- * more than one place. A block came from somewhere, hashed a particular way,
- * and asking about it anywhere else is asking a different question.
+ * THE REGION IS A PROPERTY OF THE BLOCK, so it is here rather than at the call
+ * site - unlike a string, which is worth looking for in more than one place. A
+ * block came from somewhere, and asking about it anywhere else is asking a
+ * different question.
  *
  * Expands to nothing, like every other declaration here: the build reads it out
  * of the source, assigns the index, and defines the identifier the call site
  * names. A block that was never declared is an undefined identifier at compile
  * time rather than a score that is quietly always zero.
  */
-#define KOF_MUTATION_BLOCK(name, scan_mask, norm, ...)
+#define KOF_MUTATION_BLOCK(name, scan_mask, ...)
 
 /*
  * The same declaration for a block cut from the STATIC LIBRARY.
  *
- *     KOF_MUTATION_BLOCK_LIB(blk_9f22, KOF_SCAN_ELF_CODE, KOF_MUTATION_RAW,
+ *     KOF_MUTATION_BLOCK_LIB(blk_9f22, KOF_SCAN_ELF_CODE,
  *                          0x1a2b3c4d, ...);
  *
- * A separate macro rather than a fourth argument, because the arguments after
- * the normalizer are the hashes - there is nowhere to put a flag that does not
+ * A separate macro rather than a third argument, because the arguments after
+ * the region are the hashes - there is nowhere to put a flag that does not
  * move them. It also reads as what it is at the call site, which a trailing
  * enum would not.
  *
@@ -266,7 +266,7 @@ enum kof_str_word {
  * static builds - so on those every block is an ordinary one and this macro has
  * nothing to describe.
  */
-#define KOF_MUTATION_BLOCK_LIB(name, scan_mask, norm, ...)
+#define KOF_MUTATION_BLOCK_LIB(name, scan_mask, ...)
 
 /*
  * Declare a string the target holds as UTF-16LE.

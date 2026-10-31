@@ -295,7 +295,7 @@ static int pack_load(const struct ksb_ctx *ksb, const char *workdir, struct pack
 
 	/* No module is a database too when the tree held diagnoses (a set of fixtures, or
 	 * a product that ships only those); with neither it is a run that forgot to build. */
-	if (r->n_arts == 0 && !ksb->diag.n_built) {
+	if (r->n_arts == 0 && !ksb_diag_any(ksb)) {
 		fprintf(stderr, "ksigbuilder: no .blob artefacts in %s\n", workdir);
 		return 0;
 	}
@@ -330,7 +330,8 @@ static int pack_group(struct pack_run *r)
 	 * Sorting by the artefact name makes the database a function of its
 	 * sources and nothing else.
 	 */
-	qsort(r->arts, r->n_arts, sizeof *r->arts, ksb_artefact_cmp);
+	if (r->n_arts > 1u)             /* not on a NULL list: a base of diagnoses alone has no module (audit_mem MEM-4) */
+		qsort(r->arts, r->n_arts, sizeof *r->arts, ksb_artefact_cmp);
 
 	ksb_warn_duplicate_patterns(r->arts, r->n_arts);
 
@@ -423,7 +424,8 @@ static int pack_group(struct pack_run *r)
 	 * specific pack, so the plain "elf" goes to the ELF pack and ELF|PE takes the
 	 * suffix, rather than the other way about.
 	 */
-	qsort(r->groups, r->n_groups, sizeof *r->groups, ksb_group_cmp);
+	if (r->n_groups > 1u)
+		qsort(r->groups, r->n_groups, sizeof *r->groups, ksb_group_cmp);
 
 	printf("%u module(s) -> %u pack(s)\n", r->n_arts, r->n_groups);
 
@@ -660,6 +662,9 @@ static int pack_run(struct ksb_ctx *ksb, const char *workdir,
 	 * had no entry.
 	 */
 	if (!ksb_write_diseases(ksb, outdir))
+		return 0;
+	/* AND THE NAMES of the catalog ids the diagnoses carry, beside the table of diseases and for the same reason (ksb_names.c). */
+	if (!ksb_write_names(ksb, outdir))
 		return 0;
 	return 1;
 }

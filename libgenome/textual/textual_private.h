@@ -339,10 +339,6 @@ int kgenome_textual_java(struct kgenome_textual_lexer *lx, uint32_t end);
 /* VBSCRIPT: "'" and Rem comments, "..." with the quote doubled, nothing else. Same contract. */
 int kgenome_textual_vb(struct kgenome_textual_lexer *lx, uint32_t end);
 
-/* The vb line continuation at `i` ("_", blanks, a line break; "_" a word of its own): its length, or 0.
- * The lexer and the form (lang row `vb_lines`) both ask it, so they cannot disagree on what one is. */
-uint32_t kgenome_textual_vb_cont(const uint8_t *p, uint32_t n, uint32_t i);
-
 /* `glue` for vb code: the pairs closing up would make into something else. A row of vb code may use it
  * (vbs does; asp and aspx carry the operators of a second language and keep a union of their own). */
 int kgenome_textual_vb_glue(uint8_t a, uint8_t b);

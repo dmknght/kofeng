@@ -437,6 +437,82 @@ static void fixed_units(void)
 	check(seen == 1u, "a fixed unit in a function region is not offered whole");
 }
 
+/*
+ * FUNCTION UNITS ARE SIGNED BY SHAPE, NOT BY WINDOWS (kgenome_mutation_signature).
+ * Over a code region that holds two functions (varying bytes, so a window sketch WOULD exist) and a string cluster:
+ * every unit that is functions (first != NULL) answers KGENOME_MUTATION_SIG_CFG and has no window hashes - the
+ * window unit_minhash call leaves its output untouched and answers 0 - and the cluster (first == NULL) keeps its windows,
+ * equal to the plain minhash of the same bytes.
+ */
+struct sigs {
+	uint32_t n_fn, n_data, fn_hashes, data_ok;
+	const uint8_t *p;
+};
+
+static int sig_take(void *user, uint64_t off, uint64_t len, uint32_t side, const struct kgenome_func *first)
+{
+	struct sigs *g = user;
+	uint32_t out[KGENOME_MUTATION_MINHASH_K], ref[KGENOME_MUTATION_MINHASH_K], k, n;
+
+	(void)side;
+	for (k = 0; k < KGENOME_MUTATION_MINHASH_K; k++)
+		out[k] = 0xdeadbeefu;
+	n = kgenome_mutation_unit_minhash(first, g->p + off, len, out);
+	if (first) {
+		g->n_fn++;
+		check(kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG, "a function unit has a CFG signature (kof_cfgsign_function), not windows");
+		check(n == 0u, "a function unit is not sketched");
+		for (k = 0; k < KGENOME_MUTATION_MINHASH_K; k++)
+			g->fn_hashes += out[k] != 0xdeadbeefu;
+		/* the bytes WOULD have a sketch: it is the switch that withholds it, not the content */
+		check(kgenome_mutation_minhash(g->p + off, len, ref) >= KGENOME_MUTATION_MIN_HASH, "the function bytes do vary");
+	} else {
+		g->n_data++;
+		check(kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_WINDOWS, "a unit that is not functions has windows");
+		check(n == kgenome_mutation_minhash(g->p + off, len, ref) && !memcmp(out, ref, n * sizeof out[0]),
+		      "a data unit's sketch is the plain minhash");
+		g->data_ok += n >= KGENOME_MUTATION_MIN_HASH;
+	}
+	return 0;
+}
+
+static void signatures(void)
+{
+	static uint8_t obj[8192];
+	struct kgenome_func v[2] = { { 100, 300, 0, 0 }, { 600, 300, 0, 0 } };
+	struct kgenome_func_set fs;
+	struct kof_range ext = { 0, 4096 };
+	struct sigs g;
+	uint32_t s = 0x1234567u, i;
+
+	for (i = 0; i < sizeof obj; i++) {
+		s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+		obj[i] = (uint8_t)s;
+	}
+	/* a cluster of printable strings after the functions: data inside a code region */
+	for (i = 0; i < 40; i++)
+		memcpy(obj + 2000 + i * 20u, "usr/bin/some-string-", 19), obj[2000 + i * 20u + 19u] = 0;
+	memset(&fs, 0, sizeof fs);
+	fs.v = v; fs.n = 2;
+	memset(&g, 0, sizeof g);
+	g.p = obj;
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF, .mask = KGENOME_SCAN_ELF_CODE,
+			.ext = &ext, .n_ext = 1, .funcs = &fs, .fn = sig_take, .user = &g,
+		});
+	check(g.n_fn == 2u, "both function units are still listed");
+	check(g.fn_hashes == 0u, "no function unit carries a window hash");
+	check(g.n_data >= 1u && g.data_ok >= 1u, "the string cluster of the code region keeps its windows");
+	/* a region that is not cut by function: its pieces have windows */
+	memset(&g, 0, sizeof g);
+	g.p = obj;
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF, .mask = KGENOME_SCAN_ELF_DATA,
+			.ext = &ext, .n_ext = 1, .funcs = &fs, .fn = sig_take, .user = &g,
+		});
+	check(g.n_fn == 0u && g.n_data >= 1u && g.data_ok >= 1u, "a data region is cut in pieces that keep their windows");
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -445,6 +521,7 @@ int main(void)
 	data_in_code();
 	data_strings();
 	fixed_units();
+	signatures();
 	if (failures) {
 		printf("mutation units: %d failure(s)\n", failures);
 		return 1;

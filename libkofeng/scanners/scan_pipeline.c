@@ -60,6 +60,8 @@ static void st_facts(struct kof_pipeline *p)
 
 	out->from_packer = (uint8_t)(p->from_packer != 0);
 	memset(&p->ctx, 0, sizeof p->ctx);
+	/* No entry point until a parser finds one (kofctx.h: KOF_NA); a zero here read as "the first byte" (FORM-1). */
+	p->ctx.entry_off = KOF_NA;
 	kof_mod_attach(&p->ctx, sc);
 	sx_obj_begin(sc);
 	/* the constants of a script are asked for at this level: the one scan of its text collects them with the names (objctx_textscan.c) */
@@ -71,7 +73,8 @@ static void st_facts(struct kof_pipeline *p)
 	 * needs: a rule that names a diagnose, or a diagnose that declares a
 	 * disease the verdict reads - see diag_has_reader.
 	 */
-	sc->obj.diag.all = opt && opt->report_diag != 0;
+	sc->obj.diag.all = sc->diag.explain != 0;
+	sc->obj.reader = opt && opt->reader != 0;
 
 	/*
 	 * How big the object is, before anything tries to sx_identify it.
@@ -150,10 +153,9 @@ static void st_facts(struct kof_pipeline *p)
 		p->ctx.resolve_scan = sx_declared_resolve_scan;
 		/* And out to the caller, which has the same problem the engine
 		 * had: it cannot work these out from the bytes either. */
-		/* KNOWN DEFECT N-REGION16 (2026-10-24, R) [sev M]: this copy clips kof_result.region[] to KOF_MAX_REGIONS (16) and says nothing,
-		 * while the declared table (sc->cur.rgn) is now as long as the producer's. Trigger: a normalised PE with more than 16
-		 * disjoint code extents. Effect: the host sees 16 regions and n_region 16, the rest vanish without a flag or oc_scan_limit.
-		 * Reproducer: corp300/015_240fe (2048 library spans). Fix: report the cut (KOF_BROKEN_LIMIT, limit_hits) or add a total count (ABI). */
+		/* kof_result.region is a fixed table of KOF_MAX_REGIONS (ABI): the host gets the first ones and the cut is said (rule 4). */
+		if (sc->cur.n_rgn > KOF_MAX_REGIONS)
+			OC_LIMIT(sc, "declared region table longer than kof_result.region");
 		for (g = 0; g < sc->cur.n_rgn && g < KOF_MAX_REGIONS; g++) {
 			out->region[g].mask = sc->cur.rgn[g].mask;
 			out->region[g].off = sc->cur.rgn[g].off;
@@ -169,6 +171,9 @@ static void st_facts(struct kof_pipeline *p)
 		p->present = sx_regions_present(&p->ctx, resolve);
 		p->present |= sx_sym_halves_present(&p->ctx, resolve);
 	}
+	KOF_TRACE("[facts] object %llu byte(s), format %u, arch %u, from_packer %d: regions wanted %x (kof_engine.scan_mask), present %x\n",
+		  (unsigned long long)p->buf.n, (unsigned)p->ctx.format, (unsigned)p->ctx.arch, p->from_packer,
+		  (unsigned)sc->eng->scan_mask, (unsigned)p->present);
 	sc->st.objects++;
 	sc->st.object_bytes += p->buf.n;
 
@@ -188,8 +193,7 @@ static void st_facts(struct kof_pipeline *p)
 	 * Gated twice on purpose, and both gates still apply inside the feed.
 	 * The set is NULL unless some pack carried a block, so a database
 	 * without mutation rules never reaches this. And within it, a region is
-	 * fed only for the normalizers some block of that region actually asked
-	 * for - a pack whose blocks all hash raw bytes pays one pass, not three.
+	 * fed only when some block of that region actually asks for it.
 	 *
 	 * THE GENERATION BUMP IS NOT DEFERRED WITH THE FEED. It is O(1) - see
 	 * kof_mutation_begin - and it is what makes "this object fed nothing" read
@@ -202,18 +206,8 @@ static void st_facts(struct kof_pipeline *p)
 	oc_scan_release(sc, sc->match.pix_ledgered);
 	sc->match.pix_ledgered = 0;
 	kof_mutation_begin(&sc->mutation);
-	/*
-	 * THIS OBJECT'S DESCRIPTOR IS NOT THE LAST ONE'S.
-	 *
-	 * Here and not inside sx_mutation_feed, which returns early when no pack
-	 * carried a block: a database with no mutation rules would then have left
-	 * the previous object's descriptor in place, and every kof_mutation_blocks
-	 * rule would have measured the wrong file. Built on the first ask, so
-	 * this costs a store.
-	 */
-	/* What the gated measures compare themselves against - see
-	 * kof_scanner.cur.heur_lvl. Unstated is level 1, exactly as sx_heur_object
-	 * reads it, so the two cannot drift. */
+	/* The heuristic level this scan asked for - see kof_scanner.cur.heur_lvl.
+	 * Unstated is level 1. */
 	sc->cur.heur_lvl = opt->heur_off ? 0u
 		     : (opt->heur_level ? opt->heur_level : 1u);
 }
@@ -269,8 +263,14 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 		if (opt->should_stop && opt->should_stop(opt->stop_user))
 			break;
 
-		if (!sx_prefilter(m, &p->ctx, p->present, &sc->st, out))
+		if (!sx_prefilter(m, &p->ctx, p->present, &sc->st, out)) {
+			if (similarity)
+				KOF_TRACE("[module] similarity module %u not run: refused by the prefilter (format/arch/size/regions)\n",
+					  (unsigned)mi);
 			continue;
+		}
+		if (similarity)
+			KOF_TRACE("[module] similarity module %u runs (%u block(s))\n", (unsigned)mi, (unsigned)m->n_block);
 
 		/* What this module declared it reads, produced now that a
 		 * module needing it has actually survived the sx_prefilter. */
@@ -298,6 +298,9 @@ static void st_detect(struct kof_pipeline *p)
 	struct kof_scanner *sc = p->sc;
 
 	run_modules(p, 0);
+	/* The diagnoses whose form is made of string matchers (KDIG_SEC_FORM): answered with the same matcher and the same
+	 * object the modules just searched, before the counters below are read. */
+	oc_diag_forms(sc, &p->ctx, 0, p->out);
 
 	/* Before the next kof_match_begin clears them. */
 	sc->st.searches       += sc->match.m.n_calls;
@@ -330,6 +333,8 @@ static void st_detect(struct kof_pipeline *p)
 static void st_similar(struct kof_pipeline *p)
 {
 	run_modules(p, 1);
+	/* And the diagnoses whose form is made of blocks, scored by the set the modules' blocks are in. */
+	oc_diag_forms(p->sc, &p->ctx, 1, p->out);
 }
 
 /*
@@ -448,36 +453,27 @@ static void st_analyse(struct kof_pipeline *p)
 }
 
 /*
- * MODEL: the scored model's measurement over the whole object - published for an
- * examiner (kof_result.heur_*); it names nothing.
+ * PUBLISH: two facts of the object that the host asks for and cannot work out - whether the
+ * emulator produced anything from it (kof_result.emu_unpacked) and whether a packer module
+ * opened it (kof_result.opened_by_packer).
+ *
+ * Last, because the open stage and the analysis have both run. NOT FOR A VIEW, whose open stage
+ * is its parent's, and not for an object with declared regions: neither has an open stage of its
+ * own to report.
+ *
+ * A VIEW IS KNOWN BY ITS KIND (KOF_ENT_NORMALIZED, the one carrier), not by
+ * having declared regions: a script view used to be told apart by the one BODY
+ * region it declared, which made a region the carrier of a different fact.
  */
-static void st_model(struct kof_pipeline *p)
+static void st_publish(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
-	const struct kof_scan_option *opt = p->opt;
 	struct kof_result *out = p->out;
 
-	/*
-	 * Last, because the unpack result is one of the facts - and NOT FOR A
-	 * VIEW, whose structure is not its own.
-	 *
-	 * The scored model reads the parse: where the sections end against
-	 * where the file ends, whether a segment runs past it. A normalised
-	 * view keeps its parent's headers byte for byte and is SHORTER than
-	 * they describe, so every one of those questions has the wrong answer
-	 * about it - measured before this, an ordinary view came back
-	 * ELF-other/Heur:Appended, which is a finding about the normaliser.
-	 *
-	 * Only the model that reasons about layout is skipped, because the
-	 * layout belongs to the parent and the parent is scanned too.
-	 *
-	 * A VIEW IS KNOWN BY ITS KIND (KOF_ENT_NORMALIZED, the one carrier), not by
-	 * having declared regions: a script view used to be told apart by the one BODY
-	 * region it declared, which made a region the carrier of a different fact.
-	 */
-	if (!sc->cur.n_rgn && kof_src_kind_of(sc->cur.src) != KOF_ENT_NORMALIZED)
-		sx_heur_object(sc, &p->ctx, opt, p->pdepth,
-			    out->broken == KOF_BROKEN_DAMAGED, out);
+	if (!sc->cur.n_rgn && kof_src_kind_of(sc->cur.src) != KOF_ENT_NORMALIZED) {
+		out->opened_by_packer = sc->obj.open.packed_here ? 1u : 0u;
+		out->emu_unpacked     = sc->obj.emu.produced;
+	}
 }
 
 /*
@@ -494,6 +490,8 @@ static void st_verdict(struct kof_pipeline *p)
 	 * no earlier reason - and a clean answer is not given for it. */
 	if (p->sc->obj.open.cut && !p->out->broken)
 		p->out->broken = KOF_BROKEN_LIMIT;
+	if (p->sc->obj.open.damaged && !p->out->broken)
+		p->out->broken = KOF_BROKEN_DAMAGED;
 }
 
 /*
@@ -508,18 +506,15 @@ static void st_report(struct kof_pipeline *p)
 	struct kof_scanner *sc = p->sc;
 	uint32_t n, i, k = 0;
 
-	if (!p->opt->report_diag)
+	if (!sc->diag.explain)
 		return;
 	n = kof_scan_diag_count(&p->ctx);
 	if (!n)
 		return;
-	/* One buffer for the scanner's life, lent to the caller for its callback
+	/* One buffer for the scanner's life (made, and charged, by kof_scan_set_explain), lent to the caller for its callback
 	 * - see kof_result.diag. */
-	if (!sc->diag.rep) {
-		sc->diag.rep = calloc(sc->diag.cap ? sc->diag.cap : 1u, sizeof *sc->diag.rep);
-		if (!sc->diag.rep)
-			return;
-	}
+	if (!sc->diag.rep)
+		return;
 	for (i = 0; i < n; i++)
 		if (kof_scan_diag_report(&p->ctx, i, &sc->diag.rep[k]))
 			k++;
@@ -551,7 +546,6 @@ static void open_finish(struct kof_pipeline *p)
 {
 	if (p->open.state == KOF_OPEN_FRESH || p->open.state == KOF_OPEN_DONE)
 		return;
-	p->yielded = group_yielded(p);
 	p->out->broken = sx_open_end(p->sc, &p->ctx, p->opt, &p->open);
 }
 
@@ -593,10 +587,54 @@ static const struct stage_row {
 	{ KOF_STAGE_SCRIPT,    KOF_ANALYZE_UNWRAP,  0,                              st_script },
 	{ KOF_STAGE_SERVE,     KOF_ANALYZE_UNWRAP,  0,                              st_serve },
 	{ KOF_STAGE_ANALYSE,     KOF_ANALYZE_UNWRAP,  0,                              st_analyse },
-	{ KOF_STAGE_MODEL,     KOF_ANALYZE_UNWRAP,  0,                              st_model },
+	{ KOF_STAGE_PUBLISH,   KOF_ANALYZE_UNWRAP,  0,                              st_publish },
 	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },
 	{ KOF_STAGE_REPORT,    KOF_ANALYZE_UNWRAP,  0,                              st_report }
 };
+
+/*
+ * THE STAGE'S ROW OF THE TIMING TABLE (kofdebug.h): every stage that can be the answer to "what
+ * is slow" has one, not only the opening stage - the table read "unpack 100%" for a run in which
+ * callgrind put the normaliser at two thirds (BE-7). The stages that carry no row of their own
+ * (the host's bookkeeping) answer -1. A DEBUG build only: the macros are empty in a release one.
+ */
+static int stage_slot(enum kof_stage s)
+{
+	switch (s) {
+	case KOF_STAGE_FACTS:   return (int)KOF_T_PARSE;
+	case KOF_STAGE_RECOVER: return (int)KOF_T_RECOVER;
+	case KOF_STAGE_DETECT:  return (int)KOF_T_MATCH;
+	case KOF_STAGE_NORMZ:   return (int)KOF_T_NORMZ;
+	case KOF_STAGE_SIMILAR: return (int)KOF_T_SIMILAR;
+	case KOF_STAGE_SCRIPT:  return (int)KOF_T_SCRIPT;
+	default:                return -1;
+	}
+}
+
+/* DEBUG: the stage's name for the trace (kof_stage in scan_int.h). */
+static const char *stage_word(enum kof_stage s)
+{
+	static const char *const w[KOF_STAGE_COUNT] = {
+		"FACTS", "RECOVER", "DETECT", "EXAMINE", "UNWRAP", "UNPACK", "DECRYPT", "CARVE", "NORMZ", "SIMILAR", "SCRIPT",
+		"SERVE", "ANALYSE", "PUBLISH", "VERDICT", "REPORT"
+	};
+
+	return (unsigned)s < (unsigned)KOF_STAGE_COUNT ? w[s] : "?";
+}
+
+static void run_row(struct kof_pipeline *p, const struct stage_row *r)
+{
+	const int slot = stage_slot(r->stage);
+
+	KOF_TRACE("[stage] %s depth %u format %u arch %u size %llu\n", stage_word(r->stage), (unsigned)p->pdepth,
+		  (unsigned)p->ctx.format, (unsigned)p->ctx.arch, (unsigned long long)p->buf.n);
+
+	if (slot >= 0)
+		KOF_TIME_BEGIN((enum kof_time_slot)slot);
+	r->run(p);
+	if (slot >= 0)
+		KOF_TIME_END((enum kof_time_slot)slot);
+}
 
 /* One object through every stage. */
 static void sx_pipeline_run(struct kof_pipeline *p)
@@ -612,7 +650,7 @@ static void sx_pipeline_run(struct kof_pipeline *p)
 		p->stage = r->stage;
 		p->step = r->step;
 		if (!(r->flags & ROW_CHAIN)) {
-			r->run(p);
+			run_row(p, r);
 			continue;
 		}
 		if (chain_over)
@@ -627,7 +665,7 @@ static void sx_pipeline_run(struct kof_pipeline *p)
 		/* The OPEN stage ends where the host's own step begins. */
 		if (r->stage == KOF_STAGE_NORMZ)
 			open_finish(p);
-		r->run(p);
+		run_row(p, r);
 		/*
 		 * PRODUCED SOMETHING, SO STOP.
 		 *

@@ -185,8 +185,12 @@ static void status_direct(void)
 	sc->obj.diag.graph = g;
 	sc->obj.diag.charged = charged;
 	sc->ledger.resident = charged + 100u;          /* the graph's bytes and something else */
+	sc->obj.diag.ask = 1;                          /* the analysis was demanded (BE-5: otherwise a budget status says nothing) */
 	CK(kof_scan_diag_status(&ctx) == KGENOME_OVER_BUDGET);
 	CK(kof_scan_incomplete(&ctx) == 1);
+	sc->obj.diag.ask = 0;
+	CK(kof_scan_incomplete(&ctx) == 0);
+	sc->obj.diag.ask = 1;
 
 	/* the drop frees the graph and gives back EXACTLY what was charged */
 	kof_scan_diag_drop(sc);
@@ -205,6 +209,7 @@ static void status_direct(void)
 	CK(kof_scan_incomplete(&ctx) == 1);
 	sc->obj.diag.status = KGENOME_OVER_BUDGET;
 	CK(kof_scan_incomplete(&ctx) == 1);
+	sc->obj.diag.ask = 0;
 	sc->obj.diag.status = KGENOME_TRUNCATED;    /* a per-diagnose limit: said by diag_unk, not here */
 	CK(kof_scan_incomplete(&ctx) == 0);
 	sc->obj.diag.status = KGENOME_OK;

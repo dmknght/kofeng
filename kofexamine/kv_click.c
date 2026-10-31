@@ -100,17 +100,12 @@ static int click_field(struct view *v)
 int click_menu(struct view *v)
 {
 	if (v->menu_open) {
-		int k = g_my - v->menu_row;
-
 		/* Anywhere off the menu dismisses it. A menu that only closes
 		 * on the right key is a menu people leave open. */
-		if (g_mx >= v->menu_col && g_mx < v->menu_col + MENU_W &&
-		    k >= 0 && k < menu_rows(v)) {
-			int a = menu_at_row(v, k);
+		int a = menu_hit(v);
 
-			if (a >= 0 && menu_enabled(v, a))
-				menu_run(v, a);
-		}
+		if (a >= 0 && menu_enabled(v, a))
+			menu_run(v, a);
 		v->menu_open = 0;
 		return 1;
 	}
@@ -397,7 +392,7 @@ void hit_row_none(struct view *v, uint32_t arg)
 void hit_row_addcond(struct view *v, uint32_t arg)
 {
 	(void)arg;
-	if (grp_tab_count(&v->ed, v->ed.dr.tab) && g_mx >= v->a_c0 &&
+	if (grp_tab_count(&v->ed, DT_PATTERNS) && g_mx >= v->a_c0 &&
 	    g_mx <= v->a_c1)
 		cnd_add(&v->ed);
 }
@@ -440,10 +435,7 @@ void hit_row_cond(struct view *v, uint32_t g)
 		return;
 	}
 
-	/* CS_COND: the tag row. */
-	if (v->cnd_tg[ci][0] > 0 && g_mx >= v->cnd_tg[ci][0] &&
-	    g_mx <= v->cnd_tg[ci][1])
-		syn_pick_tag(v, PK_TAG_COND, ci);
+	/* CS_COND: the type and tag row - its cells are the unit cells' own zones (unit_cells), nothing else is clickable. */
 }
 
 /*
@@ -555,11 +547,9 @@ static int click_hex(struct view *v, int rclick)
 			 * it clears whatever was being announced.
 			 */
 			v->act_msg[0] = 0;
-			v->dragged = 0;
 			if (again) {
 				select_run(v);
 				v->dragging = 0;
-				v->dragged = 1;
 			}
 		} else {
 			/*
@@ -572,7 +562,6 @@ static int click_hex(struct view *v, int rclick)
 			 */
 			v->sel_a = v->sel_b = KGENOME_BROKEN;
 			v->dragging = 0;
-			v->dragged = 0;
 			dis_bias_to_sel(v);
 		}
 		return 1;
@@ -857,17 +846,14 @@ static void click_leave_edit(struct view *v)
 static int click_chooser(struct view *v)
 {
 	if (v->ch.open) {
-		/* The row under the pointer is counted from the first one
-		 * DRAWN, which is not item zero once the list scrolls. */
-		int k = g_my - v->ch.row + v->ch.off;
+		struct kv_popup p;
+		int k;
 
-		if (g_mx >= v->ch.col && g_mx < v->ch.col + v->ch.w &&
-		    g_my >= v->ch.row && k >= 0 && k < v->ch.n &&
-		    k < v->ch.off + ch_vis(&v->ch)) {
-			/* On the rule between two halves: inside the list, so
-			 * it is not a dismiss, and not a row, so it is not a
-			 * pick either. */
-			if (v->ch.sep[k])
+		ch_popup(&v->ch, &p);
+		k = kv_popup_hit(&p, g_my, g_mx);
+		if (k >= -1) {
+			/* On a rule or an empty cell: inside the list, so it is not a dismiss, and not a row, so it is not a pick either. */
+			if (k < 0)
 				return 1;
 			v->ch.sel = k;
 			ch_take(v);
@@ -875,27 +861,18 @@ static int click_chooser(struct view *v)
 		}
 		/*
 		 * A CLICK ON THE PARENT MENU MOVES TO THAT ROW, it does not
-		 * dismiss everything.
-		 *
-		 * Only the front chooser was tested, so with a submenu open a
-		 * click on another row of the list that opened it fell through
-		 * to "outside the menu" and closed both. Picking Document and
-		 * then Executable made the whole thing vanish rather than
-		 * showing the other list, which reads as a menu that cannot be
-		 * changed your mind about.
-		 *
+		 * dismiss everything - the same hit test, on the parent's box.
 		 * Re-running the parent row is what reopens the child, so the
 		 * switch costs no new code path - it is the same call the first
 		 * pick made.
 		 */
 		if (v->ch_up.open) {
-			int ku = g_my - v->ch_up.row + v->ch_up.off;
+			struct kv_popup pu;
+			int ku;
 
-			if (g_mx >= v->ch_up.col &&
-			    g_mx < v->ch_up.col + v->ch_up.w &&
-			    g_my >= v->ch_up.row &&
-			    ku >= 0 && ku < v->ch_up.n &&
-			    ku < v->ch_up.off + ch_vis(&v->ch_up)) {
+			ch_popup(&v->ch_up, &pu);
+			ku = kv_popup_hit(&pu, g_my, g_mx);
+			if (ku >= 0) {
 				struct chooser up = v->ch_up;
 
 				up.sel = ku;
@@ -1136,7 +1113,9 @@ void click(struct view *v, int rclick)
 		return;
 	if (fam_click(v, rclick))
 		return;
-	if (syn_modal(v) && syn_click(v))
+	if (tags_click(v, rclick))
+		return;
+	if (cfgd_click(v, rclick))
 		return;
 	if (click_dialog_text(v))
 		return;

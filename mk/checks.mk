@@ -14,3 +14,14 @@
 check-rules:
 	@$(PYTHON) tools/check_rules.py
 	@$(PYTHON) tools/check_layers.py
+	@$(MAKE) --no-print-directory check-catalog
+	@$(MAKE) --no-print-directory gate-test
+
+# EVERY REFERENCE OF EVERY DIAGNOSE SOURCE against the two catalogs: a family, variant, type or tag
+# that does not exist, a variant of another family, a type the variant does not declare, Packer,
+# two diagnoses that collide. The builder's own mode, so the rule is one piece of code for this and
+# for the pack (which runs it again); it needs the built ksigbuilder, hence its own target.
+.PHONY: check-catalog
+check-catalog: $(OUT)/bin/ksigbuilder$(EXE)
+	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --catalog $(BASEDIR)/diagnoses \
+	    --pathogens $(BASEDIR)/pathogens --syndromes $(BASEDIR)/syndromes

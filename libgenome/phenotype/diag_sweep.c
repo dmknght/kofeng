@@ -246,6 +246,9 @@ static void join_add(const struct sweep_rgn *rg, struct kgenome_diag_orgs *w, co
 }
 
 /* The function a file offset is in, from the symbol table's set (sorted by offset), or NULL. */
+/* CONSOLIDATION FUNC-14 (2026-10-30, R): DROP -> engine_fn_at (kgenome_funcs_at). Last-start-below lookup: assumes the extents do not overlap. Better
+ * logic here that the keeper lacks: none verified. Prove with: an off inside a function nested in another (funcs_finish keeps the longer one, so rare):
+ * both lookups, same answer expected. */
 static const struct kgenome_func *func_at(const struct kgenome_func_set *fg, uint64_t off)
 {
 	uint32_t lo = 0, hi = fg->n;

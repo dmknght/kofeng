@@ -39,7 +39,7 @@
 #define STR_BTN_X     4u        /* [x] */
 #define STR_BTN_E     8u        /* [e] */
 #define STR_BTN_NEXT 12u        /* [>] */
-#define STR_CNT      19u        /* "nn/nn", five wide */
+#define STR_CNT      19u        /* "nn/nn+", up to six wide (ends one column before [>]) */
 #define STR_BTN_PREV 23u        /* [<] */
 #define DECL_HEXS_CAP  (3u * DECL_BYTES_MAX + 16u)
 
@@ -534,6 +534,22 @@ struct grp_sim_item {
 	uint32_t blk;               /* SIM_IT_BLOCK only: index into dr.blk */
 };
 
+/* The longest link: a diagnose name (KOF_DSRC_NAME_LEN, with its NUL). */
+#define DRAFT_LINK_MAX 64u
+/* How many diagnoses one arrival may load: a unit each, a condition and a matcher per MAX_GROUP. */
+#define DRAFT_LOADED_MAX 16u
+
+/*
+ * A DIAGNOSE THAT WAS LOADED INTO THE DRAFT, whole: its id is the link key, its name the file stem, and `hash` is
+ * kof_dsrc_view_body_hash of what its file said when it was loaded. Save deletes the file of an entry that no unit
+ * carries any more - and only when the file still says that. The list belongs to the object being edited.
+ */
+struct draft_loaded {
+	uint32_t id;                    /* the db's id of the diagnose: the link key */
+	char     name[DRAFT_LINK_MAX];  /* what the engine named that id at load: the file stem in the tree */
+	uint64_t hash;
+};
+
 struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold, 3 AT */
 	uint32_t thresh;
@@ -611,12 +627,19 @@ struct group {
 	uint8_t  n_sim;
 	uint8_t  pct;               /* how much of each the rule demands */
 	/*
-	 * THE TAG OF A BLOCK MATCHER THAT NO CONDITION USES - zero while none is
-	 * chosen. Such a matcher is a diagnose of its own and says what it
-	 * finds itself; one a condition names takes the condition's tag, and
-	 * this is not read for it (grp_standalone).
+	 * THE TAG AND THE TYPE OF A BLOCK MATCHER: a block matcher IS a diagnose unit
+	 * (the Blocks tab has no conditions), so these are its own, exactly as struct
+	 * cond's are a Patterns condition's. Empty and zero while none is chosen. A
+	 * string matcher is not a unit and does not read them.
 	 */
-	uint64_t tag;
+	char     tag[KOF_NAME_MAX + 1];
+	uint8_t  utype;
+	/*
+	 * THE LINK to the diagnose this matcher was LOADED from (see struct draft_loaded): that diagnose's ID VALUE, the db's
+	 * (kof_diag_report.id) - a value, never an index. Zero is a NEW unit. It lives on the matcher so that it moves with it when
+	 * matchers are removed, and grp_add clears it with the rest of the struct.
+	 */
+	uint32_t link;
 };
 
 static inline void grp_at_fix_sign(struct group *q)
@@ -630,7 +653,7 @@ static inline void grp_at_fix_sign(struct group *q)
 /* What a block matcher demands until somebody says otherwise. A placeholder,
  * not a recommendation: how alike is alike enough is the one thing about a
  * similarity rule that nothing but the author can answer. */
-#define GRP_PCT_DEFAULT 60u
+#define GRP_PCT_DEFAULT 70u
 
 /* How many of a reference's strings a draft keeps. Measured: the median sample
  * yields 74 and three in four are under 327. */
@@ -640,27 +663,26 @@ static inline void grp_at_fix_sign(struct group *q)
 struct cond {
 	char     expr[64];          /* over matcher ids */
 	/*
-	 * WHAT THE CONDITION FINDS, as the ID of a tag of the tag sources; zero
-	 * is "not chosen yet". The panel offers the tags that exist (a table
-	 * with a search box) and nothing else, so no spelling can be wrong, and
-	 * the id is what a diagnose will say - a rename of the tag moves no
-	 * reference.
+	 * WHAT THE CONDITION FINDS, as the NAME of a tag of the Syndromes catalog
+	 * (kof_tagcat); empty is "not chosen yet". The panel offers the tags that
+	 * exist and nothing else, so no spelling can be wrong.
 	 *
-	 * THE CONDITION'S OWN, NOT SHARED: nothing else in the draft - not the
-	 * shared Type - changes it. The file name is made from the tag's own
-	 * type, family and name (cnd_file_name).
+	 * THE CONDITION'S OWN, NOT SHARED: nothing else in the draft changes it.
+	 * The file name is made from this tag, this unit's type and the header's
+	 * family (cnd_file_name).
 	 */
-	uint64_t tag;
+	char     tag[KOF_NAME_MAX + 1];
 	/*
-	 * WHICH TAB OF THE DIAGNOSE PANEL THE CONDITION IS WRITTEN ON - enum
-	 * draft_tab. Set when it is made, from the tab that was open: a
-	 * condition over strings and one over blocks are two kinds of diagnose,
-	 * each with its own list, and an empty condition has no matcher to say
-	 * which it is. `expr` is over this tab's matcher numbers (grp_loc).
+	 * THE MALWARE TYPE OF THIS DIAGNOSE UNIT: a kof_maltype value plus one,
+	 * zero is "not chosen yet" and is drawn `?`. A unit belongs to one type (a
+	 * sample with an exploit part and a flood part has a unit of each); the
+	 * types on offer are the ones the header's variant declares.
 	 */
-	uint8_t  tab;
+	uint8_t  utype;
 	/* Matcher ids this condition joins: "1 and 2" against "1 or 2". */
 	int      op;                /* 0 and, 1 or - between this one's ids */
+	/* The diagnose this condition was loaded from, as struct group.link (an id value; zero is a NEW unit). */
+	uint32_t link;
 };
 
 /*
@@ -746,24 +768,6 @@ struct mtn_block {
 	 */
 	char     rgn_enum[48];
 	/*
-	 * LOOK FOR IT ANYWHERE IN THE FILE, not only in the region it came
-	 * from.
-	 *
-	 * The region is an ANCHOR and it is usually the right one - the same
-	 * bytes in another region are another fact, and a rule that ignored
-	 * that would score on a copy of the block sitting in a resource. But it
-	 * is not always right: a rebuild moves a blob from CODE to DATA, a
-	 * packer moves it into an overlay, and a block anchored to where it was
-	 * the first time then scores nothing on the very sample the rule was
-	 * written to catch.
-	 *
-	 * So it is the author's choice, per block, and the matcher already has
-	 * the case: KOF_SCAN_ALL is a region bit of its own that the scanner
-	 * feeds with the whole file. The fields above stay as the block was
-	 * CARVED, so the choice can be taken back.
-	 */
-	uint8_t  anywhere;
-	/*
 	 * CARRIED FROM ANOTHER SAMPLE, rather than carved from this object.
 	 *
 	 * A block declared by a rule survives moving to another file - that is
@@ -773,7 +777,10 @@ struct mtn_block {
 	 * finds it here, which is when it learns where it is.
 	 */
 	uint8_t  kept;
-	uint8_t  norm;                     /* enum kgenome_mutation_norm */
+	uint8_t  nosig;                    /* a function unit the engine did not sign (kof_cfgsign_function: below the floor, undecodable, no rules): listed, no hashes, no id; `why` says which */
+	uint8_t  why;                      /* a function unit: the engine's state for it, enum kof_cfgsign_state */
+	uint32_t fn_blk;                   /* a function unit: its reachable blocks, as the engine counted them */
+	uint64_t fn_off, fn_len;           /* a function unit: the extent of its first function (the unit's signature is about it): what a press on the function's name asks the engine about */
 	uint8_t  picked;                   /* ticked: goes into the rule */
 	uint8_t  lit;                      /* painted in the hex pane */
 	uint8_t  colour;                   /* index into mtn_colour */
@@ -841,6 +848,11 @@ struct kof_draft {
 	uint32_t     n_grp, cur_grp;
 	struct cond  cnd[MAX_GROUP];
 	uint32_t     n_cnd, cur_cnd;
+	/* What was loaded from the tree for the object in front of the reader (see struct draft_loaded). */
+	struct draft_loaded loaded[DRAFT_LOADED_MAX];
+	uint32_t     n_loaded;
+	/* The diagnoses directory of the tree the viewer works on (set by the viewer, kept by draft_clear): what the names of new units are numbered against. */
+	char         tree_dir[300];
 	/*
 	 * THE TAB THE PANEL SHOWS - enum draft_tab. A fact about the draft and
 	 * not about the screen: a matcher is added to it by ticking a block, a
@@ -848,7 +860,7 @@ struct kof_draft {
 	 * may reach the viewer to find out.
 	 */
 	uint8_t      tab;
-	char         warn[120];
+	char         warn[400];   /* a Save names what it wrote and deleted */
 	int          warn_bad;
 	int         opt_on[OPT_COUNT];
 	uint64_t    opt_val[OPT_COUNT];
@@ -870,8 +882,14 @@ struct kof_draft {
 	 * the hash until the reader sets it themselves, which clears the flag.
 	 */
 	int         opt_auto[OPT_COUNT];
+	/*
+	 * THE HEADER'S FAMILY AND VARIANT: names chosen from the Pathogens catalog
+	 * (kof_famcat), never typed. The variant is the catalog's own name
+	 * ("Mirai_A"); empty means none. A variant belongs to the family chosen
+	 * with it, and its types are what a unit may be (struct cond.utype).
+	 */
 	char        family[64];
-	uint32_t    maltype;
+	char        variant[64];
 	/*
 	 * WHICH OBJECT FORMATS THE RULE APPLIES TO, as a bit per format.
 	 *

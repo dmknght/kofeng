@@ -126,8 +126,6 @@ void on_drag(struct view *v)
 			return;
 		}
 		if (v->dragging && byte_under(v, g_my, g_mx, &at)) {
-			if (at != v->sel_a)
-				v->dragged = 1;
 			v->sel_b = at;
 			v->sel_from_dis = 0;
 			/* The bias tracks the START of the run, so dragging
@@ -490,16 +488,23 @@ int handle(struct view *v, int k)
 		if (r >= 0)
 			return r;
 	}
-	/* The tag sources' page and pick list own the keyboard while up. */
+	/* Manage > Pathogens owns the keyboard while up. */
 	{
-		int r = handle_syn_key(v, k);
+		int r = handle_fam_key(v, k);
 
 		if (r >= 0)
 			return r;
 	}
-	/* Manage > Pathogens owns the keyboard while up. */
+	/* So does Manage > Syndromes. */
 	{
-		int r = handle_fam_key(v, k);
+		int r = handle_tags_key(v, k);
+
+		if (r >= 0)
+			return r;
+	}
+	/* And the CFG dialog of a function. */
+	{
+		int r = handle_cfgd_key(v, k);
 
 		if (r >= 0)
 			return r;

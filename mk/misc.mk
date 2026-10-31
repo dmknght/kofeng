@@ -10,6 +10,33 @@
 tui-test: kofviewer
 	$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) $(TUI_ARGS)
 
+# THE MERGE GATE (tools/patch_gate.py says what it checks): code that was added without being asked for.
+#   gate-test    the self-tests of the gate: each kind of unrequested addition (a function, an export, a menu item, a section
+#                title, a hit zone, a key, a viewer-side derive loop, a removed test, a golden change or file outside the manifest) must
+#                produce its FAIL line (tests/gate/, python only, about 3 s: cheap enough to run beside check-rules)
+#   gate         the self-tests, the frozen API surface of the built tree (docs/api_surface.txt must be what the archives export) and the
+#                golden screens of the built viewer (tests/tui/golden, about 2 minutes: run it under the heavy lock). With BASE and
+#                MANIFEST (and PATCH, the `diff -ruN base tree` being delivered) it is the whole of tools/merge_gate.sh instead:
+#                    make gate BASE=../base MANIFEST=../manifest.txt PATCH=../result.patch
+.PHONY: gate-test gate gate-api gate-golden
+gate-test:
+	$(PYTHON) tests/gate/test_patch_gate.py
+	$(PYTHON) tests/gate/test_merge_gate.py
+	$(PYTHON) tests/gate/test_api_surface.py
+
+ifneq ($(BASE),)
+gate: gate-test kofviewer $(KGENOME_LIB) $(KUNCOAT_LIB)
+	sh tools/merge_gate.sh $(BASE) . $(MANIFEST) $(PATCH)
+else
+gate: gate-test gate-api gate-golden
+endif
+
+gate-api: $(LIB) $(KGENOME_LIB) $(KUNCOAT_LIB)
+	$(PYTHON) tools/api_surface.py verify .
+
+gate-golden: kofviewer
+	$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) -j 2 golden
+
 population:
 ifeq ($(KOF_CMD_SHELL),yes)
 	$(error population runs tests/gen_population.sh, a POSIX shell script: run it from an sh, or use a make with one)

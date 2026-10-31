@@ -16,7 +16,7 @@
  *                asserted per pair (a polyglot IS two formats); that it makes the same of it every time, with no
  *                crash, no hang and no read past the object, is
  *
- *   WP2-D7 (KM_CHECK): a layer cut marks the object KOF_BROKEN_LIMIT but kof_stats.limit_hits stays 0, although
+ *   WP2-D7 (fixed): a layer cut marked the object KOF_BROKEN_LIMIT but kof_stats.limit_hits stays 0, although
  *          kof_stats.limit_hits is documented (kofresult.h) as counting every object a bound cut. The same holds for a
  *          children-quota stop (a LIMIT root, limit_hits 0) and a produced-bytes stop; a cut of ONE entry does count.
  */
@@ -84,8 +84,7 @@ static int chain(void *unused)
 				char what[160];
 
 				snprintf(what, sizeof what, "chain %u: the layer cut is a LIMIT object and limit_hits is %llu", d, (unsigned long long)r.limit_hits);
-				/* KNOWN DEFECT WP2-D7 (2026-10-24, M): this row pins it, green until fixed. */
-				KM_CHECK(r.limit_hits >= r.broken_limit, what, "WP2-D7");
+				CK(r.limit_hits >= r.broken_limit, "%s", what);
 			}
 		}
 		cs_free(&r);

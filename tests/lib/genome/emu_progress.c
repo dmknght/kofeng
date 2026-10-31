@@ -18,6 +18,10 @@
  *   spins   one line incremented for ever. Must be stopped as STALLED, near the
  *           idle limit and not at the budget.
  *
+ *   rewrites  the same 16 pages, stores of the byte already there (zero over zero) on every line, for ever: no store changes a
+ *           byte, so none is progress. Must be stopped as STALLED near the idle limit; before the fix every new line
+ *           earned a credit and it ran to the budget (EMU-045).
+ *
  * MUTATION CHECK, measured: with the line credit in mem_wr removed, `sweeps`
  * ends STALLED; with it made unconditional (no new-line test) `spins` runs to
  * the budget.
@@ -71,6 +75,16 @@ static uint8_t spins[] = {
 	0xEB,0xFC                                /*     jmp L              */
 };
 
+static uint8_t rewrites[] = {
+	0x48,0xBF, 0,0,0,0,0,0,0,0,              /* P: mov rdi, DATA       */
+	0xB9, 0x00,0x04,0,0,                     /*    mov ecx, 1024       */
+	0xC6,0x07,0x00,                          /* Q: mov byte [rdi], 0   */
+	0x48,0x83,0xC7,0x40,                     /*    add rdi, 64         */
+	0xFF,0xC9,                               /*    dec ecx             */
+	0x75,0xF5,                               /*    jnz Q               */
+	0xEB,0xE4                                /*    jmp P               */
+};
+
 static enum kgenome_emu_stop run(uint8_t *code, size_t n, uint64_t *insn)
 {
 	struct kgenome_emu_cfg cfg = { BUDGET, 0, 0, 0 };
@@ -115,6 +129,13 @@ int main(void)
 	       kgenome_emu_stop_name(st));
 	ck(st == KGENOME_EMU_STOP_STALLED, "a loop on one line is stopped as stalled");
 	ck(insn < 4u * IDLE, "near the idle limit and not at the budget");
+
+	memcpy(rewrites + 2, &(uint64_t){ DATA_VA }, 8);
+	st = run(rewrites, sizeof rewrites, &insn);
+	printf("  rewrites: %llu instructions, stop=%s\n", (unsigned long long)insn,
+	       kgenome_emu_stop_name(st));
+	ck(st == KGENOME_EMU_STOP_STALLED, "stores of the byte already there are not progress");
+	ck(insn < 4u * IDLE, "and it stops near the idle limit and not at the budget");
 
 	printf("emu progress: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

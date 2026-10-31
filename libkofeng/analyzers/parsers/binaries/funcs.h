@@ -36,4 +36,14 @@ uint32_t kof_syms_build_grow_script(kof_script_names_fn feed, void *feed_user, u
  */
 void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value, int shndx, char *out, size_t cap);
 
+/*
+ * THE NAME OF A FUNCTION, in ONE place: its symbol when the block has one, else `fcn_<offset>` - the function's own file offset as 8 hex digits
+ * (`fcn_000020ab`), a name MADE from where it is and never a guess at what it is. The blocks table's row, the CFG dialog's title and the callee
+ * names of the CFG all say a function this way, so a stripped function is the same word in each. Returns 1 when a symbol named it, 0 when the name is
+ * the made-up one. `out` is always NUL-ended (cap >= 1).
+ */
+int kof_func_name(const struct kgenome_func *f, const uint8_t *blk, uint32_t n, char *out, size_t cap);
+/* The made-up name alone, for an address that is a call target and not an entry of the function table. */
+void kof_fcn_name(uint64_t off, char *out, size_t cap);
+
 #endif /* KOFENG_BINARIES_FUNCS_H */

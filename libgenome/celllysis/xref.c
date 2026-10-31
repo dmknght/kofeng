@@ -1,9 +1,11 @@
-/* One sweep of the code, and what it did with each address. See disasm_xref.h. */
+/* One sweep of the code, and what it did with each address. See xref.h. */
 
 #include "xref.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+#include <kofcore.h>   /* kof_hash64_slot */
 
 #include "celllysis.h"
 
@@ -152,15 +154,10 @@ struct kgenome_xref {
 	int      full;
 };
 
-/* KNOWN DEFECT REV-D7f (2026-10-25, Inference) [sev L]: h_of / h_find (xref.c) are a hand-rolled open-addressing
- * table (USE_HASH 1024 slots, its own multiplier, unseeded) instead of the shared helper (diag_oatab.h /
- * kof_hash64_slot). Trigger: any sweep; the keys are addresses a file chooses. Effect: none measured; a second
- * table to keep correct (full is reported through `full`). Reproducer: none. Fix: use the shared table helper or
- * kof_hash64_slot. */
 static uint32_t h_of(uint64_t va)
 {
-	va *= 0x9E3779B97F4A7C15ull;
-	return (uint32_t)(va >> 52) & (USE_HASH - 1u);
+	/* core's one multiplier (kof_hash64_slot); the home is its top bits */
+	return (kof_hash64_slot(va) >> 20) & (USE_HASH - 1u);
 }
 
 /* The slot this address is in, or the empty slot it belongs in. */

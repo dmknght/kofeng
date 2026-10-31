@@ -224,9 +224,9 @@ static void case_pm_args(void)
 	{
 		int rc = kofa_pm_scan(fd, 0x1000, ~0ull, scratch, 64, runs, 4, &res);
 
-		/* KNOWN DEFECT WP12-3 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(rc != KOFA_OK, "size 2^64-1: (size + 4095) wraps to 0 pages and the scan reports OK with nothing resident (WP12-3)",
-			 "WP12-3: kofa_pm_scan size overflow");
+		ok(rc == KOFA_ERR_OS, "size 2^64-1: (size + 4095) would wrap to 0 pages, the scan refuses it");
+		ok(kofa_pm_scan(fd, 0x1000, ~0ull - 4094u, scratch, 64, runs, 4, &res) == KOFA_ERR_OS, "size 2^64-4095: the rounding up to a page would wrap, refused");
+		ok(kofa_pm_scan(fd, ~0ull - 0xfffu, 0x2000, scratch, 64, runs, 4, &res) == KOFA_ERR_OS, "a region that runs past the top of the address space is refused");
 	}
 	close(fd);
 	{
@@ -416,6 +416,7 @@ static void case_maps_hostile(void)
 	at += (size_t)snprintf(big + at, 5000, "00400000-00401000 r-xp 00000000 08:01 7 %s\n", line);
 	at += (size_t)snprintf(big + at, 1000, "00401000-00402000 r-xp 00000000 08:01 7 /tab\tname\r\n");
 	at += (size_t)snprintf(big + at, 1000, "00402000-00403000 r-xp 00000000 08:01 7 \t /after-tab\n");
+	at += (size_t)snprintf(big + at, 1000, "0040a000-0040b000 rwxp 00000000 08:01 7 /all-flags\n");
 	at += (size_t)snprintf(big + at, 1000, "00403000-00404000 r 00000000 08:01 7 /one-letter-perms\n");
 	at += (size_t)snprintf(big + at, 1000, "00404000-00405000 rwxp 00000000 08:01 7\n");
 	at += (size_t)snprintf(big + at, 1000, "ffffffffffff0000-ffffffffffffffff rw-p 00000000 00:00 0 [stack]\n");
@@ -442,7 +443,8 @@ static void case_maps_hostile(void)
 	ok(g && g->path[0] == '\0', "a line with no path: empty path");
 	/* one more thing: the one-letter perms row is parsed from bytes the kernel never writes */
 	g = reg_at(0x403000);
-	ok(g != NULL, "a one-letter permission field is accepted (WP12-4: the second and third flag are read from uninitialised stack)");
+	ok(g != NULL && (g->flags & KOFA_RGF_READ) && !(g->flags & (KOFA_RGF_WRITE | KOFA_RGF_EXEC | KOFA_RGF_WX)),
+	   "a one-letter permission field is accepted and sets no write/exec flag (it followed an rwxp line: the old code read the second and third flag from the stack that line left)");
 	free(big);
 	/* 100000 regions: streamed, the walk neither stores nor caps them */
 	fresh();
@@ -473,7 +475,7 @@ static const char SMAPS[] =
 	"Private_Dirty:         0 kB\n"
 	"00401000-00402000 r-xp 00001000 08:01 7 /usr/bin/prog\n"
 	"Size:                  4 kB\n"
-	"Rss:                   8 kB\n"
+	"Rss:                   4 kB\n"
 	"Private_Dirty:         4 kB\n"
 	"00402000-00403000 rw-p 00002000 00:00 0\n"
 	"Rss:                   4 kB\n"
@@ -504,7 +506,7 @@ static void case_smaps(void)
 	g = reg_at(0x400000);
 	ok(g && g->rss == 4096 && (g->flags & KOFA_RGF_RSS_MEASURED) && !(g->flags & KOFA_RGF_DIRTY_CODE), "Rss 4 kB measured; Private_Dirty 0: not dirty code");
 	g = reg_at(0x401000);
-	ok(g && g->rss == 8192 && (g->flags & KOFA_RGF_DIRTY_CODE), "exec file region with Private_Dirty > 0: DIRTY_CODE");
+	ok(g && g->rss == 4096 && (g->flags & KOFA_RGF_DIRTY_CODE), "exec file region with Private_Dirty > 0: DIRTY_CODE");
 	g = reg_at(0x402000);
 	ok(g && !(g->flags & KOFA_RGF_DIRTY_CODE), "Private_Dirty on a writable anonymous region is not dirty CODE");
 	g = reg_at(0x10000000);
@@ -518,9 +520,7 @@ static void case_smaps(void)
 
 		ok(h && (h->flags & KOFA_RGF_RSS_MEASURED) && h->rss == 0, "an Rss line with no number: measured as 0");
 	}
-	/* KNOWN DEFECT WP12-5 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(g && g->rss <= g->size, "a region whose smaps Rss is 99999999999999999999 kB reports an rss above its own size (kB * 1024 wraps, no clamp to size) (WP12-5)",
-		 "WP12-5: a_kb_line multiplies without a clamp");
+	ok(g && g->rss <= g->size, "a region whose smaps Rss is 99999999999999999999 kB reports no rss above its own size (kB * 1024 is clamped)");
 	/* smaps absent: the plain maps is read instead */
 	fresh();
 	put_proc(100, "00400000-00401000 r-xp 00000000 08:01 7 /fallback\n", NULL);

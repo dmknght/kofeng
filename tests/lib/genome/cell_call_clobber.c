@@ -244,6 +244,48 @@ static void t_arm(void)
 	CK(unknown(&k, 9));
 }
 
+/*
+ * X11: a call that returns on its own leaves the model STACK as it was. `push rbx; call f; pop rbx` takes back
+ * what the walked function pushed, not the return address the walk never sees popped. Old tests missed it: (a)
+ * every stack test used `call next; pop`, the one call whose pushed address IS taken back, and no test put a
+ * push on the stack under a real call.
+ */
+static void t_call_stack(void)
+{
+	static struct code c;
+	struct kgenome_cell_cur k;
+
+	/* mov ebx,0x11223344; push rbx; call +0x20; pop rbx */
+	c.n = 0;
+	PUT(&c, 0xbb, 0x44, 0x33, 0x22, 0x11);
+	PUT(&c, 0x53);
+	PUT(&c, 0xe8, 0x20, 0, 0, 0);
+	PUT(&c, 0x5b);
+	walk(KGENOME_ARCH_X86_64, &c, 4, &k);
+	CK(known(&k, BX, 0x11223344u));
+	/* push imm8; call through a register (the callee is unknown); pop rax: the imm comes back */
+	c.n = 0;
+	PUT(&c, 0x6a, 0x5a);
+	PUT(&c, 0xff, 0xd1);                    /* call rcx */
+	PUT(&c, 0x58);                          /* pop rax */
+	walk(KGENOME_ARCH_X86_64, &c, 3, &k);
+	CK(known(&k, AX, 0x5a));
+	/* two calls between the push and the pop */
+	c.n = 0;
+	PUT(&c, 0x6a, 0x07);
+	PUT(&c, 0xe8, 0x40, 0, 0, 0);
+	PUT(&c, 0xe8, 0x40, 0, 0, 0);
+	PUT(&c, 0x59);                          /* pop rcx */
+	walk(KGENOME_ARCH_X86_64, &c, 4, &k);
+	CK(known(&k, CX, 7));
+	/* the control: `call next; pop` still takes the pushed address (the get-pc idiom) */
+	c.n = 0;
+	PUT(&c, 0xe8, 0, 0, 0, 0);
+	PUT(&c, 0x5e);                          /* pop rsi */
+	walk(KGENOME_ARCH_X86_64, &c, 2, &k);
+	CK(known(&k, SI, VA + 5u));
+}
+
 int main(int argc, char **argv)
 {
 	hk_args(argc, argv);
@@ -252,6 +294,7 @@ int main(int argc, char **argv)
 	t_not_a_call();
 	t_bare_map();
 	t_arm();
+	t_call_stack();
 	printf("cell_call_clobber: %d failure(s)\n", hk_fails);
 	return hk_fails != 0;
 }

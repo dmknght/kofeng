@@ -1,6 +1,6 @@
 /*
  * famcat_store - the catalog on disk (libkofeng/verdictor/famcat_store.c) and the snapshot (famcat.c):
- *   TEXT      the exact text of a file against an oracle string (2 families, comments, types, the counter line, letter order when a
+ *   TEXT      the exact text of a file (no id line: ids are made from names, catstore.h) against an oracle string (2 families, comments, types, the counter line, letter order when a
  *             deleted letter was reused), the file name, one comment line above a variant and none for a variant without one
  *   ROUNDTRIP save then load gives the same catalog (compared by value); a catalog whose last variant was deleted keeps its counter;
  *             every non-empty set of types as variants of one family (1023: three-letter suffixes)
@@ -36,7 +36,7 @@ static char dir[128];
 static struct kof_famcat_fam F[8], F2[8], FS[8];
 static struct kof_famcat_var V[16], V2[16], VS[16];
 static struct kof_famcat C, C2, S;
-static struct kof_famcat_store ST;
+static struct kof_catstore ST;
 
 static void fresh(void)
 {
@@ -157,7 +157,8 @@ static void text(void)
 	CK(kof_famcat_delete_variant(&C, 0) == KOF_FAMCAT_OK);
 	CK(kof_famcat_add_variant(&C, 0, NULL, ROOT, 1, NULL) == KOF_FAMCAT_OK);
 	kof_famcat_family_text(&C, 0, b, sizeof b);
-	CK(strstr(b, "(\"A\", KOF_MALTYPE_ROOTKIT);\nKOF_MALWARE_VARIANT(\"B\"") != NULL && strstr(b, "(\"D\"") != NULL);
+	CK(strstr(b, "(\"A\", KOF_MALTYPE_ROOTKIT);\nKOF_MALWARE_VARIANT(\"B\"") != NULL &&
+	   strstr(b, "KOF_MALWARE_VARIANT(\"A\"") < strstr(b, "KOF_MALWARE_VARIANT(\"B\"") && strstr(b, "(\"D\"") != NULL);
 	{
 		char nm[32];
 
@@ -186,9 +187,9 @@ static void roundtrip(void)
 	fresh();
 	wipe();
 	two();
-	CK(kof_famcat_save(&C, &ST, dir) == KOF_FAMCAT_IO_OK && ST.note[0] == 0);
+	CK(kof_famcat_save(&C, &ST, dir) == KOF_CATSTORE_IO_OK && ST.note[0] == 0);
 	CK(exists("mirai.c") && exists("gafgyt.c") && ST.n_file == 2);
-	CK(kof_famcat_load(&C2, &ST, dir) == KOF_FAMCAT_IO_OK && ST.note[0] == 0 && ST.n_bad == 0);
+	CK(kof_famcat_load(&C2, &ST, dir) == KOF_CATSTORE_IO_OK && ST.note[0] == 0 && ST.n_bad == 0);
 	/* the families are loaded in file-name order (gafgyt.c, mirai.c): compare as sets by value */
 	CK(C2.n_fam == 2 && C2.n_var == 3);
 	for (i = 0; i < C2.n_fam; i++) {
@@ -199,7 +200,7 @@ static void roundtrip(void)
 	CK(C2.fam[0].next + C2.fam[1].next == 4u + 2u);     /* Mirai D = 4 (the deleted C kept its letter), Gafgyt B = 2 */
 	/* a second save of the loaded catalog is byte-identical to the first */
 	t = slurp("mirai.c", NULL);
-	CK(kof_famcat_save(&C2, &ST, dir) == KOF_FAMCAT_IO_OK);
+	CK(kof_famcat_save(&C2, &ST, dir) == KOF_CATSTORE_IO_OK);
 	{
 		char *u = slurp("mirai.c", NULL);
 
@@ -226,8 +227,8 @@ static void roundtrip(void)
 	}
 	CK(big.n_var == 1023u);
 	wipe();
-	CK(kof_famcat_save(&big, &ST, dir) == KOF_FAMCAT_IO_OK);
-	CK(kof_famcat_load(&big2, &ST, dir) == KOF_FAMCAT_IO_OK && ST.note[0] == 0);
+	CK(kof_famcat_save(&big, &ST, dir) == KOF_CATSTORE_IO_OK);
+	CK(kof_famcat_load(&big2, &ST, dir) == KOF_CATSTORE_IO_OK && ST.note[0] == 0);
 	CK(same(&big, &big2) && big2.n_var == 1023u);
 	wipe();
 }
@@ -243,7 +244,7 @@ static void save(void)
 	wipe();
 	two();
 	memcpy(C.fam[1].name, "mirai", 6);
-	CK(kof_famcat_save(&C, &ST, dir) == KOF_FAMCAT_IO_COLLISION && strstr(ST.note, "mirai.c") && !exists("mirai.c") &&
+	CK(kof_famcat_save(&C, &ST, dir) == KOF_CATSTORE_IO_COLLISION && strstr(ST.note, "mirai.c") && !exists("mirai.c") &&
 	   !exists("gafgyt.c"));
 	/* the library's own check refuses the same names at add time */
 	fresh();
@@ -253,22 +254,22 @@ static void save(void)
 	/* a deleted family's file is removed at the next Save, the other is kept */
 	fresh();
 	two();
-	CK(kof_famcat_save(&C, &ST, dir) == KOF_FAMCAT_IO_OK && exists("gafgyt.c"));
+	CK(kof_famcat_save(&C, &ST, dir) == KOF_CATSTORE_IO_OK && exists("gafgyt.c"));
 	CK(kof_famcat_delete_family(&C, 1) == KOF_FAMCAT_OK);
-	CK(kof_famcat_save(&C, &ST, dir) == KOF_FAMCAT_IO_OK && !exists("gafgyt.c") && exists("mirai.c") && ST.n_file == 1);
+	CK(kof_famcat_save(&C, &ST, dir) == KOF_CATSTORE_IO_OK && !exists("gafgyt.c") && exists("mirai.c") && ST.n_file == 1);
 
 	/* a file that failed to load: reported, never rewritten, never removed, and a family that would take its name is refused */
 	puts_("Broken.c", "this is not a pathogen file\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_BOTNET);\n");
 	puts_("keep.c", "KOF_MALWARE_FAMILY_NAME(\"Keep\");\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_NO_SUCH_TYPE);\n");
-	CK(kof_famcat_load(&C2, &ST, dir) == KOF_FAMCAT_IO_OK);
+	CK(kof_famcat_load(&C2, &ST, dir) == KOF_CATSTORE_IO_OK);
 	CK(C2.n_fam == 1 && !strcmp(C2.fam[0].name, "Mirai") && ST.n_bad == 2 && strstr(ST.note, "Broken.c") && strstr(ST.note, "keep.c") &&
 	   ST.n_file == 1);
-	CK(kof_famcat_save(&C2, &ST, dir) == KOF_FAMCAT_IO_OK);
+	CK(kof_famcat_save(&C2, &ST, dir) == KOF_CATSTORE_IO_OK);
 	t = slurp("Broken.c", NULL);
 	CK(t && strstr(t, "this is not a pathogen file") && exists("keep.c"));
 	free(t);
 	CK(kof_famcat_add_family(&C2, "Keep", NULL, BOT, &f) == KOF_FAMCAT_OK);
-	CK(kof_famcat_save(&C2, &ST, dir) == KOF_FAMCAT_IO_COLLISION && strstr(ST.note, "keep.c"));
+	CK(kof_famcat_save(&C2, &ST, dir) == KOF_CATSTORE_IO_COLLISION && strstr(ST.note, "keep.c"));
 	t = slurp("keep.c", NULL);
 	CK(t && strstr(t, "NO_SUCH_TYPE"));
 	free(t);
@@ -277,7 +278,7 @@ static void save(void)
 	/* a missing directory is created */
 	snprintf(p, sizeof p, "%s/sub", dir);
 	two();
-	CK(kof_famcat_save(&C, &ST, p) == KOF_FAMCAT_IO_OK);
+	CK(kof_famcat_save(&C, &ST, p) == KOF_CATSTORE_IO_OK);
 	snprintf(p, sizeof p, "%s/sub/mirai.c", dir);
 	CK(stat(p, &st) == 0);
 	unlink(p);
@@ -287,8 +288,8 @@ static void save(void)
 	rmdir(p);
 
 	/* no directory named */
-	CK(kof_famcat_save(&C, &ST, "") == KOF_FAMCAT_IO_NO_DIR && ST.note[0]);
-	CK(kof_famcat_save(&C, &ST, NULL) == KOF_FAMCAT_IO_NO_DIR);
+	CK(kof_famcat_save(&C, &ST, "") == KOF_CATSTORE_IO_NO_DIR && ST.note[0]);
+	CK(kof_famcat_save(&C, &ST, NULL) == KOF_CATSTORE_IO_NO_DIR);
 
 	/* a path that is a file, not a directory: one line, the catalog is as it was */
 	puts_("plain", "x");
@@ -296,14 +297,14 @@ static void save(void)
 	fresh();
 	two();
 	kof_famcat_snapshot(&C, &S);
-	CK(kof_famcat_save(&C, &ST, p) == KOF_FAMCAT_IO_FAIL && ST.note[0] && !strchr(ST.note, '\n') && same(&C, &S));
+	CK(kof_famcat_save(&C, &ST, p) == KOF_CATSTORE_IO_FAIL && ST.note[0] && !strchr(ST.note, '\n') && same(&C, &S));
 
 	/* a read-only directory (root ignores the mode: skipped then) */
 	if (geteuid() != 0) {
 		snprintf(p, sizeof p, "%s/ro", dir);
 		mkdir(p, 0755);
 		chmod(p, 0555);
-		CK(kof_famcat_save(&C, &ST, p) == KOF_FAMCAT_IO_FAIL && strstr(ST.note, "cannot write") && same(&C, &S));
+		CK(kof_famcat_save(&C, &ST, p) == KOF_CATSTORE_IO_FAIL && strstr(ST.note, "cannot write") && same(&C, &S));
 		chmod(p, 0755);
 		rmdir(p);
 	} else {
@@ -324,14 +325,14 @@ static void load(void)
 	wipe();
 	/* a missing directory: an empty catalog; no directory named: NO_DIR */
 	snprintf(p, sizeof p, "%s/nothing", dir);
-	CK(kof_famcat_load(&C, &ST, p) == KOF_FAMCAT_IO_OK && C.n_fam == 0 && ST.note[0] == 0);
-	CK(kof_famcat_load(&C, &ST, NULL) == KOF_FAMCAT_IO_NO_DIR);
+	CK(kof_famcat_load(&C, &ST, p) == KOF_CATSTORE_IO_OK && C.n_fam == 0 && ST.note[0] == 0);
+	CK(kof_famcat_load(&C, &ST, NULL) == KOF_CATSTORE_IO_NO_DIR);
 
 	/* unknown lines are counted once in the one line; blank lines and the header comment are not */
 	puts_("a.c", "// Generated by Manage > Pathogens; edit by hand with care.\n\nKOF_MALWARE_FAMILY_NAME(\"Aa\");\nwhat is this\n"
 	      "KOF_MALWARE_NEXT_VARIANT(\"C\");\n// c1\n// c2\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_BOTNET, KOF_MALTYPE_ROOTKIT);\n"
 	      "int x = 1;\r\n// stray\n\nKOF_MALWARE_VARIANT(\"B\", KOF_MALTYPE_TROJAN);\r\n");
-	CK(kof_famcat_load(&C, &ST, dir) == KOF_FAMCAT_IO_OK && C.n_fam == 1 && C.n_var == 2 && ST.n_ignored == 2 &&
+	CK(kof_famcat_load(&C, &ST, dir) == KOF_CATSTORE_IO_OK && C.n_fam == 1 && C.n_var == 2 && ST.n_ignored == 2 &&
 	   !strcmp(ST.note, "2 lines ignored") && C.fam[0].next == 3u);
 	CK(!strcmp(C.var[0].comment, "c1 c2") && !strcmp(C.var[0].name, "Aa_A") && C.var[0].types == (BOT | ROOT) &&
 	   C.var[1].comment[0] == 0 && C.var[1].types == TRO);              /* the stray comment is not above B: it is dropped */
@@ -343,7 +344,6 @@ static void load(void)
 		static const char *const bad[] = {
 			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_PACKER);\n",    /* Packer never */
 			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_BOTNET);\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_TROJAN);\n",
-			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"A\", KOF_MALTYPE_BOTNET);\nKOF_MALWARE_VARIANT(\"B\", KOF_MALTYPE_BOTNET);\n",
 			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"A\");\n",                       /* no type */
 			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"a\", KOF_MALTYPE_BOTNET);\n",   /* not capital letters */
 			"KOF_MALWARE_FAMILY_NAME(\"Y\");\nKOF_MALWARE_VARIANT(\"AAAAAA\", KOF_MALTYPE_BOTNET);\n",
@@ -392,40 +392,40 @@ static void load(void)
 		CK(kof_famcat_load_text(&C, nx, sizeof nx - 1u, NULL, NULL) == 1 && C.fam[0].next == 3u);
 	}
 
-	/* caps: a line of exactly KOF_FAMCAT_LINE_MAX is read (and not understood), one more fails; the file at KOF_FAMCAT_FILE_MAX loads,
-	 * one more byte is "file too big"; more files than KOF_FAMCAT_FILES_MAX are said, not silent */
-	big = malloc(KOF_FAMCAT_FILE_MAX + 8u);
-	memset(big, 'x', KOF_FAMCAT_LINE_MAX + 1u);
-	big[KOF_FAMCAT_LINE_MAX + 1u] = '\n';
-	memcpy(big + KOF_FAMCAT_LINE_MAX + 2u, good, strlen(good));
-	n = KOF_FAMCAT_LINE_MAX + 2u + strlen(good);
+	/* caps: a line of exactly KOF_CATSTORE_LINE_MAX is read (and not understood), one more fails; the file at KOF_CATSTORE_FILE_MAX loads,
+	 * one more byte is "file too big"; more files than KOF_CATSTORE_FILES_MAX are said, not silent */
+	big = malloc(KOF_CATSTORE_FILE_MAX + 8u);
+	memset(big, 'x', KOF_CATSTORE_LINE_MAX + 1u);
+	big[KOF_CATSTORE_LINE_MAX + 1u] = '\n';
+	memcpy(big + KOF_CATSTORE_LINE_MAX + 2u, good, strlen(good));
+	n = KOF_CATSTORE_LINE_MAX + 2u + strlen(good);
 	fresh();
 	/* a line of LINE_MAX + 1 characters fails the file; with the first character cut it is exactly LINE_MAX and is only not understood */
 	CK(kof_famcat_load_text(&C, big, n, &ign, &why) == 0 && !strcmp(why, "line too long") && C.n_fam == 0);
 	CK(kof_famcat_load_text(&C, big + 1, n - 1u, &ign, &why) == 1 && ign == 1 && C.n_fam == 1);
 	wipe();
 	memcpy(big, good, strlen(good));
-	memset(big + strlen(good), '\n', KOF_FAMCAT_FILE_MAX - strlen(good));
-	put("fit.c", big, KOF_FAMCAT_FILE_MAX);
-	big[KOF_FAMCAT_FILE_MAX] = '\n';
-	put("over.c", big, KOF_FAMCAT_FILE_MAX + 1u);
+	memset(big + strlen(good), '\n', KOF_CATSTORE_FILE_MAX - strlen(good));
+	put("fit.c", big, KOF_CATSTORE_FILE_MAX);
+	big[KOF_CATSTORE_FILE_MAX] = '\n';
+	put("over.c", big, KOF_CATSTORE_FILE_MAX + 1u);
 	puts_("odd.txt", good);                                       /* not *.c: never read */
 	snprintf(p, sizeof p, "%s/dir.c", dir);
 	mkdir(p, 0755);                                               /* a directory named *.c is not a file */
 	fresh();
-	CK(kof_famcat_load(&C, &ST, dir) == KOF_FAMCAT_IO_OK && C.n_fam == 1 && ST.n_bad == 2 && strstr(ST.note, "dir.c, over.c") &&
+	CK(kof_famcat_load(&C, &ST, dir) == KOF_CATSTORE_IO_OK && C.n_fam == 1 && ST.n_bad == 2 && strstr(ST.note, "dir.c, over.c") &&
 	   strstr(ST.note, "not a regular file"));
 	rmdir(p);
 	fresh();
-	CK(kof_famcat_load(&C, &ST, dir) == KOF_FAMCAT_IO_OK && C.n_fam == 1 && ST.n_bad == 1 && strstr(ST.note, "(over.c: file too big)"));
+	CK(kof_famcat_load(&C, &ST, dir) == KOF_CATSTORE_IO_OK && C.n_fam == 1 && ST.n_bad == 1 && strstr(ST.note, "(over.c: file too big)"));
 	free(big);
 	wipe();
-	for (i = 0; i < KOF_FAMCAT_FILES_MAX + 3u; i++) {
+	for (i = 0; i < KOF_CATSTORE_FILES_MAX + 3u; i++) {
 		snprintf(p, sizeof p, "f%03u.c", (unsigned)i);
 		puts_(p, "// nothing\n");
 	}
 	fresh();
-	CK(kof_famcat_load(&C, &ST, dir) == KOF_FAMCAT_IO_OK && ST.n_bad == KOF_FAMCAT_FILES_MAX && strstr(ST.note, "over the limit"));
+	CK(kof_famcat_load(&C, &ST, dir) == KOF_CATSTORE_IO_OK && ST.n_bad == KOF_CATSTORE_FILES_MAX && strstr(ST.note, "over the limit"));
 	wipe();
 }
 

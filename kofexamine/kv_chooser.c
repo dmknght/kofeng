@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "kv.h"
+#include "kv_tags.h"
 
 
 /*
@@ -65,10 +66,17 @@ enum {
  * bytes again under each condition would be describing a different file - and
  * would make a string used twice look like two strings.
  */
+_Static_assert(CH_ITEMS >= KV_FAM_MAX_VARIANT && CH_ITEMS >= KV_FAM_MAX_FAMILY &&
+	       CH_ITEMS >= KV_TAG_MAX && CH_ITEMS >= MAX_DECL + 2,
+	       "a catalog outgrew the chooser: raise CH_ITEMS");
+
+/* A row past CH_ITEMS is counted, not dropped unseen: ch_open names the number on the last row. */
 static void ch_add(struct chooser *c, const char *t)
 {
 	if (c->n < CH_ITEMS)
-		snprintf(c->item[c->n++], CH_W, "%s", t);
+		snprintf(c->item[c->n++], CH_W, "%.*s", CH_W - 1, t);
+	else
+		c->more++;
 }
 
 /* The same, for a list whose rows are not all always there. */
@@ -350,6 +358,17 @@ static int opt_offerable(struct view *v, int k)
 	return 1;                       /* the two sizes always apply */
 }
 
+/* The rows of a chooser as a pop-up: an item is a row of its own (the id is its index), a separator a rule, a row that opens a list carries the ">". */
+void ch_popup(const struct chooser *c, struct kv_popup *p)
+{
+	int i;
+
+	kv_popup_init(p, 1);
+	for (i = 0; i < c->n; i++)
+		kv_popup_add(p, c->item[i], c->sep[i] ? KV_PR_RULE : c->sub[i] ? KV_PR_SUB : 0u, i);
+	p->box = c->box;
+}
+
 /*
  * `row` IS THE CONTROL'S OWN ROW - g_my, and nothing arithmetic on it.
  *
@@ -365,7 +384,7 @@ static int opt_offerable(struct view *v, int k)
  * in the same function that does. So the rule is here, in one place: hand this
  * the row that was clicked, and let it decide where the list goes.
  */
-void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
+static void ch_open_in(struct view *v, int what, uint32_t arg, int row, int col, const struct chooser *up)
 {
 	struct chooser *c = &v->ch;
 	uint32_t i;
@@ -573,9 +592,54 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		if (!c->n)
 			return;
-	} else if (what == CH_TYPE) {
-		for (i = 0; i < MALTYPE_N; i++)
-			ch_add(c, maltype_word[i]);
+	} else if (what == CH_HFAM) {
+		int created;
+		struct kv_fam_ui *u = fam_ensure(v, &created);
+
+		if (!u || !u->cat.n_fam) {
+			say_note(&v->ed, "no pathogens: add one in Manage > Pathogens");
+			return;
+		}
+		for (i = 0; i < u->cat.n_fam; i++)
+			ch_add(c, u->cat.fam[i].name);
+	} else if (what == CH_HVAR) {
+		/* Only the chosen family's variants; each row is the name the catalog composed (the types are the unit's to choose, not shown here). */
+		int created;
+		struct kv_fam_ui *u = fam_ensure(v, &created);
+		int32_t f = u ? kv_fam_find_family(&u->cat, v->ed.dr.family) : -1;
+
+		if (f < 0)
+			return;
+		for (i = 0; i < u->cat.n_var; i++) {
+			struct kv_fam_row r = { KV_FAM_VARIANT, (uint32_t)f, (int32_t)i };
+			char nm[KOF_FAMCAT_NAME_MAX + 8], ty[128], cm[KOF_FAMCAT_COMMENT_MAX + 1];
+
+			if (u->cat.var[i].family != (uint32_t)f)
+				continue;
+			kv_fam_cells(&u->cat, &r, nm, sizeof nm, ty, sizeof ty, cm, sizeof cm);
+			ch_add_verb(c, nm + KV_FAM_INDENT, i);
+		}
+		if (!c->n)
+			return;
+	} else if (what == CH_UTYPE) {
+		uint32_t mask = decl_var_types(v);
+
+		for (i = 0; i < kof_famcat_type_count(); i++)
+			if (mask & (1u << kof_famcat_type_value(i)))
+				ch_add_verb(c, kof_famcat_type_name(i), kof_famcat_type_value(i));
+		if (!c->n)
+			return;
+	} else if (what == CH_UTAG) {
+		struct kv_tag_ui *u = tags_ensure(v);
+
+		if (!u || !u->cat.n) {
+			say_note(&v->ed, "no syndromes: add one in Manage > Syndromes");
+			return;
+		}
+		/* The name alone: a tag's activities and objects are the Syndromes dialog's to show. */
+		ch_add_verb(c, "(none)", 0);
+		for (i = 0; i < u->cat.n; i++)
+			ch_add_verb(c, u->cat.tag[i].name, i + 1u);
 	} else if (what == CH_MARKER) {
 		/*
 		 * Only the markers this condition could actually search for:
@@ -936,45 +1000,40 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	 * where the eye already is. Above only when the list does not fit
 	 * below, which is the case the screen bottom forces.
 	 */
+	/* The last row of a list that did not fit says how many are missing (it stands in for one more, which is counted). */
+	if (c->more)
+		snprintf(c->item[c->n - 1], CH_W, "(%d more not shown)", c->more + 1);
 	c->open = 1;
-	c->row = row + 1;
-	if (c->row + c->n - 1 > g_rows - 1)
-		c->row = row - c->n;
-	if (c->row + c->n - 1 > g_rows - 1)
-		c->row = g_rows - c->n;
-	if (c->row < 1)
-		c->row = 1;
 	/*
-	 * Wide enough for the longest row and no wider. A row is drawn as a
-	 * leading space, the text, then either two columns of padding or one
-	 * plus the submenu ">" - so the text field is w - 2, or w - 3 when
-	 * any row in the list opens another.
+	 * THE BOX IS kv_popup_place's, and nothing here decides a row or a column.
+	 *
+	 * A list under a control: below it, above it when that is the room, the whole usable height (and then it scrolls) when neither
+	 * is. A list a row of another opened (`up`): beside that row, its top on the row's own screen row, on the right of the parent
+	 * or on the left when the right has no room. Both used to be worked out here, once by hand: the first with a width one wider
+	 * than the rows drawn, the second two rows below its parent and one column off it.
 	 */
 	{
-		int wi, longest = 0, any_sub = 0;
+		struct kv_popup p;
+		struct kv_popup_req q;
 
-		for (wi = 0; wi < c->n; wi++) {
-			int l = (int)strlen(c->item[wi]);
+		ch_popup(c, &p);
+		kv_popup_screen(&q);
+		q.ay = row;
+		q.ax = col;
+		q.anchor_h = 1;
+		q.min_w = CH_W_MIN;
+		q.max_w = CH_W;
+		if (up) {
+			/* Rows of a chooser are its items one for one, so the parent's row is its cursor's position in its box. */
+			int pr = up->box.y + up->sel - up->box.off;
 
-			if (l > longest)
-				longest = l;
-			if (c->sub[wi])
-				any_sub = 1;
+			q.parent = &up->box;
+			q.parent_row = pr >= up->box.y && pr < up->box.y + up->box.h ? pr : up->box.y;
+			q.anchor_h = 0;
 		}
-		c->w = longest + (any_sub ? 4 : 3);
-		if (c->w < CH_W_MIN)
-			c->w = CH_W_MIN;
-		if (c->w > CH_W)
-			c->w = CH_W;
-		if (c->w > g_cols - 2)
-			c->w = g_cols - 2;
+		kv_popup_place(&p, &q);
+		c->box = p.box;
 	}
-
-	c->col = col;
-	if (c->col + c->w > g_cols)
-		c->col = g_cols - c->w;
-	if (c->col < 1)
-		c->col = 1;
 
 	/*
 	 * NO ROW IS THE CURSOR YET, and that is the whole of it.
@@ -989,6 +1048,17 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	 * a click names its own row and never consults this.
 	 */
 	c->sel = -1;
+}
+
+void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
+{
+	ch_open_in(v, what, arg, row, col, NULL);
+}
+
+/* A list opened by a row of `up` (a copy of the parent taken before the new list replaces it): beside that row. */
+void ch_open_beside(struct view *v, int what, uint32_t arg, const struct chooser *up)
+{
+	ch_open_in(v, what, arg, up->box.y, up->box.x, up);
 }
 
 
@@ -1160,31 +1230,6 @@ static int64_t at_anchor_val(uint8_t anchor, uint64_t entry, uint64_t size)
 	return 0;                       /* bof */
 }
 
-/*
- * Keep the highlighted row inside the visible window.
- *
- * Called wherever `sel` moves. Without it an arrow key walks the cursor off
- * the end of the drawn rows and the list stops responding to the eye - the
- * same failure as a pane whose cursor scrolls and whose view does not.
- */
-void ch_follow(struct chooser *c)
-{
-	int vis = ch_vis(c);
-
-	if (c->sel < 0 || c->n <= vis) {
-		c->off = 0;
-		return;
-	}
-	if (c->sel < c->off)
-		c->off = c->sel;
-	else if (c->sel >= c->off + vis)
-		c->off = c->sel - vis + 1;
-	if (c->off > c->n - vis)
-		c->off = c->n - vis;
-	if (c->off < 0)
-		c->off = 0;
-}
-
 void ch_take(struct view *v)
 {
 	struct chooser *c = &v->ch;
@@ -1192,8 +1237,40 @@ void ch_take(struct view *v)
 
 	c->open = 0;
 	v->ch_up.open = 0;
-	if (c->what == CH_TYPE) {
-		v->ed.dr.maltype = (uint32_t)c->sel;
+	if (c->more && c->sel == c->n - 1)
+		return;                         /* the "N more" row picks nothing */
+	if (c->what == CH_HFAM) {
+		decl_pick_family(v, (uint32_t)c->sel);
+		return;
+	}
+	if (c->what == CH_HVAR) {
+		decl_pick_variant(v, c->verb[c->sel]);
+		return;
+	}
+	if (c->what == CH_UTYPE || c->what == CH_UTAG) {
+		uint32_t i = c->arg & 0xffffu;
+		uint8_t *ut = NULL;
+		char *tag = NULL;
+
+		if (c->arg & CH_UNIT_GRP) {
+			if (i < v->ed.dr.n_grp) {
+				ut = &v->ed.dr.grp[i].utype;
+				tag = v->ed.dr.grp[i].tag;
+			}
+		} else if (i < v->ed.dr.n_cnd) {
+			ut = &v->ed.dr.cnd[i].utype;
+			tag = v->ed.dr.cnd[i].tag;
+		}
+		if (!ut)
+			return;
+		if (c->what == CH_UTYPE) {
+			*ut = (uint8_t)(c->verb[c->sel] + 1u);
+		} else if (c->verb[c->sel] && v->tag &&
+			   (uint32_t)c->verb[c->sel] - 1u < v->tag->cat.n) {
+			snprintf(tag, KOF_NAME_MAX + 1, "%s", v->tag->cat.tag[c->verb[c->sel] - 1u].name);
+		} else {
+			tag[0] = 0;
+		}
 		return;
 	}
 	if (c->what == CH_FMT_CAT) {
@@ -1209,9 +1286,8 @@ void ch_take(struct view *v)
 				continue;
 			if ((int)n == c->sel) {
 				up.open = 1;
-				ch_open(v, fmt_cat_langs(ci) ? CH_FMT_LANG
-							     : CH_FMT_ADD, ci,
-					up.row + up.sel + 1, up.col + up.w);
+				ch_open_beside(v, fmt_cat_langs(ci) ? CH_FMT_LANG
+							     : CH_FMT_ADD, ci, &up);
 				v->ch_up = up;
 				return;
 			}
@@ -1255,10 +1331,9 @@ void ch_take(struct view *v)
 				continue;
 			if ((int)n == c->sel) {
 				up.open = 1;
-				ch_open(v, fmt_cat_langs(ci) ? CH_FMT_SW_LANG
+				ch_open_beside(v, fmt_cat_langs(ci) ? CH_FMT_SW_LANG
 							     : CH_FMT_SW,
-					FMT_SW_PACK(ci, c->arg),
-					up.row + up.sel + 1, up.col + up.w);
+					FMT_SW_PACK(ci, c->arg), &up);
 				v->ch_up = up;
 				return;
 			}
@@ -1480,6 +1555,10 @@ void ch_take(struct view *v)
 	if (c->what == CH_RULE && c->arg == MAX_GROUP) {
 		/* A new condition: the rule is chosen before there is anything
 		 * in it, which is the order somebody thinks in. */
+		if (v->ed.dr.n_grp >= MAX_GROUP) {
+			say_err(&v->ed, "No room for another matcher");
+			return;
+		}
 		grp_add(&v->ed);
 		if (!v->ed.dr.n_grp)
 			return;
@@ -1515,8 +1594,7 @@ void ch_take(struct view *v)
 				struct chooser up = *c;
 
 				up.open = 1;
-				ch_open(v, CH_RANGE_EXT, cur,
-					up.row + up.sel + 1, up.col + up.w);
+				ch_open_beside(v, CH_RANGE_EXT, cur, &up);
 				v->ch_up = up;
 			}
 			return;
@@ -1525,8 +1603,7 @@ void ch_take(struct view *v)
 			struct chooser up = *c;
 
 			up.open = 1;
-			ch_open(v, CH_RANGE_DROP, cur,
-				up.row + up.sel + 1, up.col + up.w);
+			ch_open_beside(v, CH_RANGE_DROP, cur, &up);
 			v->ch_up = up;
 			return;
 		}
@@ -1649,8 +1726,7 @@ void ch_take(struct view *v)
 			struct chooser up = *c;
 
 			up.open = 1;
-			ch_open(v, CH_CSWAP, c->arg,
-				up.row + up.sel + 1, up.col + up.w);
+			ch_open_beside(v, CH_CSWAP, c->arg, &up);
 			v->ch_up = up;
 			return;
 		}
@@ -1809,85 +1885,28 @@ void ch_take(struct view *v)
 	}
 }
 
-/* How many rows of this list the screen has room for, from where it opened. */
-int ch_vis(const struct chooser *c)
+/*
+ * Keep the highlighted row inside the visible window - kv_popup_follow.
+ *
+ * Called wherever `sel` moves. Without it an arrow key walks the cursor off
+ * the end of the drawn rows and the list stops responding to the eye.
+ */
+void ch_follow(struct chooser *c)
 {
-	int room = g_rows - c->row;     /* the status line stays uncovered */
+	struct kv_popup p;
 
-	if (room < 1)
-		room = 1;
-	return room < c->n ? room : c->n;
+	ch_popup(c, &p);
+	kv_popup_follow(&p, c->sel);
+	c->box.off = p.box.off;
 }
 
-static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
+static void draw_one_chooser(struct out *o, const struct chooser *c)
 {
-	struct out_clip cl;
-	int i, vis = ch_vis(c), off = c->off;
+	struct kv_popup p;
 
-	/* Its own box: c->w columns from where it opened, and one row per
-	 * VISIBLE item. Stated once here so the rows cannot be wrong about it
-	 * one at a time. */
-	if (off > c->n - vis)
-		off = c->n - vis;
-	if (off < 0)
-		off = 0;
-	cl = out_clip_set(o, c->row, c->col, c->row + vis - 1,
-			  c->col + c->w - 1);
-
-	for (i = off; i < off + vis; i++) {
-		int y = c->row + i - off;
-
-		out_at(o, y, c->col);
-		/*
-		 * SOMETHING ABOVE, SOMETHING BELOW - said on the row itself
-		 * rather than in a scrollbar, because the list is three
-		 * characters wider than its longest item and a bar would come
-		 * out of the text. A reader who cannot see the end of a list
-		 * has to be told there is one.
-		 */
-		if ((i == off && off > 0) ||
-		    (i == off + vis - 1 && off + vis < c->n)) {
-			out_str(o, BAR_ON);
-			out_fmt(o, " %-*.*s", c->w - 3, c->w - 3, "...");
-			out_str(o, i == c->sel ? BAR_CUR : BAR_ON);
-			out_str(o, i == off ? "^" : "v");
-			out_str(o, A_OFF);
-			continue;
-		}
-		/*
-		 * The parent keeps the cursor on the row whose list is open -
-		 * the same thing the menu bar does with sel2, and the reason is
-		 * the same: the row that was chosen has to go on looking
-		 * chosen while its children are being read.
-		 *
-		 * A chooser with sel == -1 highlights nothing. See ch_open.
-		 */
-		(void)live;
-		/*
-		 * A separator is painted in the list's own colour and never
-		 * in the cursor's, whatever c->sel happens to be: it is not a
-		 * row anything can be on. The dashes stop one short of each
-		 * edge so the rule reads as inside the box.
-		 */
-		if (c->sep[i]) {
-			int k, w = c->w - 2;
-
-			out_str(o, BAR_ON);
-			out_str(o, " ");
-			for (k = 0; k < w; k++)
-				out_str(o, "-");
-			out_str(o, " " A_OFF);
-			continue;
-		}
-		out_str(o, i == c->sel ? BAR_CUR : BAR_ON);
-		/* The ">" sits at the far edge, as the menu bar draws it. */
-		if (c->sub[i])
-			out_fmt(o, " %-*.*s>", c->w - 3, c->w - 3, c->item[i]);
-		else
-			out_fmt(o, " %-*.*s", c->w - 2, c->w - 2, c->item[i]);
-		out_str(o, A_OFF);
-	}
-	out_clip_restore(o, cl);
+	ch_popup(c, &p);
+	/* The parent keeps the cursor on the row whose list is open, so the row that was chosen goes on looking chosen. */
+	kv_popup_draw(o, &p, c->sel, -1);
 }
 
 void draw_chooser(struct out *o, struct view *v)
@@ -1895,6 +1914,6 @@ void draw_chooser(struct out *o, struct view *v)
 	if (!v->ch.open)
 		return;
 	if (v->ch_up.open)
-		draw_one_chooser(o, &v->ch_up, 0);
-	draw_one_chooser(o, &v->ch, 1);
+		draw_one_chooser(o, &v->ch_up);
+	draw_one_chooser(o, &v->ch);
 }

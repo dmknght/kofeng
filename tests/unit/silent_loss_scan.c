@@ -61,7 +61,6 @@ struct seen {
 	unsigned first_why;  /* the first reason                                 */
 	unsigned finds;      /* notes the test modules made on any object        */
 	unsigned marker;     /* children whose bytes are the marker              */
-	unsigned anom;       /* objects carrying a format anomaly word           */
 };
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
@@ -81,8 +80,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		s->broken++;
 	}
 	s->finds += got.n;
-	if (res->heur_anomalies)
-		s->anom++;
 	return 0;
 }
 
@@ -101,7 +98,7 @@ static void scan(const uint8_t *b, uint64_t n, const char *name, struct seen *s)
 /* The invariant: the marker member was opened, OR the scan raised a signal. */
 static int held(const struct seen *s)
 {
-	return s->marker || s->broken || s->finds || s->anom;
+	return s->marker || s->broken || s->finds;
 }
 
 static void le16(uint8_t *p, unsigned v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
@@ -807,8 +804,8 @@ static void over_cap(const struct cont *c, unsigned over, int lost, const char *
 	scan(f, len, c->name, &s);
 	if (lost == 2)          /* said through the scanner's own counter as well */
 		CK(kscan_stats(sc)->limit_hits > hits0);
-	printf("  %s: n=%u objs=%u marker=%u broken=%u(why %u) finds=%u anom=%u\n", c->name,
-	       c->cap + over, s.objs, s.marker, s.broken, s.first_why, s.finds, s.anom);
+	printf("  %s: n=%u objs=%u marker=%u broken=%u(why %u) finds=%u\n", c->name,
+	       c->cap + over, s.objs, s.marker, s.broken, s.first_why, s.finds);
 	snprintf(what, sizeof what, "%s: the marker member past the cap is neither opened nor flagged", c->name);
 	if (lost == 1)
 		KM_CHECK(held(&s), what, cap);

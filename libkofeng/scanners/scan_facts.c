@@ -6,6 +6,7 @@
 
 #define _GNU_SOURCE
 
+#include "../kofcore/kofdebug.h"
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "../kofcore/kofmod/kofsym.h"
@@ -52,6 +53,7 @@ uint32_t sx_regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
 			continue;
 		if (ctx->resolve_scan(ctx, m, ext, KOF_SCAN_MAX_EXTENTS))
 			present |= m;
+		KOF_TRACE("[regions] mask %x asked: %s\n", (unsigned)m, (present & m) ? "present" : "none");
 	}
 	return present;
 }
@@ -212,6 +214,23 @@ static int fmt_is_viewless(uint8_t fmt)
 {
 	return fmt == KOF_FMT_TEXT || fmt == KOF_FMT_MACHO ||
 	       fmt == KOF_FMT_IMAGE || fmt == KOF_FMT_FONT;
+}
+
+/*
+ * WHAT THE PARSE SAYS ABOUT THE OBJECT, read once after it, by the engine (a module has
+ * nothing to remember): a table of the parse was full and what is past it was not read
+ * (kof_parser_cut_bits: LIMIT), or a member, a directory or a table points past the end of
+ * the file so the parse holds less than the file declares (kof_parser_damage_bits: DAMAGED).
+ * Both are reports and no control flow, so the open stages still open what the parse held.
+ */
+static void view_say(struct kof_scanner *sc, const struct kof_parser *p, const void *view)
+{
+	uint64_t an = p->anomalies(view);
+
+	if (an & kof_parser_cut_bits(p))
+		oc_scan_limit(sc);
+	if (an & kof_parser_damage_bits(p))
+		oc_scan_damaged(sc);
 }
 
 /*
@@ -460,6 +479,8 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		view_arm(sc, as_format, sc->cache.view[as_format]);
 		(void)p->parse(buf, sc->cache.view[as_format], ctx);
 		view_charge(sc, as_format, sc->cache.view[as_format]);
+		if (ctx->format && ctx->file_header)
+			view_say(sc, p, sc->cache.view[as_format]);
 		/* A parse that agreed sets its own id AND its view; one that left the
 		 * id without the view (a half-built row) must not hand a module a
 		 * format whose accessor casts NULL. */
@@ -516,11 +537,7 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		if (kp ? kp->parse(buf, sc->cache.view[p->format], ctx, keep)
 		       : p->parse(buf, sc->cache.view[p->format], ctx)) {
 			view_charge(sc, p->format, sc->cache.view[p->format]);
-			/* A table of the parse was full: the members past it were
-			 * not read, and the object says so (see kof_parser_cut_bits). */
-			if (p->anomalies(sc->cache.view[p->format]) &
-			    kof_parser_cut_bits(p))
-				oc_scan_limit(sc);
+			view_say(sc, p, sc->cache.view[p->format]);
 			return;
 		}
 	}

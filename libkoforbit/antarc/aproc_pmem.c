@@ -328,6 +328,9 @@ static int a_parse_maps(char *line, struct kofa_region *r, char *pathbuf,
 
 	memset(r, 0, sizeof *r);
 	pathbuf[0] = '\0';
+	/* %7s writes only the characters the field has: a one- or two-character
+	 * field would leave the rest of perms as the stack had it. */
+	memset(perms, 0, sizeof perms);
 
 	if (sscanf(line, "%llx-%llx %7s %llx %x:%x %llu%n",
 		   &lo, &hi, perms, &off, &maj, &min, &ino, &n) < 7)
@@ -341,12 +344,6 @@ static int a_parse_maps(char *line, struct kofa_region *r, char *pathbuf,
 	r->inode = ino;
 	r->dev = ((uint64_t)maj << 8) | min;
 
-	/* KNOWN DEFECT WP12-4 (2026-10-24, M) [sev M]: a_parse_maps reads perms[1] and
-	 * perms[2] after %7s, which for a one- or two- character field leaves
-	 * them uninitialised. Trigger: a maps line with a short permission field
-	 * (a real kernel writes four characters). Effect: random WRITE/EXEC
-	 * flags. Reproducer: fuzz orbit/proc_text seed 2 iter 9691. Fix:
-	 * memset(perms, 0, sizeof perms) before the sscanf. */
 	if (perms[0] == 'r') r->flags |= KOFA_RGF_READ;
 	if (perms[1] == 'w') r->flags |= KOFA_RGF_WRITE;
 	if (perms[2] == 'x') r->flags |= KOFA_RGF_EXEC;
@@ -419,12 +416,13 @@ static uint64_t a_kb_line(const char *line)
 
 	if (!p)
 		return 0;
-	/* KNOWN DEFECT WP12-5 (2026-10-24, M) [sev M]: a_kb_line saturates strtoull and
-	 * then multiplies by 1024, which wraps. Trigger: smaps "Rss:
-	 * 99999999999999999999 kB". Effect: a region reports an rss far above
-	 * its own size. Reproducer: tests/unit/orbit_pmem.c case_smaps. Fix:
-	 * clamp the kB count to UINT64_MAX / 1024 (or to the region size). */
-	return (uint64_t)strtoull(p + 1, NULL, 10) * 1024u;
+	/* strtoull saturates at 2^64-1 and kB * 1024 would then wrap to a small
+	 * number: clamp the count so the product saturates instead. */
+	{
+		uint64_t kb = (uint64_t)strtoull(p + 1, NULL, 10);
+
+		return kb > UINT64_MAX / 1024u ? UINT64_MAX : kb * 1024u;
+	}
 }
 
 /*
@@ -480,6 +478,10 @@ static int a_next_raw(struct kofa_pmem *m, struct kofa_region *r)
 		 */
 		if (m->pending_valid && !strncmp(m->line, "Rss:", 4)) {
 			m->pending.rss = a_kb_line(m->line);
+			/* resident cannot exceed the region: a larger figure is a
+			 * line this library did not produce */
+			if (m->pending.rss > m->pending.size)
+				m->pending.rss = m->pending.size;
 			m->pending.flags |= KOFA_RGF_RSS_MEASURED;
 			continue;
 		}

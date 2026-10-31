@@ -6,7 +6,7 @@
  * search per surviving window, a walk of the whole equal range, one 4-byte stamp per pair. It is the
  * specification the new index must equal ENTRY FOR ENTRY: every (object, block) count the same, on
  * random databases and objects, with a hash shared by many blocks, a hash twice in one block, units
- * of several regions, normalizers and sides, and the any-region flag. The new matcher has ONE path (the
+ * of several regions and sides, and the any-region flag. The new matcher has ONE path (the
  * batch); it is run with the default batch and with a batch forced down to 4096 survivors, so that a
  * unit that spans many batches is held to the same counts, and both must equal ref.
  *
@@ -105,12 +105,12 @@ static void ref_free(struct ref *r)
 	free(r->pair); free(r->bloom); free(r->pstamp); free(r->stamp); free(r->seen);
 }
 
-static void ref_unit(struct ref *r, uint32_t mask, uint32_t norm, uint32_t side, const uint8_t *p, uint64_t n)
+static void ref_unit(struct ref *r, uint32_t mask, uint32_t side, const uint8_t *p, uint64_t n)
 {
 	struct kgenome_mtn_win w;
 	uint32_t top;
 
-	if (!r->n_pair || !kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!r->n_pair || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	top = r->pair[r->n_pair - 1u].hash;
 	do {
@@ -136,7 +136,7 @@ static void ref_unit(struct ref *r, uint32_t mask, uint32_t norm, uint32_t side,
 
 			if (r->pstamp[lo] == r->gen)
 				continue;
-			if (k->norm != norm || k->side != side || (!r->any && !(k->scan_mask & mask)))
+			if (k->side != side || (!r->any && !(k->scan_mask & mask)))
 				continue;
 			r->pstamp[lo] = r->gen;
 			if (r->stamp[b] != r->gen) {
@@ -156,19 +156,19 @@ static uint32_t ref_count(const struct ref *r, uint32_t b)
 /* ---- material --------------------------------------------------------- */
 
 struct unit {
-	uint32_t mask, norm, side;
+	uint32_t mask, side;
 	int any;
 	const uint8_t *p;
 	uint64_t n;
 };
 
-/* The window values of a buffer, under a normalizer. */
-static uint32_t values(const uint8_t *p, uint64_t n, uint32_t norm, uint32_t *out, uint32_t max)
+/* The window values of a buffer. */
+static uint32_t values(const uint8_t *p, uint64_t n, uint32_t *out, uint32_t max)
 {
 	struct kgenome_mtn_win w;
 	uint32_t k = 0;
 
-	if (!kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!kgenome_mtn_win_begin(&w, p, n))
 		return 0;
 	do {
 		if (k < max && !kgenome_mtn_win_flat(&w))
@@ -207,7 +207,6 @@ static void db_random(struct db *d, uint32_t nb, const uint32_t *src, uint32_t n
 		d->b[i].scan_mask = 1u << (rnd(seed) % 3u);
 		if (rnd(seed) % 5u == 0)
 			d->b[i].scan_mask |= 1u << (rnd(seed) % 3u);
-		d->b[i].norm = (uint8_t)(rnd(seed) % 3u);
 		d->b[i].side = (uint8_t)(rnd(seed) % 2u);
 		for (j = 0; j < n; j++) {
 			uint32_t v;
@@ -255,9 +254,9 @@ static int same_all(const struct db *d, const struct kof_mutation_build_req *rq0
 				kof_mutation_any_region(&cs, u[i].any);
 				kof_mutation_any_region(&cb, u[i].any);
 			}
-			ref_unit(&r, u[i].mask, u[i].norm, u[i].side, u[i].p, u[i].n);
-			kof_mutation_unit(&cs, u[i].mask, u[i].norm, u[i].side, u[i].p, u[i].n);
-			kof_mutation_unit(&cb, u[i].mask, u[i].norm, u[i].side, u[i].p, u[i].n);
+			ref_unit(&r, u[i].mask, u[i].side, u[i].p, u[i].n);
+			kof_mutation_unit(&cs, u[i].mask, u[i].side, u[i].p, u[i].n);
+			kof_mutation_unit(&cb, u[i].mask, u[i].side, u[i].p, u[i].n);
 		}
 		for (b = 0; b < d->nb; b++) {
 			uint32_t x = ref_count(&r, b);
@@ -306,12 +305,11 @@ static void t_exact(void)
 				obj[k] = obj[k % 4096u];
 		if (t == 2)
 			memset(obj + 9000, 0, 6000);          /* flat run: skipped by the flat test */
-		ns = values(obj, N, 0, src, N);
+		ns = values(obj, N, src, N);
 		db_random(&d, 300 + t * 100u, src, ns, &seed, t % 3u ? 4u : 0u);
-		/* units: pieces of the object in several regions, norms, sides; some repeated; any toggled */
+		/* units: pieces of the object in several regions, sides; some repeated; any toggled */
 		for (k = 0; k < 12u; k++) {
 			u[nu].mask = 1u << (rnd(&seed) % 3u);
-			u[nu].norm = rnd(&seed) % 3u;
 			u[nu].side = rnd(&seed) % 2u;
 			u[nu].any = (t >= 4u && k >= 8u);
 			u[nu].p = obj + rnd(&seed) % (N / 2u);
@@ -367,7 +365,7 @@ static void t_hot(void)
 
 	for (i = 0; i < REP; i++)
 		memcpy(obj + (size_t)i * 8u, pat, 8);
-	values(obj, 64, 0, hot, 8);
+	values(obj, 64, hot, 8);
 	make_hot_db(&d, R, hot, 8, &seed);
 	memset(&rq, 0, sizeof rq);
 	rq.blocks = d.b; rq.n_blocks = R; rq.pool = d.pool; rq.n_pool = d.np; rq.res = &res;
@@ -376,7 +374,7 @@ static void t_hot(void)
 	CK(res.max_mult == R);
 	/* periodic data whose 8 rotations are held by 5000 blocks, 64000 windows: 8 walks of 5000 */
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&c, 1u, 0, obj, (uint64_t)REP * 8u);
 	kof_mutation_stat(&c, &st);
 	CK(st.walks == 8u && st.visits == 8u * R);
 	CK(st.probes <= 8u + 1u);               /* every repeat is one survivor of the batch, not a probe */
@@ -385,23 +383,23 @@ static void t_hot(void)
 	/* the same in batches of 4096: the hot table answers the second batch, nothing is walked twice */
 	c.chunk_max = 4096u;
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&c, 1u, 0, obj, (uint64_t)REP * 8u);
 	kof_mutation_stat(&c, &st);
 	CK(st.walks == 8u && st.visits == 8u * R && st.n_chunks == 1u + (REP * 8u - 1u) / 4096u);
 	/* a second unit with the same context repeats it for free */
-	kof_mutation_unit(&c, 1u, 0, 0, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&c, 1u, 0, obj, (uint64_t)REP * 8u);
 	kof_mutation_stat(&c, &st);
 	CK(st.walks == 8u);
 	/* a different region walks again, once, and credits nothing (the blocks are in region 1) */
-	kof_mutation_unit(&c, 2u, 0, 0, obj, (uint64_t)REP * 8u);
-	kof_mutation_unit(&c, 2u, 0, 0, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&c, 2u, 0, obj, (uint64_t)REP * 8u);
+	kof_mutation_unit(&c, 2u, 0, obj, (uint64_t)REP * 8u);
 	kof_mutation_stat(&c, &st);
 	CK(st.walks == 16u);                     /* region 2 is a new context: one more walk per value, once */
 	/* alternating regions, 50 times: still bounded by (values x contexts) */
 	kof_mutation_begin(&c);
 	for (i = 0; i < 50u; i++) {
-		kof_mutation_unit(&c, 1u, 0, 0, obj, 800u);
-		kof_mutation_unit(&c, 2u, 0, 0, obj, 800u);
+		kof_mutation_unit(&c, 1u, 0, obj, 800u);
+		kof_mutation_unit(&c, 2u, 0, obj, 800u);
 	}
 	kof_mutation_stat(&c, &st);
 	CK(st.walks <= 16u && st.visits <= 16u * R);
@@ -432,7 +430,7 @@ static void t_flat_and_bloom_defeat(void)
 	set = kof_mutation_build_req(&rq);
 	CK(set && kof_mutation_ctx_init(&c, set));
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, z, 1u << 20);      /* zero-filled: every window flat */
+	kof_mutation_unit(&c, 1u, 0, z, 1u << 20);      /* zero-filled: every window flat */
 	kof_mutation_stat(&c, &st);
 	CK(st.probes == 0 && st.walks == 0 && st.touched == 0 && st.io_reads == 0);
 	/* windows that pass the filter and are in no block: found by trial through the probe, then
@@ -442,7 +440,7 @@ static void t_flat_and_bloom_defeat(void)
 		uint32_t vv;
 
 		fill(w, 9, &seed);
-		values(w, 8, 0, &vv, 1);
+		values(w, 8, &vv, 1);
 		if (kof_mutation_probe(set, vv) == 1u) {
 			memcpy(fp + (size_t)n * 8u, w, 8);
 			n++;
@@ -451,7 +449,7 @@ static void t_flat_and_bloom_defeat(void)
 	for (i = 8; i < (8u << 14) / 8u; i++)
 		memcpy(fp + (size_t)i * 8u, fp + (size_t)(i % 8u) * 8u, 8);
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, fp, 8u << 14);
+	kof_mutation_unit(&c, 1u, 0, fp, 8u << 14);
 	kof_mutation_stat(&c, &st);
 	/* bounded: no walk, no state, and the repeats are one survivor each in a batch */
 	CK(st.walks == 0 && st.visits == 0 && st.touched == 0 && st.probes <= 64u);   /* 8 patterns x 8 rotations, each one survivor */
@@ -476,7 +474,7 @@ static void t_zipf_and_everything(void)
 	uint32_t zb = 4000;
 
 	fill(obj, N, &seed);
-	ns = values(obj, N, 0, src, N);
+	ns = values(obj, N, src, N);
 	/* every window of the object is in the database: the hit-everything object; and a Zipf-like skew */
 	d.nb = zb;
 	d.b = calloc(zb, sizeof *d.b);
@@ -497,7 +495,7 @@ static void t_zipf_and_everything(void)
 	set = kof_mutation_build_req(&rq);
 	CK(set && kof_mutation_ctx_init(&c, set));
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, N);
+	kof_mutation_unit(&c, 1u, 0, obj, N);
 	kof_mutation_stat(&c, &st);
 	/* each distinct value walked once: visits is at most the number of entries, however skewed */
 	CK(st.visits <= res.n_pair && st.walks <= res.n_key && st.touched <= zb);
@@ -542,7 +540,7 @@ static void t_skew_and_oversize(void)
 	uint32_t bad = 0;
 
 	fill(obj, N, &seed);
-	ns = values(obj, N, 0, val, N);
+	ns = values(obj, N, val, N);
 	/* the bucket of the key that holds the most of the object's own windows */
 	for (i = 0; i < ns; i++) {
 		uint32_t bk = (val[i] * 0x9E3779B1u) >> 16;
@@ -580,8 +578,8 @@ static void t_skew_and_oversize(void)
 	ref_init(&r, d.b, d.nb, d.pool);
 	r.gen++;
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, N);
-	ref_unit(&r, 1u, 0, 0, obj, N);
+	kof_mutation_unit(&c, 1u, 0, obj, N);
+	ref_unit(&r, 1u, 0, obj, N);
 	for (k = 0; k < d.nb; k++)
 		bad += kof_mutation_matched(&c, k) != ref_count(&r, k);
 	kof_mutation_stat(&c, &st);
@@ -590,7 +588,7 @@ static void t_skew_and_oversize(void)
 	/* the allowance: three pages of reads, then the object says it ran out and counts only fall */
 	c.io_budget = 3u * 4096u;
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, N);
+	kof_mutation_unit(&c, 1u, 0, obj, N);
 	kof_mutation_stat(&c, &st);
 	CK(st.status & KOF_MTN_S_IO_BUDGET);
 	for (k = 0; k < d.nb; k++)
@@ -625,7 +623,7 @@ static void t_budget_and_allowance(void)
 
 	for (i = 0; i < 64u; i++)
 		memcpy(obj + i * 8u, pat, 8);
-	values(obj, 64, 0, hot, 8);
+	values(obj, 64, hot, 8);
 	make_hot_db(&d, R, hot, 3, &seed);              /* three hot values, 3000 blocks each */
 	memset(&rq, 0, sizeof rq);
 	rq.blocks = d.b; rq.n_blocks = R; rq.pool = d.pool; rq.n_pool = d.np; rq.res = &res;
@@ -633,7 +631,7 @@ static void t_budget_and_allowance(void)
 	set = kof_mutation_build_req(&rq);
 	CK(set && kof_mutation_ctx_init(&c, set));
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, sizeof obj);
+	kof_mutation_unit(&c, 1u, 0, obj, sizeof obj);
 	kof_mutation_stat(&c, &st);
 	CK((st.status & KOF_MTN_S_WALK_TRUNCATED) && st.trunc_walks >= 1u && st.trunc_pairs >= R);
 	CK(st.visits <= rq.max_visit);
@@ -709,22 +707,20 @@ static void t_state_cap(void)
 	struct ref r;
 
 	fill(obj, N, &seed);
-	ns = values(obj, N, 0, src, N);
+	ns = values(obj, N, src, N);
 	db_random(&d, 2500, src, ns, &seed, 0);
 	set = kof_mutation_build(d.b, d.nb, d.pool, d.np);
 	CK(set && kof_mutation_ctx_init(&c, set));
 	ref_init(&r, d.b, d.nb, d.pool);
 	r.gen++;
-	ref_unit(&r, 1u, 0, 0, obj, N);
-	ref_unit(&r, 2u, 1, 0, obj, N);
-	ref_unit(&r, 2u, 0, 1, obj, N);
+	ref_unit(&r, 1u, 0, obj, N);
+	ref_unit(&r, 2u, 1, obj, N);
 	for (k = 0; k < 3u; k++) {
 		kof_mutation_trim(&c);
 		kof_mutation_limit(&c, caps[k]);
 		kof_mutation_begin(&c);
-		kof_mutation_unit(&c, 1u, 0, 0, obj, N);
-		kof_mutation_unit(&c, 2u, 1, 0, obj, N);
-		kof_mutation_unit(&c, 2u, 0, 1, obj, N);
+		kof_mutation_unit(&c, 1u, 0, obj, N);
+		kof_mutation_unit(&c, 2u, 1, obj, N);
 		kof_mutation_stat(&c, &st);
 		CK(st.status & KOF_MTN_S_STATE_NOMEM);
 		CK(kof_mutation_held(&c) <= caps[k]);                   /* never past what the host allowed */
@@ -739,9 +735,8 @@ static void t_state_cap(void)
 	kof_mutation_trim(&c);
 	kof_mutation_limit(&c, KOF_MUTATION_STATE_CAP);
 	kof_mutation_begin(&c);
-	kof_mutation_unit(&c, 1u, 0, 0, obj, N);
-	kof_mutation_unit(&c, 2u, 1, 0, obj, N);
-	kof_mutation_unit(&c, 2u, 0, 1, obj, N);
+	kof_mutation_unit(&c, 1u, 0, obj, N);
+	kof_mutation_unit(&c, 2u, 1, obj, N);
 	kof_mutation_stat(&c, &st);
 	CK(st.status == 0 && kof_mutation_held(&c) > 0 && kof_mutation_held(&c) == st.state_bytes);
 	for (b = 0; b < d.nb; b++)
@@ -768,7 +763,7 @@ static void t_wrap(void)
 	struct ref r;
 
 	fill(obj, N, &seed);
-	ns = values(obj, N, 0, src, N);
+	ns = values(obj, N, src, N);
 	db_random(&d, 200, src, ns, &seed, 3u);
 	set = kof_mutation_build(d.b, d.nb, d.pool, d.np);
 	CK(set && kof_mutation_ctx_init(&c, set));
@@ -779,8 +774,8 @@ static void t_wrap(void)
 
 		r.gen++;
 		kof_mutation_begin(&c);
-		kof_mutation_unit(&c, m, 0, 0, obj, N);
-		ref_unit(&r, m, 0, 0, obj, N);
+		kof_mutation_unit(&c, m, 0, obj, N);
+		ref_unit(&r, m, 0, obj, N);
 		for (b = 0; b < d.nb; b++)
 			bad += kof_mutation_matched(&c, b) != ref_count(&r, b);
 	}
@@ -810,8 +805,7 @@ static void *thr_run(void *a)
 	c.chunk_max = t->nb & 1u ? 4096u : 0u;
 	for (i = 0; i < 20u; i++) {
 		kof_mutation_begin(&c);
-		kof_mutation_unit(&c, 1u, 0, 0, t->obj, t->n);
-		kof_mutation_unit(&c, 2u, 1, 0, t->obj, t->n);
+		kof_mutation_unit(&c, 1u, 0, t->obj, t->n);
 	}
 	for (b = 0; b < t->nb; b++)
 		t->out[b] = kof_mutation_matched(&c, b);
@@ -831,7 +825,7 @@ static void t_threads(void)
 	uint32_t *want;
 
 	fill(obj, N, &seed);
-	ns = values(obj, N, 0, src, N);
+	ns = values(obj, N, src, N);
 	db_random(&d, 800, src, ns, &seed, 2u);
 	set = kof_mutation_build(d.b, d.nb, d.pool, d.np);
 	CK(set != NULL);
@@ -953,7 +947,7 @@ static void t_cell(const char *spec)
 	{
 		uint8_t *two = tile(per, L, (uint64_t)L + 8u);
 
-		L = values(two, (uint64_t)L + 8u, 0, val, L + 8u);
+		L = values(two, (uint64_t)L + 8u, val, L + 8u);
 		free(two);
 	}
 	pool = malloc((size_t)nkeys * 4u);
@@ -1006,7 +1000,7 @@ static void t_cell(const char *spec)
 
 				memmove(w, obj + i - 7u, 7);
 				w[7] = (uint8_t)(start + tries);
-				values(w, 8, 0, &vv, 1);
+				values(w, 8, &vv, 1);
 				ok = kof_mutation_probe(set, vv);
 				if (ok == 1u)
 					break;
@@ -1020,10 +1014,10 @@ static void t_cell(const char *spec)
 		t0 = now();
 		if (isref) {
 			r.gen++;
-			ref_unit(&r, 1u, 0, 0, obj, (uint64_t)S + 8u);
+			ref_unit(&r, 1u, 0, obj, (uint64_t)S + 8u);
 		} else {
 			kof_mutation_begin(&c);
-			kof_mutation_unit(&c, 1u, 0, 0, obj, (uint64_t)S + 8u);
+			kof_mutation_unit(&c, 1u, 0, obj, (uint64_t)S + 8u);
 		}
 		t0 = now() - t0;
 		if (t0 < best)
@@ -1059,7 +1053,7 @@ static void t_corpus(const char *list)
 	char **names = NULL;
 	uint8_t **bufs = NULL;
 	uint64_t *lens = NULL;
-	uint32_t i, k, norm;
+	uint32_t i, k;
 	uint64_t total = 0;
 	struct kof_mutation_set *set;
 	struct kof_mutation_ctx cs, cb;
@@ -1103,8 +1097,7 @@ static void t_corpus(const char *list)
 		for (k = 0; (uint64_t)k * 8192u < (uint64_t)len; k++) {
 			uint32_t piece = (uint32_t)((uint64_t)len - (uint64_t)k * 8192u < 8192u ? (uint64_t)len - (uint64_t)k * 8192u : 8192u), h[64], m;
 
-			norm = (nf + k) % 3u == 0 ? 1u : 0u;
-			m = kgenome_mutation_minhash(buf + (size_t)k * 8192u, piece, norm, h);
+			m = kgenome_mutation_minhash(buf + (size_t)k * 8192u, piece, h);
 			if (m < KGENOME_MUTATION_MIN_HASH)
 				continue;
 			if (nb == cap) {
@@ -1115,7 +1108,7 @@ static void t_corpus(const char *list)
 			memset(&b[nb], 0, sizeof b[nb]);
 			if (m > 32u)
 				m = 32u;
-			b[nb].first_hash = np; b[nb].n_hash = m; b[nb].scan_mask = 1u; b[nb].norm = (uint8_t)norm;
+			b[nb].first_hash = np; b[nb].n_hash = m; b[nb].scan_mask = 1u;
 			memcpy(pool + np, h, (size_t)m * 4u);
 			np += m; nb++;
 		}
@@ -1129,11 +1122,9 @@ static void t_corpus(const char *list)
 	for (i = 0; i < nf; i++) {
 		r.gen++;
 		kof_mutation_begin(&cs); kof_mutation_begin(&cb);
-		for (norm = 0; norm < 2u; norm++) {
-			ref_unit(&r, 1u, norm, 0, bufs[i], lens[i]);
-			kof_mutation_unit(&cs, 1u, norm, 0, bufs[i], lens[i]);
-			kof_mutation_unit(&cb, 1u, norm, 0, bufs[i], lens[i]);
-		}
+		ref_unit(&r, 1u, 0, bufs[i], lens[i]);
+		kof_mutation_unit(&cs, 1u, 0, bufs[i], lens[i]);
+		kof_mutation_unit(&cb, 1u, 0, bufs[i], lens[i]);
 		for (k = 0; k < nb; k++) {
 			uint32_t x = ref_count(&r, k);
 

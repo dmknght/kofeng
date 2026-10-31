@@ -227,12 +227,10 @@ static int buffered_size(struct kof_scanner *sc, uint64_t out_hint,
 			want = room;
 			/* The tail will not fit and will be dropped. Sticky only
 			 * when it was residency that ran out. */
-			/* KNOWN DEFECT WP2-D5 (2026-10-24, Inference) [sev M]: buffered_size makes the residency
-			 * branch of an oversized claim sticky (oc_scan_broken) where one entry should only be
-			 * cut (rule 4); sink read, the branch that fires is not measured. Trigger: a 7z
-			 * folder declares an unpack size over the budget. Effect: the folder after the cut
-			 * one is not walked (2 of 3). Reproducer: tests/unit/ctr_liars.c 7z/claimUnp (green
-			 * until fixed). Fix: oc_entry_cut, and let the module loop go on. */
+			/* KNOWN DEFECT WP2-D5 (2026-10-24, Inference) [sev M]: [traced 2026-10-28: NOT this branch] the row 7z/claimUnp (tests/unit/ctr_liars.c) loses the folder after an over-size one,
+			 * but here by_policy is set (capped=1) and the stop is not sticky: the over-size folder decodes 197 of its 200 bytes (status TRUNCATED, DAMAGED, entry cut, child made) and the
+			 * NEXT folder's own decode answers status 3 (bad data) with want == out_hint == 300. Trigger: a 7z folder declaring 0xfffffff0 unpacked. Effect: that folder is not opened.
+			 * Reproducer: tests/unit/ctr_liars.c 7z/claimUnp. Fix: find why the second decode fails (the decoder, kuncoat_lzma2_decode, or the folder's pack offset); nothing to change here. */
 			if (by_policy) {
 				capped = 1;     /* said once the output is in the sink: buffered_cut */
 			} else {

@@ -22,7 +22,7 @@ feeds it keys and SGR mouse events, and reads the emulated screen (pyte).
   read-only first (`tui.prep_sample`).
 * `--bases` always points at a **private copy** of `bases/` (`tui.bases_dir()`),
   one per test process, because
-  `Analysis > Rebuild database` runs `make` in the first directory above it that
+  `Manage > Rebuild database` runs `make` in the first directory above it that
   has a Makefile.  Never pass the repository's own `bases` to the viewer in a
   test: Rebuild would rebuild the real database.
 
@@ -58,13 +58,14 @@ Exit status is 1 when any case is FAIL or ERROR.
 | `t_draft.py` | draft panel: Type, Family, Comment, Format, Region, Options, Strings (the Intron table) |
 | `t_mutation.py` | mutation block table (the Blocks tab) |
 | `t_rules.py` | matchers, thresholds, Conditions, the Lineage table |
+| `t_agree.py` | what the viewer shows equals what the engine's pull API answers (`unit_tool_agree --truth`): verdict, family, variant, tag, type, diagnoses, basis, the file's verdict and its child, over four databases (the product's and tests/agree's three) and four samples; a tool that composes or respells what the engine answers fails |
 | `t_diagnose.py` | the diagnose panel: Patterns / Blocks / Graphs title bar (click), each tab's tables, the find_sim matcher made by a block tick, the Tag chooser (one tag per condition), per-tab matcher numbers, independent conditions, the output preview and its file names (the tag's first type, family and name), Graphs on hold |
-| `t_syntable.py` | Analysis > Syndrome table: four tabs, search, Add / Edit / Delete (and its refusal with a list) / Check / Save into a copy of bases/syndromes under build/, ids and file names, the tag form and pick list, `ksigbuilder --tags`, and the diagnose panel's Tag chooser, repeated-name cells, standalone block matchers and output names |
 | `t_sig.py` | File > Save / Save As, Discard, rule loading, Next/Previous with and without a draft |
 | `t_switch.py` | Switch-File Next / Previous over a folder (menu and Ctrl+\\ / Ctrl+]) |
 | `t_resize.py` | terminal resize |
 | `t_input.py` | malformed / unusual terminal input, bursts, quit, signals |
 | `t_cli.py` | command line |
+| `t_golden.py`, `golden/` | golden screens: text dumps of the viewer on four fixed samples (run1, a clean ELF, a PE, a zip) in the tree, dashboard tabs, panel tabs, menus and dialogs; a case fails on ANY difference and prints the diff. `golden/SAMPLES.txt` pins the samples by sha256 (read-only copies in `$KOF_GOLDEN_SAMPLES`, default `/mnt/games/normtest/golden_samples`). A golden file changes only in a patch whose manifest says `allow golden <name>` (`tools/patch_gate.py`); `KOF_GOLDEN_WRITE=1 python3 run_all.py golden` rewrites them, and `golden_required_rows_are_present` then still fails when a rewritten screen lost the Dashboard Detection block, the Graphs tab's Diagnoses table, the Blocks tab's matched-block columns or the Patterns tab's Matchers / Conditions rows (`make gate-golden` runs them; `make gate` runs the whole merge gate) |
 | `t_fuzz.py`, `fuzz.py` | seeded random input |
 
 Coordinates are 1-based `(x = column, y = row)`, like the SGR mouse protocol.

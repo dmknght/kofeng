@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "objctx_int.h"
+#include "../kofcore/tabgrow.h"
 #include "../analyzers/parsers/scripts/script_apply.h"
 #include <phenotype/diag_scan.h>
 #include <textual/textual.h>
@@ -52,11 +53,11 @@ static void on_range(struct oc_consts *a, uint64_t off, uint64_t len, const uint
 		return;
 	}
 	if (a->n == a->cap) {
-		/* KNOWN DEFECT REV-D8c (2026-10-25, Inference) [sev L]: the sub_rec table doubles a uint32 capacity with no overflow guard and no ledger charge (only the arena is bounded, by a->room).
-		 * Trigger: about 2^31 recorded substitutions (records of length 0 are not stopped by room). Effect: cap * 2u wraps to 0, realloc(0) and a write past the table;
-		 * not reachable in practice (a->an and the script size bound it first, not measured). Reproducer: none. Fix: bound a->n by the same allowance as the arena, or refuse when cap > UINT32_MAX / 2. */
-		uint32_t nc = a->cap ? a->cap * 2u : 16u;
-		struct sub_rec *nr = realloc(a->r, (size_t)nc * sizeof *nr);
+		/* KNOWN DEFECT REV-D8c (2026-10-25, Inference) [sev L]: [narrowed 2026-10-28: the doubling is overflow-guarded, kof_cap_double] the sub_rec table is not charged to the scanner's ledger.
+		 * Trigger: a hostile script/object with a very large table (bounded by the input, not by the ledger). Effect: resident bytes above the cap by the table. Reproducer: none (read).
+		 * Fix: scan_charge the growth and oc_scan_release it where the table is freed. */
+		uint32_t nc = kof_cap_double(a->cap, 16u);
+		struct sub_rec *nr = nc ? realloc(a->r, (size_t)nc * sizeof *nr) : NULL;
 
 		if (!nr) {
 			a->fail = 1;

@@ -22,9 +22,6 @@ ORBIT_WRAP := -Wl,--wrap=open -Wl,--wrap=fopen -Wl,--wrap=opendir -Wl,--wrap=rea
 
 $(foreach t,$(ORBIT_TESTS),$(eval UT_SRC_$(t) := $$(ORBIT_SRC)))
 $(foreach t,$(ORBIT_TESTS),$(eval UT_INC_$(t) := $$(ORBIT_INC)))
-# WP12-18: apev.c casts the connector's event (offset 36 of a message) to a struct that wants 8-byte alignment, on every record; the
-# sanitised twin of the one test that feeds it records would abort on the first. The flag is accepted and does nothing in the release build.
-UT_INC_orbit_events += -fno-sanitize=alignment
 $(foreach t,$(ORBIT_TESTS),$(eval UT_LIB_$(t) := yes))
 $(foreach t,$(ORBIT_TESTS),$(eval UT_LDX_$(t) := $$(ORBIT_WRAP) -lrt))
 $(foreach t,$(ORBIT_TESTS),$(eval UT_DEP_$(t) := tests/lib/orbit_sys.c tests/lib/orbit_sys.h))

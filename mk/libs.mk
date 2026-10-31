@@ -135,6 +135,16 @@ genotype-x86:
 	$(CC) $(REF_FLAGS) tools/genotype/x86_gen.c tools/genotype/ref_shim.c $(REF_SRC) $(X86_SRC) -Ilibgenome/genotype -o $(TEST)/x86_gen$(EXE)
 	@$(call EXEC,$(TEST)/x86_gen$(EXE)) $(REF)/inc/bdx86_constants.h libgenome/genotype/x86
 
+# The derived indexes of the ARM state, Thumb state and AArch64 decoders (arm32_index_tab.c, arm64_l1_tab.c) are written from the
+# hand-written rows by tools/genotype/arm_index_gen.c and checked in; nothing of the oracle is needed. Re-run after a row changes
+# (tests/lib/genome/arm_index.c fails when the checked-in tables are not what the rows make).
+ARMIDX_SRC = libgenome/genotype/arm32/arm32_rows.c libgenome/genotype/arm32/thumb_rows.c libgenome/genotype/arm64/arm64_tab.c
+.PHONY: genotype-arm-index
+genotype-arm-index:
+	@$(call MKDIR,$(TEST))
+	$(CC) -O1 -std=gnu11 -Ilibkofeng/kofcore -Ilibgenome -Ilibgenome/genotype tools/genotype/arm_index_gen.c $(ARMIDX_SRC) -o $(TEST)/arm_index_gen$(EXE)
+	@$(call EXEC,$(TEST)/arm_index_gen$(EXE)) libgenome/genotype
+
 genotype-x86-diff:
 	@$(if $(REF),$(NOOP),$(error genotype-x86-diff: pass REF=<reference decoder checkout>))
 	@$(call MKDIR,$(TEST))

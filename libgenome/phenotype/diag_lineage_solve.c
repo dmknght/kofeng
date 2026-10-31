@@ -57,6 +57,10 @@ int kgenome_lineage_decode(struct kgenome_lineage *L, uint32_t fi)
 	const struct kgenome_lineage_fn *f = &L->fn[fi];
 
 	L->n_in = 0;
+	/* KNOWN DEFECT CS-2 (2026-10-30, M) [sev M]: kgenome_lineage_decode decodes the whole extent linearly, so literal pools, padding and jump-table data become instructions and leaders() makes blocks of them.
+	 * Trigger: a function with an inline pool or trailing data (ARM, x86-64, MIPS). Effect: blocks with no incoming edge: 13% of ARM, 10.9% of x86-64, 2.3% of MIPS; 2088 UD on ARM; every signature built on them is polluted.
+	 * Reproducer: /mnt/games/normtest/briefs/cfg_decision.md (section EVIDENCE) and /mnt/games/normtest/fix_cfg_survey/h/cfgsv.c.
+	 * Fix: build blocks from the entry only (reachable blocks): the cfg builder lifted from this unit; this comment goes with the swap (CS-3). */
 	kgenome_diag_code_run(&(const struct kgenome_diag_code_req){
 		.obj = L->obj, .base = L->base, .size = L->size, .off = f->off, .n = f->len, .va = f->va,
 		.fn = collect, .user = L, .wk = L->wk });
@@ -297,57 +301,30 @@ static void out_ret(struct kgenome_lineage *L, const struct kgenome_lineage_val 
 	}
 }
 
-/* ---- the blocks ---- */
+/* ---- the blocks ----
+ * The blocks and their successors are celllysis/cfg.h's (kgenome_cfg_build, one builder for the lineage and the signature); what is
+ * here is what the fixpoint does over them. The allocations of the graph go through the lineage's ledger. */
 
-static uint32_t find_va(const struct kgenome_lineage *L, uint64_t va)
+static void *cfg_alloc(void *user, size_t n)
 {
-	const uint32_t lo = kof_lower_bound_u64(L->in, L->n_in, sizeof *L->in, offsetof(struct kgenome_cell_insn, at_va), va);
+	struct kgenome_lineage *L = user;
+	void *p;
 
-	return lo < L->n_in && L->in[lo].at_va == va ? lo : UINT32_MAX;
-}
-
-static uint32_t block_of(const struct kgenome_lineage_cfg *g, uint32_t ins)
-{
-	uint32_t lo = 0, hi = g->nb;
-
-	while (lo + 1u < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (g->bfirst[mid] <= ins)
-			lo = mid;
-		else
-			hi = mid;
+	if (!kgenome_lineage_charge(L, n))
+		return NULL;
+	p = malloc(n);
+	if (!p) {
+		kgenome_lineage_uncharge(L, n);
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		L->halt = 1;
 	}
-	return lo;
+	return p;
 }
 
-static int is_branch(const struct kgenome_cell_insn *in)
+static void cfg_release(void *user, void *p, size_t n)
 {
-	return in->op == KGENOME_CELL_JMP || in->op == KGENOME_CELL_JCC || in->op == KGENOME_CELL_LOOP;
-}
-
-/* The block leaders: the entry, the target of a branch inside the function, and what follows a branch,
- * a return or an instruction that faults. */
-static uint32_t leaders(const struct kgenome_lineage *L, uint8_t *ld)
-{
-	uint32_t i, nb = 0;
-
-	ld[0] = 1;
-	for (i = 0; i < L->n_in; i++) {
-		const struct kgenome_cell_insn *in = &L->in[i];
-
-		if (is_branch(in) && !(in->flags & KGENOME_CELL_F_INDIRECT) && in->target_va != KGENOME_BROKEN) {
-			uint32_t j = find_va(L, in->target_va);
-
-			if (j != UINT32_MAX)
-				ld[j] = 1;
-		}
-		if ((is_branch(in) || in->op == KGENOME_CELL_RET || in->op == KGENOME_CELL_UD) && i + 1u < L->n_in)
-			ld[i + 1u] = 1;
-	}
-	for (i = 0; i < L->n_in; i++)
-		nb += ld[i];
-	return nb;
+	free(p);
+	kgenome_lineage_uncharge(user, n);
 }
 
 /* The block `succ` has a new way in: join the state, and look at it again when it changed. A walk from a
@@ -488,7 +465,8 @@ static void do_call(struct kgenome_lineage *L, struct kgenome_lineage_state *w,
 	kgenome_lineage_state_call(L, w, next, &ret, pop);
 }
 
-int kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in)
+int kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kgenome_lineage_cfg *g, uint32_t b,
+				const struct kgenome_cell_insn *in)
 {
 	uint32_t node;
 
@@ -496,7 +474,8 @@ int kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kg
 		return 1;
 	if (in->flags & KGENOME_CELL_F_INDIRECT)
 		return 0;
-	return in->target_va == KGENOME_BROKEN || find_va(L, in->target_va) == UINT32_MAX;
+	/* a direct jump whose target is an instruction of the function ends its block as a JUMP with an edge; any other leaves it */
+	return g->cfg.b[b].term != KGENOME_CFG_T_JUMP;
 }
 
 /* One visit of block `b`: step its instructions from the state at its top. Without `emit` the result is
@@ -504,7 +483,7 @@ int kgenome_lineage_jmp_is_tail(const struct kgenome_lineage *L, const struct kg
 static void block_run(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, uint32_t b, int emit)
 {
 	struct kgenome_lineage_state w;
-	const uint32_t first = g->bfirst[b], end = g->bfirst[b + 1u];
+	const uint32_t first = kgenome_lineage_bfirst(g, b), end = kgenome_lineage_bend(g, b);
 	uint32_t i;
 	int exits = 0;
 
@@ -529,7 +508,7 @@ static void block_run(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, 
 			}
 			break;
 		case KGENOME_CELL_JMP:
-			if (kgenome_lineage_jmp_is_tail(L, in)) {
+			if (kgenome_lineage_jmp_is_tail(L, g, b, in)) {
 				do_call(L, &w, in, next, 1, emit);
 				exits = 1;
 			}
@@ -539,31 +518,26 @@ static void block_run(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, 
 		case KGENOME_CELL_UD:
 			break;
 		case KGENOME_CELL_RET:
+			/* where the flow goes after it is the block's successors: none, or - an ARM conditional return - the fall-through */
 			if (emit && !w.seeded) {
 				struct kgenome_lineage_val r = w.r[KGENOME_CELL_REG_AX];
 
 				out_ret(L, &r);
 			}
-			exits = 1;
 			break;
 		default:
 			kgenome_lineage_state_step(L, &w, in);
 		}
 	}
 	if (!emit && !exits) {
-		const struct kgenome_cell_insn *last = &L->in[end - 1u];
-		int fall = 1;
+		unsigned e;
 
-		if (is_branch(last) && !(last->flags & KGENOME_CELL_F_INDIRECT) && last->target_va != KGENOME_BROKEN) {
-			uint32_t j = find_va(L, last->target_va);
+		for (e = 0; e < 2u; e++) {
+			const uint32_t succ = g->cfg.b[b].succ[e];
 
-			if (j != UINT32_MAX)
-				propagate(L, g, block_of(g, j), &w);
+			if (succ != KGENOME_CFG_NONE)
+				propagate(L, g, succ, &w);
 		}
-		if (last->op == KGENOME_CELL_JMP || last->op == KGENOME_CELL_UD)
-			fall = 0;
-		if (fall && end < L->n_in)
-			propagate(L, g, b + 1u, &w);
 	}
 	kgenome_lineage_state_free(L, &w);
 }
@@ -686,10 +660,9 @@ static int run_once(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, in
 void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineage_out *out)
 {
 	struct kgenome_lineage_cfg g;
-	uint8_t *ld = NULL;
-	uint32_t i, b, nb;
+	const struct kgenome_lineage_fn *f = &L->fn[fi];
+	uint32_t b, nb;
 	unsigned nruns = 1, seeded = 0;
-	uint64_t cost;
 	int ok;
 
 	L->out = out;
@@ -698,23 +671,30 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 	if (!kgenome_lineage_decode(L, fi) || !L->n_in)
 		return;
 	memset(&g, 0, sizeof g);
-	cost = (uint64_t)L->n_in * (1u + 4u + 1u) + 8u;
-	if (!kgenome_lineage_charge(L, cost))
-		return;
-	ld = calloc(L->n_in, 1);
-	if (!ld) {
-		kgenome_diag_note(L->s, KGENOME_NOMEM);
-		kgenome_lineage_uncharge(L, cost);
-		return;
-	}
-	nb = leaders(L, ld);
 	{
-		const uint64_t gc = (uint64_t)nb * (sizeof *g.bs + sizeof *g.wl + 1u + sizeof *g.bpred + sizeof *g.bact) +
-				    (uint64_t)(nb + 1u) * sizeof *g.bfirst;
+		/* the instructions are the ones decoded just above: the graph is built from them and nothing is decoded again */
+		const struct kgenome_cfg_req rq = {
+			.in = L->in, .n_in = L->n_in, .arch = L->obj->arch, .be = 0,
+			.va_lo = f->va, .va_hi = f->va + f->len, .bytes = L->base, .bytes_len = L->size,
+			.flags = KGENOME_CFG_F_SPLIT_EXITS,
+			.mem = { .alloc = cfg_alloc, .release = cfg_release, .user = L } };
+		const enum kgenome_status cst = kgenome_cfg_build(&rq, &g.cfg);
+
+		/* a refused charge was noted by the ledger, a failed allocation by cfg_alloc; the other statuses are the graph's own */
+		if (cst == KGENOME_BAD_INPUT || cst == KGENOME_UNSUPPORTED || cst == KGENOME_TRUNCATED)
+			kgenome_diag_note(L->s, cst);
+		if (cst != KGENOME_OK && cst != KGENOME_TRUNCATED) {
+			L->out = NULL;
+			return;
+		}
+	}
+	nb = g.cfg.n_all;
+	{
+		const uint64_t gc = (uint64_t)nb * (sizeof *g.bs + sizeof *g.wl + 1u + sizeof *g.bpred + sizeof *g.bact);
 
 		if (!kgenome_lineage_charge(L, gc)) {
-			free(ld);
-			kgenome_lineage_uncharge(L, cost);
+			kgenome_cfg_free(&g.cfg, &(const struct kgenome_cfg_mem){ cfg_alloc, cfg_release, L });
+			L->out = NULL;
 			return;
 		}
 		g.nb = nb;
@@ -723,16 +703,11 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 		g.inq = calloc(nb, 1);
 		g.bpred = calloc(nb, sizeof *g.bpred);
 		g.bact = calloc(nb, sizeof *g.bact);
-		g.bfirst = calloc((size_t)nb + 1u, sizeof *g.bfirst);
-		if (!g.bs || !g.wl || !g.inq || !g.bfirst || !g.bpred || !g.bact) {
+		if (!g.bs || !g.wl || !g.inq || !g.bpred || !g.bact) {
 			kgenome_diag_note(L->s, KGENOME_NOMEM);
 			L->halt = 1;
 		}
 		if (!L->halt) {
-			for (i = 0, b = 0; i < L->n_in; i++)
-				if (ld[i])
-					g.bfirst[b++] = i;
-			g.bfirst[nb] = L->n_in;
 			kgenome_lineage_preds(L, &g);
 			L->run = (L->plan & KGENOME_LINEAGE_S_EAGER) ? (L->plan & ~KGENOME_LINEAGE_S_EAGER) : KGENOME_LINEAGE_S_FLOW;
 			/* The seeds wait for the last run: most functions are read once, and a seeded block is read at
@@ -773,10 +748,8 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 		free(g.inq);
 		free(g.bpred);
 		free(g.bact);
-		free(g.bfirst);
 		kgenome_lineage_uncharge(L, gc);
 	}
-	free(ld);
-	kgenome_lineage_uncharge(L, cost);
+	kgenome_cfg_free(&g.cfg, &(const struct kgenome_cfg_mem){ cfg_alloc, cfg_release, L });
 	L->out = NULL;
 }

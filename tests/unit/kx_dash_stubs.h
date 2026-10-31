@@ -43,6 +43,20 @@ void prop_head(const char *w)
 	prop_add(A_BOLD "%s" A_OFF, w);
 }
 
+/* The detection block names the children that carry a verdict (the viewer's name-based ancestry): no children in these tests. */
+uint32_t obj_ancestors(const struct view *v, const struct object *ob, const struct object **out, uint32_t cap)
+{
+	(void)v; (void)ob; (void)out; (void)cap;
+	return 0;
+}
+
+const char *base_name(const char *path)
+{
+	const char *s = strrchr(path, '/');
+
+	return s ? s + 1 : path;
+}
+
 void prop_perm(char *out, size_t cap, unsigned p)
 {
 	snprintf(out, cap, "%c%c%c", (p & 4) ? 'R' : '-', (p & 2) ? 'W' : '-', (p & 1) ? 'X' : '-');
@@ -147,16 +161,20 @@ void prop_off(char *out, size_t cap, uint64_t v)
 }
 
 
-int heur_of(const struct object *ob, struct kof_heur_facts *out, int32_t *score, const char **guess)
+/* The per-file verdict (kv_collect.c, kverdict_filemap) is not linked here: the test sets what the engine's roll-up would answer. */
+const char *g_file_verdict;
+const char *file_verdict_of(const struct view *v, const struct object *ob)
 {
-	memset(out, 0, sizeof *out);
-	out->format = ob->ctx.format;
-	out->anomalies = ob->heur.heur_anomalies;
-	out->flags = ob->heur.heur_flags;
-	*score = ob->heur.heur_score;
-	*guess = "Unknown";
-	return ob->heur.heur_scored != 0;
+	(void)v;
+	(void)ob;
+	return g_file_verdict;
 }
 
+
+/* The drag start (kv_dialogs.c) is not linked here: the test only needs to see which box the click took hold of. */
+void dlg_hold(struct view *v, struct dlg_off *off)
+{
+	v->dlg_move = off;
+}
 
 #endif

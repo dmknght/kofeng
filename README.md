@@ -105,7 +105,6 @@ map to it.
 | [Conditions](../../wiki/Conditions) | what a combination of markers means, and at what confidence |
 | [Regions](../../wiki/Regions) | CODE, DATA, NOLOAD — scanning part of a file instead of all of it |
 | [Shellcode signatures](../../wiki/Shellcode-signatures) | when the payload is not a file |
-| [Heuristic rules](../../wiki/Heuristic-rules) | scoring what the parse found wrong, when no signature names it |
 
 ## Inside the engine
 
@@ -175,7 +174,7 @@ section 12 is the authority and `make check-rules` enforces the include directio
 
 | directory | what it is |
 |---|---|
-| `libkofeng/` | the engine: `kofcore/` (buffers, hash, platform calls, the module ABI under `kofmod/`), `analyzers/` (what is read out of one object: parsers, the normaliser), `databases/` (the pack loader and builder), `detectors/` (pattern, mutation, linkage, heuristics), `verdictor/`, `scanners/` (the pipeline), and the public API `kofeng.h` |
+| `libkofeng/` | the engine: `kofcore/` (buffers, hash, platform calls, the module ABI under `kofmod/`), `analyzers/` (what is read out of one object: parsers, the normaliser), `databases/` (the pack loader and builder), `detectors/` (pattern, mutation, linkage), `verdictor/`, `scanners/` (the pipeline), and the public API `kofeng.h` |
 | `libgenome/` | analysis of executables: `genotype/` (one instruction, per architecture; the PE/ELF image), `celllysis/` (reading code without running it), `phenotype/` (the emulator and the diagnose scan) |
 | `libuncoat/` | decompress, decrypt and decode algorithms: bytes and a budget in, bytes and a status out |
 | `libkoforbit/` | the collectors and what they produce: `antarc/` (Linux), `grille/` (Windows), `evt/` (the event record), `fridge/` (the clean-file cache), `report/`, `chan/`, and the contract-only `mon/` and `walk/` |

@@ -119,8 +119,8 @@ static void module_reset(struct ksb_ctx *ksb)
  * virus_ that declares itself a trojan fails the build instead of sitting in
  * the wrong group for ever.
  *
- * The old form carries nothing and is accepted while the tree is moved over.
- * Retiring it is deleting `legacy_ok` and the one test that reads it.
+ * The old form carries nothing and is accepted while the tree is moved over:
+ * a name that is not <type>_<word>_<digits>.c is left without a declared type.
  */
 static void nameform_read(struct ksb_ctx *ksb, const char *base)
 {

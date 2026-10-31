@@ -4,7 +4,7 @@
  * kv_dashdata.c - the dashboard's content as data. See kv_dashdata.h for the contract: nothing here draws, takes a
  * terminal's geometry or writes an escape sequence; a row is text and a tone, a table is columns, a count and a
  * cell function. Where the facts come from is the engine's parse of the object (kgenome_elf_info, kgenome_pe_info on
- * ob->info, the region partition on the view's tree, the heuristic result on ob->heur, the SYM block) and the two
+ * ob->info, the region partition on the view's tree, the SYM block) and the two
  * accessors of libgenome for the header fields the parse does not keep.
  */
 
@@ -412,41 +412,111 @@ void dash_anomalies(const struct object *ob, struct dash_block *b)
 	}
 }
 
-/* The engine's heuristic result (ob->heur), shown and not recomputed; the traces under it with their weights. */
-void dash_heuristic(const struct object *ob, struct dash_block *b)
-{
-	const struct kof_heur_model *hm = kof_heur_default();
-	struct kof_heur_facts hf;
-	const char *guess = "Unknown";
-	int32_t sc = 0;
-	uint32_t k;
-	struct dash_row *r;
+/* ---- the detection block ----------------------------------------------------------------------------------- */
 
-	block_begin(b, "Heuristic");
-	if (!heur_of(ob, &hf, &sc, &guess)) {
-		r = row_new(b, "", DT_NONE);
-		span(r, DT_DIM, "  no model for this format - not scored");
+/* The matcher rows of one diagnose, from the report a kscan_explain run holds for the object. */
+static void detection_why(struct dash_block *b, const struct kdet_object *why, uint32_t id)
+{
+	uint32_t k, m;
+
+	for (k = 0; why && k < why->res.n_diag; k++) {
+		const struct kof_diag_report *d = &why->res.diag[k];
+		struct dash_row *r;
+
+		if (d->id != id)
+			continue;
+		for (m = 0; d->form && m < d->n_match_total && m < KOF_DIAG_REPORT_MATCH; m++) {
+			char t[96];
+			int res = kdet_matcher_text(&d->match[m], t, sizeof t);
+
+			r = row_new(b, "", DT_NONE);
+			span(r, DT_DIM, "      matcher %u ", m);
+			span(r, res == KDET_M_NOT_ASKED ? DT_DIM : res ? DT_ID : DT_WARN, "%s", t);
+		}
+		for (m = 0; d->form && m < d->n_part; m++) {
+			char t[240];
+			int hit = kdet_part_text(&d->part[m], t, sizeof t);
+
+			r = row_new(b, "", DT_NONE);
+			span(r, DT_DIM, "      part ");
+			span(r, hit ? DT_ID : DT_WARN, "%s", t);
+		}
+		if (d->form && d->n_part_total > d->n_part) {
+			r = row_new(b, "", DT_NONE);
+			span(r, DT_DIM, "      (%u more part(s) not listed)", (unsigned)(d->n_part_total - d->n_part));
+		}
+		if (!d->form && d->state == KOF_DIAG_ST_MATCH && d->n_bound) {
+			r = row_new(b, "", DT_NONE);
+			span(r, DT_DIM, "      lineage %u of %u node(s), head at %#llx", (unsigned)d->n_bound, (unsigned)d->n_node,
+			     (unsigned long long)d->at[0]);
+		}
+		if (d->form && d->n_match_total > KOF_DIAG_REPORT_MATCH) {
+			r = row_new(b, "", DT_NONE);
+			span(r, DT_DIM, "      (%u more matcher(s) not listed)", (unsigned)(d->n_match_total - KOF_DIAG_REPORT_MATCH));
+		}
 		return;
 	}
-	r = row_new(b, "score", DT_DIM);
-	span(r, sc >= hm->bar_centinats ? DT_HEUR : DT_SIZE, "%d", sc);
-	span(r, DT_DIM, "  of %d to report", hm->bar_centinats);
-	if (sc >= hm->bar_centinats) {
-		r = row_new(b, "verdict", DT_DIM);
-		span(r, DT_HEUR, "%s", guess);
+}
+
+/* What the engine says about this object's detection (kdet_info, kdet_diag: the verdict, the catalog facts it was decided from, each
+ * matched diagnose) and, when a run of kscan_explain is given, why each diagnose matched. Nothing is decided here. */
+void dash_detection(const struct view *v, const struct object *ob, const struct kdet_object *why, struct dash_block *b)
+{
+	struct kdet_info in;
+	struct dash_row *r;
+	uint32_t i;
+
+	block_begin(b, "Detection");
+	kdet_info(v->eng, &ob->heur, &in);
+	if (!in.has_verdict) {
+		const char *fv = file_verdict_of(v, ob);
+
+		if (fv) {
+			r = row_new(b, "verdict", DT_DIM);
+			span(r, DT_BAD, "%s", fv);
+		}
+		return;
 	}
-	for (k = 0; k < hm->n_anom; k++)
-		if (hm->anom[k].format == hf.format && (hf.anomalies & hm->anom[k].mask)) {
+	r = row_new(b, "verdict", DT_DIM);
+	span(r, DT_BAD, "%s", in.verdict);
+	if (in.incomplete)
+		span(r, DT_WARN, "  (may be missing a disease)");
+	if (in.level) {
+		r = row_new(b, "family", DT_DIM);
+		span(r, DT_NAME, "%s", in.family);
+		r = row_new(b, "variant", DT_DIM);
+		span(r, DT_NAME, "%s", in.variant);
+		r = row_new(b, "tag", DT_DIM);
+		span(r, DT_NAME, "%s", in.tag);
+		r = row_new(b, "basis", DT_DIM);
+		span(r, DT_TYPE, "%s", in.level == KOF_VCAT_VARIANT ? "variant" : "tag");
+		span(r, DT_DIM, "  cover %u  jaccard %u  groups %u  matched %u%s", (unsigned)in.cover, (unsigned)in.jaccard,
+		     (unsigned)in.groups, (unsigned)in.fired, in.cut ? "  (cut)" : "");
+	}
+	for (i = 0; i < in.n_diag; i++) {
+		struct kdet_diag d;
+
+		if (!kdet_diag(v->eng, &ob->heur, i, &d))
+			continue;
+		r = row_new(b, i ? "" : "diagnose", DT_DIM);
+		span(r, DT_NAME, "%s", d.name ? d.name : "?");
+		if (d.type >= 0)
+			span(r, DT_TYPE, "  %s", kof_maltype_name((uint32_t)d.type));
+		r = row_new(b, "", DT_NONE);
+		span(r, DT_DIM, "    family %s  variant %s  tag %s", d.family, d.variant, d.tag);
+		if (d.kind == KDET_KIND_GRAPH) {
 			r = row_new(b, "", DT_NONE);
-			span(r, DT_WARN, "     +%-6d", hm->anom[k].centinats);
-			span(r, DT_DIM, " %s", hm->anom[k].guess);
+			span(r, DT_DIM, "    graph (lineage)");
 		}
-	for (k = 0; k < hm->n_flag; k++)
-		if (hf.flags & KOF_HEUR_FL(hm->flag[k].fact)) {
+		if (d.has_form) {
 			r = row_new(b, "", DT_NONE);
-			span(r, DT_WARN, "     +%-6d", hm->flag[k].centinats);
-			span(r, DT_DIM, " %s", hm->flag[k].guess);
+			span(r, DT_DIM, "    %s over %u matcher(s): %s", d.form.similarity ? "similarity" : "strings",
+			     (unsigned)d.form.matchers, d.expr);
 		}
+		detection_why(b, why, d.id);
+	}
+	if (in.diag_total > in.n_diag)
+		b->not_shown += in.diag_total - in.n_diag;
 }
 
 /* ---- the layout tables ----------------------------------------------------------------------------------- */
@@ -964,6 +1034,22 @@ static void genome_of(const struct object *ob, struct kgenome_obj *g)
 	g->obj_size = ob->buf.n;
 }
 
+/*
+ * The tail both row loaders share: the library filled `n` rows of the maximum-size array; keep exactly those (shrink, or give the array
+ * back when there are none). A listing that found nothing and one that could not be made are different answers: the caller says
+ * DASH_NOMEM when the array could not be allocated at all, so the page never reads a failed allocation as "nothing found".
+ */
+static void *dash_rows_finish(void *rows, uint32_t n, size_t row_size)
+{
+	if (rows && n) {
+		void *shrunk = realloc(rows, n * row_size);
+
+		return shrunk ? shrunk : rows;
+	}
+	free(rows);
+	return NULL;
+}
+
 void dash_infect_load(const struct object *ob, struct dash_infect *I)
 {
 	struct kgenome_infect_range in[KOF_MAX_INFECTED];
@@ -983,6 +1069,12 @@ void dash_infect_load(const struct object *ob, struct dash_infect *I)
 	free(I->row);
 	memset(I, 0, sizeof *I);
 	rows = malloc(KGENOME_INFECT_MAX * sizeof *rows);
+	if (!rows) {
+		/* not "no infection": the listing was not made */
+		I->why = DASH_NOMEM;
+		I->file = ob->buf;
+		return;
+	}
 	memset(&rq, 0, sizeof rq);
 	genome_of(ob, &g);
 	rq.obj = &g;
@@ -990,21 +1082,12 @@ void dash_infect_load(const struct object *ob, struct dash_infect *I)
 	rq.inf = in;
 	rq.n_inf = n;
 	rq.out = rows;
-	rq.cap = rows ? KGENOME_INFECT_MAX : 0u;
+	rq.cap = KGENOME_INFECT_MAX;
 	st = kgenome_infect_regions(&rq, &rs);
 	I->n = rs.n;
 	I->total = rs.total;
 	I->file = ob->buf;
-	if (rows && rs.n) {
-		struct kgenome_infect_row *shrunk = realloc(rows, rs.n * sizeof *rows);
-
-		rows = shrunk ? shrunk : rows;
-	}
-	if (!rs.n) {
-		free(rows);
-		rows = NULL;
-	}
-	I->row = rows;
+	I->row = dash_rows_finish(rows, rs.n, sizeof *rows);
 	I->why = rs.n ? DASH_OK : st == KGENOME_BAD_INPUT ? DASH_NA : DASH_NONE;
 }
 
@@ -1019,7 +1102,8 @@ void dash_infect_table(const struct dash_infect *I, struct dash_table *t)
 	t->declared = I->total;
 	t->not_shown = I->total > I->n ? I->total - I->n : 0u;
 	if (!I->n) {
-		t->none = I->why == DASH_NA ? "this object is not a parsed ELF or PE: there are no regions an infector uses to list"
+		t->none = I->why == DASH_NOMEM ? "not listed: out of memory"
+			: I->why == DASH_NA ? "this object is not a parsed ELF or PE: there are no regions an infector uses to list"
 					    : "no region an infector commonly uses was found in this object";
 		return;
 	}
@@ -1080,6 +1164,11 @@ void dash_shell_load(const struct object *ob, struct dash_shell *S)
 	free(S->row);
 	memset(S, 0, sizeof *S);
 	rows = malloc(KOFSCFIND_ROWS_MAX * sizeof *rows);
+	if (!rows) {
+		S->why = DASH_NOMEM;
+		S->file = ob->buf;
+		return;
+	}
 	memset(&in, 0, sizeof in);
 	genome_of(ob, &g);
 	in.obj = &g;
@@ -1088,21 +1177,12 @@ void dash_shell_load(const struct object *ob, struct dash_shell *S)
 	in.payload_len = ob->payload_len;
 	in.payload_bits = ob->payload_bits;
 	in.out = rows;
-	in.cap = rows ? KOFSCFIND_ROWS_MAX : 0u;
+	in.cap = KOFSCFIND_ROWS_MAX;
 	st = kofscfind_list(&in, &rs);
 	S->n = rs.n;
 	S->total = rs.total;
 	S->file = ob->buf;
-	if (rows && rs.n) {
-		struct kofscfind_row *shrunk = realloc(rows, rs.n * sizeof *rows);
-
-		rows = shrunk ? shrunk : rows;
-	}
-	if (!rs.n) {
-		free(rows);
-		rows = NULL;
-	}
-	S->row = rows;
+	S->row = dash_rows_finish(rows, rs.n, sizeof *rows);
 	S->why = rs.n ? DASH_OK : st == KGENOME_UNSUPPORTED ? DASH_NA : DASH_NONE;
 }
 
@@ -1119,7 +1199,8 @@ void dash_shell_table(const struct dash_shell *S, struct dash_table *t)
 	t->declared = S->total;
 	t->not_shown = S->total > S->n ? S->total - S->n : 0u;
 	if (!S->n) {
-		t->none = S->why == DASH_NA ? "this object is not an executable image: no variable or range in it carries execute permission"
+		t->none = S->why == DASH_NOMEM ? "not listed: out of memory"
+			: S->why == DASH_NA ? "this object is not an executable image: no variable or range in it carries execute permission"
 					    : "no variable or data range in this object carries execute permission";
 		return;
 	}

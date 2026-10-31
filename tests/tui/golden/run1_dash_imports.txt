@@ -1,0 +1,51 @@
+# golden run1_dash_imports: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │   filter                                                                          [ ] icase [ ] regex                                                              │  │
+ 4| │   rec  type    bind   vis       flags name                                                                                                sec     size      value  │  │
+ 5| │   0    NOTYPE  LOCAL  DEFAULT   .U...                                                                                                     UND        0 0x00000000  ┃  │
+ 6| │   1    FUNC    GLOBAL DEFAULT   .U... free@GLIBC_2.2.5                                                                                    UND        0 0x00000000  ┃  │
+ 7| │   2    FUNC    GLOBAL DEFAULT   .U... recv@GLIBC_2.2.5                                                                                    UND        0 0x00000000  ┃  │
+ 8| │   3    FUNC    GLOBAL DEFAULT   .U... __errno_location@GLIBC_2.2.5                                                                        UND        0 0x00000000  ┃  │
+ 9| │   4    FUNC    GLOBAL DEFAULT   .U... unlink@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+10| │   5    NOTYPE  WEAK   DEFAULT   .U... _ITM_deregisterTMCloneTable                                                                         UND        0 0x00000000  ┃  │
+11| │   6    FUNC    GLOBAL DEFAULT   .U... _exit@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+12| │   7    FUNC    GLOBAL DEFAULT   .U... strcpy@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+13| │   8    FUNC    GLOBAL DEFAULT   .U... toupper@GLIBC_2.2.5                                                                                 UND        0 0x00000000  ┃  │
+14| │   9    FUNC    GLOBAL DEFAULT   .U... setsockopt@GLIBC_2.2.5                                                                              UND        0 0x00000000  ┃  │
+15| │   10   FUNC    GLOBAL DEFAULT   .U... fcntl@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+16| │   11   FUNC    GLOBAL DEFAULT   .U... write@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+17| │   12   FUNC    GLOBAL DEFAULT   .U... getpid@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+18| │   13   FUNC    GLOBAL DEFAULT   .U... inet_ntoa@GLIBC_2.2.5                                                                               UND        0 0x00000000  ┃  │
+19| │   14   FUNC    GLOBAL DEFAULT   .U... clock@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+20| │   15   FUNC    GLOBAL DEFAULT   .U... strlen@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+21| │   16   FUNC    GLOBAL DEFAULT   .U... chdir@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+22| │   17   FUNC    GLOBAL DEFAULT   .U... htons@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+23| │   18   FUNC    GLOBAL DEFAULT   .U... send@GLIBC_2.2.5                                                                                    UND        0 0x00000000  ┃  │
+24| │   19   FUNC    GLOBAL DEFAULT   .U... strchr@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+25| │   20   FUNC    GLOBAL DEFAULT   .U... htonl@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+26| │   21   FUNC    GLOBAL DEFAULT   .U... memset@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+27| │   22   FUNC    GLOBAL DEFAULT   .U... ioctl@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+28| │   23   FUNC    GLOBAL DEFAULT   .U... sendto@GLIBC_2.2.5                                                                                  UND        0 0x00000000  ┃  │
+29| │   24   FUNC    GLOBAL DEFAULT   .U... close@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+30| │   25   FUNC    GLOBAL DEFAULT   .U... read@GLIBC_2.2.5                                                                                    UND        0 0x00000000  ┃  │
+31| │   26   FUNC    GLOBAL DEFAULT   .U... __libc_start_main@GLIBC_2.2.5                                                                       UND        0 0x00000000  ┃  │
+32| │   27   FUNC    GLOBAL DEFAULT   .U... srand@GLIBC_2.2.5                                                                                   UND        0 0x00000000  ┃  │
+33| │   28   FUNC    GLOBAL DEFAULT   .U... getsockopt@GLIBC_2.2.5                                                                              UND        0 0x00000000  ┃  │
+34| │   29   FUNC    GLOBAL DEFAULT   .U... inet_addr@GLIBC_2.2.5                                                                               UND        0 0x00000000  ┃  │
+35| │   30   FUNC    GLOBAL DEFAULT   .U... strcmp@GLIBC_2.2.5                                                                                  UND        0 0x00000000  │  │
+36| │   31   FUNC    GLOBAL DEFAULT   .U... signal@GLIBC_2.2.5                                                                                  UND        0 0x00000000  │  │
+37|-│   32   FUNC    GLOBAL DEFAULT   .U... gethostbyname@GLIBC_2.2.5                                                                           UND        0 0x00000000  │---
+38| │   33   NOTYPE  WEAK   DEFAULT   .U... __gmon_start__                                                                                      UND        0 0x00000000  │ ]
+39| │   34   FUNC    GLOBAL DEFAULT   .U... memcpy@GLIBC_2.14                                                                                   UND        0 0x00000000  │
+40| │   35   FUNC    GLOBAL DEFAULT   .U... prctl@GLIBC_2.2.5                                                                                   UND        0 0x00000000  │
+41| │   36   FUNC    GLOBAL DEFAULT   .U... kill@GLIBC_2.2.5                                                                                    UND        0 0x00000000  │
+42| │   37   FUNC    GLOBAL DEFAULT   .U... time@GLIBC_2.2.5                                                                                    UND        0 0x00000000  │
+43| │   38   FUNC    GLOBAL DEFAULT   .U... select@GLIBC_2.2.5                                                                                  UND        0 0x00000000  │
+44| │   39   FUNC    GLOBAL DEFAULT   .U... malloc@GLIBC_2.2.5                                                                                  UND        0 0x00000000  │
+45| │   40   FUNC    GLOBAL DEFAULT   .U... memmove@GLIBC_2.2.5                                                                                 UND        0 0x00000000  │
+46| │   41   FUNC    GLOBAL DEFAULT   .U... waitpid@GLIBC_2.2.5                                                                                 UND        0 0x00000000  │
+47| │   42   FUNC    GLOBAL DEFAULT   .U... open@GLIBC_2.2.5                                                                                    UND        0 0x00000000  │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-43 of 61 items ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

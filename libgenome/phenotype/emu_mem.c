@@ -355,42 +355,11 @@ int kgenome_emu_mem_rd(struct kgenome_emu *e, uint64_t va, void *dst, unsigned n
 		struct kgenome_emu_page *p = kgenome_emu_page_lookup(e, va + i);
 
 		if (!p) {
-			/*
-			 * A DATA READ FROM NOWHERE ANSWERS ZERO, UNDER
-			 * MEASUREMENT - see KOF_EMU_SOFTREAD.
-			 *
-			 * The engine already makes this trade for page zero,
-			 * with the argument written beside it: what a run is
-			 * FOR is the plaintext the guest writes, and a read of
-			 * a field off a pointer the environment could not
-			 * supply should not end it. The same argument applies
-			 * to a pointer that is garbage rather than null, and
-			 * the published designs call a run that dies this way
-			 * an INCORRECT termination - something to recover from
-			 * rather than to report.
-			 *
-			 * Measured before it is believed: 125 of 129 runs over
-			 * a Windows corpus end in a fault. Whether tolerating
-			 * them produces anything is the question this flag
-			 * exists to answer, so it is off by default.
-			 */
-			if (e->softread && !e->in_fetch && e->running) {
-				e->soft_reads++;
-				d[i] = 0;
-				continue;
-			}
 			e->fault_va = va + i;
 			memcpy(e->fault_kind, "read", 5);
 			return 0;
 		}
 		d[i] = p->data[(va + i) & (KGENOME_EMU_PAGE - 1u)];
-	}
-	/* A DATA read, not the fetch of an instruction - see `last_read_va`.
-	 * The fetch reads memory too and counting it would make every program
-	 * look like it was decrypting itself. */
-	if (e->running && !e->in_fetch) {
-		e->last_read[e->last_read_n % KGENOME_EMU_RDRING] = va;
-		e->last_read_n++;
 	}
 	return 1;
 }
@@ -402,40 +371,12 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 
 	for (i = 0; i < n; i++) {
 		struct kgenome_emu_page *p = kgenome_emu_page_lookup(e, va + i);
+		int same;       /* the byte is the byte already there: no progress (see the line credit below) */
 
 		if (!p) {
-			/*
-			 * A WRITE TO NOWHERE GETS A PAGE, UNDER MEASUREMENT -
-			 * see KOF_EMU_SOFTWRITE.
-			 *
-			 * THE ARGUMENT FOR REFUSING IS THE ARGUMENT FOR THIS.
-			 * The note beside the read path says a write that goes
-			 * nowhere "loses the very bytes this exists to
-			 * collect" - and refusing it loses them just as
-			 * completely, by ending the run. Giving the guest the
-			 * page keeps them, and keeps whatever it writes next.
-			 *
-			 * Measured over 300 Windows samples: of seventeen runs
-			 * that ended in a fault, SEVEN were a write to an
-			 * address nothing mapped.
-			 *
-			 * STILL BOUNDED. page_add refuses past the page budget,
-			 * so a guest that writes at random addresses buys a
-			 * fixed number of pages and then ends exactly as it
-			 * does today.
-			 */
-			if (e->softwrite && e->running) {
-				p = kgenome_emu_page_add(e, (va + i) &
-					     ~(uint64_t)(KGENOME_EMU_PAGE - 1u),
-					     KGENOME_EMU_R | KGENOME_EMU_W);
-				if (p)
-					e->soft_writes++;
-			}
-			if (!p) {
-				e->fault_va = va + i;
-				memcpy(e->fault_kind, "write", 6);
-				return 0;
-			}
+			e->fault_va = va + i;
+			memcpy(e->fault_kind, "write", 6);
+			return 0;
 		}
 		{
 			uint32_t po = (uint32_t)((va + i) &
@@ -446,57 +387,10 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 				memcpy(e->fault_kind, "write", 6);
 				return 0;
 			}
+			same = p->data[po] == s[i];
 			p->data[po] = s[i];
 			if (po + 1u > p->wr_hi)
 				p->wr_hi = (uint16_t)(po + 1u);
-		}
-		/*
-		 * A WRITE BACK TO WHAT WAS JUST READ, near where the last one
-		 * was - see `last_read_va`. Eight bytes of slack, so a loop
-		 * working a dword or a qword at a time is still one stride.
-		 */
-		/*
-		 * ---- IS THE GUEST STILL DECRYPTING --------------------------
-		 *
-		 * A WRITE NEXT TO THE LAST ONE. See `last_read` for why the
-		 * signal has to be a memory trace rather than an opcode; this
-		 * is which trace, and it was measured rather than assumed.
-		 *
-		 * THE PUBLISHED HEURISTIC IS A READ FOLLOWED BY A WRITE BACK TO
-		 * THE SAME ADDRESS - decryption in place - AND IT DOES NOT FIT
-		 * THIS FAMILY. Measured on a Sality body: of 408,441 guest
-		 * writes, 350,346 were indeed writes back to something just
-		 * read, and every one of them was the STACK - push and pop
-		 * touching the same slot. The decryption itself reads from one
-		 * place and writes to another, so it never made that pattern
-		 * once in twenty million instructions.
-		 *
-		 * What it does make is a SEQUENTIAL WRITE STREAM: 58,076 writes
-		 * landing within eight bytes of the one before, against 58,066
-		 * loop iterations counted independently. That is the output of
-		 * the decryption, and a decryptor cannot avoid producing it
-		 * whatever instructions it is spelled with.
-		 *
-		 * THE STACK IS EXCLUDED, and it has to be: a run of pushes is
-		 * also a sequential write stream, and without this every
-		 * function prologue would read as decryption.
-		 */
-		if (e->running && !i) {
-			uint64_t sp = e->gpr[KGENOME_EMU_RSP];
-			uint64_t d = va > sp ? va - sp : sp - va;
-
-			if (d > (64u << 10)) {
-				d = va > e->pair_va ? va - e->pair_va
-						    : e->pair_va - va;
-				if (e->pair_va && d && d <= 8u) {
-					if (e->active_n &&
-					    e->since_active > e->gap_max)
-						e->gap_max = e->since_active;
-					e->active_n++;
-					e->since_active = 0;
-				}
-				e->pair_va = va;
-			}
 		}
 		/* The first write to a page is the unit of progress: see
 		 * KGENOME_EMU_IDLE. Recorded here, where it happens, so nothing
@@ -530,17 +424,18 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 			 * restored only by a genuinely new page, so a guest
 			 * that sweeps a buffer for ever is still stopped - by
 			 * the credit and then by the same ceiling as before.
+			 *
+			 * A store of the byte already there changes nothing and
+			 * earns nothing: pe300/045.bin spins a keystream loop
+			 * whose stores are no-ops (3,357,492 bytes written, 235
+			 * differ) and its credits kept it running to 289 M of the
+			 * 2.08 G budget (agent-reported, emu_unpack_report.md).
 			 */
 			uint64_t sp = e->gpr[KGENOME_EMU_RSP];
 			uint64_t dsp = va > sp ? va - sp : sp - va;
 			uint64_t line = va >> 6;
 
-			/* KNOWN DEFECT EMU-045 (2026-10-24, M) [sev M]: a store earns progress credit and a new page restarts it even when the byte
-			 * written is the byte already there, so a keystream loop whose stores are no-ops never reaches the idle ceiling.
-			 * Trigger: emu_unpack of pe300/045.bin (agent-reported measurement). Effect: 289M of 2.08G insns, 3,357,492 bytes
-			 * written of which 235 differ, ends BUDGET "Limit reached". Reproducer: /mnt/games/normtest/emu_unpack_report.md.
-			 * Fix: no credit for a store of the value already present (copy: 289.4M -> 8.4M; needs the owner's identity gate). */
-			if (dsp > (64u << 10) && line != e->last_wr_line) {
+			if (!same && dsp > (64u << 10) && line != e->last_wr_line) {
 				e->last_wr_line = line;
 				e->idle_credit++;
 				e->last_new_page = e->insn;

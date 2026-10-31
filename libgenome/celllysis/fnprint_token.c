@@ -22,6 +22,11 @@
  * The weak token is the opcode class and condition only: a different register
  * allocation or a changed constant leaves it alone.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #include "fnprint_private.h"
 
 #include <stdlib.h>
@@ -294,8 +299,6 @@ void kgenome_fnprint_acc_good(struct kgenome_fnprint_acc *a, const struct kgenom
 		a->n_call++;
 	if (in->op == KGENOME_CELL_JMP || in->op == KGENOME_CELL_JCC || in->op == KGENOME_CELL_LOOP)
 		a->n_branch++;
-	if (in->flags & KGENOME_CELL_F_INDIRECT)
-		a->has_ind = 1;
 	a->last_op = in->op;
 }
 

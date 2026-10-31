@@ -357,6 +357,288 @@ static void disease(void)
 	}
 }
 
+/*
+ * THE CATALOG DECLARATIONS - KOF_DIAG_FAMILY / _VARIANT / _TYPE / _TAG: read, shown, patched, and
+ * an unknown KOF_ line is said and not dropped. A source without them reads and prints exactly as
+ * before (the corpus loop of main pins that), so what is pinned here is the new lines only.
+ */
+static unsigned warns;
+static char last_warn[200];
+
+static char last_err[200];
+
+static void on_err(void *ud, int line, const char *m)
+{
+	(void)ud;
+	(void)line;
+	snprintf(last_err, sizeof last_err, "%s", m);
+}
+
+static void on_warn(void *ud, const char *m)
+{
+	(void)ud;
+	warns++;
+	snprintf(last_warn, sizeof last_warn, "%s", m);
+}
+
+static const char meta_src[] =
+	"/* the evidence for the rule: MEASURED on 0 of 900 clean modules */\n"
+	"KOF_DIAG_NAME(botnet_mirai_flood_01);\n"
+	"KOF_DIAG_FAMILY(\"Mirai\");\n"
+	"/* the variant is the catalog's own name */\n"
+	"KOF_DIAG_VARIANT(\"A\");\n"
+	"KOF_DIAG_TYPE(KOF_MALTYPE_BOTNET);\n"
+	"KOF_DIAG_TAG(\"flood\");\n"
+	"KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
+	"KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
+	"KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n";
+
+static const char plain_src[] =
+	"/* the evidence for the rule: MEASURED on 0 of 900 clean modules */\n"
+	"KOF_DIAG_NAME(botnet_mirai_flood_01);\n"
+	"KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
+	"KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
+	"KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n";
+
+static struct kof_dsrc_item *item_of(struct kof_dsrc *d, unsigned kind)
+{
+	uint32_t q;
+
+	for (q = 0; q < d->n; q++)
+		if (d->item[q].kind == kind)
+			return &d->item[q];
+	return NULL;
+}
+
+static void catalog(void)
+{
+	static struct kof_dsrc d, e2, back;
+	struct kof_dsrc_view v;
+	struct kof_dsrc_report rep = { NULL, on_warn, NULL };
+	size_t n = sizeof meta_src - 1u, pn = 0, k;
+	char line[128];
+	char *p, *pr0, *pr1;
+	struct kof_dsrc_item *it;
+	unsigned c;
+
+	warns = 0;
+	CHECK(kof_dsrc_parse(meta_src, n, &d, &rep) == 0 && warns == 0, "the source parses without a word said");
+	CHECK(d.n == 8u, "eight declarations, got %u", d.n);
+	CHECK(kof_dsrc_resolve(&d, &v, &rep) == 0, "and resolves");
+	CHECK(!strcmp(v.family, "Mirai") && !strcmp(v.variant, "A") && !strcmp(v.tag, "flood") &&
+	      v.type == KOF_MALTYPE_BOTNET && v.meta == KOF_DSRC_META_ALL, "the view carries the four");
+	{
+		static const struct { unsigned kind; const char *text; } want[] = {
+			{ KDS_FAMILY,  "KOF_DIAG_FAMILY(\"Mirai\");" },
+			{ KDS_VARIANT, "KOF_DIAG_VARIANT(\"A\");" },
+			{ KDS_TYPE,    "KOF_DIAG_TYPE(KOF_MALTYPE_BOTNET);" },
+			{ KDS_TAG,     "KOF_DIAG_TAG(\"flood\");" },
+		};
+
+		for (k = 0; k < 4u; k++) {
+			it = item_of(&d, want[k].kind);
+			CHECK(it && kof_dsrc_print(it, line, sizeof line) > 0 && !strcmp(line, want[k].text),
+			      "printed as written: %s", it ? line : "(missing)");
+		}
+	}
+	/* No-op patch: byte for byte. */
+	p = kof_dsrc_patch(meta_src, n, &d, &pn);
+	CHECK(p && pn == n && !memcmp(p, meta_src, n), "a no-op patch changed the source");
+	free(p);
+
+	/* Replace the tag: one line changes, the comments around it do not. */
+	memcpy(&e2, &d, sizeof e2);
+	it = item_of(&e2, KDS_TAG);
+	snprintf(it->s1, sizeof it->s1, "%s", "c2");
+	p = kof_dsrc_patch(meta_src, n, &e2, &pn);
+	CHECK(p && strstr(p, "KOF_DIAG_TAG(\"c2\");\n") && !strstr(p, "\"flood\"") &&
+	      lines_of(p) == lines_of(meta_src), "the tag line is replaced in place");
+	pr0 = prose(meta_src, n);
+	pr1 = p ? prose(p, pn) : NULL;
+	CHECK(pr1 && !strcmp(pr0, pr1), "replacing the tag changed the prose");
+	CHECK(p && kof_dsrc_parse(p, pn, &back, &rep) == 0 &&
+	      kof_dsrc_resolve(&back, &v, &rep) == 0 && !strcmp(v.tag, "c2"), "and it reads back");
+	free(p); free(pr0); free(pr1);
+
+	/* Remove the family line: one line fewer, and the four are no longer all there. */
+	memcpy(&e2, &d, sizeof e2);
+	for (c = 0; c < e2.n; c++)
+		if (e2.item[c].kind == KDS_FAMILY) {
+			memmove(&e2.item[c], &e2.item[c + 1u], (e2.n - c - 1u) * sizeof e2.item[0]);
+			e2.n--;
+			break;
+		}
+	p = kof_dsrc_patch(meta_src, n, &e2, &pn);
+	CHECK(p && lines_of(p) == lines_of(meta_src) - 1 && !strstr(p, "KOF_DIAG_FAMILY"), "the family line is removed");
+	CHECK(p && strstr(p, "/* the variant is the catalog's own name */"), "its neighbour's comment stays");
+	CHECK(p && kof_dsrc_parse(p, pn, &back, &rep) == 0 && kof_dsrc_resolve(&back, &v, NULL) > 0,
+	      "three of the four is an error: they go together");
+	free(p);
+
+	/* Add the four to a source without them: only new lines appear. */
+	pn = sizeof plain_src - 1u;
+	CHECK(kof_dsrc_parse(plain_src, pn, &d, &rep) == 0, "the plain source parses");
+	memcpy(&e2, &d, sizeof e2);
+	{
+		static const unsigned kinds[4] = { KDS_FAMILY, KDS_VARIANT, KDS_TYPE, KDS_TAG };
+
+		for (c = 0; c < 4u; c++) {
+			it = &e2.item[e2.n++];
+			memset(it, 0, sizeof *it);
+			it->kind = (uint8_t)kinds[c];
+			if (kinds[c] == KDS_FAMILY)
+				snprintf(it->s1, sizeof it->s1, "Mirai");
+			else if (kinds[c] == KDS_VARIANT)
+				snprintf(it->s1, sizeof it->s1, "A");
+			else if (kinds[c] == KDS_TAG)
+				snprintf(it->s1, sizeof it->s1, "flood");
+			else
+				it->a = KOF_MALTYPE_BOTNET;
+		}
+	}
+	p = kof_dsrc_patch(plain_src, pn, &e2, &pn);
+	CHECK(p && lines_of(p) == lines_of(plain_src) + 4, "four lines are added, nothing else");
+	pr0 = prose(plain_src, sizeof plain_src - 1u);
+	pr1 = p ? prose(p, pn) : NULL;
+	CHECK(pr1 && !strcmp(pr0, pr1), "adding them changed the prose");
+	CHECK(p && kof_dsrc_parse(p, pn, &back, &rep) == 0 && kof_dsrc_resolve(&back, &v, &rep) == 0 &&
+	      !strcmp(v.family, "Mirai") && !strcmp(v.variant, "A") && !strcmp(v.tag, "flood") &&
+	      v.type == KOF_MALTYPE_BOTNET, "and they read back");
+	{
+		size_t qn = 0;
+		char *q = p ? kof_dsrc_patch(p, pn, &back, &qn) : NULL;
+
+		CHECK(q && qn == pn && !memcmp(p, q, pn), "the patched text is stable under another patch");
+		free(q);
+	}
+	free(p); free(pr0); free(pr1);
+
+	/* An unknown macro line is said, with its line, and is not an error, and the patcher keeps it. */
+	{
+		static const char unk[] =
+			"KOF_DIAG_NAME(a);\n"
+			"KOF_DIAG_FUTURE(1);\n"
+			"/* KOF_IN_A_COMMENT(1); is only a mention */\n"
+			"KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n";
+		size_t un = sizeof unk - 1u, qn = 0;
+
+		warns = 0;
+		last_warn[0] = 0;
+		CHECK(kof_dsrc_parse(unk, un, &d, &rep) == 0, "an unknown macro is not an error");
+		CHECK(warns == 1 && strstr(last_warn, "line 2") && strstr(last_warn, "KOF_DIAG_FUTURE"),
+		      "it is said once, with its line: '%s'", last_warn);
+		CHECK(d.n == 2u, "and is not a declaration: %u", d.n);
+		p = kof_dsrc_patch(unk, un, &d, &qn);
+		CHECK(p && qn == un && !memcmp(p, unk, un), "the patcher leaves the line where it was");
+		free(p);
+	}
+
+	/* What a line may not say. */
+	{
+		static const char *const bad[] = {
+			"KOF_DIAG_FAMILY(Mirai);\n",                 /* not quoted         */
+			"KOF_DIAG_FAMILY(\"\");\n",                  /* empty              */
+			"KOF_DIAG_FAMILY(\"a b\");\n",               /* a space            */
+			"KOF_DIAG_FAMILY(\"a,b\");\n",               /* splits the line    */
+			"KOF_DIAG_FAMILY(\"a/b\");\n",
+			"KOF_DIAG_FAMILY();\n",
+			"KOF_DIAG_VARIANT(\"Mirai_A\");\n",              /* the family is not part of it */
+			"KOF_DIAG_VARIANT(\"a\");\n",                   /* lower case          */
+			"KOF_DIAG_VARIANT(\"A1\");\n",
+			"KOF_DIAG_VARIANT(\"ABCDEFGHI\");\n",            /* nine letters        */
+			"KOF_DIAG_VARIANT(\"\");\n",
+			"KOF_DIAG_TYPE(KOF_MALTYPE_NOPE);\n",
+			"KOF_DIAG_TYPE(Botnet);\n",
+			"KOF_DIAG_TYPE();\n",
+		};
+
+		for (c = 0; c < sizeof bad / sizeof bad[0]; c++) {
+			static char text[256];
+			int errs;
+
+			snprintf(text, sizeof text, "KOF_DIAG_NAME(b);\n%s", bad[c]);
+			errs = kof_dsrc_parse(text, strlen(text), &d, &rep);
+			CHECK(errs > 0, "refused: %s", bad[c]);
+		}
+		{
+			static const char old_form[] = "KOF_DIAG_NAME(b);\nKOF_DIAG_VARIANT(\"Mirai_A\");\n";
+			struct kof_dsrc_report er = { on_err, NULL, NULL };
+
+			last_err[0] = 0;
+			CHECK(kof_dsrc_parse(old_form, sizeof old_form - 1u, &d, &er) == 1 &&
+			      strstr(last_err, "letters only") != NULL,
+			      "Mirai_A is refused with a clear message: '%s'", last_err);
+		}
+		/* A name over the bound, and the declaration twice. */
+		{
+			static char text[512];
+			char long_name[80];
+
+			memset(long_name, 'a', sizeof long_name - 1u);
+			long_name[sizeof long_name - 1u] = 0;
+			snprintf(text, sizeof text, "KOF_DIAG_TAG(\"%s\");\n", long_name);
+			CHECK(kof_dsrc_parse(text, strlen(text), &d, &rep) > 0, "a name of 79 characters is refused");
+			snprintf(text, sizeof text, "KOF_DIAG_NAME(b);\nKOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
+				 "KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
+				 "KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n"
+				 "KOF_DIAG_FAMILY(\"A\");\nKOF_DIAG_FAMILY(\"B\");\nKOF_DIAG_VARIANT(\"A\");\n"
+				 "KOF_DIAG_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DIAG_TAG(\"t\");\n");
+			CHECK(kof_dsrc_parse(text, strlen(text), &d, &rep) == 0, "twice parses ...");
+			CHECK(kof_dsrc_resolve(&d, &v, &rep) > 0, "... and resolve refuses it");
+		}
+	}
+
+	/* A call that is never closed is refused: an error, and no item (WD-1). */
+	{
+		static const char open_call[] = "KOF_DIAG_TAG(\"flood\"\n";
+
+		CHECK(kof_dsrc_parse(open_call, sizeof open_call - 1u, &d, &rep) > 0 && d.n == 0u,
+		      "an unclosed KOF_DIAG_TAG( is refused (WD-1)");
+	}
+
+	/* Every byte in a name, exhaustively: a name the printer writes is a name the reader reads. */
+	{
+		unsigned b, accepted = 0;
+
+		for (b = 1; b < 256u; b++) {
+			char w[4], text[64];
+			int errs;
+
+			w[0] = 'a'; w[1] = (char)b; w[2] = 'c'; w[3] = 0;
+			if (b == '\n')
+				continue;
+			snprintf(text, sizeof text, "KOF_DIAG_TAG(\"%s\");\n", w);
+			errs = kof_dsrc_parse(text, strlen(text), &d, &rep);
+			CHECK((errs == 0) == (kof_dsrc_catalog_word_ok(w) != 0),
+			      "byte 0x%02x: reader and word rule disagree", b);
+			if (errs == 0) {
+				accepted++;
+				char want[80];
+
+				snprintf(want, sizeof want, "KOF_DIAG_TAG(\"%s\");", w);
+				CHECK(d.n == 1u && !strcmp(d.item[0].s1, w) &&
+				      kof_dsrc_print(&d.item[0], line, sizeof line) > 0 &&
+				      !strcmp(line, want),
+				      "byte 0x%02x does not round trip", b);
+			}
+		}
+		/* letters, digits, '_' and '-' */
+		CHECK(accepted == 26u + 26u + 10u + 2u, "%u bytes accepted, want 64", accepted);
+	}
+	/* The printer refuses what the reader would. */
+	{
+		struct kof_dsrc_item bad_it;
+
+		memset(&bad_it, 0, sizeof bad_it);
+		bad_it.kind = KDS_TAG;
+		snprintf(bad_it.s1, sizeof bad_it.s1, "a b");
+		CHECK(kof_dsrc_print(&bad_it, line, sizeof line) == 0, "the printer refuses a bad name");
+		bad_it.kind = KDS_TYPE;
+		bad_it.a = (uint16_t)KOF_MALTYPE_COUNT;
+		CHECK(kof_dsrc_print(&bad_it, line, sizeof line) == 0, "and a type that is no maltype");
+	}
+}
+
 int main(void)
 {
 	static const char *const dirs[] = { "docs/disabled/diagnoses", "tests/sigs/diagnoses" };
@@ -364,6 +646,7 @@ int main(void)
 
 	tables();
 	disease();
+	catalog();
 	mentions();
 	long_line();
 	edits();

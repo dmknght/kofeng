@@ -63,7 +63,7 @@ static uint32_t values(const uint8_t *p, uint64_t n, uint32_t *out, uint32_t max
 	struct kgenome_mtn_win w;
 	uint32_t k = 0;
 
-	if (!kgenome_mtn_win_begin(&w, p, n, 0))
+	if (!kgenome_mtn_win_begin(&w, p, n))
 		return 0;
 	do {
 		if (k < max && !kgenome_mtn_win_flat(&w))
@@ -202,8 +202,8 @@ static uint32_t *counts_of(const struct kof_mutation_set *set, uint32_t nb, cons
 	c.chunk_max = chunk;
 	kof_mutation_begin(&c);
 	for (off = 0; off < n; off += 8192u) {
-		kof_mutation_unit(&c, 1u, 0, 0, obj + off, n - off < 8192u + 8u ? n - off : 8192u + 8u);
-		kof_mutation_unit(&c, 2u, 0, 1, obj + off, n - off < 8192u + 8u ? n - off : 8192u + 8u);
+		kof_mutation_unit(&c, 1u, 0, obj + off, n - off < 8192u + 8u ? n - off : 8192u + 8u);
+		kof_mutation_unit(&c, 2u, 1, obj + off, n - off < 8192u + 8u ? n - off : 8192u + 8u);
 	}
 	for (b = 0; b < nb; b++)
 		out[b] = kof_mutation_matched(&c, b);

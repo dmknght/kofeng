@@ -211,6 +211,10 @@ struct kof_zip_entry {
 	uint64_t local_off;       /* where the local header is */
 	uint64_t name_off;        /* the central copy of the name */
 	uint32_t name_len;
+	/* KNOWN DEFECT DF-2 (2026-10-30, M) [sev H]: the entry CRC-32 is read by kof_zip_parse (and shown) but no code compares it: the module that opens the member (bases/decomp/zip.c, a comment there would move the pack) and the host's inflate never see it.
+	 * Trigger: a bit flipped in a stored or deflate stream that still decodes. Effect: other bytes become the child, no broken bit, the rules scan them silently.
+	 * Reproducer: /mnt/games/normtest/fix_detacc2_fmt/defects/df_repro.c (prints "DF-2 REPRODUCED").
+	 * Fix: after the member is produced compare kof_crc32 of it with this field and report KOF_BROKEN_DAMAGED (the gzip trailer is HD-7, same fix). */
 	uint32_t crc32;
 	uint16_t method;
 	uint16_t flags;

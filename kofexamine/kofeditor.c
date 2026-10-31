@@ -9,8 +9,9 @@
  *
  * See kofeditor.h for why this file exists and where the boundary was drawn.
  * What is here answers questions about a DRAFT: its strings, blocks, matchers
- * and conditions. Nothing here knows a pane is on screen, and nothing writes a
- * file.
+ * and conditions. Nothing here knows a pane is on screen. The one thing written
+ * is the generator's output (draft_generate): a diagnose source per unit, and
+ * only through the shared diagsrc printer.
  */
 
 #include <stdio.h>
@@ -19,6 +20,11 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>
@@ -27,8 +33,10 @@
 #include <kofmod/proc.h>
 /* For the object facts below - see "what an object IS". */
 #include <phenotype/emu_unpack.h>
+#include <celllysis/mutation.h>
 
 #include "kofeditor.h"
+#include "../libkofeng/databases/diagsrc.h"
 #include "../libkofeng/databases/pack/hexprog.h"
 #include "../libkofeng/detectors/pattern/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
@@ -205,23 +213,13 @@ static int cnd_next_id(const char **pp, unsigned long *id, int *neg)
 
 	while (*p) {
 		if (*p == '!') {
-			const char *q = p + 1;
-
-			while (*q == ' ')
-				q++;
-			if (*q >= '0' && *q <= '9') {
-				/* Set rather than toggled: a "!" that does not
-				 * reach a number is dropped below, so "!!1" is
-				 * one negation here and one in the emitter,
-				 * which drops the same one. Two readings of the
-				 * same text that disagreed would be a panel
-				 * showing the opposite of the generated file. */
-				n = 1;
-				p = q;
-				continue;
-			}
-			n = 0;
+			/* Toggled: form_expr writes every "!" it is given, so "!!1"
+			 * is two negations in the file and must be two here. A "!"
+			 * that reaches no number ("!(") is reset by the next byte. */
+			n = !n;
 			p++;
+			while (*p == ' ')
+				p++;
 			continue;
 		}
 		if (*p >= '0' && *p <= '9') {
@@ -278,14 +276,15 @@ unsigned long cnd_foreign(const struct kof_editor *e, const struct cond *c)
 	int neg;
 
 	while (cnd_next_id(&p, &n, &neg))
-		if (n < 1ul || n > (unsigned long)grp_tab_count(e, c->tab))
+		if (n < 1ul || n > (unsigned long)grp_tab_count(e, DT_PATTERNS))
 			return n + 1ul;
 	return 0;
 }
 
 int cnd_uses(const struct kof_editor *e, const struct cond *c, uint32_t g)
 {
-	return g < e->dr.n_grp && grp_tab(e, g) == c->tab &&
+	(void)c;
+	return g < e->dr.n_grp && grp_tab(e, g) == DT_PATTERNS &&
 	       cnd_has_id(c, grp_loc(e, g));
 }
 
@@ -532,47 +531,109 @@ int decl_text_editable(const struct decl *d)
  * end. Twenty-two columns is the widest one id can be written in - a "!", a
  * join, and every digit of an unsigned long somebody typed by hand.
  */
-enum { CND_DROP = 0, CND_NEG, CND_SWAP };
+enum { CND_DROP = 0, CND_NEG, CND_SWAP, CND_SHIFT };
+
+/* Cut [from, to) out of an expression with the operator that joined it to its neighbour (the one before it, else the one
+ * after), and a group that is left empty with it. Returns where the scan resumes. */
+static size_t cnd_cut(char *s, size_t from, size_t to)
+{
+	for (;;) {
+		size_t a = to, b = from;
+
+		while (b && s[b - 1] == ' ')
+			b--;
+		if (b && (s[b - 1] == '&' || s[b - 1] == '|')) {
+			char o = s[--b];
+
+			if (b && s[b - 1] == o)
+				b--;
+			from = b;
+		} else {
+			while (s[a] == ' ')
+				a++;
+			if (s[a] == '&' || s[a] == '|') {
+				char o = s[a++];
+
+				if (s[a] == o)
+					a++;
+				while (s[a] == ' ')
+					a++;
+				to = a;
+			}
+		}
+		memmove(s + from, s + to, strlen(s + to) + 1u);
+		a = from;
+		while (s[a] == ' ')
+			a++;
+		b = from;
+		while (b && s[b - 1] == ' ')
+			b--;
+		if (!b || s[b - 1] != '(' || s[a] != ')')
+			return from;
+		from = b - 1u;
+		to = a + 1u;
+		while (from && s[from - 1] == '!')
+			from--;
+	}
+}
 
 static void cnd_rewrite(struct cond *c, uint32_t id, uint32_t to, int verb)
 {
-	char out[sizeof c->expr];
-	size_t at = 0;
-	const char *p = c->expr;
+	char *s = c->expr;
+	const char *p = s;
 	unsigned long n;
-	int neg, first = 1;
+	int neg;
 
-	out[0] = 0;
+	/* Edited IN PLACE: only the number (or its "!") the verb acts on changes, every other byte stays, so parentheses and
+	 * a mix of & and | survive. Nothing is re-written, so no id can be dropped; an edit that would not fit in the field
+	 * is not made. */
 	while (cnd_next_id(&p, &n, &neg)) {
-		int w;
+		size_t e = (size_t)(p - s), ns = e, bs, len, w;
+		unsigned long val;
+		char num[24];
 
-		if (n == (unsigned long)id) {
-			if (verb == CND_DROP)
+		if (verb == CND_SHIFT ? n <= (unsigned long)id : n != (unsigned long)id)
+			continue;
+		while (ns && s[ns - 1] >= '0' && s[ns - 1] <= '9')
+			ns--;
+		bs = ns;
+		while (bs && (s[bs - 1] == '!' || s[bs - 1] == ' '))
+			bs--;
+		while (s[bs] == ' ')
+			bs++;
+		len = strlen(s);
+		if (verb == CND_DROP) {
+			p = s + cnd_cut(s, bs, e);
+		} else if (verb == CND_NEG && neg) {
+			size_t k = ns;
+
+			while (s[--k] != '!')
+				;
+			memmove(s + k, s + k + 1u, len - k);
+			p = s + e - 1u;
+		} else if (verb == CND_NEG) {
+			if (len + 1u >= sizeof c->expr)
 				continue;
-			if (verb == CND_NEG)
-				neg = !neg;
-			else
-				n = (unsigned long)to;
+			memmove(s + ns + 1u, s + ns, len - ns + 1u);
+			s[ns] = '!';
+			p = s + e + 1u;
+		} else {
+			val = verb == CND_SWAP ? (unsigned long)to : n - 1ul;
+			w = (size_t)snprintf(num, sizeof num, "%lu", val);
+			if (len - (e - ns) + w >= sizeof c->expr)
+				continue;
+			memmove(s + ns + w, s + e, len - e + 1u);
+			memcpy(s + ns, num, w);
+			p = s + ns + w;
 		}
-		if (at + 22u >= sizeof out)
-			break;
-		w = snprintf(out + at, sizeof out - at, "%s%s%lu",
-			     first ? "" : (c->op ? "|" : "&"),
-			     neg ? "!" : "", n);
-		if (w < 0)
-			break;
-		at += (size_t)w;
-		first = 0;
 	}
-	out[at] = 0;
-	snprintf(c->expr, sizeof c->expr, "%s", out);
 }
 
-/* Take one matcher out of a condition's expression. A matcher that is not on
- * the condition's tab has no number in it, so nothing happens. */
+/* Take one matcher out of a condition's expression. A block matcher is no part
+ * of a condition (only the Patterns tab has them), so nothing happens. */
 void cnd_drop_matcher(const struct kof_editor *e, struct cond *c, uint32_t g)
 {
-	if (g < e->dr.n_grp && grp_tab(e, g) == c->tab)
+	if (g < e->dr.n_grp && grp_tab(e, g) == DT_PATTERNS)
 		cnd_rewrite(c, grp_loc(e, g), 0, CND_DROP);
 }
 
@@ -586,7 +647,7 @@ void cnd_drop_matcher(const struct kof_editor *e, struct cond *c, uint32_t g)
 void cnd_negate_matcher(const struct kof_editor *e, struct cond *c,
 			uint32_t g)
 {
-	if (g < e->dr.n_grp && grp_tab(e, g) == c->tab)
+	if (g < e->dr.n_grp && grp_tab(e, g) == DT_PATTERNS)
 		cnd_rewrite(c, grp_loc(e, g), 0, CND_NEG);
 }
 
@@ -611,17 +672,23 @@ void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
 {
 	struct cond *c;
 	char canon[sizeof e->dr.cnd[0].expr];
+	int list;
 
 	if (ci >= e->dr.n_cnd || g >= e->dr.n_grp || to >= e->dr.n_grp)
 		return;
 	c = &e->dr.cnd[ci];
-	/* Both ends are on the condition's own tab, or nothing is done: the
-	 * other tabs' matchers are not ones it can name. */
-	if (grp_tab(e, g) != c->tab || grp_tab(e, to) != c->tab)
+	/* Both ends are string matchers, or nothing is done: a block matcher is
+	 * not one a condition can name. */
+	if (grp_tab(e, g) != DT_PATTERNS || grp_tab(e, to) != DT_PATTERNS)
 		return;
-	cnd_rewrite(c, grp_loc(e, g), grp_loc(e, to), CND_SWAP);
 	cnd_canon(e, ci, canon, sizeof canon);
-	snprintf(c->expr, sizeof c->expr, "%s", canon);
+	list = !strcmp(c->expr, canon);
+	cnd_rewrite(c, grp_loc(e, g), grp_loc(e, to), CND_SWAP);
+	/* Back into the order the row draws, but only a list: a typed expression is the author's. */
+	if (list) {
+		cnd_canon(e, ci, canon, sizeof canon);
+		snprintf(c->expr, sizeof c->expr, "%s", canon);
+	}
 }
 
 
@@ -679,26 +746,6 @@ void obj_sha256(struct object *o)
 		return;
 	if (!o->sha256[0])
 		khash_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
-}
-
-/*
- * WHAT THE GATE SAID, IF IT HAS BEEN ASKED - AND IT IS NOT ASKED BY LOOKING.
- *
- * Nothing about the emulator runs until the reader chooses Unpack with
- * emulator. That is a rule about the tool and not an optimisation: the
- * interpreter is the one thing here that executes what it is shown, and it
- * runs when somebody asks for it and not because a row was selected.
- *
- * The GATE is not the emulator - it reads a byte histogram and decides whether
- * emulating would be worth it - but it is about the emulator, it costs a walk
- * of every executable segment, and it was running on touch: a spilled object
- * faulted in whole to fill one status-line tag nobody had asked for. So it is
- * asked where the choice is made - see emu_here - and this only reports what
- * that left behind.
- */
-uint8_t obj_emu_why(const struct object *o)
-{
-	return (o && o->emu_why_done) ? o->emu_why : 0u;
 }
 
 void say_note(struct kof_editor *e, const char *fmt, ...)
@@ -803,7 +850,7 @@ uint32_t grp_mask(struct kof_editor *e, uint32_t g)
 		return e->dr.grp[g].mask;
 	for (i = 0; i < e->dr.n_decl; i++)
 		if (e->dr.decl[i].grp & (1u << g))
-			need |= e->dr.decl[i].mask;
+			need |= e->dr.decl[i].mask0;
 	return need ? need : KOF_SCAN_ALL;
 }
 
@@ -855,19 +902,14 @@ void grp_add(struct kof_editor *e)
 }
 
 /*
- * What a condition is called on screen: "1." for the first one of its tab.
- *
- * Numbered by position among the conditions of its own tab, in creation order:
- * the conditions are independent blocks, one file each, and the other tabs'
- * are on another list.
+ * What a condition is called on screen: "1." for the first one. Numbered by
+ * position, in creation order: the conditions are independent blocks, one file
+ * each (only the Patterns tab has them).
  */
 void cnd_label(struct kof_editor *e, uint32_t i, char *out, size_t cap)
 {
-	uint32_t k, pos = 0;
-
-	for (k = 0; k < i; k++)
-		pos += e->dr.cnd[k].tab == e->dr.cnd[i].tab;
-	snprintf(out, cap, "%u.", pos + 1u);
+	(void)e;
+	snprintf(out, cap, "%u.", i + 1u);
 }
 
 /*
@@ -975,40 +1017,13 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 		 * the same renumbering the matcher array itself gets. */
 		e->dr.decl[i].grp = lo | (hi << g);
 	}
-	/* The numbers move within the matcher's own tab, and only the
-	 * conditions of that tab name them. */
-	for (k = 0; k < e->dr.n_cnd; k++) {
-		struct cond *c = &e->dr.cnd[k];
-		char out[sizeof c->expr];
-		size_t at = 0;
-		const char *p = c->expr;
-		unsigned long n;
-		int neg, first = 1;
-
-		if (c->tab != gt)
-			continue;
-		out[0] = 0;
-		while (cnd_next_id(&p, &n, &neg)) {
-			int w;
-
-			if (n == (unsigned long)gl)
-				continue;
-			if (n > (unsigned long)gl)
-				n--;
-			/* The id moves down; whether it was negated does not.
-			 * See cnd_rewrite for why the room is checked. */
-			if (at + 22u >= sizeof out)
-				break;
-			w = snprintf(out + at, sizeof out - at, "%s%s%lu",
-				     first ? "" : (c->op ? "|" : "&"),
-				     neg ? "!" : "", n);
-			if (w < 0)
-				break;
-			at += (size_t)w;
-			first = 0;
-		}
-		out[at] = 0;
-		snprintf(c->expr, sizeof c->expr, "%s", out);
+	/* Only a string matcher is named by a condition, and the numbers move
+	 * among the string matchers. A block matcher is its own unit: removing
+	 * it renumbers nothing, and every other matcher keeps its own type and
+	 * tag (they live in the matcher, which moves with it). */
+	for (k = 0; gt == DT_PATTERNS && k < e->dr.n_cnd; k++) {
+		cnd_rewrite(&e->dr.cnd[k], gl, 0, CND_DROP);
+		cnd_rewrite(&e->dr.cnd[k], gl, 0, CND_SHIFT);
 	}
 	memmove(&e->dr.grp[g], &e->dr.grp[g + 1u],
 		(e->dr.n_grp - g - 1u) * sizeof e->dr.grp[0]);
@@ -1025,7 +1040,6 @@ void cnd_add(struct kof_editor *e)
 		return;
 	c = &e->dr.cnd[e->dr.n_cnd];
 	memset(c, 0, sizeof *c);
-	c->tab = e->dr.tab;
 	e->dr.cur_cnd = e->dr.n_cnd++;
 	e->dr.warn[0] = 0;
 }
@@ -1117,13 +1131,16 @@ uint32_t draft_hash(struct kof_editor *e)
 	/* One step, the engine's - see kofcore.h. The mask and the cast were
 	 * noise around a byte. */
 	#define MIX(b) (h = kof_hash_step(h, (uint8_t)(b)))
+	/* MIX takes ONE byte: a value wider than that is folded byte by byte, or its upper bytes are not part of the hash. */
+	#define MIX32(w) do { uint32_t w_ = (uint32_t)(w); MIX(w_); MIX(w_ >> 8); MIX(w_ >> 16); MIX(w_ >> 24); } while (0)
 	for (i = 0; e->dr.family[i]; i++)
 		MIX((uint8_t)e->dr.family[i]);
 	for (i = 0; e->dr.note[i]; i++)
 		MIX((uint8_t)e->dr.note[i]);
-	MIX(e->dr.maltype);
+	for (i = 0; e->dr.variant[i]; i++)
+		MIX((uint8_t)e->dr.variant[i]);
 	for (i = 0; i < e->dr.n_rng_add; i++)
-		MIX(e->dr.rng_add[i]);
+		MIX32(e->dr.rng_add[i]);
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
 		/*
 		 * AN OPTION THE ENGINE FILLED IN READS AS ABSENT - see
@@ -1142,13 +1159,13 @@ uint32_t draft_hash(struct kof_editor *e)
 		uint64_t val = e->dr.opt_auto[i] ? 0u : e->dr.opt_val[i];
 
 		MIX(on);
-		MIX(val);
-		MIX(val >> 32);
+		MIX32(val);
+		MIX32(val >> 32);
 	}
 	for (i = 0; i < e->dr.n_decl; i++) {
 		const struct decl *d = &e->dr.decl[i];
 
-		MIX(d->len); MIX(d->hex); MIX(d->mask);
+		MIX(d->len); MIX(d->hex); MIX32(d->mask); MIX(d->wide);
 		MIX(d->grp); MIX(d->fullword); MIX(d->icase);
 		/* The spelling when there is one - it is what would be
 		 * written, and `bytes` may be NULL beside it. */
@@ -1160,15 +1177,21 @@ uint32_t draft_hash(struct kof_editor *e)
 				MIX(d->bytes[j]);
 	}
 	for (i = 0; i < e->dr.n_grp; i++) {
-		MIX(e->dr.grp[i].rule); MIX(e->dr.grp[i].thresh); MIX(e->dr.grp[i].mask);
-		MIX(e->dr.grp[i].tag); MIX(e->dr.grp[i].tag >> 32);
+		MIX(e->dr.grp[i].rule); MIX(e->dr.grp[i].thresh); MIX32(e->dr.grp[i].mask);
+		MIX(e->dr.grp[i].at_anchor); MIX(e->dr.grp[i].at_auto);
+		MIX32(e->dr.grp[i].at_off); MIX32((uint64_t)e->dr.grp[i].at_off >> 32);
+		MIX(e->dr.grp[i].utype);
+		for (j = 0; e->dr.grp[i].tag[j]; j++)
+			MIX((uint8_t)e->dr.grp[i].tag[j]);
 		for (j = 0; e->dr.grp[i].note[j]; j++)
 			MIX((uint8_t)e->dr.grp[i].note[j]);
 	}
 	for (i = 0; i < e->dr.n_cnd; i++) {
 		const struct cond *c = &e->dr.cnd[i];
 
-		MIX(c->tag); MIX(c->tag >> 32); MIX(c->tab);
+		MIX(c->utype);
+		for (j = 0; c->tag[j]; j++)
+			MIX((uint8_t)c->tag[j]);
 		MIX(c->op);
 		for (j = 0; c->expr[j]; j++)
 			MIX((uint8_t)c->expr[j]);
@@ -1216,8 +1239,6 @@ uint32_t draft_hash(struct kof_editor *e)
 			if (!e->dr.blk[i].picked)
 				continue;
 			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].id);
-			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].norm);
-			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].anywhere);
 			acc += b;
 		}
 		MIX(acc);
@@ -1263,6 +1284,7 @@ uint32_t draft_hash(struct kof_editor *e)
 			}
 		}
 	}
+	#undef MIX32
 	#undef MIX
 	return h;
 }
@@ -1347,37 +1369,12 @@ void rng_retarget(struct kof_editor *e, uint32_t was, uint32_t now)
 	 */
 }
 
-/*
- * THE SCAN RANGES A READER MAY REMOVE, and which kind each one is.
- *
- * Two kinds on one list, because a reader thinks of them as one thing - the
- * ranges this draft has. An UNUSED range is a KOF_TARGET_RANGE the draft
- * declared that no matcher searches; removing it just drops the declaration. A
- * range a matcher DOES search has no life apart from that matcher - see the note
- * on grp.mask - so removing it removes the matcher, the same thing the matcher's
- * own [x] does, reached from where the reader was looking instead.
- *
- * Unused first, then the matcher ranges deduplicated. Enumerated the same way
- * where the menu is drawn and where a pick is carried out, so a row index means
- * the same on both sides.
- */
-uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused,
-			      uint32_t cap)
+/* The ranges the matchers search, appended to mask[n..) distinct from everything already there: the one loop rng_removable and rng_all
+ * share, so what counts as a range (grp_has_range, grp_mask) is said once. Returns the new count. */
+static uint32_t rng_add_searched(struct kof_editor *e, uint32_t *mask, int *unused, uint32_t n, uint32_t cap)
 {
-	uint32_t n = 0, i, g, k;
+	uint32_t g, k;
 
-	for (i = 0; i < e->dr.n_rng_add && n < cap; i++) {
-		int used = 0;
-
-		for (g = 0; g < e->dr.n_grp; g++)
-			used |= grp_has_range(e, g) &&
-				grp_mask(e, g) == e->dr.rng_add[i];
-		if (used)
-			continue;
-		mask[n] = e->dr.rng_add[i];
-		unused[n] = 1;
-		n++;
-	}
 	for (g = 0; g < e->dr.n_grp && n < cap; g++) {
 		uint32_t mm;
 		int dup = 0;
@@ -1397,6 +1394,40 @@ uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused,
 }
 
 /*
+ * THE SCAN RANGES A READER MAY REMOVE, and which kind each one is.
+ *
+ * Two kinds on one list, because a reader thinks of them as one thing - the
+ * ranges this draft has. An UNUSED range is a KOF_TARGET_RANGE the draft
+ * declared that no matcher searches; removing it just drops the declaration. A
+ * range a matcher DOES search has no life apart from that matcher - see the note
+ * on grp.mask - so removing it removes the matcher, the same thing the matcher's
+ * own [x] does, reached from where the reader was looking instead.
+ *
+ * Unused first, then the matcher ranges deduplicated. Enumerated the same way
+ * where the menu is drawn and where a pick is carried out, so a row index means
+ * the same on both sides.
+ */
+uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused,
+			      uint32_t cap)
+{
+	uint32_t n = 0, i, g;
+
+	for (i = 0; i < e->dr.n_rng_add && n < cap; i++) {
+		int used = 0;
+
+		for (g = 0; g < e->dr.n_grp; g++)
+			used |= grp_has_range(e, g) &&
+				grp_mask(e, g) == e->dr.rng_add[i];
+		if (used)
+			continue;
+		mask[n] = e->dr.rng_add[i];
+		unused[n] = 1;
+		n++;
+	}
+	return rng_add_searched(e, mask, unused, n, cap);
+}
+
+/*
  * EVERY RANGE THE DRAFT HAS, in one order.
  *
  * The distinct masks the matchers search, then the declared ones nothing
@@ -1408,23 +1439,8 @@ uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused,
 uint32_t rng_all(struct kof_editor *e, uint32_t *mask, int *unused,
 			uint32_t cap)
 {
-	uint32_t n = 0, g, k;
+	uint32_t n = rng_add_searched(e, mask, unused, 0, cap), g, k;
 
-	for (g = 0; g < e->dr.n_grp && n < cap; g++) {
-		uint32_t m;
-		int dup = 0;
-
-		if (!grp_has_range(e, g))
-			continue;
-		m = grp_mask(e, g);
-		for (k = 0; k < n; k++)
-			dup |= mask[k] == m;
-		if (dup)
-			continue;
-		mask[n] = m;
-		unused[n] = 0;
-		n++;
-	}
 	for (g = 0; g < e->dr.n_rng_add && n < cap; g++) {
 		int used = 0;
 
@@ -1651,12 +1667,24 @@ void decl_sync_ranges(struct kof_editor *e)
  */
 void decl_edit_commit(struct kof_editor *e, uint32_t i)
 {
-	struct decl *d = &e->dr.decl[i];
+	struct decl *d;
 	size_t n = strlen(e->dr.sedit);
 	uint8_t *nb;
 
 	if (i >= e->dr.n_decl)
 		return;
+	d = &e->dr.decl[i];
+	/* Every refusal below comes BEFORE the marker is touched: "unchanged" is the status line's word and the marker's too. */
+	if (!n) {
+		/* A marker that never had text (a new one, left empty) is not kept: it would stay as a row of length 0. */
+		if (!d->len) {
+			decl_remove(e, i);
+			say_note(e, "String %u had no text - not kept", i + 1u);
+			return;
+		}
+		say_note(e, "String %u would be empty - unchanged", i + 1u);
+		return;
+	}
 	if (d->hex) {
 		/*
 		 * Refused rather than truncated. A hex pattern cut off halfway
@@ -1669,15 +1697,17 @@ void decl_edit_commit(struct kof_editor *e, uint32_t i)
 				 (unsigned)(sizeof d->hexs - 1u));
 			return;
 		}
-		memcpy(d->hexs, e->dr.sedit, n + 1u);
 		/*
 		 * Refused by the same compiler the build uses, and in its own
 		 * words. A pattern the panel accepted and the build then threw
 		 * out is a rule that looked right in the viewer and does not
 		 * exist in the database.
 		 */
-		if (!decl_from_hexs(d)) {
-			{
+		{
+			uint8_t prog[KOF_HEX_MAX_PROG];
+			struct kof_hex_stat st;
+
+			if (!kof_hex_compile(e->dr.sedit, prog, sizeof prog, &st)) {
 				/*
 				 * Capitalised here and not at the source: the
 				 * same string is printed by ksigbuilder as
@@ -1692,9 +1722,15 @@ void decl_edit_commit(struct kof_editor *e, uint32_t i)
 				if (why[0] >= 'a' && why[0] <= 'z')
 					why[0] = (char)(why[0] - 32);
 				say_note(e, "%s", why);
+				return;
 			}
-			return;
+			if (!st.min_span) {
+				say_note(e, "String %u would be empty - unchanged", i + 1u);
+				return;
+			}
 		}
+		memcpy(d->hexs, e->dr.sedit, n + 1u);
+		(void)decl_from_hexs(d);
 	} else {
 		size_t r, w = 0;
 
@@ -1722,11 +1758,6 @@ void decl_edit_commit(struct kof_editor *e, uint32_t i)
 		}
 		d->len = (uint32_t)w;
 		d->nbytes = d->len;
-	}
-	if (!d->len) {
-		say_note(e, "String %u would be empty - unchanged",
-			 i + 1u);
-		return;
 	}
 	decl_locate(e, d);
 }
@@ -2057,77 +2088,6 @@ uint32_t grp_tab_count(const struct kof_editor *e, uint8_t tab)
 }
 
 
-const struct kof_tagent *tag_find(const struct kof_editor *e, uint64_t id)
-{
-	return e->tags && id ? kof_tagset_find(e->tags, KOF_TAGSRC_K_TAG, id)
-			     : NULL;
-}
-
-const char *tag_name(const struct kof_editor *e, uint64_t id)
-{
-	const struct kof_tagent *t = tag_find(e, id);
-
-	return t ? t->name : "";
-}
-
-/* How many tags carry this name. */
-static uint32_t tag_same_name(const struct kof_tagset *s, const char *name)
-{
-	size_t i;
-	uint32_t n = 0;
-
-	for (i = 0; i < s->n; i++)
-		n += !s->e[i].removed && s->e[i].kind == KOF_TAGSRC_K_TAG &&
-		     !strcmp(s->e[i].name, name);
-	return n;
-}
-
-void tag_label(const struct kof_editor *e, uint64_t id, char *out, size_t cap)
-{
-	const struct kof_tagent *t = tag_find(e, id);
-	size_t n;
-
-	if (!cap)
-		return;
-	out[0] = 0;
-	if (!t)
-		return;
-	n = (size_t)snprintf(out, cap, "%s", t->name);
-	if (tag_same_name(e->tags, t->name) < 2u || n + 1u >= cap)
-		return;
-	/* Another tag has this name: which one is told by what it is about. */
-	n += (size_t)snprintf(out + n, cap - n, " (");
-	if (t->has_fam && n + 1u < cap) {
-		const char *f = kof_tagset_name(e->tags, KOF_TAGSRC_K_FAMILY,
-						t->fam);
-
-		n += (size_t)snprintf(out + n, cap - n, "family %s",
-				      f ? f : "?");
-	}
-	if (t->n_typ && n + 1u < cap) {
-		n += (size_t)snprintf(out + n, cap - n, "%stypes ",
-				      t->has_fam ? ", " : "");
-		if (n + 1u < cap)
-			n += kof_tagset_join(e->tags, KOF_TAGSRC_K_TYPE, t->typ,
-					     t->n_typ, out + n, cap - n);
-	}
-	if (n + 2u < cap)
-		snprintf(out + n, cap - n, ")");
-}
-
-/* A block matcher no condition uses is a diagnose of its own. */
-int grp_standalone(const struct kof_editor *e, uint32_t g)
-{
-	uint32_t ci;
-
-	if (g >= e->dr.n_grp || e->dr.grp[g].kind != GRP_KIND_SIM)
-		return 0;
-	for (ci = 0; ci < e->dr.n_cnd; ci++)
-		if (cnd_uses(e, &e->dr.cnd[ci], g))
-			return 0;
-	return 1;
-}
-
 /* One word of a file name: lower case, [a-z0-9_-] kept and the rest dropped. */
 static size_t name_word(char *out, size_t cap, size_t n, const char *w)
 {
@@ -2140,85 +2100,1552 @@ static size_t name_word(char *out, size_t cap, size_t n, const char *w)
 	return n;
 }
 
-/* `<first type>_<family>_<tag>` of tag `id`: what a running id is counted
- * within. Every word is the tag's own - the first type it declares, its
- * family, its name - and a part it has not got is left out, so no underscore
- * is doubled. No tag has `<tag>` where the name goes, so the gap shows. */
-static void tag_prefix(const struct kof_editor *e, uint64_t id, char *out,
-		       size_t cap)
+/* `<type>_<family>_<tag>` of one diagnose unit: what a running id is counted
+ * within, and the one place the output's name is composed. The type is the
+ * UNIT's own (struct cond.utype), the family the header's and the tag the
+ * unit's. A type or tag not chosen yet is written `<type>` / `<tag>` so the gap
+ * shows; no family is left out (a generic diagnose), so no underscore is
+ * doubled. */
+static void tag_prefix(const struct kof_editor *e, uint8_t utype,
+		       const char *tag, char *out, size_t cap)
 {
-	const struct kof_tagent *t = tag_find(e, id);
-	const char *w;
 	size_t n = 0;
 
-	if (!t) {
-		snprintf(out, cap, "<tag>");
-		return;
-	}
-	if (t->n_typ && (w = kof_tagset_name(e->tags, KOF_TAGSRC_K_TYPE,
-					     t->typ[0])) != NULL)
-		n = name_word(out, cap, n, w);
-	if (t->has_fam && (w = kof_tagset_name(e->tags, KOF_TAGSRC_K_FAMILY,
-					       t->fam)) != NULL) {
+	if (utype)
+		n = name_word(out, cap, n, kof_maltype_name((uint32_t)utype - 1u));
+	else
+		n = (size_t)snprintf(out, cap, "<type>");
+	if (e->dr.family[0]) {
 		if (n && n + 1u < cap)
 			out[n++] = '_';
-		n = name_word(out, cap, n, w);
+		n = name_word(out, cap, n, e->dr.family);
 	}
 	if (n && n + 1u < cap)
 		out[n++] = '_';
-	n = name_word(out, cap, n, t->name);
-	out[n] = 0;
+	if (tag[0])
+		n = name_word(out, cap, n, tag);
+	else
+		n += (size_t)snprintf(out + n, n < cap ? cap - n : 0u, "<tag>");
+	out[n < cap ? n : cap - 1u] = 0;
 }
 
-/* The prefix of the diagnose `i` of the output order: the conditions first,
- * then the standalone block matchers - see cnd_file_name. */
-static uint32_t prefix_run(const struct kof_editor *e, const char *mine,
-			   uint32_t n_cond, uint32_t n_grp)
-{
-	char other[160];
-	uint32_t k, id = 1;
+/*
+ * THE DIAGNOSE UNITS, the one list, and the rule is two lines: a PATTERNS CONDITION is a unit, and a
+ * BLOCKS MATCHER is a unit; nothing else is (a string matcher is part of the conditions that name it,
+ * the Graphs tab writes nothing). The draw, the hit zones of the Type and Tag cells,
+ * the file names, the preview and the writer all ask this list, so they cannot disagree about which
+ * units exist. Order = the output's: the conditions first, then the block matchers.
+ */
+_Static_assert(DRAFT_UNIT_MAX == 2u * MAX_GROUP, "a draft holds MAX_GROUP conditions and MAX_GROUP matchers");
 
-	for (k = 0; k < n_cond; k++) {
-		tag_prefix(e, e->dr.cnd[k].tag, other, sizeof other);
-		id += !strcmp(mine, other);
+uint32_t draft_units(const struct kof_editor *e, struct draft_unit *out, uint32_t cap)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < e->dr.n_cnd && n < cap; i++) {
+		const struct cond *c = &e->dr.cnd[i];
+
+		out[n].is_grp = 0;
+		out[n].idx = i;
+		out[n].utype = c->utype;
+		out[n].tag = c->tag;
+		n++;
 	}
-	for (k = 0; k < n_grp; k++) {
-		if (!grp_standalone(e, k))
+	for (i = 0; i < e->dr.n_grp && n < cap; i++) {
+		const struct group *q = &e->dr.grp[i];
+
+		if (q->kind != GRP_KIND_SIM)
 			continue;
-		tag_prefix(e, e->dr.grp[k].tag, other, sizeof other);
-		id += !strcmp(mine, other);
+		out[n].is_grp = 1;
+		out[n].idx = i;
+		out[n].utype = q->utype;
+		out[n].tag = q->tag;
+		n++;
 	}
-	return id;
+	return n;
 }
 
-void cnd_file_name(const struct kof_editor *e, uint32_t ci, char *out,
-		   size_t cap)
+/* How many units the draft has: what Generate has to write. */
+uint32_t draft_unit_count(const struct kof_editor *e)
 {
-	char mine[160];
+	struct draft_unit u[DRAFT_UNIT_MAX];
+
+	return draft_units(e, u, DRAFT_UNIT_MAX);
+}
+
+/* The units the open tab lists: Patterns its conditions, Blocks its matchers, Graphs none. */
+uint32_t draft_units_on_tab(const struct kof_editor *e, uint8_t tab, struct draft_unit *out, uint32_t cap)
+{
+	struct draft_unit all[DRAFT_UNIT_MAX];
+	uint32_t i, n = 0, m = draft_units(e, all, DRAFT_UNIT_MAX);
+
+	if (tab != DT_PATTERNS && tab != DT_BLOCKS)
+		return 0;
+	for (i = 0; i < m && n < cap; i++)
+		if (all[i].is_grp == (tab == DT_BLOCKS))
+			out[n++] = all[i];
+	return n;
+}
+
+/* Where unit (is_grp, idx) is in the output order, or -1 when it is no unit: its cells are not drawn and its name is empty. */
+int draft_unit_find(const struct kof_editor *e, int is_grp, uint32_t idx)
+{
+	struct draft_unit u[DRAFT_UNIT_MAX];
+	uint32_t i, n = draft_units(e, u, DRAFT_UNIT_MAX);
+
+	for (i = 0; i < n; i++)
+		if (!u[i].is_grp == !is_grp && u[i].idx == idx)
+			return (int)i;
+	return -1;
+}
+
+static int loaded_find(const struct kof_editor *e, uint32_t id);
+
+/* A file name of a unit that is being worked out: only the part the numbering reads. */
+struct unit_out {
+	char  fn[200];
+	char *text;
+	size_t n;
+	char  label[40];        /* "condition 2", "block matcher 3": what a refusal names */
+};
+
+/* The first `<prefix>_NN.c` (NN 01 to 99) that is not a file of `dir` and not the name of a unit before `k` in `u`; 0 when none is free.
+ * THE ONE PLACE A NEW NAME IS NUMBERED: the panel shows it and Save writes it, so they cannot differ. */
+static uint32_t unit_free_number(const char *dir, const char *prefix, const struct unit_out *u, uint32_t k)
+{
+	uint32_t nn, j;
+
+	for (nn = 1; nn <= 99u; nn++) {
+		char fn[200], path[4400];
+		int taken = 0;
+
+		snprintf(fn, sizeof fn, "%s_%02u.c", prefix, nn);
+		snprintf(path, sizeof path, "%s/%s", dir, fn);
+		for (j = 0; j < k; j++)
+			taken |= !strcmp(u[j].fn, fn);
+		if (!taken && access(path, F_OK) != 0)
+			return nn;
+	}
+	return 0;
+}
+
+/* The name of unit k: the file of the diagnose it carries the id of, else the first free number (see unit_free_number). `u[0..k)` hold the
+ * names of the units before it. A number is never derived from where the unit sits in the draft. */
+static void unit_name_in(const struct kof_editor *e, const char *dir, const struct draft_unit *ul, uint32_t k, struct unit_out *u)
+{
+	uint32_t lid = ul[k].is_grp ? e->dr.grp[ul[k].idx].link : e->dr.cnd[ul[k].idx].link;
+	int li = loaded_find(e, lid);
+	char prefix[160];
+	uint32_t nn;
+
+	if (li >= 0) {
+		snprintf(u[k].fn, sizeof u[k].fn, "%.*s.c", (int)DRAFT_LINK_MAX - 1, e->dr.loaded[li].name);
+		return;
+	}
+	tag_prefix(e, ul[k].utype, ul[k].tag, prefix, sizeof prefix);
+	nn = unit_free_number(dir, prefix, u, k);
+	if (nn)
+		snprintf(u[k].fn, sizeof u[k].fn, "%s_%02u.c", prefix, nn);
+	else
+		snprintf(u[k].fn, sizeof u[k].fn, "%s_--.c", prefix);
+}
+
+/* The file name of unit `k` of the list, as Save will write it into the tree's diagnoses directory (kof_draft.tree_dir). */
+static void unit_name(const struct kof_editor *e, const struct draft_unit *u, uint32_t k, char *out, size_t cap)
+{
+	struct unit_out tmp[DRAFT_UNIT_MAX];
+	uint32_t j;
+
+	memset(tmp, 0, sizeof tmp);
+	for (j = 0; j <= k && j < DRAFT_UNIT_MAX; j++)
+		unit_name_in(e, e->dr.tree_dir, u, j, tmp);
+	snprintf(out, cap, "%s", tmp[k].fn);
+}
+
+void draft_set_tree_dir(struct kof_editor *e, const char *dir)
+{
+	snprintf(e->dr.tree_dir, sizeof e->dr.tree_dir, "%s", dir ? dir : "");
+}
+
+void draft_unit_name(const struct kof_editor *e, int is_grp, uint32_t idx, char *out, size_t cap)
+{
+	struct draft_unit u[DRAFT_UNIT_MAX];
+	int k;
 
 	if (!out || !cap)
 		return;
 	out[0] = 0;
-	if (ci >= e->dr.n_cnd)
-		return;
-	tag_prefix(e, e->dr.cnd[ci].tag, mine, sizeof mine);
-	snprintf(out, cap, "%s_%02u.c", mine,
-		 prefix_run(e, mine, ci, 0));
+	draft_units(e, u, DRAFT_UNIT_MAX);
+	k = draft_unit_find(e, is_grp, idx);
+	if (k >= 0)
+		unit_name(e, u, (uint32_t)k, out, cap);
 }
 
-void grp_file_name(const struct kof_editor *e, uint32_t g, char *out,
-		   size_t cap)
+void cnd_file_name(const struct kof_editor *e, uint32_t ci, char *out, size_t cap)
 {
-	char mine[160];
+	draft_unit_name(e, 0, ci, out, cap);
+}
 
-	if (!out || !cap)
-		return;
+void grp_file_name(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
+{
+	draft_unit_name(e, 1, g, out, cap);
+}
+
+/* ---- THE GENERATOR'S OUTPUT: one diagnose source per unit ---------------------- */
+
+/* The variant's LETTERS out of the header's catalog name "<family>_<letters>" ("Mirai_A" -> "A"), or NULL
+ * when the name does not start with the family: the source names the family once, so only letters follow. */
+static const char *variant_letters(const struct kof_editor *e)
+{
+	size_t n = strlen(e->dr.family);
+
+	if (!n || strncmp(e->dr.variant, e->dr.family, n) || e->dr.variant[n] != '_')
+		return NULL;
+	return e->dr.variant + n + 1u;
+}
+
+/*
+ * THE DECLARATIONS OF ONE UNIT, as diagsrc items: its name (the file's stem), the header's format
+ * and subtype options (the declarations the panel has always had that a diagnose source can say),
+ * and the four catalog lines - family and variant from the header, type and tag from the unit.
+ * ONE function builds the list, for the file that is written and for the preview that lists it, and
+ * the text of every line is the shared printer's (kof_dsrc_print): this file has no string code of
+ * its own for a declaration.
+ *
+ * A gap (no family, no variant, no type, no tag) is simply not in the list; the caller that writes
+ * refuses before it gets here (draft_unit_gap), the preview shows what is missing.
+ */
+void draft_unit_items(const struct kof_editor *e, const char *stem, uint8_t utype,
+		      const char *tag, struct kof_dsrc *d)
+{
+	struct kof_dsrc_item *it;
+	uint32_t f;
+
+	memset(d, 0, sizeof *d);
+	it = &d->item[d->n++];
+	it->kind = KDS_NAME;
+	snprintf(it->s1, sizeof it->s1, "%s", stem);
+	if (e->dr.fmt_mask) {
+		char words[KOF_DSRC_WORDS_LEN] = "";
+		size_t at = 0;
+		uint64_t val = 0;
+
+		for (f = 0; f < KOF_FMT_COUNT; f++) {
+			const char *id = kof_format_ident((uint8_t)f);
+
+			if (!(e->dr.fmt_mask & (1u << f)) || !id)
+				continue;
+			if (at + strlen(id) + 4u >= sizeof words)
+				break;
+			at += (size_t)snprintf(words + at, sizeof words - at, "%s%s", at ? " | " : "", id);
+			val |= (uint64_t)f;
+		}
+		it = &d->item[d->n++];
+		it->kind = KDS_FORMAT;
+		it->v = val;
+		snprintf(it->s1, sizeof it->s1, "%s", words);
+	}
+	if (e->dr.opt_on[OPT_SUBTYPE]) {
+		it = &d->item[d->n++];
+		it->kind = KDS_SUBTYPE;
+		it->v = e->dr.opt_val[OPT_SUBTYPE];
+	}
+	/* The two options a signature declared as targets (KOF_TARGET_SIZE_MIN, KOF_TARGET_ARCH) are conditions of the diagnose: the
+	 * engine's facts for them (KOF_FACT_SIZE_MIN, KOF_FACT_ARCH_SET), written as KOF_DIAG_HAS_ATTRB lines. */
+	if (e->dr.opt_on[OPT_SIZE_MIN]) {
+		it = &d->item[d->n++];
+		it->kind = KDS_ATTRB;
+		it->a = (uint16_t)KOF_FACT_SIZE_MIN;
+		it->v = e->dr.opt_val[OPT_SIZE_MIN];
+	}
+	if (e->dr.opt_on[OPT_ARCH] && e->dr.opt_val[OPT_ARCH] < 64u) {
+		it = &d->item[d->n++];
+		it->kind = KDS_ATTRB;
+		it->a = (uint16_t)KOF_FACT_ARCH_SET;
+		it->v = (uint64_t)1 << e->dr.opt_val[OPT_ARCH];
+	}
+	if (e->dr.family[0]) {
+		it = &d->item[d->n++];
+		it->kind = KDS_FAMILY;
+		snprintf(it->s1, sizeof it->s1, "%s", e->dr.family);
+	}
+	if (e->dr.variant[0]) {
+		it = &d->item[d->n++];
+		it->kind = KDS_VARIANT;
+		snprintf(it->s1, sizeof it->s1, "%s", variant_letters(e) ? variant_letters(e) : e->dr.variant);
+	}
+	if (utype) {
+		it = &d->item[d->n++];
+		it->kind = KDS_TYPE;
+		it->a = (uint16_t)(utype - 1u);
+	}
+	if (tag[0]) {
+		it = &d->item[d->n++];
+		it->kind = KDS_TAG;
+		snprintf(it->s1, sizeof it->s1, "%s", tag);
+	}
+}
+
+/* Why a unit cannot be written, or NULL: the header and the unit must both say what the file is about. */
+static const char *draft_unit_gap(const struct kof_editor *e, uint8_t utype, const char *tag)
+{
+	/* What a diagnose has no condition for is refused, not dropped: the file would say less than the panel does. */
+	if (e->dr.opt_on[OPT_SIZE_MAX])
+		return "the header sets a maximum size, which a diagnose has no condition for (the engine has none by design)";
+	if (e->dr.opt_on[OPT_ARCH] && e->dr.opt_val[OPT_ARCH] >= 64u)
+		return "the header names an architecture past the 64 a set of them holds";
+	if (!e->dr.family[0])
+		return "the header has no family";
+	if (!e->dr.variant[0])
+		return "the header has no variant";
+	if (!utype)
+		return "it has no type";
+	if (!tag[0])
+		return "it has no tag";
+	if (!variant_letters(e) || !kof_dsrc_variant_word_ok(variant_letters(e)))
+		return "the variant's name is not \"<family>_<letters>\"";
+	if (!kof_dsrc_catalog_word_ok(e->dr.family) || !kof_dsrc_catalog_word_ok(tag))
+		return "a name has a character a diagnose source cannot hold";
+	return NULL;
+}
+
+/*
+ * THE DETECTION PART OF A UNIT, as the declarations a diagnose source reads (databases/diagsrc.h, the form).
+ *
+ * A PATTERNS CONDITION is the markers of the matchers its expression names, a range for each distinct region they search,
+ * the matchers, and the expression over them; a BLOCKS MATCHER is the blocks it holds, and itself. Every line is a diagsrc
+ * item, printed by the shared printer: this file has no string code of its own for a declaration, and it computes nothing
+ * the engine decides - what a marker matches, what a block scores are the engine's, this only says what was drawn.
+ *
+ * WHAT HAS NO SPELLING IS REFUSED WITH A REASON, never written in a way that means something else: a marker with a byte a
+ * literal cannot spell is a hex pattern, and where a hex pattern cannot hold what the marker means (a wide marker with such
+ * a byte, a regex the panel has no wire for) the unit is not written. The caller checks the output with the reader the
+ * builder uses, so a file Generate writes is one the builder accepts.
+ */
+
+#define FORM_NAME_MAX 24u
+
+/* Add an item to `d` or say why not. */
+static struct kof_dsrc_item *form_item(struct kof_dsrc *d, unsigned kind, const char **why)
+{
+	struct kof_dsrc_item *it;
+
+	if (d->n >= KOF_DSRC_MAX_ITEM) {
+		*why = "it needs more declarations than a diagnose source holds";
+		return NULL;
+	}
+	it = &d->item[d->n];
+	memset(it, 0, sizeof *it);
+	it->kind = (uint8_t)kind;
+	return it;
+}
+
+static int form_text(struct kof_dsrc *d, const char **t, uint32_t *n, const char *p, size_t len, const char **why)
+{
+	const char *q = kof_dsrc_text(d, p, len);
+
+	if (!q) {
+		*why = "its declarations are over the size of the source reader's text pool";
+		return 0;
+	}
+	*t = q;
+	*n = (uint32_t)len;
+	return 1;
+}
+
+/* A mask in the KOF_SCAN_* words of the formats the header targets. The whole file, the symbol halves and every region a
+ * target format names are spelled; a bit no such format names has no word and the unit is refused. */
+static const char *form_mask_words(const struct kof_editor *e, uint32_t mask, char *out, size_t cap)
+{
+	uint32_t b;
+	size_t at = 0;
+
+	if (mask & KOF_SCAN_ALL) {
+		snprintf(out, cap, "KOF_SCAN_ALL");
+		return NULL;
+	}
 	out[0] = 0;
-	if (!grp_standalone(e, g))
+	for (b = 0; b < 32u; b++) {
+		const char *w = NULL;
+		uint32_t f;
+
+		if (!(mask & (1u << b)))
+			continue;
+		if ((1u << b) == KOF_SCAN_SYM_IMP)
+			w = "KOF_SCAN_SYM_IMP";
+		else if ((1u << b) == KOF_SCAN_SYM_EXP)
+			w = "KOF_SCAN_SYM_EXP";
+		/* The word the source reader knows, from the first of the header's formats that has this region. */
+		for (f = 0; !w && f < KOF_FMT_COUNT; f++)
+			if (e->dr.fmt_mask & (1u << f))
+				w = kof_dsrc_region_word((uint8_t)f, 1u << b);
+		if (!w)
+			return "it searches a region that none of the formats the header targets names";
+		if (at + strlen(w) + 4u >= cap)
+			return "its region mask is too long";
+		at += (size_t)snprintf(out + at, cap - at, "%s%s", at ? " | " : "", w);
+	}
+	if (!at)
+		return "it searches no region";
+	/* The words mean the mask when the reader reads them back: every region of every format reads as itself (tests/unit/diagsrc_form.c,
+	 * "words"), and a bit with no name was refused above. */
+	return NULL;
+}
+
+/* One marker as a KDS_STR item named `name`. */
+static const char *form_str(struct kof_dsrc *d, const struct decl *dc, const char *name)
+{
+	const char *why = NULL;
+	struct kof_dsrc_item *it;
+	char probe[2u * KOF_DSRC_LIT_MAX + 8u];
+	unsigned opt = 0;
+	int lit_ok;
+	uint32_t i;
+
+	if (dc->hex == DECL_RX)
+		return "it has a regex marker, which the panel has no wire for yet";
+	if (!dc->nbytes && !(dc->hex && dc->hexs[0]))
+		return "it has an empty marker";
+	if (dc->nbytes > KOF_DSRC_LIT_MAX && !(dc->hex && dc->hexs[0]))
+		return "it has a marker over 512 bytes";
+	if (!(it = form_item(d, KDS_STR, &why)))
+		return why;
+	snprintf(it->s1, sizeof it->s1, "%s", name);
+	if (dc->icase)
+		opt |= KDS_OPT_ICASE;
+	if (dc->fullword == KOF_WORD_FULLWORD)
+		opt |= KDS_OPT_FULLWORD;
+	else if (dc->fullword == KOF_WORD_TOKEN)
+		opt |= KDS_OPT_TOKEN;
+	if (dc->hex && dc->hexs[0]) {
+		/* A pattern as it was written. The panel's search ignores the options of a pattern (decl_pattern); one the
+		 * author set is the author's, and the engine applies it, so it is written. */
+		size_t L = strlen(dc->hexs);
+
+		if (L > KOF_DSRC_TEXT_MAX)
+			return "it has a hex pattern over 511 characters";
+		it->a = KDS_STR_HEX;
+		it->b = (uint16_t)(opt ? (opt | KDS_OPT_GIVEN) : 0u);
+		if (!form_text(d, &it->t1, &it->n1, dc->hexs, L, &why))
+			return why;
+		d->n++;
+		return NULL;
+	}
+	lit_ok = kof_dsrc_lit_escape(dc->bytes, dc->nbytes, probe, sizeof probe) != 0;
+	if (dc->wide) {
+		/* ASCII only: a byte above 0x7E or below a space has no escape, so lit_ok already says no for it */
+		if (!lit_ok)
+			return "it has a wide marker with a byte that has no text spelling";
+		it->a = KDS_STR_WIDE;
+		it->b = (uint16_t)(opt | KDS_OPT_GIVEN);
+	} else if (lit_ok) {
+		it->a = KDS_STR_PLAIN;
+		/* A pattern declared from a selection is concrete bytes: the panel's search applied the options only to a
+		 * literal (decl_pattern), so a hex one has the defaults. */
+		it->b = (uint16_t)((dc->hex ? 0u : opt) | KDS_OPT_GIVEN);
+	} else {
+		/* A byte a literal cannot spell: the same bytes as a hex pattern. */
+		char hx[KOF_DSRC_TEXT_MAX + 1u];
+		size_t at = 0;
+
+		if ((size_t)dc->nbytes * 3u > KOF_DSRC_TEXT_MAX)
+			return "it has a marker of more than 170 bytes that needs a hex pattern";
+		for (i = 0; i < dc->nbytes; i++)
+			at += (size_t)snprintf(hx + at, sizeof hx - at, "%s%02X", i ? " " : "", (unsigned)dc->bytes[i]);
+		it->a = KDS_STR_HEX;
+		it->b = (uint16_t)((dc->hex ? 0u : opt) ? ((dc->hex ? 0u : opt) | KDS_OPT_GIVEN) : 0u);
+		if (!form_text(d, &it->t1, &it->n1, hx, at, &why))
+			return why;
+		d->n++;
+		return NULL;
+	}
+	if (!form_text(d, &it->t1, &it->n1, (const char *)dc->bytes, dc->nbytes, &why))
+		return why;
+	d->n++;
+	return NULL;
+}
+
+/* The expression of a condition in the source's operators and the matchers' names ("m1 && !m2"). */
+static const char *form_expr(const struct kof_editor *e, const struct cond *c, char *out, size_t cap)
+{
+	const char *p = c->expr;
+	size_t at = 0;
+	int depth = 0;
+
+	out[0] = 0;
+	for (; *p; p++) {
+		const char *t = NULL;
+		char num[24];
+
+		if (*p == ' ')
+			continue;
+		if (*p >= '0' && *p <= '9') {
+			unsigned long n = 0;
+
+			while (*p >= '0' && *p <= '9' && n < 1000ul)
+				n = n * 10ul + (unsigned long)(*p++ - '0');
+			p--;
+			snprintf(num, sizeof num, "m%lu", n);
+			t = num;
+		} else if (*p == '&') {
+			t = " && ";
+			if (p[1] == '&')
+				p++;
+		} else if (*p == '|') {
+			t = " || ";
+			if (p[1] == '|')
+				p++;
+		} else if (*p == '!') {
+			t = "!";
+		} else if (*p == '(' || *p == ')') {
+			depth += *p == '(' ? 1 : -1;
+			if (depth < 0)
+				return "its expression has a parenthesis that does not match";
+			t = *p == '(' ? "(" : ")";
+		} else {
+			return "its expression has a character a diagnose cannot say";
+		}
+		if (at + strlen(t) + 1u >= cap)
+			return "its expression is too long";
+		at += (size_t)snprintf(out + at, cap - at, "%s", t);
+	}
+	(void)e;
+	if (depth)
+		return "its expression has a parenthesis that does not match";
+	return at ? NULL : "its expression names no matcher";
+}
+
+/* The declarations of one PATTERNS condition. */
+static const char *form_condition(const struct kof_editor *e, uint32_t ci, struct kof_dsrc *d)
+{
+	const struct cond *c = &e->dr.cnd[ci];
+	const char *why = NULL;
+	uint32_t g, i, n_rng = 0, rng_mask[MAX_GROUP];
+	uint32_t used_decl = 0;
+	char expr[256];
+	struct kof_dsrc_item *it;
+
+	if ((why = form_expr(e, c, expr, sizeof expr)) != NULL)
+		return why;
+	/* (A matcher that is not on this tab was refused before any text is made: draft_generate_with.)
+	 * The ranges, one per distinct mask of the matchers that search. */
+	for (g = 0; g < e->dr.n_grp; g++) {
+		const struct group *q = &e->dr.grp[g];
+		uint32_t mask, k;
+		char words[256];
+
+		if (!cnd_uses(e, c, g) || grp_is_at(q->rule))     /* cnd_uses: a matcher of the Patterns tab, which is a string matcher */
+			continue;
+		mask = grp_mask((struct kof_editor *)(uintptr_t)e, g);
+		for (k = 0; k < n_rng && rng_mask[k] != mask; k++)
+			;
+		if (k < n_rng)
+			continue;
+		if ((why = form_mask_words(e, mask, words, sizeof words)) != NULL)
+			return why;
+		if (!(it = form_item(d, KDS_RANGE, &why)))
+			return why;
+		snprintf(it->s1, sizeof it->s1, "r%u", (unsigned)n_rng);
+		it->v = mask;
+		if (!form_text(d, &it->t1, &it->n1, words, strlen(words), &why))
+			return why;
+		d->n++;
+		rng_mask[n_rng++] = mask;
+	}
+	/* The markers the matchers use, once each. */
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (cnd_uses(e, c, g))
+			for (i = 0; i < e->dr.n_decl && i < 32u; i++)
+				if (e->dr.decl[i].grp & (1u << g))
+					used_decl |= 1u << i;
+	for (i = 0; i < e->dr.n_decl && i < 32u; i++) {
+		char name[FORM_NAME_MAX];
+
+		if (!(used_decl & (1u << i)))
+			continue;
+		snprintf(name, sizeof name, "s%u", i);
+		if ((why = form_str(d, &e->dr.decl[i], name)) != NULL)
+			return why;
+	}
+	/* The matchers. */
+	for (g = 0; g < e->dr.n_grp; g++) {
+		const struct group *q = &e->dr.grp[g];
+		char names[KOF_FORM_MAX_ARG * (FORM_NAME_MAX + 2u)];
+		size_t at = 0;
+		uint32_t k = 0, mask;
+
+		if (!cnd_uses(e, c, g))
+			continue;
+		for (i = 0; i < e->dr.n_decl && i < 32u; i++)
+			if (e->dr.decl[i].grp & (1u << g)) {
+				if (at + FORM_NAME_MAX + 2u >= sizeof names)
+					return "a matcher lists more markers than a diagnose allows";
+				at += (size_t)snprintf(names + at, sizeof names - at, "%ss%u", k ? ", " : "", (unsigned)i);
+				k++;
+			}
+		if (!k)
+			return "it names a matcher with no marker";
+		if (k > KOF_FORM_MAX_ARG)
+			return "a matcher lists more than sixteen markers";
+		if (!(it = form_item(d, KDS_FIND, &why)))
+			return why;
+		snprintf(it->s1, sizeof it->s1, "m%u", (unsigned)grp_loc(e, g));
+		it->a = (uint16_t)(q->rule > 3 ? 0 : q->rule);
+		if (grp_is_at(q->rule)) {
+			if (k != 1u)
+				return "an AT matcher compares ONE marker";
+			it->b = q->at_anchor;
+			it->v = (uint64_t)q->at_off;
+		} else {
+			uint32_t kk;
+
+			mask = grp_mask((struct kof_editor *)(uintptr_t)e, g);
+			for (kk = 0; kk < n_rng && rng_mask[kk] != mask; kk++)
+				;
+			snprintf(it->s2, sizeof it->s2, "r%u", (unsigned)kk);
+			if (q->rule == 2) {
+				uint32_t th = grp_thresh_eff((struct kof_editor *)(uintptr_t)e, g);
+
+				if (th < 1u || th > k || th > 255u)
+					return "a threshold the matcher cannot reach";
+				it->b = (uint16_t)th;
+			}
+		}
+		if (!form_text(d, &it->t1, &it->n1, names, at, &why))
+			return why;
+		d->n++;
+	}
+	if (!(it = form_item(d, KDS_EXPR, &why)))
+		return why;
+	if (!form_text(d, &it->t1, &it->n1, expr, strlen(expr), &why))
+		return why;
+	d->n++;
+	return NULL;
+}
+
+/* The declarations of one BLOCKS matcher: its blocks, and itself. */
+static const char *form_block_matcher(const struct kof_editor *e, uint32_t g, struct kof_dsrc *d)
+{
+	const struct group *q = &e->dr.grp[g];
+	const char *why = NULL;
+	struct kof_dsrc_item *it;
+	char names[KOF_FORM_MAX_ARG * (FORM_NAME_MAX + 2u)];
+	size_t at = 0;
+	uint8_t k;
+
+	if (!q->n_sim)
+		return "it holds no block";
+	if (q->n_sim > KOF_FORM_MAX_ARG)
+		return "it holds more than sixteen blocks";
+	if (q->pct < 1u || q->pct > 100u)
+		return "its threshold is not a percentage from 1 to 100";
+	for (k = 0; k < q->n_sim; k++) {
+		const struct mtn_block *b;
+		char words[64], name[FORM_NAME_MAX];
+		uint32_t mask = 0, j;
+
+		if (q->sim[k].what != SIM_IT_BLOCK || q->sim[k].blk >= e->dr.n_blk || !e->dr.blk)
+			return "it holds a measure that is not a block";
+		b = &e->dr.blk[q->sim[k].blk];
+		/* The region the block was cut from, in the engine's own spelling. */
+		snprintf(words, sizeof words, "%s", !b->rgn_enum[0] ? "KOF_SCAN_ALL" : b->rgn_enum);
+		if (!kof_dsrc_mask_of(words, &mask, NULL, 0))
+			return "a block's region has no name the source reader knows";
+		if (b->n_hash < kgenome_mutation_block_min(mask) || b->n_hash > KOF_FORM_HASH_MAX)
+			return "a block has too few or too many hashes";
+		snprintf(name, sizeof name, "b%u", (unsigned)q->sim[k].blk);
+		/* a block named twice is one block */
+		for (j = 0; j < k; j++)
+			if (q->sim[j].blk == q->sim[k].blk)
+				return "it names a block twice";
+		if (!(it = form_item(d, KDS_BLOCK, &why)))
+			return why;
+		snprintf(it->s1, sizeof it->s1, "%s", name);
+		it->b = b->side == (uint8_t)KGENOME_MUTATION_SIDE_LIB ? 1u : 0u;
+		it->v = mask;
+		if (!form_text(d, &it->t1, &it->n1, words, strlen(words), &why) ||
+		    !form_text(d, &it->t2, &it->n2, (const char *)b->hash, (size_t)b->n_hash * sizeof b->hash[0], &why))
+			return why;
+		d->n++;
+		at += (size_t)snprintf(names + at, sizeof names - at, "%s%s", k ? ", " : "", name);
+	}
+	if (!(it = form_item(d, KDS_SIMILAR, &why)))
+		return why;
+	snprintf(it->s1, sizeof it->s1, "m%u", (unsigned)grp_loc(e, g));
+	it->a = q->pct;
+	if (!form_text(d, &it->t1, &it->n1, names, at, &why))
+		return why;
+	d->n++;
+	return NULL;
+}
+
+/* THE DETECTION DECLARATIONS OF UNIT (is_grp, idx) appended to `d`: NULL, or the reason the unit cannot be written. */
+const char *draft_unit_form(const struct kof_editor *e, int is_grp, uint32_t idx, struct kof_dsrc *d)
+{
+	return is_grp ? form_block_matcher(e, idx, d) : form_condition(e, idx, d);
+}
+
+/*
+ * WRITE THE OUTPUT: one `<type>_<family>_<tag>_NN.c` per unit into `dir` (the tree's bases/diagnoses).
+ * ALL OR NOTHING: every unit is checked first - the header has a family and a variant, every unit a
+ * type and a tag, no file of that name exists - and when any check fails NOTHING is written and `msg`
+ * says which unit and why. A file is created with "wx" and never replaced: an existing file is
+ * refused and named. Returns the number of files written, or -1 on a refusal (msg is the reason).
+ * A write that fails part way removes the files this call made.
+ */
+int draft_generate(struct kof_editor *e, const char *dir, char *msg, size_t cap)
+{
+	return draft_generate_with(e, dir, msg, cap, 1);
+}
+
+/* What the reader said first about a text it was given: the writer reads its own output back. */
+struct first_err {
+	char msg[200];
+	int  line;
+	int  n;
+};
+
+static void first_err_cb(void *ud, int line, const char *m)
+{
+	struct first_err *f = ud;
+
+	if (!f->n++) {
+		snprintf(f->msg, sizeof f->msg, "%s", m);
+		f->line = line;
+	}
+}
+
+/*
+ * THE TEXT OF ONE UNIT'S FILE: the catalog lines and, with `with_form`, its detection declarations; then the text is READ
+ * BACK by the reader the builder uses (parse and resolve) and a file that would not build is a refusal here, naming the
+ * line - Generate never writes a source ksigbuilder would reject for what the panel said. `with_form` 0 is the seam the
+ * writer's own tests use (names, running ids, all-or-nothing): the catalog lines alone, nothing read back. Returns the text
+ * (malloc'd) or NULL with `why` set.
+ */
+static char *unit_text(const struct kof_editor *e, const char *stem, const struct draft_unit *u, struct kof_dsrc *d,
+		       size_t *n, int with_form, char *why, size_t cap)
+{
+	char *text;
+	uint32_t q;
+
+	draft_unit_items(e, stem, u->utype, u->tag, d);
+	if (with_form) {
+		const char *r = draft_unit_form(e, u->is_grp, u->idx, d);
+
+		if (r) {
+			snprintf(why, cap, "%s", r);
+			return NULL;
+		}
+		for (q = 0; q < d->n; q++) {
+			char one[8192];
+
+			if (!kof_dsrc_print(&d->item[q], one, sizeof one)) {
+				snprintf(why, cap, "one of its declarations cannot be written as source");
+				return NULL;
+			}
+		}
+	}
+	text = kof_dsrc_patch("", 0, d, n);
+	if (!text) {
+		snprintf(why, cap, "out of memory");
+		return NULL;
+	}
+	if (with_form) {
+		struct kof_dsrc *back = calloc(1, sizeof *back);
+		struct kof_dsrc_view v;
+		struct first_err fe = { "", 0, 0 };
+		const struct kof_dsrc_report rep = { first_err_cb, NULL, &fe };
+
+		if (!back) {
+			free(text);
+			snprintf(why, cap, "out of memory");
+			return NULL;
+		}
+		(void)kof_dsrc_parse(text, *n, back, &rep);
+		if (!fe.n)
+			(void)kof_dsrc_resolve(back, &v, &rep);
+		else
+			memset(&v, 0, sizeof v);
+		kof_dsrc_view_free(&v);
+		free(back);
+		if (fe.n) {
+			snprintf(why, cap, "the source it would write does not read: %s (line %d)", fe.msg, fe.line);
+			free(text);
+			return NULL;
+		}
+	}
+	return text;
+}
+
+/* The bytes of a file, malloc'd (NUL added); NULL when it cannot be read whole. */
+static char *file_bytes(FILE *f, size_t *n)
+{
+	char *p = NULL;
+	size_t cap = 0, len = 0, got;
+
+	for (;;) {
+		char *q;
+
+		if (len + 4097u > cap) {
+			cap = cap ? cap * 2u : 8192u;
+			q = realloc(p, cap);
+			if (!q) {
+				free(p);
+				return NULL;
+			}
+			p = q;
+		}
+		got = fread(p + len, 1, 4096u, f);
+		len += got;
+		if (got < 4096u)
+			break;
+	}
+	if (ferror(f)) {
+		free(p);
+		return NULL;
+	}
+	p[len] = 0;
+	*n = len;
+	return p;
+}
+
+/* Whether the diagnose already in `have` (its file `stem`.c, `on` bytes) says what unit k of the draft would write: both are read and
+ * resolved by the builder's reader and compared by the builder's own identity (kof_dsrc_view_same: family, variant, type, tag and what it
+ * looks for - the local labels of blocks and matchers, comments and spacing do not count); with `with_form` 0 the bytes are compared.
+ * `id`, when given, receives the file's name and kof_dsrc_view_body_hash (only a with_form comparison reads it; else it is left alone). */
+static int unit_in_file(const struct kof_editor *e, const char *stem, const struct draft_unit *ul, uint32_t k, const char *have, size_t on,
+			int with_form, struct kof_dsrc *d, struct kof_dsrc *old, struct kof_dsrc *cand, struct draft_loaded *id)
+{
+	size_t cn = 0;
+	char *want;
+	char bad[260];
+	int same = 0;
+
+	want = unit_text(e, stem, &ul[k], d, &cn, with_form, bad, sizeof bad);
+	if (!want)
+		return 0;
+	if (!with_form) {
+		same = on == cn && !memcmp(have, want, cn);
+	} else {
+		struct first_err fo = { "", 0, 0 }, fc = { "", 0, 0 };
+		const struct kof_dsrc_report ro = { first_err_cb, NULL, &fo }, rc = { first_err_cb, NULL, &fc };
+		struct kof_dsrc_view vo, vc;
+
+		memset(&vo, 0, sizeof vo);
+		memset(&vc, 0, sizeof vc);
+		(void)kof_dsrc_parse(have, on, old, &ro);
+		(void)kof_dsrc_parse(want, cn, cand, &rc);
+		if (!fo.n && !fc.n) {
+			(void)kof_dsrc_resolve(old, &vo, &ro);
+			(void)kof_dsrc_resolve(cand, &vc, &rc);
+			same = !fo.n && !fc.n && kof_dsrc_view_same(&vo, &vc);
+			if (same && id) {
+				snprintf(id->name, sizeof id->name, "%s", vo.name);
+				id->hash = kof_dsrc_view_body_hash(&vo);
+			}
+		}
+		kof_dsrc_view_free(&vo);
+		kof_dsrc_view_free(&vc);
+	}
+	free(want);
+	return same;
+}
+
+/*
+ * WHERE UNIT k GOES in `dir`, which is a question about the files that are already there and not only about the draft: the running id
+ * of a name counts the draft's own units, so a new unit of a type, family and tag that the tree already has would name a file that exists.
+ * A diagnose in the tree that says the same as the unit IS the unit (`*present`: nothing to write, the file is named); otherwise the unit
+ * takes the first `<prefix>_NN.c` that is free in `dir` and among the units before it. A file is still never replaced. 0, or -1 with `why`.
+ *
+ * THE DIRECTORY IS READ AS IT IS BEFORE THIS SAVE: a file this Save is about to delete is still there, so its number is taken and a new
+ * unit never gets the name of a file removed in the same call (a number comes back only in a later Save, when the file is really gone).
+ */
+static int unit_resolve(const struct kof_editor *e, const char *dir, const struct draft_unit *ul, uint32_t k, struct unit_out *u, int with_form,
+			struct kof_dsrc *d, struct kof_dsrc *old, struct kof_dsrc *cand, int *present, char *why, size_t cap)
+{
+	char prefix[160], fn[200], path[4400];
+	uint32_t nn;
+
+	*present = 0;
+	tag_prefix(e, ul[k].utype, ul[k].tag, prefix, sizeof prefix);
+	for (nn = 1; nn <= 99u; nn++) {
+		FILE *f;
+		char stem[200];
+		int same = 0;
+		size_t on = 0;
+		char *have;
+
+		snprintf(fn, sizeof fn, "%s_%02u.c", prefix, nn);
+		snprintf(path, sizeof path, "%s/%s", dir, fn);
+		f = fopen(path, "rb");
+		if (!f)
+			continue;
+		have = file_bytes(f, &on);
+		snprintf(stem, sizeof stem, "%s", fn);
+		stem[strlen(stem) - 2u] = 0;
+		if (have)
+			same = unit_in_file(e, stem, ul, k, have, on, with_form, d, old, cand, NULL);
+		free(have);
+		fclose(f);
+		if (same) {
+			snprintf(u[k].fn, sizeof u[k].fn, "%s", fn);
+			*present = 1;
+			return 0;
+		}
+	}
+	nn = unit_free_number(dir, prefix, u, k);
+	if (!nn) {
+		snprintf(why, cap, "has no free number: 01 to 99 are taken in %s", dir);
+		return -1;
+	}
+	snprintf(u[k].fn, sizeof u[k].fn, "%s_%02u.c", prefix, nn);
+	return 0;
+}
+
+/* ---- THE LINK between a unit and the diagnose it was loaded from ------------------------------------------------------ */
+
+/* A link is a diagnose name used as a file stem in the tree: letters, digits, '_' and '-' only, so it cannot hold a path, a dot or a NUL. */
+static int link_name_ok(const char *n)
+{
+	size_t i, len = n ? strlen(n) : 0;
+
+	if (!len || len >= DRAFT_LINK_MAX)
+		return 0;
+	for (i = 0; i < len; i++)
+		if (!isalnum((unsigned char)n[i]) && n[i] != '_' && n[i] != '-')
+			return 0;
+	return 1;
+}
+
+/* The regular file `dir`/`name`.c, read whole (malloc'd, NUL added) with its mode: NULL for a missing file, a symlink, a directory, anything
+ * else that is not a regular file, or one over 1 MiB. O_NOFOLLOW as well as lstat, so a link swapped in between is refused too. */
+static char *tree_file(const char *dir, const char *name, size_t *n, mode_t *mode)
+{
+	char path[4400];
+	struct stat st;
+	FILE *f;
+	char *b;
+	int fd;
+
+	if (!link_name_ok(name) || snprintf(path, sizeof path, "%s/%s.c", dir, name) >= (int)sizeof path)
+		return NULL;
+	if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (off_t)(1 << 20))
+		return NULL;
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0)
+		return NULL;
+	f = fdopen(fd, "rb");
+	if (!f) {
+		close(fd);
+		return NULL;
+	}
+	b = file_bytes(f, n);
+	fclose(f);
+	*mode = st.st_mode & 07777u;
+	return b;
+}
+
+/* Whether `dir`/`name`.c is simply not there (ENOENT): the one reason a file of a link may be left out of a Save quietly. Any other file that
+ * cannot be read as a regular file (a symlink, a directory, too big, unreadable) is something to refuse about, not to skip. */
+static int tree_missing(const char *dir, const char *name)
+{
+	char path[4400];
+	struct stat st;
+
+	return link_name_ok(name) && snprintf(path, sizeof path, "%s/%s.c", dir, name) < (int)sizeof path && lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+/* The identity of a diagnose source: it reads and resolves, and its own name is `name`. 1 and the body hash, or 0. */
+static int text_identity(const char *text, size_t n, const char *name, struct kof_dsrc *d, uint64_t *hash)
+{
+	struct first_err fe = { "", 0, 0 };
+	const struct kof_dsrc_report rep = { first_err_cb, NULL, &fe };
+	struct kof_dsrc_view v;
+	int ok;
+
+	memset(&v, 0, sizeof v);
+	(void)kof_dsrc_parse(text, n, d, &rep);
+	if (!fe.n)
+		(void)kof_dsrc_resolve(d, &v, &rep);
+	ok = !fe.n && !strcmp(v.name, name);
+	if (ok)
+		*hash = kof_dsrc_view_body_hash(&v);
+	kof_dsrc_view_free(&v);
+	return ok;
+}
+
+static uint32_t *unit_link_of(struct kof_editor *e, const struct draft_unit *u)
+{
+	return u->is_grp ? &e->dr.grp[u->idx].link : &e->dr.cnd[u->idx].link;
+}
+
+/* The loaded entry of id `id`, or -1. */
+static int loaded_find(const struct kof_editor *e, uint32_t id)
+{
+	uint32_t i;
+
+	for (i = 0; id && i < e->dr.n_loaded; i++)
+		if (e->dr.loaded[i].id == id)
+			return (int)i;
+	return -1;
+}
+
+/* How many matchers and conditions of the draft carry the link `id` (every one, a unit or not). */
+static uint32_t link_carriers(const struct kof_editor *e, uint32_t id)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < e->dr.n_grp; i++)
+		n += id && e->dr.grp[i].link == id;
+	for (i = 0; i < e->dr.n_cnd; i++)
+		n += id && e->dr.cnd[i].link == id;
+	return n;
+}
+
+void draft_links_reset(struct kof_editor *e)
+{
+	uint32_t i;
+
+	for (i = 0; i < MAX_GROUP; i++) {
+		e->dr.grp[i].link = 0;
+		e->dr.cnd[i].link = 0;
+	}
+	memset(e->dr.loaded, 0, sizeof e->dr.loaded);
+	e->dr.n_loaded = 0;
+}
+
+uint32_t draft_unit_link(const struct kof_editor *e, int is_grp, uint32_t idx)
+{
+	if (is_grp)
+		return idx < e->dr.n_grp ? e->dr.grp[idx].link : 0u;
+	return idx < e->dr.n_cnd ? e->dr.cnd[idx].link : 0u;
+}
+
+uint32_t draft_links_loaded(const struct kof_editor *e)
+{
+	return e->dr.n_loaded;
+}
+
+uint32_t draft_links_removed(const struct kof_editor *e)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < e->dr.n_loaded; i++)
+		n += !link_carriers(e, e->dr.loaded[i].id);
+	return n;
+}
+
+/*
+ * LINK UNIT (is_grp, idx) TO THE DIAGNOSE `name` it was loaded from - only when the draft says EXACTLY what that file says: the unit is
+ * regenerated from the loaded state and compared with the file by the builder's identity (kof_dsrc_view_same). A diagnose the panel
+ * cannot represent whole (several matchers, an expression written by hand, a threshold or block that differs) therefore never gets a link, and
+ * what has no link is never modified or deleted. The file must be a regular file of the tree (no symlink), named `name`.c and carrying that
+ * name. Refused too: a unit that is already linked, a name another unit carries, a full list. 1 when linked, else 0.
+ */
+int draft_link_unit(struct kof_editor *e, int is_grp, uint32_t idx, const char *dir, uint32_t did, const char *name)
+{
+	struct draft_unit ul[DRAFT_UNIT_MAX];
+	struct kof_dsrc *d = NULL, *old = NULL, *cand = NULL;
+	struct draft_loaded id;
+	char *have = NULL;
+	size_t on = 0;
+	mode_t mode;
+	int k, linked = 0;
+
+	if (!did || !link_name_ok(name) || e->dr.n_loaded >= DRAFT_LOADED_MAX || link_carriers(e, did) || loaded_find(e, did) >= 0)
+		return 0;
+	(void)draft_units(e, ul, DRAFT_UNIT_MAX);
+	k = draft_unit_find(e, is_grp, idx);
+	if (k < 0 || draft_unit_link(e, is_grp, idx))
+		return 0;
+	d = calloc(1, sizeof *d);
+	old = calloc(1, sizeof *old);
+	cand = calloc(1, sizeof *cand);
+	have = d && old && cand ? tree_file(dir, name, &on, &mode) : NULL;
+	memset(&id, 0, sizeof id);
+	if (have && unit_in_file(e, name, ul, (uint32_t)k, have, on, 1, d, old, cand, &id) && !strcmp(id.name, name)) {
+		*unit_link_of(e, &ul[k]) = did;
+		id.id = did;
+		e->dr.loaded[e->dr.n_loaded++] = id;
+		linked = 1;
+	}
+	free(have);
+	free(d);
+	free(old);
+	free(cand);
+	return linked;
+}
+
+/* ---- THE SAVE: what was added is written, what was removed is deleted --------------------------------------------------- */
+
+static FILE *fs_create(void *ud, const char *path)
+{
+	(void)ud;
+	return fopen(path, "wbx");
+}
+
+static int fs_unlink(void *ud, const char *path)
+{
+	(void)ud;
+	return unlink(path);
+}
+
+static const struct draft_fs fs_real = { NULL, fs_create, fs_unlink };
+
+/* A file this Save deletes: kept whole in memory until the Save is over, so a failure part way can put it back. */
+struct del_plan {
+	uint32_t id;
+	char   name[DRAFT_LINK_MAX];
+	char  *bytes;
+	size_t n;
+	mode_t mode;
+	int    keep;            /* a unit that says the same was added again: the file stays */
+	int    gone;            /* deleted by this call */
+};
+
+/* Append to the status line; when it does not fit the end says so. */
+static void say_add(char *msg, size_t cap, const char *fmt, ...)
+{
+	size_t at = strlen(msg);
+	va_list ap;
+	int w;
+
+	if (at + 1u >= cap)
 		return;
-	tag_prefix(e, e->dr.grp[g].tag, mine, sizeof mine);
-	snprintf(out, cap, "%s_%02u.c", mine,
-		 prefix_run(e, mine, e->dr.n_cnd, g));
+	va_start(ap, fmt);
+	w = vsnprintf(msg + at, cap - at, fmt, ap);
+	va_end(ap);
+	if (w >= 0 && (size_t)w >= cap - at && cap > 4u)
+		memcpy(msg + cap - 4u, "...", 4u);
+}
+
+/* " a, b, c" - the names (stems) of the files `names[i]` for the flagged entries. */
+static void say_names(char *msg, size_t cap, const char *const *names, const int *flag, uint32_t n)
+{
+	uint32_t i, first = 1;
+
+	for (i = 0; i < n; i++) {
+		size_t L;
+		char stem[200];
+
+		if (!flag[i])
+			continue;
+		snprintf(stem, sizeof stem, "%s", names[i]);
+		L = strlen(stem);
+		if (L > 2u && !strcmp(stem + L - 2u, ".c"))
+			stem[L - 2u] = 0;
+		say_add(msg, cap, "%s%s", first ? " " : ", ", stem);
+		first = 0;
+	}
+}
+
+static void put_back(const char *dir, struct del_plan *dp, uint32_t nd, char *msg, size_t cap)
+{
+	uint32_t z;
+
+	for (z = 0; z < nd; z++) {
+		char path[4400];
+		FILE *f;
+
+		if (!dp[z].gone)
+			continue;
+		snprintf(path, sizeof path, "%s/%s.c", dir, dp[z].name);
+		f = fopen(path, "wbx");
+		if (f && fwrite(dp[z].bytes, 1, dp[z].n, f) == dp[z].n && fclose(f) == 0) {
+			(void)chmod(path, dp[z].mode);
+			dp[z].gone = 0;
+			continue;
+		}
+		if (f)
+			fclose(f);
+		say_add(msg, cap, " [%s.c could not be put back]", dp[z].name);
+	}
+}
+
+/* `with_form` 0 writes the catalog lines only, which is the seam the writer's own tests use; Generate passes 1. */
+int draft_generate_with(struct kof_editor *e, const char *dir, char *msg, size_t cap, int with_form)
+{
+	return draft_generate_fs(e, dir, msg, cap, with_form, &fs_real);
+}
+
+/*
+ * THE HEADER COMMENT in front of a unit's new text (kof_dsrc_head, diagsrc.h): the sample's file name and the digest the properties
+ * pane shows for the object (obj_sha256, cached in the object), the host's date today, the engine's numbers.
+ *
+ * The name is the FILE's (the top-level segment of the object's name, kobj_toplevel_len). A draft with no object writes no sample
+ * line. The researcher is not written: this tool has no account name to give (the old generator asked the system for it; that code
+ * went with the old editor) and a guess would sign it for somebody. A failure leaves the text as it was.
+ */
+static void unit_head(struct kof_editor *e, struct unit_out *u)
+{
+	struct kof_dsrc_meta m;
+	char name[256], today[24];
+	struct object *ob = e->obj && e->n_obj && e->cur < *e->n_obj ? &e->obj[e->cur] : NULL;
+	time_t now = time(NULL);
+	struct tm tmv;
+	size_t hn = 0;
+	char *t;
+
+	memset(&m, 0, sizeof m);
+	if (ob) {
+		size_t k = kobj_toplevel_len(ob->name);
+
+		snprintf(name, sizeof name, "%.*s", (int)(k < sizeof name - 1u ? k : sizeof name - 1u), ob->name);
+		obj_sha256(ob);
+		m.name = kof_path_base(name);
+		m.sha256 = ob->sha256[0] ? ob->sha256 : NULL;
+	}
+	if (localtime_r(&now, &tmv) == NULL || !strftime(today, sizeof today, "%Y-%m-%d", &tmv))
+		return;
+	m.date = today;
+	t = kof_dsrc_head(u->text, u->n, &m, NULL, &hn);
+	if (!t)
+		return;
+	free(u->text);
+	u->text = t;
+	u->n = hn;
+}
+
+/*
+ * SAVE: ADD and REMOVE by one mechanism, the link (see draft_link_unit). The plan comes first and the disk is not touched until all of
+ * it is sound:
+ *   a unit with no link is NEW: written to a new file (a file in the tree that already says the same is not written again);
+ *   a unit whose link was loaded and whose content still equals its file is UNTOUCHED;
+ *   a unit whose link was loaded and whose content is not its file's is MODIFIED: editing a diagnose is not done, so it is reported,
+ *     not written (no new duplicate) and its file is not deleted;
+ *   a loaded link that no matcher or condition carries any more is REMOVED: its file is deleted - the file must still be the regular
+ *     file that was loaded (name and body hash), or the Save refuses.
+ * Then the new files are created and the removed ones unlinked; a failure part way puts back every file this call deleted (from the
+ * copy kept in memory) and removes every file it created. Returns the number of files written, or -1 on a refusal (msg is the reason).
+ */
+int draft_generate_fs(struct kof_editor *e, const char *dir, char *msg, size_t cap, int with_form, const struct draft_fs *fs)
+{
+	struct unit_out *u = NULL;
+	struct kof_dsrc *d = NULL, *old = NULL, *cand = NULL;
+	struct draft_unit ul[DRAFT_UNIT_MAX];
+	struct del_plan dp[DRAFT_LOADED_MAX];
+	int present[DRAFT_UNIT_MAX], linked[DRAFT_UNIT_MAX], towrite[DRAFT_UNIT_MAX], gone_link[DRAFT_LOADED_MAX];
+	const char *names[DRAFT_UNIT_MAX];
+	char delnames[DRAFT_LOADED_MAX][DRAFT_LINK_MAX + 3];
+	const char *delp[DRAFT_LOADED_MAX];
+	int delflag[DRAFT_LOADED_MAX];
+	uint32_t n, k, i, nsame = 0, nmod = 0, nnew = 0, nd = 0, ndel = 0;
+	int rc = -1;
+	const char *why;
+
+	msg[0] = 0;
+	memset(dp, 0, sizeof dp);
+	memset(gone_link, 0, sizeof gone_link);
+	u = calloc((size_t)MAX_GROUP * 2u + 2u, sizeof *u);
+	d = calloc(1, sizeof *d);
+	old = calloc(1, sizeof *old);
+	cand = calloc(1, sizeof *cand);
+	if (!u || !d || !old || !cand) {
+		snprintf(msg, cap, "out of memory");
+		goto out;
+	}
+	n = draft_units(e, ul, DRAFT_UNIT_MAX);
+	for (k = 0; k < n; k++) {
+		unit_name_in(e, dir, ul, k, u);
+		if (!ul[k].is_grp) {
+			const struct cond *c = &e->dr.cnd[ul[k].idx];
+
+			snprintf(u[k].label, sizeof u[k].label, "condition %u", ul[k].idx + 1u);
+			why = draft_unit_gap(e, ul[k].utype, ul[k].tag);
+			if (!why && cnd_foreign(e, c))
+				why = "it names a matcher that is not on this tab";
+		} else {
+			snprintf(u[k].label, sizeof u[k].label, "block matcher %u", ul[k].idx + 1u);
+			why = draft_unit_gap(e, ul[k].utype, ul[k].tag);
+		}
+		if (why) {
+			snprintf(msg, cap, "Not written: %s %s", u[k].label, why);
+			goto out;
+		}
+	}
+	{
+		struct stat st;
+
+		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+			snprintf(msg, cap, "Not written: %s is not a directory", dir);
+			goto out;
+		}
+	}
+	/* THE LINKS. One diagnose, one carrier: a link two matchers or conditions carry is a draft that cannot say what is removed. */
+	for (i = 0; i < e->dr.n_loaded; i++)
+		if (link_carriers(e, e->dr.loaded[i].id) > 1u) {
+			snprintf(msg, cap, "Not written: two units are linked to %s.c", e->dr.loaded[i].name);
+			goto out;
+		}
+	for (k = 0; k < n; k++) {
+		const uint32_t lid = *unit_link_of(e, &ul[k]);
+		const char *lk = lid && loaded_find(e, lid) >= 0 ? e->dr.loaded[loaded_find(e, lid)].name : "";
+		char *have;
+		size_t on = 0;
+		mode_t mode;
+
+		linked[k] = 0;
+		if (!lk[0])
+			continue;
+		have = tree_file(dir, lk, &on, &mode);
+		if (!have) {
+			if (!tree_missing(dir, lk)) {
+				snprintf(msg, cap, "Not written: %s.c is not a regular file that can be read", lk);
+				goto out;
+			}
+			/* The file is gone: nothing to modify and nothing to delete; the unit is new. */
+			gone_link[loaded_find(e, lid)] = 1;
+			continue;
+		}
+		linked[k] = unit_in_file(e, lk, ul, k, have, on, with_form, d, old, cand, NULL) ? 1 : 2;
+		free(have);
+		snprintf(u[k].fn, sizeof u[k].fn, "%s.c", lk);
+		nmod += linked[k] == 2;
+		nsame += linked[k] == 1;
+	}
+	/* A loaded link that nothing carries is a removal; one that a matcher carries which is no unit (its kind was changed) is a modification. */
+	for (i = 0; i < e->dr.n_loaded; i++) {
+		const char *nm = e->dr.loaded[i].name;
+		uint32_t units = 0, carried = link_carriers(e, e->dr.loaded[i].id);
+
+		if (gone_link[i])
+			continue;
+		for (k = 0; k < n; k++)
+			units += *unit_link_of(e, &ul[k]) == e->dr.loaded[i].id;
+		if (carried > units) {
+			nmod++;
+			continue;
+		}
+		if (carried)
+			continue;
+		{
+			size_t on = 0;
+			mode_t mode;
+			uint64_t h = 0;
+			char *have = tree_file(dir, nm, &on, &mode);
+
+			if (!have) {
+				if (!tree_missing(dir, nm)) {
+					snprintf(msg, cap, "Not written: %s.c is not a regular file that can be read, so it is not deleted", nm);
+					goto out;
+				}
+				gone_link[i] = 1;
+				continue;
+			}
+			if (!text_identity(have, on, nm, d, &h) || h != e->dr.loaded[i].hash) {
+				snprintf(msg, cap, "Not written: %s.c is not the diagnose that was loaded (it changed), so it is not deleted", nm);
+				free(have);
+				goto out;
+			}
+			dp[nd].id = e->dr.loaded[i].id;
+			snprintf(dp[nd].name, sizeof dp[nd].name, "%s", nm);
+			dp[nd].bytes = have;
+			dp[nd].n = on;
+			dp[nd].mode = mode;
+			nd++;
+		}
+	}
+	if (!n && !nd && !nmod) {
+		snprintf(msg, cap, "Nothing to write: add a condition or a block matcher first");
+		goto out;
+	}
+	for (k = 0; k < n; k++) {
+		char bad[260];
+		size_t len = strlen(u[k].fn);
+
+		present[k] = 0;
+		if (linked[k])
+			continue;
+		if (len < 3u || len - 2u >= KOF_DSRC_NAME_LEN) {
+			snprintf(msg, cap, "Not written: the name %s is too long for a diagnose", u[k].fn);
+			goto out;
+		}
+		if (unit_resolve(e, dir, ul, k, u, with_form, d, old, cand, &present[k], bad, sizeof bad) < 0) {
+			snprintf(msg, cap, "Not written: %s %s", u[k].label, bad);
+			goto out;
+		}
+		nsame += present[k] != 0;
+		/* A unit added again that says what a file to be deleted says IS that diagnose: the file stays, and the unit takes its link. */
+		for (i = 0; present[k] && i < nd; i++) {
+			char fn[DRAFT_LINK_MAX + 3];
+
+			snprintf(fn, sizeof fn, "%.*s.c", (int)DRAFT_LINK_MAX - 1, dp[i].name);
+			dp[i].keep |= !strcmp(fn, u[k].fn);
+		}
+	}
+	/* The text of every file, before the first is created. */
+	for (k = 0; k < n; k++) {
+		char stem[200], bad[260];
+
+		towrite[k] = !linked[k] && !present[k];
+		if (!towrite[k])
+			continue;
+		snprintf(stem, sizeof stem, "%s", u[k].fn);
+		stem[strlen(stem) - 2u] = 0;
+		u[k].text = unit_text(e, stem, &ul[k], d, &u[k].n, with_form, bad, sizeof bad);
+		if (!u[k].text) {
+			snprintf(msg, cap, "Not written: %s %s", u[k].label, bad);
+			goto out;
+		}
+		/* unit_in_file compares what the draft says (a form read back ignores comments); the catalog-only seam (with_form 0) compares bytes and writes none. */
+		if (with_form)
+			unit_head(e, &u[k]);
+		nnew++;
+	}
+	for (k = 0; k < n; k++) {
+		char path[4400];
+		FILE *f;
+
+		if (!towrite[k])
+			continue;
+		snprintf(path, sizeof path, "%s/%s", dir, u[k].fn);
+		f = fs->create(fs->ud, path);
+		if (!f || fwrite(u[k].text, 1, u[k].n, f) != u[k].n) {
+			uint32_t z;
+
+			snprintf(msg, cap, "Not written: cannot create %s in %s", u[k].fn, dir);
+			/* Only a file this call created is removed: "wx" failing means somebody else's. */
+			if (f) {
+				fclose(f);
+				(void)remove(path);
+			}
+			for (z = 0; z < k; z++) {
+				if (!towrite[z])
+					continue;
+				snprintf(path, sizeof path, "%s/%s", dir, u[z].fn);
+				(void)remove(path);
+			}
+			goto out;
+		}
+		if (fclose(f) != 0) {
+			uint32_t z;
+
+			snprintf(msg, cap, "Not written: cannot finish %s in %s", u[k].fn, dir);
+			for (z = 0; z <= k; z++) {
+				if (!towrite[z])
+					continue;
+				snprintf(path, sizeof path, "%s/%s", dir, u[z].fn);
+				(void)remove(path);
+			}
+			goto out;
+		}
+	}
+	for (i = 0; i < nd; i++) {
+		char path[4400];
+		struct stat st;
+
+		if (dp[i].keep)
+			continue;
+		snprintf(path, sizeof path, "%s/%s.c", dir, dp[i].name);
+		/* The exact file, and only if it is still a regular file (not a link put there since the plan). */
+		if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || fs->unlink(fs->ud, path) != 0) {
+			uint32_t z;
+
+			snprintf(msg, cap, "Not written: cannot delete %s.c from %s; nothing was changed", dp[i].name, dir);
+			put_back(dir, dp, nd, msg, cap);
+			for (z = 0; z < n; z++) {
+				if (!towrite[z])
+					continue;
+				snprintf(path, sizeof path, "%s/%s", dir, u[z].fn);
+				(void)remove(path);
+			}
+			goto out;
+		}
+		dp[i].gone = 1;
+		ndel++;
+	}
+	/* Done: the draft's own record follows the disk. */
+	for (k = 0; k < n; k++) {
+		uint32_t *lk = unit_link_of(e, &ul[k]);
+
+		if (!linked[k] && *lk)
+			*lk = 0;                       /* its file was gone: a new unit now */
+		for (i = 0; present[k] && i < nd; i++) {
+			char fn[DRAFT_LINK_MAX + 3];
+
+			snprintf(fn, sizeof fn, "%.*s.c", (int)DRAFT_LINK_MAX - 1, dp[i].name);
+			if (dp[i].keep && !strcmp(u[k].fn, fn))
+				*lk = dp[i].id;
+		}
+	}
+	for (i = e->dr.n_loaded; i-- > 0; ) {
+		int drop = gone_link[i];
+		uint32_t z;
+
+		for (z = 0; z < nd; z++)
+			drop |= dp[z].gone && dp[z].id == e->dr.loaded[i].id;
+		if (drop) {
+			memmove(&e->dr.loaded[i], &e->dr.loaded[i + 1u], (e->dr.n_loaded - i - 1u) * sizeof e->dr.loaded[0]);
+			e->dr.n_loaded--;
+		}
+	}
+	/* A unit just written IS a loaded diagnose from now on: it takes the id the engine derives for its name (kof_diag_id32_, the engine's own
+	 * function), so that taking it out later deletes the file written here and a second Save does not see it as new. */
+	for (k = 0; k < n; k++) {
+		char stem[DRAFT_LINK_MAX];
+		uint64_t h = 0;
+		uint32_t nid;
+
+		if (!towrite[k] || strlen(u[k].fn) - 2u >= DRAFT_LINK_MAX)
+			continue;
+		snprintf(stem, sizeof stem, "%.*s", (int)strlen(u[k].fn) - 2, u[k].fn);
+		nid = kof_diag_id32_(stem);
+		if (!nid || e->dr.n_loaded >= DRAFT_LOADED_MAX || loaded_find(e, nid) >= 0 || link_carriers(e, nid) || *unit_link_of(e, &ul[k]) ||
+		    !text_identity(u[k].text, u[k].n, stem, d, &h))
+			continue;
+		*unit_link_of(e, &ul[k]) = nid;
+		e->dr.loaded[e->dr.n_loaded].id = nid;
+		snprintf(e->dr.loaded[e->dr.n_loaded].name, sizeof e->dr.loaded[0].name, "%s", stem);
+		e->dr.loaded[e->dr.n_loaded++].hash = h;
+	}
+	for (k = 0; k < n; k++)
+		names[k] = u[k].fn;
+	for (i = 0; i < nd; i++) {
+		snprintf(delnames[i], sizeof delnames[i], "%.*s.c", (int)DRAFT_LINK_MAX - 1, dp[i].name);
+		delp[i] = delnames[i];
+		delflag[i] = dp[i].gone;
+	}
+	if (!nnew && !ndel && !nmod) {
+		snprintf(msg, cap, "Nothing new to write: the %u diagnose%s already in %s say%s the same", n, n == 1u ? "" : "s", dir, n == 1u ? "s" : "");
+	} else {
+		if (nnew) {
+			snprintf(msg, cap, "Wrote %u file%s to %s:", nnew, nnew == 1u ? "" : "s", dir);
+			say_names(msg, cap, names, towrite, n);
+			if (nsame)
+				say_add(msg, cap, " (%u already there, unchanged)", nsame);
+		} else if (nsame) {
+			snprintf(msg, cap, "%u unchanged", nsame);
+		}
+		if (ndel) {
+			say_add(msg, cap, "%sDeleted %u file%s from %s:", msg[0] ? "; " : "", ndel, ndel == 1u ? "" : "s", dir);
+			say_names(msg, cap, delp, delflag, nd);
+		}
+		if (nmod)
+			say_add(msg, cap, "%s%u modified diagnose%s not saved: editing is not done", msg[0] ? "; " : "", nmod, nmod == 1u ? "" : "s");
+	}
+	rc = (int)nnew;
+out:
+	if (u)
+		for (k = 0; k < (uint32_t)MAX_GROUP * 2u + 2u; k++)
+			free(u[k].text);
+	for (i = 0; i < DRAFT_LOADED_MAX; i++)
+		free(dp[i].bytes);
+	free(u);
+	free(d);
+	free(old);
+	free(cand);
+	return rc;
+}
+
+/*
+ * Call the draft as it stands the saved state: Generate wrote it out, so nothing is
+ * left to lose and the guards that ask "is there work to finish or undo" (stepping to
+ * another file, rebuilding the database) must stop answering yes. Without this the
+ * reader saved six files and Rebuild still said "Finish or undo the draft first".
+ */
+void draft_mark_saved(struct kof_editor *e)
+{
+	e->dr.saved_hash = draft_hash(e);
 }
 
 /*
@@ -2290,6 +3717,9 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.decl, 0, sizeof e->dr.decl);
 	memset(e->dr.grp, 0, sizeof e->dr.grp);
 	memset(e->dr.cnd, 0, sizeof e->dr.cnd);
+	/* The links went with the units that carried them, and the loaded list belongs to the draft being thrown away. */
+	memset(e->dr.loaded, 0, sizeof e->dr.loaded);
+	e->dr.n_loaded = 0;
 	memset(e->dr.opt_on, 0, sizeof e->dr.opt_on);
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
 	memset(e->dr.opt_auto, 0, sizeof e->dr.opt_auto);
@@ -2307,7 +3737,7 @@ void draft_clear(struct kof_editor *e)
 	e->dr.n_rng_add = 0;
 	e->dr.cur_grp = e->dr.cur_cnd = e->dr.sel_decl = 0;
 	e->dr.family[0] = 0;
-	e->dr.maltype = 0;
+	e->dr.variant[0] = 0;
 	/* The note belongs to the signature, not to the session. Left behind,
 	 * it followed the researcher from one rule into the next and got
 	 * written into that one's file on the next save. */

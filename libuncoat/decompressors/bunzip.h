@@ -64,11 +64,12 @@
 #define KUNCOAT_BZ_MAX_BLOCK 900000u
 
 /* The format's own bounds on its Huffman stage, all fixed by the specification:
- * at most six tables, a code no longer than twenty-three bits, an alphabet of
+ * at most six tables, a code no longer than twenty bits (libbz2 refuses 21 and above as a data
+ * error; the compressor never writes above 17), an alphabet of
  * 256 symbols plus RUNA, RUNB and the end marker, and a selector every fifty
  * symbols of a block. */
 #define KUNCOAT_BZ_GROUPS      6u
-#define KUNCOAT_BZ_MAX_CODELEN 23u
+#define KUNCOAT_BZ_MAX_CODELEN 20u
 #define KUNCOAT_BZ_ALPHA       258u
 #define KUNCOAT_BZ_MAX_SELECT  18002u
 

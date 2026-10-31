@@ -349,27 +349,64 @@ static void anomalies_rows(void)
 	memset(&FMT, 0, sizeof FMT);
 }
 
-/* The heuristic is the engine's: shown as scored, never recomputed. Not scored is said, and is not a score of zero. */
-static void heuristic_rows(void)
+/* The detection block is the engine's answer put in rows (kdet_info / kdet_diag): a verdict, the catalog facts and the basis it was
+ * decided from, each matched diagnose, and - from a kscan_explain run - why each matched. Without a verdict there is nothing to say. */
+static void detection_rows(void)
 {
-	const struct kof_heur_model *hm = kof_heur_default();
-	char t[100];
+	static struct view V;
+	static struct kdet_object why;
+	static struct kof_diag_report rep;
+	char t[160];
 
 	memset(&OB, 0, sizeof OB);
-	OB.ctx.format = KOF_FMT_ELF;
-	dash_heuristic(&OB, &BK);
-	CK(strcmp(BK.head, "Heuristic") == 0 && BK.n == 1u);
-	CK(strstr(BK.row[0].s[0].text, "not scored") != NULL);
-	OB.heur.heur_scored = 1;
-	OB.heur.heur_score = hm->bar_centinats - 1;
-	dash_heuristic(&OB, &BK);
-	CK(strcmp(BK.row[0].label, "score") == 0 && BK.row[0].s[0].tone == DT_SIZE);
-	row_text(&BK.row[0], t, sizeof t);
-	CK(atoi(t) == hm->bar_centinats - 1 && strstr(t, "to report") != NULL);
-	CK(find_row(&BK, "verdict") == NULL);
-	OB.heur.heur_score = hm->bar_centinats;
-	dash_heuristic(&OB, &BK);
-	CK(BK.row[0].s[0].tone == DT_HEUR && find_row(&BK, "verdict") != NULL);
+	dash_detection(&V, &OB, NULL, &BK);
+	CK(strcmp(BK.head, "Detection") == 0 && BK.n == 0u);
+	/* The object that is the file has no verdict of its own; the engine's per-file roll-up has one: it is shown, as the verdict row only. */
+	g_file_verdict = "Infected#ELF-x64/Botnet:Mirai.A!Diagnose";
+	dash_detection(&V, &OB, NULL, &BK);
+	CK(BK.n == 1u && strcmp(BK.row[0].label, "verdict") == 0 && strstr(BK.row[0].s[0].text, "Mirai.A") && BK.row[0].s[0].tone == DT_BAD);
+	g_file_verdict = NULL;
+	dash_detection(&V, &OB, NULL, &BK);
+	CK(BK.n == 0u);
+	OB.heur.has_verdict = 1;
+	snprintf(OB.heur.verdict.name, sizeof OB.heur.verdict.name, "Infected#ELF-x64/Botnet:Mirai.A!Diagnose");
+	dash_detection(&V, &OB, NULL, &BK);
+	CK(BK.n == 1u && strcmp(BK.row[0].label, "verdict") == 0 && BK.row[0].s[0].tone == DT_BAD);
+	OB.heur.cat.level = KOF_VCAT_VARIANT;
+	OB.heur.cat.cover = 1000u;
+	OB.heur.cat.jaccard = 900u;
+	OB.heur.cat.n_groups = 1u;
+	OB.heur.cat.n_fired = 6u;
+	OB.heur.verdict.n_diag = 1u;
+	OB.heur.verdict.diag_total = 3u;
+	OB.heur.verdict.diag[0] = 7u;
+	rep.id = 7u;
+	rep.form = 1;
+	rep.n_match_total = 2u;
+	rep.state = KOF_DIAG_ST_MATCH;
+	rep.match[0].kind = KDET_M_SIMILAR;
+	rep.match[0].result = KDET_M_YES;
+	rep.match[0].n = 1u;
+	rep.match[0].pct = 100u;
+	rep.match[0].need = 70u;
+	rep.match[1].result = KDET_M_NOT_ASKED;
+	why.res.diag = &rep;
+	why.res.n_diag = 1u;
+	dash_detection(&V, &OB, &why, &BK);
+	CK(find_row(&BK, "family") && find_row(&BK, "variant") && find_row(&BK, "tag") && find_row(&BK, "diagnose"));
+	row_text(find_row(&BK, "basis"), t, sizeof t);
+	CK(strstr(t, "variant") && strstr(t, "cover 1000") && strstr(t, "jaccard 900") && strstr(t, "groups 1") && strstr(t, "matched 6"));
+	{
+		uint32_t i, hit = 0, skipped = 0;
+
+		for (i = 0; i < BK.n; i++) {
+			row_text(&BK.row[i], t, sizeof t);
+			hit += strstr(t, "matcher 0 similarity 100% of the 1 block(s), 70% demanded") != NULL;
+			skipped += strstr(t, "matcher 1 not asked") != NULL;
+		}
+		CK(hit == 1u && skipped == 1u);
+	}
+	CK(BK.not_shown == 2u);                  /* the verdict listed 1 of 3 diagnoses: the other two are counted, not silent */
 }
 
 /* ================================================================================ LAYOUT */
@@ -956,6 +993,39 @@ static void infect_rows(void)
 	CK(INF.why == DASH_OK && inf_row("entry point") >= 0 && inf_row("last section .reloc") >= 0);
 }
 
+/* The row arrays of the two loaders are malloc'd at the library's maximum: when that fails the page must say "not listed", not
+ * "none found" (an infection the page then reports as absent). Only the armed call fails. */
+static int g_fail_malloc;
+void *__real_malloc(size_t n);
+void *__wrap_malloc(size_t n);
+void *__wrap_malloc(size_t n)
+{
+	if (g_fail_malloc)
+		return NULL;
+	return __real_malloc(n);
+}
+
+static void rows_out_of_memory(void)
+{
+	struct dash_table t;
+
+	hk_elf(&E, 1, 0, 0);
+	obj_elf(&E);
+	g_fail_malloc = 1;
+	dash_infect_load(&OB, &INF);
+	g_fail_malloc = 0;
+	dash_infect_table(&INF, &t);
+	CK(INF.why == DASH_NOMEM && INF.n == 0 && t.n_col == 0 && strstr(t.none, "out of memory") != NULL);
+	g_fail_malloc = 1;
+	dash_shell_load(&OB, &SHL);
+	g_fail_malloc = 0;
+	dash_shell_table(&SHL, &t);
+	CK(SHL.why == DASH_NOMEM && SHL.n == 0 && t.n_col == 0 && strstr(t.none, "out of memory") != NULL);
+	/* and the same object loads normally once memory is back */
+	dash_infect_load(&OB, &INF);
+	CK(INF.why == DASH_OK && INF.n >= 4u);
+}
+
 /* Shellcode: the finder's row first and flagged, the variable in executable memory, the ranges; every cell against the bytes. */
 static void shell_rows(void)
 {
@@ -1327,7 +1397,7 @@ int main(int argc, char **argv)
 	header_pe_rows();
 	regions_rows();
 	anomalies_rows();
-	heuristic_rows();
+	detection_rows();
 	layout_elf_shapes();
 	layout_hostile();
 	layout_pe();
@@ -1340,6 +1410,7 @@ int main(int argc, char **argv)
 	count_text();
 	block_bound();
 	infect_rows();
+	rows_out_of_memory();
 	shell_rows();
 	infect_tabs();
 	printf("kx_dashdata: %d failure(s)\n", hk_fails);

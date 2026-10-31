@@ -1,0 +1,51 @@
+# golden run1_dash_exports: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │   filter                                                                          [ ] icase [ ] regex                                                              │  │
+ 4| │   rec  type    bind   vis       flags name                                                                                                sec     size      value  │  │
+ 5| │   0    SECTION LOCAL  DEFAULT   D....                                                                                                       1        0 0x000002a8  ┃  │
+ 6| │   1    SECTION LOCAL  DEFAULT   D....                                                                                                       2        0 0x000002c4  ┃  │
+ 7| │   2    SECTION LOCAL  DEFAULT   D....                                                                                                       3        0 0x000002e8  ┃  │
+ 8| │   3    SECTION LOCAL  DEFAULT   D....                                                                                                       4        0 0x00000308  ┃  │
+ 9| │   4    SECTION LOCAL  DEFAULT   D....                                                                                                       5        0 0x00000330  ┃  │
+10| │   5    SECTION LOCAL  DEFAULT   D....                                                                                                       6        0 0x000008e8  ┃  │
+11| │   6    SECTION LOCAL  DEFAULT   D....                                                                                                       7        0 0x00000b04  ┃  │
+12| │   7    SECTION LOCAL  DEFAULT   D....                                                                                                       8        0 0x00000b80  ┃  │
+13| │   8    SECTION LOCAL  DEFAULT   D....                                                                                                       9        0 0x00000bc0  ┃  │
+14| │   9    SECTION LOCAL  DEFAULT   D....                                                                                                      10        0 0x00001d60  ┃  │
+15| │   10   SECTION LOCAL  DEFAULT   D..X.                                                                                                      11        0 0x00003000  ┃  │
+16| │   11   SECTION LOCAL  DEFAULT   D..X.                                                                                                      12        0 0x00003020  ┃  │
+17| │   12   SECTION LOCAL  DEFAULT   D..X.                                                                                                      13        0 0x000033a0  ┃  │
+18| │   13   SECTION LOCAL  DEFAULT   D..X.                                                                                                      14        0 0x000033b0  ╿  │
+19| │   14   SECTION LOCAL  DEFAULT   D..X.                                                                                                      15        0 0x0000a5b4  │  │
+20| │   15   SECTION LOCAL  DEFAULT   D....                                                                                                      16        0 0x0000b000  │  │
+21| │   16   SECTION LOCAL  DEFAULT   D....                                                                                                      17        0 0x0000c234  │  │
+22| │   17   SECTION LOCAL  DEFAULT   D....                                                                                                      18        0 0x0000c418  │  │
+23| │   18   SECTION LOCAL  DEFAULT   D.W..                                                                                                      19        0 0x0000dde8  │  │
+24| │   19   SECTION LOCAL  DEFAULT   D.W..                                                                                                      20        0 0x0000ddf0  │  │
+25| │   20   SECTION LOCAL  DEFAULT   D.W..                                                                                                      21        0 0x0000ddf8  │  │
+26| │   21   SECTION LOCAL  DEFAULT   D.W..                                                                                                      22        0 0x0000dfd8  │  │
+27| │   22   SECTION LOCAL  DEFAULT   D.W..                                                                                                      23        0 0x0000e000  │  │
+28| │   23   SECTION LOCAL  DEFAULT   D.W..                                                                                                      24        0 0x0000e1e0  │  │
+29| │   24   SECTION LOCAL  DEFAULT   D.W..                                                                                                      25        0 0x0000e840  │  │
+30| │   25   SECTION LOCAL  DEFAULT   D....                                                                                                      26        0 0x00000000  │  │
+31| │   26   FILE    LOCAL  DEFAULT   D.... crtstuff.c                                                                                          ABS        0 0x00000000  │  │
+32| │   27   FUNC    LOCAL  DEFAULT   D..X. deregister_tm_clones                                                                                 14        0 0x000033e0  │  │
+33| │   28   FUNC    LOCAL  DEFAULT   D..X. register_tm_clones                                                                                   14        0 0x00003410  │  │
+34| │   29   FUNC    LOCAL  DEFAULT   D..X. __do_global_dtors_aux                                                                                14        0 0x00003450  │  │
+35| │   30   OBJECT  LOCAL  DEFAULT   D.W.S completed.0                                                                                          25        1 0x0000e840  │  │
+36| │   31   OBJECT  LOCAL  DEFAULT   D.W.. __do_global_dtors_aux_fini_array_entry                                                               20        0 0x0000ddf0  │  │
+37|-│   32   FUNC    LOCAL  DEFAULT   D..X. frame_dummy                                                                                          14        0 0x00003490  │---
+38| │   33   OBJECT  LOCAL  DEFAULT   D.W.. __frame_dummy_init_array_entry                                                                       19        0 0x0000dde8  │ ]
+39| │   34   FILE    LOCAL  DEFAULT   D.... Mirai.Linux.eragon.c                                                                                ABS        0 0x00000000  │
+40| │   35   OBJECT  LOCAL  DEFAULT   D.W.S Q                                                                                                    25    16384 0x0000e8a0  │
+41| │   36   OBJECT  LOCAL  DEFAULT   D.W.S c                                                                                                    24        4 0x0000e204  │
+42| │   37   OBJECT  LOCAL  DEFAULT   D.W.S i.1                                                                                                  24        4 0x0000e340  │
+43| │   38   OBJECT  LOCAL  DEFAULT   D.W.S x                                                                                                    25        4 0x000128a0  │
+44| │   39   OBJECT  LOCAL  DEFAULT   D.W.S y                                                                                                    25        4 0x000128a4  │
+45| │   40   OBJECT  LOCAL  DEFAULT   D.W.S z                                                                                                    25        4 0x000128a8  │
+46| │   41   OBJECT  LOCAL  DEFAULT   D.W.S w                                                                                                    25        4 0x000128ac  │
+47| │   42   FUNC    LOCAL  DEFAULT   D..XS printchar                                                                                            14       79 0x000038fd  │
+48| ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-43 of 136 items ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

@@ -9,7 +9,7 @@
  * either this, or - when it uses one part - that part's header by its part path
  * (<celllysis/nucleo.h>); it never includes a header this one does not name, and
  * never a `_private.h`. tools/check_layers.py enforces that (LIB PUBLIC HEADERS),
- * and tests/unit/kgenome_header.c compiles a unit that includes only this.
+ * and tests/lib/genome/kgenome_header.c compiles a unit that includes only this.
  *
  * FIVE PARTS and the two headers they share:
  *
@@ -80,6 +80,7 @@
 #include "celllysis/capability.h"
 #include "celllysis/cell.h"
 #include "celllysis/decode.h"
+#include "celllysis/disasm.h"
 #include "celllysis/space.h"
 #include "celllysis/celllysis.h"
 #include "celllysis/nucleo.h"
@@ -89,6 +90,8 @@
 #include "celllysis/mutation.h"
 #include "celllysis/mutation_window.h"
 #include "celllysis/fnprint.h"
+#include "celllysis/cfg.h"
+#include "celllysis/gview.h"
 
 /* phenotype: the emulator and what it produces */
 #include "phenotype/emu.h"
@@ -99,5 +102,6 @@
 #include "phenotype/diag_scan_state.h"
 #include "phenotype/diag_lineage.h"
 #include "phenotype/codemap.h"
+#include "phenotype/callnames.h"
 
 #endif /* KGENOME_H */

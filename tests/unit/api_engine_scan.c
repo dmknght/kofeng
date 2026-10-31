@@ -95,15 +95,14 @@ static void t_open(void)
 		return;
 	}
 	CK(a != b, "each open is its own engine");
-	CK(kdb_records(a) == kdb_records(b) && kdb_unpackers(a) == kdb_unpackers(b) &&
+	CK(kdb_unpackers(a) == kdb_unpackers(b) &&
 	   kdb_diagnoses(a) == kdb_diagnoses(b),
 	   "two opens of one database count the same");
 	CK(kdb_unpackers(a) > 0 && kdb_unpackers(c) > 0, "unpackers are counted");
-	CK(kdb_records(c) > 0, "the test set holds detections");
 	CK(kdb_stamp(a) != 0 && kdb_stamp(a) == kdb_stamp(b), "the stamp is stable across opens");
 	CK(kdb_stamp(a) != kdb_stamp(c), "and differs between databases");
 	CK(kdb_stamp(NULL) == 0, "no engine, no stamp");
-	CK(kdb_records(NULL) == 0 && kdb_unpackers(NULL) == 0 &&
+	CK(kdb_unpackers(NULL) == 0 &&
 	   kdb_diagnoses(NULL) == 0 && kdb_diag_full(NULL) == 0 && kdb_diag_collisions(NULL) == 0 &&
 	   kdb_diag_refused(NULL) == 0 && kdb_diag_packs_refused(NULL) == 0, "a NULL engine counts zero everywhere");
 	CK(kdb_diag_full(a) == 0 && kdb_diag_collisions(a) == 0 && kdb_diag_refused(a) == 0 &&

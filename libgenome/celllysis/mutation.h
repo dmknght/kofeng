@@ -28,7 +28,7 @@
  * there to be one of it.
  *
  * ONE DEFINITION OF A WINDOW, three readers. The iterator below is what a window
- * IS - eight bytes as the normalizer presents them, rolled, mixed - and the pool
+ * IS - eight bytes, rolled, mixed - and the pool
  * (the generator), the membership pass (the authoring tool asking whether a
  * sample holds a pool's windows) and the scan (kof_mutation_unit) all walk it.
  * Windows of one repeated byte are left out on every side - see
@@ -37,28 +37,21 @@
 struct kgenome_mtn_win {
 	const uint8_t *p;
 	uint64_t       n, at;
-	uint32_t       norm, h, drop;
+	uint32_t       h, drop;
 };
 
 /* Position on the first window; 0 when the span has none. */
-static inline int kgenome_mtn_win_begin(struct kgenome_mtn_win *w, const uint8_t *p, uint64_t n,
-			       uint32_t norm)
+static inline int kgenome_mtn_win_begin(struct kgenome_mtn_win *w, const uint8_t *p, uint64_t n)
 {
 	uint32_t i;
 
-	if (norm != KGENOME_MUTATION_RAW) {
-		if (n < 2u)
-			return 0;
-		n -= 1u;
-	}
 	if (n < KGENOME_MUTATION_NG)
 		return 0;
-	w->p = p; w->n = n; w->at = 0; w->norm = norm;
+	w->p = p; w->n = n; w->at = 0;
 	w->drop = kgenome_mutation_drop_weight();
 	w->h = 0;
 	for (i = 0; i < KGENOME_MUTATION_NG; i++)
-		w->h = w->h * KGENOME_MUTATION_BASE +
-		       (uint32_t)kgenome_mutation_byte(p, i, norm);
+		w->h = w->h * KGENOME_MUTATION_BASE + (uint32_t)p[i];
 	return 1;
 }
 
@@ -69,7 +62,7 @@ static inline uint32_t kgenome_mtn_win_value(const struct kgenome_mtn_win *w)
 
 static inline int kgenome_mtn_win_flat(const struct kgenome_mtn_win *w)
 {
-	return kgenome_mutation_flat(w->p, w->at, w->norm);
+	return kgenome_mutation_flat(w->p, w->at);
 }
 
 /* Roll to the next window; 0 once the last has been given. */
@@ -77,16 +70,8 @@ static inline int kgenome_mtn_win_next(struct kgenome_mtn_win *w)
 {
 	if (w->at + KGENOME_MUTATION_NG >= w->n)
 		return 0;
-	if (w->norm == KGENOME_MUTATION_RAW) {
-		w->h -= (uint32_t)w->p[w->at] * w->drop;
-		w->h = w->h * KGENOME_MUTATION_BASE +
-		       (uint32_t)w->p[w->at + KGENOME_MUTATION_NG];
-	} else {
-		w->h -= (uint32_t)kgenome_mutation_byte(w->p, w->at, w->norm) * w->drop;
-		w->h = w->h * KGENOME_MUTATION_BASE +
-		       (uint32_t)kgenome_mutation_byte(w->p, w->at + KGENOME_MUTATION_NG,
-					       w->norm);
-	}
+	w->h -= (uint32_t)w->p[w->at] * w->drop;
+	w->h = w->h * KGENOME_MUTATION_BASE + (uint32_t)w->p[w->at + KGENOME_MUTATION_NG];
 	w->at++;
 	return 1;
 }
@@ -117,12 +102,10 @@ static inline int kgenome_mtn_win_next(struct kgenome_mtn_win *w)
 /* Every distinct non-flat window hash of the span, ascending, malloc'd; NULL
  * (and *n_out 0) when the span has none. The CALLER bounds the span: a block's
  * input is a function or a cluster, never a file. */
-uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t norm,
-			  uint32_t *n_out);
+uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t *n_out);
 
 /* The smallest K of the pool; ascending, distinct. */
-uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
-			    uint32_t *out);
+uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t *out);
 
 /*
  * Which of `pool`'s windows does this sample hold? Bit i of `bits` (n_pool bits,
@@ -130,7 +113,7 @@ uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
  * pool[i] anywhere. One pass over the sample, a bit table first.
  */
 void kgenome_mutation_member(const uint32_t *pool, uint32_t n_pool, const uint8_t *p,
-		       uint64_t n, uint32_t norm, uint8_t *bits);
+		       uint64_t n, uint8_t *bits);
 
 /*
  * The block of a pool, given how many positive samples held each window
@@ -189,6 +172,39 @@ typedef int (*kgenome_mutation_unit_fn)(void *user, uint64_t off, uint64_t len,
 				  uint32_t side, const struct kgenome_func *first);
 
 int kgenome_mutation_by_function(uint32_t format, uint32_t mask);
+
+/*
+ * WHETHER A UNIT HAS A SIGNATURE, AND OF WHAT KIND - the one switch.
+ *
+ * A unit that is FUNCTIONS (`first` is not NULL in the unit callback; a piece of bytes or a string cluster gets NULL) was sketched from
+ * its raw 8-byte windows until 2026-10-30 (measured on same-family samples, exp_cfg/report.md: x86-64 recall 5 of 60 pairs, 0 on every
+ * other architecture: a rebuild moves the instruction bytes without moving the function). Its signature is now the shape of the
+ * function's control-flow graph (cfg.h), made by the engine's one signing function (kof_cfgsign_function), which also decides whether
+ * the function has a reachable block (kgenome_cfg_anchor, floor one): this switch only says which KIND of sketch the unit has.
+ *
+ * The answer is a state and never a zero hash that could collide with another unit's. Data units (strings, data sections, scripts,
+ * documents, clusters inside a code region) keep their windows. Every reader of units - the scanner's feed, the report that locates a
+ * block, the examiner's --blocks, the viewer's table - asks here, so there is one place to change.
+ */
+enum kgenome_mutation_sig {
+	KGENOME_MUTATION_SIG_WINDOWS = 0,   /* the unit has a window sketch */
+	KGENOME_MUTATION_SIG_CFG     = 1    /* a function unit: the CFG sketch of its first function (kof_cfgsign_function) */
+};
+uint32_t kgenome_mutation_signature(const struct kgenome_func *first);
+
+/* kgenome_mutation_minhash for a unit that has a window sketch; 0 hashes (out untouched) for one that has none, so a caller cannot sketch a function
+ * unit by windows by accident. A CFG sketch needs the decoder and the object (kof_cfgsign_function) and is a list of KGENOME_CFG_MIN_KEYS..KGENOME_CFG_KEYS u32
+ * of another hash domain (KGENOME_CFG_KEY_SEED). */
+uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const uint8_t *p,
+				       uint64_t n, uint32_t *out);
+
+/*
+ * The fewest hashes a block of this region may carry. A block cut from a function region is a CFG sketch or a window sketch of a cluster
+ * of strings: the sketch of a signed function holds KGENOME_CFG_MIN_KEYS (one) or more distinct elements, so that is the floor
+ * for a region that is cut a function at a time; every other region keeps KGENOME_MUTATION_MIN_HASH. ONE definition: the pack check, the
+ * loader, the builder, the editor and the viewer all ask it.
+ */
+uint32_t kgenome_mutation_block_min(uint32_t scan_mask);
 
 /*
  * ONE REGION TO CUT, as a request: the object, the region and how it is offered,

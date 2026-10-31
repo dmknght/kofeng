@@ -14,6 +14,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <kofcore.h>
 
@@ -56,47 +57,26 @@ struct hx_step {
 };
 
 /*
- * WRITABLE FILE-SCOPE STATE, AND WHY IT IS ALLOWED TO BE HERE.
+ * THE COMPILER'S STATE IS PER THREAD.
  *
- * The parse state of this file - hx_step[], hx_n_steps, hex_msg[], and below
- * them rx_p, rx_gap_lo, rx_gap_hi, rx_gap_have - is written by every call to
- * kof_hex_compile and kof_regex_compile, so those two are NOT reentrant and
- * not safe to call from two threads at once.
- *
- * That is safe in this tree because they are never called at scan time, nor
- * from more than one thread. MEASURED by reading every caller:
- *
- *   - libkofeng itself: no call at all. The engine only READS programs (the
- *     matchers in kofmatch.c / kofmultimatch.c walk the bytes a pack carries);
- *     grep finds kof_hex_compile / kof_regex_compile only in this file, in
- *     hexprog.h (the declaration) and in the callers below.
- *   - ksigbuilder (builds a pack, one rule after another, no threads) and the
- *     rule editor and `find` view of kofexamine (one UI thread, one pattern at
- *     a time). None of the three links pthread or starts a thread.
- *   - the unit tests, which are single threaded.
- *
- * The scanner's --jobs threads run the engine, which never reaches here.
- *
- * Why not thread-local: hx_step[] alone is 150,816 bytes (24 steps), and
- * a _Thread_local object of that size would be part of the static TLS block of
- * EVERY thread of every program linking the library - each scan worker would
- * carry a compiler's scratch it never uses. If a threaded caller of the compile
- * ever appears, the state moves into a context the caller supplies; the callers
- * of the two entry points are the list above.
- *
- * Static rather than automatic: 8 x 8 x 512 bytes is not a stack frame, and this is
- * a build tool that compiles one pattern at a time. */
-/* KNOWN DEFECT R1c (2026-10-24, R) [sev L]: the pattern compiler keeps hx_step, hx_n_steps, hex_msg and rx_gap_* in writable
- * statics (.bss 0x24e60 per the graph_bin audit), against the rule "no writable global state". Trigger: two threads compile a
- * pattern at once. Effect: the steps and the error text of one are overwritten by the other. Reproducer: none (read).
- * Fix: a context the caller supplies, as the comment above already says. */
-static struct hx_step hx_step[KOF_HEX_MAX_STEPS];
-static uint32_t       hx_n_steps;
+ * The parse state of this file - hx_step, hx_n_steps, hex_msg[], and below them rx_p,
+ * rx_gap_lo, rx_gap_hi, rx_gap_have, hx_open_gaps - is written by every call to
+ * kof_hex_compile and kof_regex_compile, so it is PER THREAD (_Thread_local), and two threads
+ * compile at once without seeing each other: the steps and the error text of one were
+ * overwritten by the other (R1c; the rule is no writable global state, and a library is safe on
+ * many threads). The step table is 150,816 bytes (24 steps), which a thread-local array would
+ * put in the static TLS block of EVERY thread of every program linking the library, so it is a
+ * thread-local POINTER to a table the two entry points make for the length of one compile and
+ * free before they return (the compiler runs once per rule: a build tool's cost, never a scan's).
+ * kof_hex_error() reads the calling thread's message.
+ */
+static _Thread_local struct hx_step *hx_step;
+static _Thread_local uint32_t hx_n_steps;
 
 /* The first thing that went wrong, for the caller to print with a file and a line.
  * A sink rather than stderr: this is library code, and a library that prints has
  * decided something the program using it should have decided. */
-static char hex_msg[256];
+static _Thread_local char hex_msg[256];
 
 const char *kof_hex_error(void)
 {
@@ -213,7 +193,7 @@ static struct hx_step *hx_new_step(uint32_t gap_min, uint32_t gap_max)
 /* "[4]", "[4-6]", "[4-]", "[-]". The open forms are clamped rather than taken as
  * infinite: two parts that may be arbitrarily far apart are two patterns and a
  * kof_find_str_all, not one pattern. */
-static uint32_t hx_open_gaps;   /* open jumps of the pattern being compiled */
+static _Thread_local uint32_t hx_open_gaps;   /* open jumps of the pattern being compiled */
 
 static int hex_jump(const char **pp, uint32_t *lo, uint32_t *hi)
 {
@@ -649,12 +629,10 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 /*
  * Compile hex text into a program.
  *
- * Returns the program length, or 0 with kof_hex_error() set. Not reentrant - the
- * parse state is static - which is what a build tool wants and what nothing else
- * calls: the engine only ever reads programs, never makes them.
+ * Returns the program length, or 0 with kof_hex_error() set. The parse state is the
+ * calling thread's (see the top of this file), so two threads may compile at once.
  */
-uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
-			 struct kof_hex_stat *stat)
+static uint32_t hex_compile_in(const char *text, uint8_t *out, uint32_t cap, struct kof_hex_stat *stat)
 {
 	struct kof_hex_stat local;
 
@@ -668,6 +646,22 @@ uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
 	if (!hex_emit(out, cap, stat))
 		return 0;
 	return stat->len;
+}
+
+uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
+			 struct kof_hex_stat *stat)
+{
+	uint32_t r;
+
+	hx_step = malloc(sizeof *hx_step * KOF_HEX_MAX_STEPS);
+	if (!hx_step) {
+		hex_err("out of memory");
+		return 0;
+	}
+	r = hex_compile_in(text, out, cap, stat);
+	free(hx_step);
+	hx_step = NULL;
+	return r;
 }
 
 
@@ -715,9 +709,8 @@ uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
  *                  forward once.
  */
 
-/* rx_p, rx_gap_lo/hi/have: compile-time state like hx_step above - see the note
- * there for why a file-scope writable is acceptable in this file. */
-static const char *rx_p;          /* the cursor, so the recursive walk shares it */
+/* rx_p, rx_gap_lo/hi/have: compile-time state like hx_step above, per thread. */
+static _Thread_local const char *rx_p;          /* the cursor, so the recursive walk shares it */
 
 /*
  * A GAP BELONGS TO THE STEP THAT FOLLOWS IT, so it is carried rather than
@@ -729,8 +722,8 @@ static const char *rx_p;          /* the cursor, so the recursive walk shares it
  * two agree, and it is also why a run of bytes cannot continue across one: the
  * bytes after a gap are a new step by definition.
  */
-static uint32_t rx_gap_lo, rx_gap_hi;
-static int      rx_gap_have;
+static _Thread_local uint32_t rx_gap_lo, rx_gap_hi;
+static _Thread_local int rx_gap_have;
 
 static int rx_fail(const char *why)
 {
@@ -1205,8 +1198,7 @@ static int rx_body(void)
  * "a regex must carry something the prefilter can key on" is enforced without
  * this file having to remember it.
  */
-uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
-			   struct kof_hex_stat *stat)
+static uint32_t regex_compile_in(const char *text, uint8_t *out, uint32_t cap, struct kof_hex_stat *stat)
 {
 	struct kof_hex_stat local;
 
@@ -1231,4 +1223,20 @@ uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
 	if (!hex_emit(out, cap, stat))
 		return 0;
 	return stat->len;
+}
+
+uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
+			   struct kof_hex_stat *stat)
+{
+	uint32_t r;
+
+	hx_step = malloc(sizeof *hx_step * KOF_HEX_MAX_STEPS);
+	if (!hx_step) {
+		hex_err("out of memory");
+		return 0;
+	}
+	r = regex_compile_in(text, out, cap, stat);
+	free(hx_step);
+	hx_step = NULL;
+	return r;
 }

@@ -92,10 +92,11 @@ enum kgenome_emu_stop {
 	 */
 	KGENOME_EMU_STOP_INSN,
 	/*
-	 * THE DECRYPTION FINISHED. Not a failure and not a budget: the guest
-	 * decrypted something and then stopped doing so, which is exactly the
-	 * moment everything this interpreter exists for has already happened.
-	 * See KGENOME_EMU_QUIET.
+	 * NOTHING SETS THIS ONE. The stop that ended a run when the guest had
+	 * decrypted something and then stopped doing so was a parked experiment
+	 * (its threshold was never settled, 3 of 4 samples) and its detector is
+	 * gone; the code stays only because it is the last value of this public
+	 * enum and the lib tests use it as the upper bound / a "no run" mark.
 	 */
 	KGENOME_EMU_STOP_QUIET
 };
@@ -146,41 +147,6 @@ enum kgenome_emu_stop {
  * see it and an unproductive one ends in a fraction of a second.
  */
 #define KGENOME_EMU_IDLE      (4u << 20)
-
-/*
- * HOW LONG A RUN CARRIES ON AFTER THE DECRYPTION STOPS - AND WHY IT IS OFF.
- *
- * An "active instruction" is a write landing within a few bytes of the last
- * one, away from the stack: the output of a decryption loop. See the note in
- * emu_interp.c for why the signal is a memory trace and not an opcode, and for the
- * measurement that chose this trace over the published one.
- *
- * THE SIGNAL IS REAL AND THE THRESHOLD IS NOT. A run that has not produced one
- * for a while has finished decrypting - that much is sound, and the actives
- * land exactly on the decrypted body on every sample here. What does not exist
- * is one number that says "a while". Measured, the largest gap between two
- * consecutive actives WITHIN a decryption that had not finished:
- *
- *     Sality 160e27a3        395
- *     Sality 8ef99966        335
- *     Sality f073b23d        418
- *     Sality 57d128c3      7,992
- *     Themida telvm.exe    3,973
- *     PECompact 007 Spy  1,209,199
- *
- * Three and a half orders of magnitude. The 1500 below is the figure the
- * technique's original description uses, and it was chosen against DOS-era
- * viruses whose decryptors were tight; a modern packer interleaves long
- * phases that write nothing and is still decrypting. Setting the bar high
- * enough for PECompact saves nothing at all, and setting it anywhere lower
- * loses a detection - measured, 57d128c3 stops after 11,066 instructions
- * having decrypted nothing.
- *
- * So this stays behind KGENOME_EMU_QUIET, off, with the numbers written down. A
- * relative rule - a multiple of the gaps seen so far - is the obvious next
- * thing to try and has not been measured.
- */
-#define KGENOME_EMU_QUIET     1500u
 
 #define KGENOME_EMU_MAX_VMA   1024u       /* the floor of the live-mapping ceiling, see above */
 
@@ -743,7 +709,7 @@ int kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
  *
  * So a module names BYTES. The run stops when the instruction about to execute
  * begins with them, and that is a pause: registers and memory are as the guest
- * left them, kof_emu_reg and kgenome_emu_read answer about that moment, and calling
+ * left them, kgenome_emu_get_reg and kgenome_emu_read answer about that moment, and calling
  * kgenome_emu_run again continues from it.
  *
  * WHY A PAUSE AND NOT A CALLBACK. A callback would put module code inside the

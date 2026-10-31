@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * kofresult.h - what a scan answers with: the verdict (a finding), the diagnose report,
  * kof_result, the verdictor's input and the statistics. *
  * A part of <koftypes.h>, which includes it: a host still includes koftypes.h (or
@@ -76,6 +82,9 @@ struct kof_finding {
 	uint8_t  type;           /* enum kof_maltype    - what it is    */
 	uint8_t  fmt;            /* enum kof_format     - of the object */
 	uint8_t  arch;           /* enum kgenome_arch                       */
+	/* KNOWN DEFECT DEAD2-3 (2026-10-29, M) [sev L]: type_known has no writer and no reader anywhere in the tree (kofexamine, kofscanner, tests and the engine included), so it is always 0 and says "unknown" for every finding.
+	 * Trigger: any finding. Effect: a host that reads it is told no disease is named. Reproducer: grep -rnw type_known (one hit, this line).
+	 * Fix: set it where kof_verdict_make knows the lead disease has a name, or remove the member at the next ABI move (it is a public struct: the owner decides). */
 	uint8_t  type_known;     /* 0 when a disease the database does not name led it */
 
 	/*
@@ -99,6 +108,30 @@ struct kof_finding {
 	uint32_t diag[KOF_VERDICT_TRACE];
 	uint32_t n_disease, disease_total;
 	uint32_t disease[KOF_VERDICT_TRACE];
+};
+
+/*
+ * WHAT THE CATALOG SAYS OF A VERDICT (APPENDED to kof_result, `cat`; kof_finding did not change). Filled when at least one
+ * diagnose that carries catalog facts (family, variant, tag, type: KDIG_SEC_META) matched, zero (level NONE) otherwise.
+ * The verdict's name is then made of these (kof_verdict_make_cat); the ids are the pack's 64-bit catalog ids and a name
+ * shows their first 8 hex digits (the rule of the catalog file names), because a pack carries ids, not names.
+ *
+ *   level       KOF_VCAT_VARIANT: the lead (family, variant); KOF_VCAT_TAG: only the tag (a fired diagnose with no variant)
+ *   cover       permille of the lead variant's tags (the tags of every diagnose that declares it) that matched
+ *   jaccard     the lead variant's Jaccard index over tags, families and variants (kof_vmatch), permille
+ *   n_groups    how many (family, variant) groups the matched diagnoses fall in: more than 1 is a competing claim,
+ *               the lead is only the first by the rule in verdictor/vdecide.c (TEMPORARY, not measured)
+ *   n_fired     how many matched diagnoses carry catalog facts
+ *   other_types mask of the kof_maltype values the other matched diagnoses carry (each diagnose keeps its own type)
+ *   cut         1 when a bound of the matching cut its input (the verdict then may lack a group)
+ */
+enum { KOF_VCAT_NONE = 0, KOF_VCAT_TAG = 1, KOF_VCAT_VARIANT = 2 };
+struct kof_verdict_cat {
+	uint8_t  level, type, cut, pad;
+	uint32_t other_types;
+	uint32_t cover, jaccard;
+	uint32_t n_groups, n_fired;
+	uint64_t family_id, variant_id, tag_id;
 };
 
 /*
@@ -135,17 +168,15 @@ struct kof_infected {
 	uint32_t _pad;
 };
 
-/* The most declared regions one object reports - see kof_result.region. Matched
- * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
-/* KNOWN DEFECT N-REGION16b (2026-10-24, R) [sev L]: the comment above is stale: KOF_SRC_MAX_REGIONS no longer bounds what a
- * producer may declare (tables are dynamic since fix_normalize N3), so "matched to" is false and the 16 here is a
- * silent ABI clip. Trigger: any object declaring more than 16 regions. Effect: see N-REGION16 in scan_pipeline.c.
- * Reproducer: corp300/015_240fe. Fix: reword with the clip, or raise it with the n_region total (ABI decision). */
+/* The most declared regions one object reports - the size of kof_result.region (a fixed table, so a
+ * struct a host compiled against stays the size it was). A producer may declare MORE (the engine's own
+ * table is as long as the producer's, scanners/scan_pipeline.c): n_region is then this many and the rest
+ * are not delivered. The clip is said: the object reads KOF_BROKEN_LIMIT and kof_stats.limit_hits moves (scan_pipeline.c); it is not the producer's bound. */
 #define KOF_MAX_REGIONS 16u
 
 /*
  * WHAT EACH LOADED DIAGNOSE MAKES OF AN OBJECT - delivered in kof_result.diag
- * to a caller that asked for it with kof_scan_option.report_diag.
+ * to a caller that asked for it with kscan_explain (kofeng.h).
  *
  * ONE STATE PER DIAGNOSE, in the order the checks run - the first that fails is
  * the reason, so a state also says how far the diagnose got:
@@ -170,6 +201,64 @@ enum kof_diag_state {
 	KOF_DIAG_ST_MATCH
 };
 
+/*
+ * WHAT ONE MATCHER OF A DETECTION FORM CAME TO, for the pull API kscan_explain (kofeng.h, kdet_*). Filled only for a
+ * form diagnose (string markers, similarity blocks) and only when the report was asked for: a normal scan records nothing.
+ * `result` is KDET_M_NO / YES, or NOT_ASKED when the expression's short circuit never needed this matcher.
+ *   find        n markers were searched in the regions `mask`; `found` of them were there
+ *   similarity  n blocks were scored; `pct` is the lowest percentage seen (the first one short of `need`, when it failed),
+ *               `need` the percentage the matcher demands
+ */
+#define KOF_DIAG_REPORT_MATCH 16u
+
+enum { KDET_M_FIND = 1, KDET_M_SIMILAR = 2 };
+enum { KDET_M_NO = 0, KDET_M_YES = 1, KDET_M_NOT_ASKED = 2 };
+
+struct kof_diag_match {
+	uint8_t  kind;        /* KDET_M_FIND or KDET_M_SIMILAR */
+	uint8_t  result;      /* KDET_M_NO, KDET_M_YES, KDET_M_NOT_ASKED */
+	uint8_t  n, found;
+	uint16_t pct, need;
+	uint32_t mask;        /* the region mask a find searched */
+};
+
+/*
+ * A MARKER OR A BLOCK OF A DETECTION FORM, and what it came to on this object - the third level of the pull API (kscan_explain):
+ * diagnose, matcher, part. Filled only for a form that MATCHED and only when the report was asked for.
+ *   marker  `hit`: found in the regions the matcher names; `off` / `plen`: where the first occurrence is and how long (place == 1);
+ *           `region`: the region bit it lies in. `id` is the marker's index in the form.
+ *   block   `hit`: the matcher's percentage was reached by this block; `pct` / `matched` / `n`: what share of its n hashes the object holds;
+ *           `id`: kof_mutation_fold of its hashes (the id kofexaminer --blocks lists for the unit it matches); `mask`, `norm`, `side`:
+ *           what it was cut from. `off` / `plen` / `region`: the unit of the object that holds the most of its hashes (place == 1;
+ *           `place_hits` of them). The similarity matcher counts windows without positions, so the place is found by one more walk over
+ *           the object's units, made only for the report.
+ */
+#define KOF_DIAG_REPORT_PARTS 16u
+
+enum { KDET_P_MARKER = 1, KDET_P_BLOCK = 2 };
+
+struct kof_diag_part {
+	uint8_t  matcher;
+	uint8_t  kind;        /* KDET_P_MARKER / KDET_P_BLOCK */
+	uint8_t  hit;
+	uint8_t  place;
+	uint8_t  pct;         /* block */
+	uint8_t  side;        /* block: enum kgenome_mutation_side */
+	uint8_t  pad;
+	uint16_t n;           /* block: its hashes; marker: its length */
+	uint16_t pad2;
+	uint32_t id;
+	uint32_t unit_id;     /* block: the id (kof_mutation_fold of its block, as kofexaminer --blocks prints it) of the unit of the OBJECT that is the place; 0 without a place */
+	uint32_t mask;        /* regions searched / region cut from */
+	uint32_t matched;     /* block */
+	uint32_t place_hits;  /* block: hashes the place holds */
+	uint32_t region;      /* region bit of the place */
+	uint64_t off, plen;
+	const char *region_name;   /* the parser's name of the place's region, NULL when it has none (static text) */
+	const char *mask_name;     /* the same for `mask` when it is one region, "ALL" for the whole object */
+	char        func[40];      /* the function the place is, when the unit is one and the symbols name it (copied, cut), else empty */
+};
+
 struct kof_diag_report {
 	const char *name;
 	uint32_t    id;                     /* kof_diag_id32_(name) */
@@ -180,6 +269,12 @@ struct kof_diag_report {
 	uint8_t     n_bound;                /* nodes found: n_node on MATCH, else 0 */
 	uint16_t    cap[KOF_DIAG_REPORT_NODES];  /* what node k is */
 	uint64_t    at[KOF_DIAG_REPORT_NODES];   /* where, as an offset into the object */
+	uint8_t     form;                   /* 1 when this is a detection form: match[] is meaningful */
+	uint8_t     n_match_total;          /* matchers the form has (match[] holds the first KOF_DIAG_REPORT_MATCH) */
+	struct kof_diag_match match[KOF_DIAG_REPORT_MATCH];
+	uint8_t     n_part;                 /* parts listed in part[] (a form that matched, and a report was asked for) */
+	uint8_t     n_part_total;           /* parts the form has in the matchers that were asked (part[] holds the first KOF_DIAG_REPORT_PARTS) */
+	struct kof_diag_part part[KOF_DIAG_REPORT_PARTS];
 };
 
 
@@ -329,26 +424,12 @@ struct kof_result {
 	const char *packer_build;
 
 	/*
-	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
-	 *
-	 * Here rather than left to be recomputed, because it was being
-	 * recomputed and the copy drifted. kofviewer built its own facts from
-	 * what it could see - tree depth, a name it had been handed - and once
-	 * the engine learned to tell a packer from a container the two answers
-	 * stopped agreeing. A panel that scores an object differently from the
-	 * scanner is worse than one that shows nothing: both look authoritative
-	 * and only one is.
-	 *
-	 * So the engine computes it once, on the object it is looking at, with
-	 * the facts only it has, and hands the whole of it back. A caller that
-	 * wants to explain the number reads the model - kof_heur_default() - for
-	 * the words, and never re-derives the evidence.
-	 *
-	 * `heur_scored` is 0 when the heuristic did not run (switched off) or no
-	 * model covers this format, and that is NOT the same as a score of zero.
+	 * Was this object opened by a packer module (the file on disk that an
+	 * unpacker recognised), as opposed to produced by one - see from_packer.
+	 * Both are true of a packed sample and they are different objects: this
+	 * marks the file, from_packer marks what came out of it.
 	 */
-	uint8_t  heur_scored;
-	uint8_t  heur_depth;        /* executable packer layers above this object */
+	uint8_t  opened_by_packer;
 	/*
 	 * Was this object produced BY an executable packer, as opposed to having
 	 * been carried by a container. The viewer's own name-matching guess at
@@ -374,9 +455,6 @@ struct kof_result {
 	 * claims and only one of them is true.
 	 */
 	uint8_t  emu_unpacked;
-	int32_t  heur_score;        /* centinats */
-	uint32_t heur_flags;        /* KOF_HEUR_FL(KOF_HEUR_F_*) */
-	uint64_t heur_anomalies;    /* the format's own anomaly word */
 
 	/*
 	 * THE SYMBOL RECORDS THIS OBJECT IS TO BE READ WITH, when its own bytes
@@ -419,7 +497,7 @@ struct kof_result {
 
 	/*
 	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT, when the caller asked - see
-	 * kof_scan_option.report_diag. NULL and 0 otherwise.
+	 * kscan_explain. NULL and 0 otherwise.
 	 *
 	 * THIS IS NOT THE LISTING THAT WAS REMOVED, and it is not a way to ask what
 	 * a file does: a diagnose is a step and the verdict is the answer. It is for
@@ -512,6 +590,9 @@ struct kof_result {
 	 * broken; this says so for an object that has findings or a verdict already.
 	 */
 	uint8_t verdict_incomplete;
+	/* APPENDED LAST (ABI: a host rebuilds; nothing precedes it that moved): the catalog facts of the verdict, see
+	 * struct kof_verdict_cat. All zero for a verdict made of diseases only and for an object with none. */
+	struct kof_verdict_cat cat;
 };
 
 /*
@@ -757,6 +838,19 @@ struct kof_stats {
 	 * `verdict_lost` is the difference. Zero is the only correct value; a nonzero
 	 * one is a defect of the engine and kofscanner prints it as an error. */
 	uint64_t verdicts_counted, verdicts_delivered, verdict_lost;
+	/*
+	 * APPENDED (audit_mem, work-once counters; they exist in every build, the [mem]/[work] traces only in DEBUG=1). Each counts how many times this scanner
+	 * BUILT a product, so a test divides by `objects`: the similarity feed of an object (`work_feeds`, at most one an object), a diagnose form's expression
+	 * (`work_form_asks`, at most one a form and object), a matcher of a form (`work_form_matchers`, at most one a matcher, form and object), the verdict's
+	 * diseases and diagnoses (`work_verdicts`, one an object that reaches the verdict stage) and the catalog verdict (`work_catalogs`, at most one an object).
+	 */
+	uint64_t work_feeds, work_form_asks, work_form_matchers, work_verdicts, work_catalogs;
+	/*
+	 * APPENDED (prototype 2026-10-30, function units carry no similarity signature yet - kgenome_mutation_signature): the objects on which the feed
+	 * met at least one function unit and did not sketch it (KOF_MTN_S_FUNC_UNSIGNED). A block cut from a function scores 0 there; the objects are
+	 * counted, not lost. Zero means the objects had no function unit or no pack had a block. Not an error.
+	 */
+	uint64_t mutation_unsigned_objects;
 };
 
 #endif /* KOFRESULT_H */

@@ -8,6 +8,7 @@
 
 #include "dbloader.h"
 #include "pack/hexprog.h"
+#include "pack/diagform.h"
 #include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/pattern/kofpix.h"
 #include "../detectors/linkage/kofdiag.h"
@@ -37,6 +38,9 @@ int kof_db_arena_open(struct kof_engine *e, size_t want);
 void kof_db_load_diagnoses(struct kof_engine *e, const char *dir);
 void kof_db_refuse_retired(struct kof_engine *e, const char *dir);
 void kof_db_load_diseases(struct kof_engine *e, const char *dir);
+/* names.kdig: the NAMES of the ids the diagnoses carry, loaded the way diseases.kdig is (ksigbuilder ksb_names.c has the layout). A file that is
+ * wrong is said on stderr and counted in diag_packs_refused, refused whole, never fatal. kof_db_cat_name (dbloader.h) answers one id. */
+void kof_db_load_names(struct kof_engine *e, const char *dir);
 /* Mark the modules the loaded diagnoses name as their readers, and free the scratch. */
 void kof_db_mark_diag_readers(struct kof_engine *e);
 const char **kof_db_collect_packs(const char *dir, uint32_t *out_n);

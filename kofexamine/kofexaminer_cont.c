@@ -155,6 +155,35 @@ static void print_entry_name(kof_buf buf, uint64_t off, uint32_t len, uint32_t c
  */
 #define ZIP_SHOW 12u
 
+/*
+ * One entry row of the zip and rar listings, and the line that says how many were left out: the shared part of the two printers (the
+ * column layout, the STORED/PACKED word, the escaped name). The method is the caller's text because the two formats write it
+ * differently (a zip's decimal, a rar's hex); the notes after the name are each format's own bits.
+ */
+struct kex_arow {
+	char     method[8];
+	uint64_t csize, usize, data_off;
+	int      stored;      /* the data is in the file as it is: STORED, else PACKED */
+	uint64_t name_off;
+	uint32_t name_len;
+};
+
+static void kex_print_arow(uint32_t i, const struct kex_arow *r, kof_buf buf)
+{
+	printf("    [%3u] m=%s %9llu -> %-9llu @%-9llu %-6s ", i, r->method,
+	       (unsigned long long)r->csize, (unsigned long long)r->usize,
+	       (unsigned long long)r->data_off,
+	       !r->data_off ? "-" : r->stored ? "STORED" : "PACKED");
+	print_entry_name(buf, r->name_off, r->name_len, 60u);
+}
+
+static void kex_print_more(uint32_t n_entries, uint32_t shown)
+{
+	if (n_entries > shown)
+		printf("    ... %u more\n", n_entries - shown);
+}
+
+
 static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_zip_info *z = v;
@@ -190,14 +219,16 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		if (shown >= ZIP_SHOW && !e->suspicious)
 			continue;
 		shown++;
-		printf("    [%3u] m=%-3u %9llu -> %-9llu @%-9llu %-6s ", i, e->method,
-		       (unsigned long long)e->csize, (unsigned long long)e->usize,
-		       (unsigned long long)e->data_off,
-		       !e->data_off ? "-" :
-		       (e->method == KOF_ZIP_M_STORE &&
-			!(e->suspicious & KOF_ZIP_ENT_ENCRYPTED))
-		       ? "STORED" : "PACKED");
-		print_entry_name(buf, e->name_off, e->name_len, 60u);
+		struct kex_arow row;
+
+		snprintf(row.method, sizeof row.method, "%-3u", e->method);
+		row.csize = e->csize;
+		row.usize = e->usize;
+		row.data_off = e->data_off;
+		row.stored = e->method == KOF_ZIP_M_STORE && !(e->suspicious & KOF_ZIP_ENT_ENCRYPTED);
+		row.name_off = e->name_off;
+		row.name_len = e->name_len;
+		kex_print_arow(i, &row, buf);
 		if (e->suspicious & KOF_ZIP_ENT_TRAVERSAL)
 			kex_note_bad("ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_ZIP_ENT_ENCRYPTED)
@@ -208,8 +239,7 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 			kex_note_bad("declared expansion is absurd");
 		printf("\n");
 	}
-	if (z->n_entries > shown)
-		printf("    ... %u more\n", z->n_entries - shown);
+	kex_print_more(z->n_entries, shown);
 }
 
 
@@ -339,15 +369,16 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		if (shown >= ZIP_SHOW && !e->suspicious)
 			continue;
 		shown++;
-		printf("    [%3u] m=%02x %9llu -> %-9llu @%-9llu %-6s ", i,
-		       e->method, (unsigned long long)e->csize,
-		       (unsigned long long)e->usize,
-		       (unsigned long long)e->data_off,
-		       !e->data_off ? "-" :
-		       (e->method == KOF_RAR_M_STORE &&
-			!(e->suspicious & KOF_RAR_ENT_ENCRYPTED))
-		       ? "STORED" : "PACKED");
-		print_entry_name(buf, e->name_off, e->name_len, 60u);
+		struct kex_arow row;
+
+		snprintf(row.method, sizeof row.method, "%02x", e->method);
+		row.csize = e->csize;
+		row.usize = e->usize;
+		row.data_off = e->data_off;
+		row.stored = e->method == KOF_RAR_M_STORE && !(e->suspicious & KOF_RAR_ENT_ENCRYPTED);
+		row.name_off = e->name_off;
+		row.name_len = e->name_len;
+		kex_print_arow(i, &row, buf);
 		if (e->suspicious & KOF_RAR_ENT_TRAVERSAL)
 			kex_note_bad("ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED)
@@ -360,8 +391,7 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 			kex_note_warn("split across volumes");
 		printf("\n");
 	}
-	if (r->n_entries > shown)
-		printf("    ... %u more\n", r->n_entries - shown);
+	kex_print_more(r->n_entries, shown);
 }
 
 

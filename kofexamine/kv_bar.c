@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "kv.h"
+#include <celllysis/disasm.h>
 
 
 
@@ -74,7 +75,7 @@ static const struct {
 	 * two they are looking at - they never see both. */
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Separate children", BM_ANALYSIS, -1, 0 },
-	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
+	{ "Rebuild database",  BM_MANAGE, -1, 0 },
 	{ "Filter events",     BM_ANALYSIS, -1, 1 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
@@ -167,47 +168,44 @@ int bar_has_sub(int i)
  * numbers do not change - this is a presentation order and nothing stored ever
  * sees it.
  *
- * Built once and kept, because it is asked for by every walk over the menu -
- * the drawer, the hit test, the keyboard cursor - and it is the same answer
- * every time.
+ * Worked out per ask (see below) rather than kept: it is the same answer every
+ * time, but a kept table is writable global state.
  */
+/* One slot per verb a reader may filter on: verb 0 is not a verb and KOF_EVT_CONT is not an event, so neither is offered one. A verb added
+ * to the vocabulary without a slot here would have no filter row, and nothing would say so: it fails to compile instead. */
+_Static_assert(KOF_EVT_TYPE_COUNT - 2 <= BI_FILT_V27 - BI_FILT_V0 + 1, "kv_barmenu.h: a filter slot for every event verb");
+
+/* Whether verb `vb` is offered a slot, and its rank among those by NAME (ties by number, as a stable insertion sort gave). */
+static int filt_verb_rank(int vb)
+{
+	const char *name = kof_evt_verb_name((uint16_t)vb);
+	int u, rank = 0;
+
+	for (u = 1; u < KOF_EVT_TYPE_COUNT; u++) {
+		int c;
+
+		if (u == KOF_EVT_CONT || u == vb)
+			continue;
+		c = strcmp(kof_evt_verb_name((uint16_t)u), name);
+		if (c < 0 || (c == 0 && u < vb))
+			rank++;
+	}
+	return rank;
+}
+
 static int bar_filt_verb(int i)
 {
-	static uint8_t order[KOF_EVT_TYPE_COUNT];
-	static int n_order;
-	int k;
+	int k, vb;
 
 	if (i < BI_FILT_V0 || i > BI_FILT_V27)
 		return -1;
-
-	if (!n_order) {
-		/* Insertion sort over a couple of dozen names, once. Verb 0 is
-		 * not a verb and KOF_EVT_CONT is not an event a reader filters
-		 * on - see log_scan_verbs - so neither is offered a slot. */
-		int vb;
-
-		for (vb = 1; vb < KOF_EVT_TYPE_COUNT; vb++) {
-			const char *name;
-			int at;
-
-			if (vb == KOF_EVT_CONT)
-				continue;
-			name = kof_evt_verb_name((uint16_t)vb);
-			for (at = n_order; at > 0; at--) {
-				const char *prev =
-					kof_evt_verb_name(order[at - 1]);
-
-				if (strcmp(prev, name) <= 0)
-					break;
-				order[at] = order[at - 1];
-			}
-			order[at] = (uint8_t)vb;
-			n_order++;
-		}
-	}
-
+	/* Computed per ask, over a couple of dozen names: a table kept here would be writable global state, and the menu is only walked
+	 * while it is open. */
 	k = i - BI_FILT_V0;
-	return k < n_order ? (int)order[k] : -1;
+	for (vb = 1; vb < KOF_EVT_TYPE_COUNT; vb++)
+		if (vb != KOF_EVT_CONT && filt_verb_rank(vb) == k)
+			return vb;
+	return -1;
 }
 
 static const char *bar_label(struct view *v, int i)
@@ -375,11 +373,19 @@ static int bar_shown(struct view *v, int i)
 
 		if (!obj_maybe_code(ob))
 			return 0;
-		/* This disassembler is x86. An image of another architecture
-		 * would be decoded as instructions it does not contain, which
-		 * is not a thing to offer and then explain. */
-		return !ob->fmt || ob->ctx.arch == KGENOME_ARCH_X86 ||
-		       ob->ctx.arch == KGENOME_ARCH_X86_64;
+		/* Offered where the library has text for the object's
+		 * architecture (kgenome_disasm_level_obj: x86, ARM in ARM
+		 * state, AArch64). An image of another architecture would be
+		 * decoded as instructions it does not contain, which is not a
+		 * thing to offer and then explain. */
+		if (!ob->fmt)
+			return 1;
+		{
+			struct kgenome_obj g;
+
+			kof_genome_obj(&ob->ctx, &g);
+			return kgenome_disasm_level_obj(&g) != KGENOME_DISASM_NONE;
+		}
 	}
 case BI_UNPACKER: {
 		const struct object *ob = cur_obj(v);
@@ -540,10 +546,8 @@ case BI_UNPACKER:
 		return ob && ob->buf.p && v->rgn_len != 0;
 	}
 	case BI_DASH:      return 1;
-	/* SWITCHED OFF for now (owner): Syndromes stays listed and greyed. It is the old Syndrome table (kv_syntable.c, kv_syn.c and the
-	 * tag-source backend under databases/tagsrc*): the code stays and is to be removed later, on request. When it is switched back
-	 * on the condition was `v->syn != NULL` (a directory of files, not a property of the object). */
-	case BI_SYNTAB:    return 0;
+	/* Manage > Syndromes: the session's tag catalog, kept in the view (nothing is stored). Needs no object. */
+	case BI_SYNTAB:    return 1;
 	/* Manage > Pathogens: the session's catalog, kept in the view (nothing is stored). Needs no object. */
 	case BI_FAMILIES:  return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
@@ -668,11 +672,10 @@ static struct kv_menu bar_menu(struct view *v, int sub)
 	m.has_sub = sub ? NULL : bm_sub;
 	m.label = bm_label;
 	m.w = BAR_W;
-	m.c_on  = BAR_ON;
-	m.c_off = BAR_OFF;
-	m.c_cur = BAR_CUR;
 	return m;
 }
+
+static int bar_popups(struct view *v, struct kv_popup *top, struct kv_popup *sub);
 
 void draw_bar(struct out *o, struct view *v)
 {
@@ -695,51 +698,65 @@ void draw_bar(struct out *o, struct view *v)
 	if (v->bar_open < 0)
 		return;
 
-	/* The drop-down, drawn over whatever is under it. */
+	/* The drop-down, drawn over whatever is under it, and its submenu beside the row it belongs to. */
 	{
-		struct kv_menu top = bar_menu(v, 0);
-		int col = bar_col(v->bar_open);
+		struct kv_popup top, sub;
+		int has_sub = bar_popups(v, &top, &sub);
 
-		kv_menu_draw(o, &top, 2, col, v->bar_sel, v->bar_sub);
-
-		/* The open submenu, beside its parent rather than over it. */
-		if (v->bar_sub >= 0) {
-			struct kv_menu sub = bar_menu(v, 1);
-			int r = kv_menu_row_of(&top, v->bar_sub);
-
-			if (r >= 0)
-				kv_menu_draw(o, &sub, 2 + r, col + BAR_W,
-					     v->bar_sel, -1);
-		}
+		kv_popup_draw(o, &top, v->bar_sel, v->bar_sub);
+		if (has_sub)
+			kv_popup_draw(o, &sub, v->bar_sel, -1);
 	}
+}
+
+/*
+ * The drop-down and, when one is open, its submenu: the boxes kv_popup_place decides. Where each menu's block starts on the bar is
+ * bar_col; the submenu opens beside its parent's row (on the left when the right has no room), so the drawing and the click test below
+ * read one answer. Returns 1 when `sub` is filled.
+ */
+static int bar_popups(struct view *v, struct kv_popup *top, struct kv_popup *sub)
+{
+	struct kv_menu mt = bar_menu(v, 0);
+	struct kv_popup_req q;
+	int r;
+
+	kv_menu_popup(&mt, top);
+	kv_menu_req(&mt, 2, bar_col(v->bar_open), 0, &q);
+	kv_popup_place(top, &q);
+	if (v->bar_sub < 0)
+		return 0;
+	r = kv_popup_row_y(top, v->bar_sub);
+	if (r < 0)
+		return 0;
+	{
+		struct kv_menu ms = bar_menu(v, 1);
+
+		kv_menu_popup(&ms, sub);
+		kv_menu_req(&ms, r, top->box.x + top->box.w, 0, &q);
+		q.parent = &top->box;
+		q.parent_row = r;
+		kv_popup_place(sub, &q);
+	}
+	return 1;
 }
 
 /*
  * Which item a click on an open drop-down landed on, or -1.
  *
- * The submenu is tested FIRST. It is drawn over whatever is to the right of its
- * parent, so a click inside it is inside the submenu whatever else is there -
- * testing the parent panel first would answer for a column the reader cannot
- * see.
+ * The submenu is tested FIRST: it is drawn over whatever is beside its parent, so a click inside it is its click whatever else is there.
  */
 int bar_item_at(struct view *v, int row, int col)
 {
-	struct kv_menu top = bar_menu(v, 0);
-	int c0 = bar_col(v->bar_open);
+	struct kv_popup top, sub;
+	int r;
 
-	/* The submenu column first: it is drawn over what would otherwise be
-	 * empty screen beside the drop-down, so a click there is its click. */
-	if (v->bar_sub >= 0 && col >= c0 + BAR_W && col < c0 + 2 * BAR_W) {
-		struct kv_menu sub = bar_menu(v, 1);
-		int r = kv_menu_row_of(&top, v->bar_sub);
-
-		return r < 0 ? -1 : kv_menu_at_row(&sub, row - (2 + r));
+	if (bar_popups(v, &top, &sub)) {
+		r = kv_popup_hit(&sub, row, col);
+		if (r >= 0)
+			return sub.row[r].id;
 	}
-	if (col < c0 || col >= c0 + BAR_W)
-		return -1;
-	/* A rule's own row belongs to nothing, which kv_menu_at_row answers
-	 * with -1 rather than with the item under it. */
-	return kv_menu_at_row(&top, row - 2);
+	r = kv_popup_hit(&top, row, col);
+	return r >= 0 ? top.row[r].id : -1;
 }
 
 /* The items of one menu, in table order. Returns how many, up to `cap`. */
@@ -1015,8 +1032,8 @@ void bar_run(struct view *v, int i)
 	 * to `default: break;` - the menu closes and nothing happens, which
 	 * is exactly how BI_GOTO looked before the dialog existed. */
 	case BI_SYNTAB:
-		syn_open(v);
-		return;
+		tags_open(v);
+		break;
 	case BI_FAMILIES:
 		fam_open(v);
 		break;

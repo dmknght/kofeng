@@ -93,7 +93,6 @@ struct node {
 	 * once.
 	 */
 	uint8_t  ent;               /* the row IS an entry */
-	uint32_t ent_i;             /* which row of ctx->entries */
 	/* The exact bytes of an entry row: these bytes, not a resolve. */
 	uint64_t ent_off, ent_len;
 	uint64_t bytes;
@@ -186,8 +185,6 @@ struct hit {
 
 /* The two generator buttons on the Mutation blocks heading, as drawn. */
 
-
-struct kv_syn;                  /* the tag sources - see kv_syn.c */
 
 /* The longest row of the disassembly panel as text, and the longest instruction text with its comments. A comment is the engine's words about the instruction and is not cut to the width of a screen. */
 #define DIS_LINE_MAX 320

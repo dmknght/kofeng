@@ -413,12 +413,16 @@ void kgenome_diag_callees_init(struct kgenome_diag_callees *c, const struct kgen
 	/* the complement of what a call must give back (celllysis keeps the one row, so the constant map and this
 	 * cannot disagree about a register); an architecture without a row loses every register to a callee */
 	c->caller_saved = (uint16_t)~kgenome_cell_call_keeps(arch);
+	c->unit = arch == KGENOME_ARCH_X86 ? 4u : 0u;       /* stdcall exists in 32-bit code; x86-64 has one convention */
 }
 
 /*
  * Is it a call at all: `call next` (the address of the next instruction) or a callee that begins by popping its own
  * return address. One decode, no memo - asked for every direct call, also where no register is carried.
  */
+/* CONSOLIDATION GETPC-2 (2026-10-30, R): DROP -> call_facts (cursor.c). Same test (`call next`, callee first instruction POP) written a second time,
+ * plus callee_scan's i == 0 check: three copies in two files. Better logic here that the keeper lacks: none verified (it also bounds the callee to
+ * c->off..c->off+c->n, which call_facts does not). Prove with: tests/lib/genome/diag_graph_bin.c getpc rows: both must agree on call $+5 / pop. */
 static int callee_getpc(const struct kgenome_diag_callees *c, const struct kgenome_cell_insn *call)
 {
 	struct kgenome_cell_cur kc;
@@ -439,19 +443,26 @@ static int callee_getpc(const struct kgenome_diag_callees *c, const struct kgeno
  * The bound is KGENOME_DIAG_CALLEE_INSN and the answers are remembered per target (KGENOME_DIAG_CALLEE_MEMO), so a
  * call in a loop costs one reading.
  */
-static int callee_scan(struct kgenome_diag_callees *c, const struct kgenome_cell_insn *call, uint16_t *writes)
+/* CONSOLIDATION GETPC-3 (2026-10-30, R): KEEP (the callee write mask: read from the first instruction to the first ret, push/pop pairs not counted, `ret
+ * N` pop count, memoised; only caller kgenome_diag_org_call). Unique logic: the cursor row gives only the ABI callee-saved set. Its own i == 0 POP test
+ * is DROP -> call_facts (GETPC-1). Straight-line callees only: a branch or call inside makes the answer unknown. Prove with: a callee that clobbers rbx
+ * and restores it (push/pop): mask must exclude rbx; diag_graph_bin.c t1.s/t8.s rows. */
+static int callee_scan(struct kgenome_diag_callees *c, const struct kgenome_cell_insn *call, uint16_t *writes, uint16_t *pop)
 {
 	struct kgenome_cell_cur kc;
 	struct kgenome_cell_insn ci;
 	uint16_t mask = 0, pushed = 0, restored = 0;
 	unsigned i, slot = (unsigned)((call->target * 0x9e3779b97f4a7c15ull) >> 58);
 	int kind = CALLEE_UNKNOWN;
+	uint16_t ret_pop = 0;
 
 	*writes = 0;
+	*pop = 0;
 	if (call->target == call->at + call->len)
 		return CALLEE_GETPC;                    /* `call next`: the address of the next instruction */
 	if (c->memo[slot].kind && c->memo[slot].target == call->target) {
 		*writes = c->memo[slot].writes;
+		*pop = c->memo[slot].pop;
 		return c->memo[slot].kind;
 	}
 	if (call->target < c->off || call->target >= c->off + c->n)
@@ -468,6 +479,8 @@ static int callee_scan(struct kgenome_diag_callees *c, const struct kgenome_cell
 		}
 		if (ci.op == KGENOME_CELL_RET) {
 			mask = (uint16_t)(mask & ~(pushed & restored));
+			if (ci.n_op && ci.o[0].kind == KGENOME_CELL_O_IMM && ci.o[0].imm <= 0xffffu)
+				ret_pop = (uint16_t)ci.o[0].imm;        /* `ret N`: the callee pops its own arguments */
 			kind = CALLEE_KNOWN;
 			break;
 		}
@@ -483,23 +496,20 @@ static int callee_scan(struct kgenome_diag_callees *c, const struct kgenome_cell
 		mask = (uint16_t)(mask | (uint16_t)(ci.wmask & 0xffffu));
 	}
 	*writes = kind == CALLEE_KNOWN ? mask : 0u;
+	*pop = kind == CALLEE_KNOWN ? ret_pop : 0u;
 	c->memo[slot].target = call->target;
 	c->memo[slot].writes = *writes;
+	c->memo[slot].pop = *pop;
 	c->memo[slot].kind = (uint8_t)kind;
 	return kind;
 }
 
-/* KNOWN DEFECT X11b (2026-10-24, R) [sev M]: kgenome_diag_org_call leaves the ring as it was after a call, so the words an
- * i386 stdcall callee pops (`ret N`) stay as phantom slots. Trigger: `push a; push b; call stdcall_fn` then a later
- * pop or push. Effect: the ring drifts by N/4 slots per call and a later pop takes an argument's producer (a wrong
- * link) or the ring overflows into TRUNCATED. Reproducer: none (read). Fix: shrink the ring by the callee's pop
- * count, as kgenome_lineage_state_call does from the codemap `ret N` or the API's argc table. */
 void kgenome_diag_org_call(struct kgenome_diag_orgs *w, struct kgenome_diag_callees *c,
 			   const struct kgenome_cell_insn *in, int target_unknown)
 {
 	const uint16_t cs = c->caller_saved;
 	const int direct = !target_unknown && !(in->flags & KGENOME_CELL_F_INDIRECT) && in->target != KGENOME_BROKEN;
-	uint16_t live = 0, writes = 0;
+	uint16_t live = 0, writes = 0, pop = 0;
 	unsigned r;
 	int kind = CALLEE_UNKNOWN;
 
@@ -509,11 +519,16 @@ void kgenome_diag_org_call(struct kgenome_diag_orgs *w, struct kgenome_diag_call
 	/* the callee is read when a register is carried that it could take; otherwise only the one question that
 	 * changes the ring: does it fetch the program counter */
 	if (direct)
-		kind = live ? callee_scan(c, in, &writes) : callee_getpc(c, in) ? CALLEE_GETPC : CALLEE_UNKNOWN;
+		kind = live || c->unit ? callee_scan(c, in, &writes, &pop) : callee_getpc(c, in) ? CALLEE_GETPC : CALLEE_UNKNOWN;
 	if (kind == CALLEE_GETPC) {
 		ring_push_none(w, 1u);          /* the return address the pop after it takes back */
 		return;
 	}
+	/* A stdcall callee that was read pops its own arguments (`ret N`): the words they were pushed in are gone from the
+	 * ring, or a later pop takes an argument's producer and the ring drifts N/4 slots a call. A callee not read, or
+	 * one that returns plain (cdecl: the caller's `add esp` follows), moves nothing here. */
+	if (kind == CALLEE_KNOWN && pop && c->unit && pop % c->unit == 0)
+		ring_shrink(w, pop / c->unit);
 	if (!live)
 		return;
 	if (kind == CALLEE_KNOWN)

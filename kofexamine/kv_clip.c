@@ -69,6 +69,26 @@ size_t paste_extern(char *out, size_t cap)
 
 #else /* POSIX */
 
+/*
+ * Run helper row `row` (a program and up to three arguments, NULL where a row is shorter) in the child and never return.
+ *
+ * execvp wants char *const[] and is documented not to modify what it points at - a signature older than const itself - so the table's
+ * pointers go in as they are, cast once here, and the strings stay const everywhere they are read (no strdup: a failed one left argv[0]
+ * NULL). The vector is one longer than the row: a row that uses all four slots (xclip -o -selection clipboard) has no NULL of its own,
+ * and execvp reads until it finds one.
+ */
+static void exec_helper(const char *const row[4])
+{
+	char *argv[5];
+	size_t a;
+
+	for (a = 0; a < 4u; a++)
+		argv[a] = (char *)(uintptr_t)row[a];
+	argv[4] = NULL;
+	execvp(argv[0], argv);
+	_exit(127);
+}
+
 static const char *copy_extern(const char *bytes, size_t n)
 {
 	static const char *const helper[][4] = {
@@ -102,23 +122,7 @@ static const char *copy_extern(const char *bytes, size_t n)
 			}
 			close(fds[0]);
 			close(fds[1]);
-			/*
-			 * execvp wants char *const[] and is documented not to
-			 * modify what it points at - a signature older than
-			 * const itself. The copy is made here rather than
-			 * casting the table, so the strings stay const
-			 * everywhere they are actually read.
-			 */
-			{
-				char *argv[4];
-				size_t a;
-
-				for (a = 0; a < 4u; a++)
-					argv[a] = helper[h][a]
-						  ? strdup(helper[h][a]) : NULL;
-				execvp(argv[0], argv);
-			}
-			_exit(127);
+			exec_helper(helper[h]);
 		}
 		close(fds[0]);
 		/* A helper that is not installed exits before reading, and the
@@ -198,16 +202,7 @@ size_t paste_extern(char *out, size_t cap)
 			dup2(fds[1], STDOUT_FILENO);
 			close(fds[0]);
 			close(fds[1]);
-			{
-				char *argv[4];
-				size_t a;
-
-				for (a = 0; a < 4u; a++)
-					argv[a] = helper[h][a]
-						  ? strdup(helper[h][a]) : NULL;
-				execvp(argv[0], argv);
-			}
-			_exit(127);
+			exec_helper(helper[h]);
 		}
 		close(fds[1]);
 		while (got < cap) {

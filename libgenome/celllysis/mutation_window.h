@@ -32,23 +32,15 @@
 #define KGENOME_MUTATION_MIN_HASH  16u
 
 /*
- * What a rule hashes: the bytes, or a difference between neighbours.
+ * What a rule hashes: the bytes. There is no other form.
  *
- * The difference forms exist to make a constant key disappear. If a block is
- * obfuscated with one byte XORed over it, (b[i]^k) ^ (b[i+1]^k) is b[i]^b[i+1]
- * whatever k was - so the same block re-keyed produces the same hashes. SUB
- * does the same for a key that was added rather than XORed.
- *
- * They cost one operation per byte and they LOSE INFORMATION - the absolute
- * value of each byte - which is why they are not the default. See the note on
- * normalizers above.
+ * A form that hashed the difference between neighbouring bytes (so that a constant XOR or
+ * additive key vanishes), and the normalizer argument that chose it, were removed 2026-10-31
+ * by the owner: nothing in the tool decides which form a block needs, and an encoding that
+ * is detected is decoded by the NORMALISE stage (the normalised view), not by the matcher.
+ * The pack's block record keeps a byte where the normalizer was (the layout is the owner's to
+ * change); it is written 0 and a loader refuses any other value.
  */
-enum kgenome_mutation_norm {
-	KGENOME_MUTATION_RAW = 0,   /* the bytes themselves */
-	KGENOME_MUTATION_XOR = 1,   /* b[i] ^ b[i+1]  - a constant XOR key vanishes */
-	KGENOME_MUTATION_SUB = 2,   /* b[i+1] - b[i]  - a constant additive key vanishes */
-	KGENOME_MUTATION_NORM_COUNT
-};
 
 /*
  * THE HASH, WRITTEN ONCE AND INCLUDED EVERYWHERE.
@@ -85,16 +77,6 @@ static inline uint32_t kgenome_mutation_mix(uint32_t h)
 	return h ^ (h >> 15);
 }
 
-/* One byte of the stream a normalizer presents: the byte itself, or the
- * difference between it and its neighbour. */
-static inline uint8_t kgenome_mutation_byte(const uint8_t *p, uint64_t k,
-				      uint32_t norm)
-{
-	return norm == KGENOME_MUTATION_RAW ? p[k]
-	     : norm == KGENOME_MUTATION_XOR ? (uint8_t)(p[k] ^ p[k + 1u])
-	     : (uint8_t)(p[k + 1u] - p[k]);
-}
-
 /*
  * A WINDOW OF ONE REPEATED BYTE IS NOT CONTENT, AND IS NEVER KEPT.
  *
@@ -117,13 +99,13 @@ static inline uint8_t kgenome_mutation_byte(const uint8_t *p, uint64_t k,
  * Tested after the cheaper comparison on both sides, because a window that
  * would not have been kept costs nothing to skip and this costs eight.
  */
-static inline int kgenome_mutation_flat(const uint8_t *p, uint64_t at, uint32_t norm)
+static inline int kgenome_mutation_flat(const uint8_t *p, uint64_t at)
 {
-	uint8_t b0 = kgenome_mutation_byte(p, at, norm);
+	uint8_t b0 = p[at];
 	uint32_t i;
 
 	for (i = 1u; i < KGENOME_MUTATION_NG; i++)
-		if (kgenome_mutation_byte(p, at + i, norm) != b0)
+		if (p[at + i] != b0)
 			return 0;
 	return 1;
 }

@@ -20,3 +20,4 @@ kgenome_textual_subst_cap	pending WP3 (kgenome/textual subst, shape S3)
 kgenome_textual_subst_order	pending WP3 (kgenome/textual subst, shape S3)
 kgenome_textual_value	pending WP3 (kgenome/textual form/value, shape S3)
 kgenome_textual_word_read	pending WP3 (kgenome/textual command reader, shape S3)
+kgenome_textual_vb_cont	pending WP3 (kgenome/textual line readers, shape S3): byte-driven and pure; driven through the vb lexer by tests/lib/genome/textual_vbs.c and by diag_text_vb_cont.c

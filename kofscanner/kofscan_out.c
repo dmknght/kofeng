@@ -277,9 +277,13 @@ void ksn_on_event_detected(const char *object, const char *verdict,
 	if (!r->verbose || !f)
 		return;
 	for (i = 0; i < f->n_diag; i++) {
-		const char *nm = kdb_diagnose_name(r->eng, f->diag[i]);
+		struct kdet_diag d;
 
-		printf("  diagnose %s\n", nm ? nm : "?");
+		(void)kdet_diag_of(r->eng, f->diag[i], &d);
+		printf("  diagnose %s", d.name ? d.name : "?");
+		if (d.has_catalog)
+			printf("  family=%s variant=%s tag=%s type=%s", d.family, d.variant, d.tag, kof_maltype_name((uint32_t)d.type));
+		printf("\n");
 	}
 	if (f->diag_total > f->n_diag)
 		printf("  diagnose (%u more not listed)\n",
@@ -364,6 +368,16 @@ int ksn_on_object(const char *name, const void *bytes, uint64_t len,
 			       ? "Infection" : "Damage",
 			       (unsigned long long)res->infected[q].len,
 			       (unsigned long long)res->infected[q].off);
+	}
+
+	/* Under -v what the verdict's name was decided from (kof_result.cat, the engine's): the lead and how much of it was seen. */
+	if (r->verbose && res->has_verdict && res->cat.level) {
+		struct kdet_info in;
+
+		kdet_info(r->eng, res, &in);
+		printf("  basis %s family=%s variant=%s tag=%s cover=%u jaccard=%u groups=%u matched=%u%s\n",
+		       in.level == KOF_VCAT_VARIANT ? "variant" : "tag", in.family, in.variant, in.tag, (unsigned)in.cover,
+		       (unsigned)in.jaccard, (unsigned)in.groups, (unsigned)in.fired, in.cut ? " (cut)" : "");
 	}
 
 	/*

@@ -102,6 +102,10 @@ static int parity8(uint64_t v)
  */
 #if defined(__x86_64__)
 #define KGENOME_EMU_HOST_DSHIFT 1
+/* KNOWN DEFECT DEAD2-1 (2026-10-29, M) [sev M]: kgenome_emu_host_dshift16 is never called. KGENOME_EMU_HOST_DSHIFT is defined here, in emu_state.c, but tested by `#ifdef` in emu_ops.c, which never sees it, so a 16 bit SHLD/SHRD with a count past the operand size takes the `goto unsupported` arm.
+ * Trigger: a 16 bit double shift with count 17..31 (the VMProtect `shrd cx, ax, 0x51` the comments here and in emu_ops.c describe). Effect: the run stops on that instruction; the comments say it runs on the host.
+ * Reproducer: nm on ph_emu_state.o shows the definition and no relocation against it in any other object (analysis build, /mnt/games/normtest/fix_dead2/an).
+ * Fix: define the macro in emu_private.h (a behaviour change on a hostile path: add a test that compares with the host CPU first), or delete this function, the #ifdef arm in emu_ops.c and the two comments. */
 uint16_t kgenome_emu_host_dshift16(uint16_t dst, uint16_t src, uint8_t cnt,
 			      int left, uint64_t *fl)
 {

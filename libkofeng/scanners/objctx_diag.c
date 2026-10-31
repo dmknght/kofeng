@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * objctx_diag.c - the diagnose analysis and the symbol block, as a module sees them.
  *
  * WHAT THIS SERVES: the calls a rule makes to ask what a diagnose found (kof_diag,
@@ -37,6 +43,7 @@
 #include "../detectors/linkage/kofdiag.h"
 
 #include "objctx_int.h"
+#include "../databases/pack/diagform.h"
 #include "../analyzers/genome_obj.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,8 +51,6 @@
 
 static const struct kgenome_diag_apihash_set *sc_apihash(struct kof_scanner *sc,
 					    const struct kof_obj_ctx *ctx);
-static int diag_when_met(const struct kof_obj_ctx *ctx,
-			 const struct kof_diag *d);
 
 /*
  * READING THE DIAGNOSE SURFACE IS ASKING FOR IT. A rule that names a diagnose,
@@ -223,6 +228,15 @@ uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
 	uint32_t n;
 
 	if (!sc || !dll || !fn || !dll_cap || !fn_cap)
+		return 0;
+	/*
+	 * NOTHING TO READ THE ANSWER, NO RUN. The module that asks (apihash_pe_00) asks of every PE,
+	 * and the answer goes into the symbol block, which a detector or a diagnose reads. A pack with
+	 * neither (the bare pack of a measurement, a host that loaded only unpackers) paid the emulator
+	 * for it all the same: 13.9% of the Ir of 50 corp300 files, the slowest of them (BE-6). A
+	 * diagnose that serves from the analysis runs it through sc_apihash itself, unaffected.
+	 */
+	if (!sc->eng || (!sc->eng->n_mods && !sc->eng->n_diag))
 		return 0;
 	a = sc_apihash(sc, ctx);
 	if (!a || !a->n_call)
@@ -477,8 +491,7 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 		/* The set feeds the plague units and the view's remap, and a set a limit
 		 * cut (the function bound, memory) is a partial list of the object's
 		 * functions: the object says so. */
-		if (kgenome_status_is_cut(sc->obj.sym.funcs.status))
-			oc_scan_limit(sc);
+		oc_status_said(sc, sc->obj.sym.funcs.status);
 	}
 	return &sc->obj.sym.funcs;
 }
@@ -584,14 +597,21 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 		return 0;
 	case KOF_FACT_FORMAT:
 		return (uint64_t)ctx->format == want;
+	case KOF_FACT_SIZE_MIN:
+		return ctx->obj_size >= want;
+	case KOF_FACT_ARCH_SET:
+		return ctx->arch < 64u && ((want >> ctx->arch) & 1u) != 0;
+	case KOF_FACT_FORMAT_SET:
+		/* A bit per format: the diagnose is for any of them (a form that lives in an ELF, in a script, in a plain text). */
+		return ctx->format < 64u && ((want >> ctx->format) & 1u) != 0;
 	default:
 		return 0;
 	}
 }
 
 /* Every condition a diagnose stated - see KOF_DIAG_HAS_ATTRB. */
-static int diag_when_met(const struct kof_obj_ctx *ctx,
-			 const struct kof_diag *d)
+int oc_diag_when_met(const struct kof_obj_ctx *ctx,
+		     const struct kof_diag *d)
 {
 	uint8_t i;
 
@@ -612,6 +632,9 @@ static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
  *   string reader) - the count the database build wrote for the modules it read
  *   (KDIG_SEC_USERS);
  *
+ *   the catalog facts it carries (family, variant, type, tag: KDIG_SEC_META) - they ARE its
+ *   declaration of what a match finds, and the verdict is made of them like of a disease;
+ *
  *   a disease it declares (KOF_DECLARE_DISEASE) - the verdict is made of the
  *   diseases an object has, so a diagnose that can find one is read by the
  *   verdict whether or not any rule asks. Several diagnoses whose diseases are
@@ -624,12 +647,12 @@ static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
  */
 static int diag_has_reader(const struct kof_diag *d)
 {
-	return !d->users_known || d->n_users != 0u || d->disease != 0u;
+	return !d->users_known || d->n_users != 0u || d->disease != 0u || d->tag_id != 0u;
 }
 
 /* Is it RUN: when something reads it - or when the caller asked for the report
  * on every diagnose, see kof_scan_diag_report. */
-static int diag_used(const struct kof_scanner *sc, const struct kof_diag *d)
+int oc_diag_used(const struct kof_scanner *sc, const struct kof_diag *d)
 {
 	return sc->obj.diag.all || diag_has_reader(d);
 }
@@ -698,12 +721,12 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 	 * allocation that failed count here - the per-diagnose limits are already
 	 * 'cannot say' through diag_unk. */
 	st = kof_scan_diag_status(ctx);
-	/* KNOWN DEFECT REV-D2 (2026-10-24, R) [sev L]: "this analysis stopped short, so the object is limited" is decided in separate
-	 * places with separate rules: here (OVER_BUDGET/NOMEM, TRUNCATED only when asked), kgenome_status_is_cut in
-	 * objctx_diag.c (symbols, PE imports), scan_norm.c (view functions) and pe_sym.c. Trigger: the same status from two
-	 * products. Effect: one cut sets KOF_BROKEN_LIMIT or limit_hits, the same cut elsewhere does not. Reproducer: none (read).
-	 * Fix: one oc_ function maps a lib status to the object's report and every site calls it. */
-	if (st == KGENOME_OVER_BUDGET || st == KGENOME_NOMEM)
+	/* THE RULE, once (REV-D2): a product the engine itself reads says a cut at once (oc_status_said);
+	 * a product only a diagnose reads is said here, and only when the analysis was demanded. */
+	/* ... and, like TRUNCATED below, only when the analysis was DEMANDED (obj.diag.ask): the
+	 * API-resolution run of every PE (sc_apihash) can spend its budget in a pack that holds
+	 * no diagnose, and an object nobody asked a question about is not cut by it (BE-5). */
+	if ((st == KGENOME_OVER_BUDGET || st == KGENOME_NOMEM) && sc->obj.diag.ask)
 		return 1;
 	/*
 	 * A CUT ANALYSIS THAT SOMETHING ASKED FOR. KGENOME_TRUNCATED is the status of
@@ -721,7 +744,12 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 		return 1;
 	/* The block counts only when it was built for this object: forcing it here
 	 * would make every clean object pay for a table nothing asked for. */
-	if (sc->obj.latch[KOF_OL_SYM] && kof_sym_truncated(sc->syms.buf, sc->obj.sym.n))
+	/* ... and the block's truncated byte is the verdict's concern the same way: it carries, among
+	 * other causes, the API-resolution run's own budget (sym_declared), and that run is made for
+	 * every PE by a module whether or not any diagnose reads the block (BE-5: corp300/181_149.bin and
+	 * 136_045.bin read Limit in a pack of no diagnose). A rule that reads the symbols says it by
+	 * demanding the analysis (obj.diag.ask). */
+	if (sc->obj.diag.ask && sc->obj.latch[KOF_OL_SYM] && kof_sym_truncated(sc->syms.buf, sc->obj.sym.n))
 		return 1;
 	return 0;
 }
@@ -778,7 +806,7 @@ int kof_scan_diag_feeds_verdict(const struct kof_obj_ctx *ctx)
 	if (!sc || !sc->eng)
 		return 0;
 	for (i = 0; i < sc->eng->n_diag; i++)
-		if (sc->eng->diag[i].disease && diag_gate_open(sc, ctx, i))
+		if ((sc->eng->diag[i].disease || sc->eng->diag[i].family_id) && diag_gate_open(sc, ctx, i))
 			return 1;
 	return 0;
 }
@@ -876,8 +904,7 @@ const struct kgenome_pe_imptab *oc_pe_imports(struct kof_scanner *sc,
 			kgenome_pe_imptab_build(b, kof_pe(ctx), &sc->obj.diag.pe_imp);
 			/* A thunk budget or memory that stopped the walk leaves the table -
 			 * and the symbol block and the graph built from it - short: say so. */
-			if (kgenome_status_is_cut(sc->obj.diag.pe_imp.status))
-				oc_scan_limit(sc);
+			oc_status_said(sc, sc->obj.diag.pe_imp.status);
 		}
 	}
 	return &sc->obj.diag.pe_imp;
@@ -1013,9 +1040,9 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 * as ZERO closes it; a diagnose whose users were never written
 		 * down is unknown and keeps running.
 		 */
-		if (!diag_used(sc, d))
+		if (!oc_diag_used(sc, d))
 			continue;
-		if (!diag_when_met(ctx, d))
+		if (!oc_diag_when_met(ctx, d))
 			continue;               /* the file is not the shape */
 		/* The analysis this diagnose is written for is not one the file
 		 * offers, so there is nothing for it to find. */
@@ -1302,7 +1329,10 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 		/* An unread diagnose is not matched: nobody collects the answer,
 		 * and the shared graph is still there for the ones that are. */
-		if (!diag_used(sc, &sc->eng->diag[i]))
+		if (!oc_diag_used(sc, &sc->eng->diag[i]))
+			continue;
+		/* A form is not matched against nodes: it has none (objctx_diag_form.c answers it). */
+		if (sc->eng->diag[i].form)
 			continue;
 		/*
 		 * THREE ANSWERS, not two: a limit reached on this scan makes a 0
@@ -1390,10 +1420,27 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 	memset(out, 0, sizeof *out);
 	out->name = d->name;
 	out->id = d->id;
+	/* A detection form has no node and no route: its state is whether its shape is here and what it came to. */
+	if (d->form) {
+		out->state = !oc_diag_when_met(ctx, d) ? KOF_DIAG_ST_SHAPE
+			   : oc_diag_form_hit(sc, i) ? KOF_DIAG_ST_MATCH : KOF_DIAG_ST_SEEN;
+		out->form = 1;
+		out->n_match_total = (uint8_t)d->form->n_match;
+		if (sc->diag.xm && ((unsigned)(sc->diag.fdone[i >> 3] >> (i & 7u)) & 1u))
+			memcpy(out->match, sc->diag.xm[i], sizeof out->match);
+		else {
+			uint32_t k;
+
+			for (k = 0; k < KOF_DIAG_REPORT_MATCH; k++)
+				out->match[k].result = KDET_M_NOT_ASKED;
+		}
+		oc_explain_parts(ctx, i, out);
+		return 1;
+	}
 	out->n_node = d->n_node > KOF_DIAG_REPORT_NODES
 		      ? (uint8_t)KOF_DIAG_REPORT_NODES : d->n_node;
 	/* The order the gate applies them in - see diag_gates. */
-	if (!diag_when_met(ctx, d)) {
+	if (!oc_diag_when_met(ctx, d)) {
 		out->state = KOF_DIAG_ST_SHAPE;
 	} else if (!oc_diag_routes(d, ctx)) {
 		out->state = KOF_DIAG_ST_NO_ROUTE;

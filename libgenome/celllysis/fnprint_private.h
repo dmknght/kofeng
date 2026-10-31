@@ -40,7 +40,6 @@ struct kgenome_fnprint_acc {
 	uint32_t pend_bad;         /* undecodable bytes not yet mixed: trailing ones are padding */
 	uint32_t n_insn, n_bad, n_call, n_branch, n_syscall, n_zero;
 	uint8_t  last_op;          /* class of the last instruction hashed */
-	uint8_t  has_ind;
 };
 
 /*

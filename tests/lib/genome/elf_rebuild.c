@@ -142,6 +142,24 @@ int main(void)
 		free(f); f = NULL;
 	}
 
+	/*
+	 * 2b. E-ELFPH: the program header table past the last segment's content. The old rebuild left the table as
+	 *     zeroes under an e_phoff/e_phnum that named it. Old tests missed it: (a) the line was never executed -
+	 *     every image put its table inside the first segment.
+	 */
+	image(0, 0);
+	w64(mem + 0x20, 0x3000);
+	memcpy(mem + 0x3000, mem + 64, 112);
+	if (!try_rebuild(&f, &n)) {
+		fail("an image with its program headers past the segments did not rebuild");
+	} else {
+		if (n != 0x3000 + 112)
+			fail("the file does not reach the end of the program header table");
+		else if (memcmp(f + 0x3000, mem + 0x3000, 112))
+			fail("the program header table the header names is not in the rebuilt file");
+		free(f); f = NULL;
+	}
+
 	/* 3. Headers that must be refused rather than believed. */
 	{
 		struct { const char *what; uint64_t off; unsigned width; uint64_t v; }

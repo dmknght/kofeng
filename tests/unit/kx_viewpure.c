@@ -1,7 +1,7 @@
 /*
  * kx_viewpure - the viewer's pure helpers of kofexamine/kofview.c that tests/unit/out_clip.c and the TUI tests do not reach by
- * name: the scrollbar geometry (kv_bar_thumb, kv_bar_at, kv_scrollbar, kv_scrollbar_h), the dropdown model (kv_menu_rows,
- * kv_menu_at_row, kv_menu_row_of, kv_menu_first, kv_menu_step) and what a format can be asked (kv_cap).
+ * name: the scrollbar geometry (kv_bar_thumb, kv_bar_at, kv_scrollbar, kv_scrollbar_h), the dropdown model (kv_menu_popup
+ * and kv_popup_row_of / kv_popup_first / kv_popup_step over it: rows, the item at a row, the row of an item, the first and the next choosable) and what a format can be asked (kv_cap).
  *
  * Each suite is an exhaustive sweep of a small space against a model written here with exact (128-bit) arithmetic. Known defect
  * pinned: EX-10, the thumb arithmetic multiplies rows by `shown` in 64 bits and wraps for an object of 2^58 or more lines/bytes.
@@ -151,6 +151,49 @@ static int m_shown(void *u, int i) { return (int)((((struct mm *)u)->shown >> i)
 static int m_enabled(void *u, int i) { return (int)((((struct mm *)u)->enabled >> i) & 1u); }
 static int m_rule(void *u, int i) { return (int)((((struct mm *)u)->rule >> i) & 1u); }
 
+/* The menu through the pop-up it becomes (kv_menu_popup): the questions the old dropdown answered, asked of the ONE implementation. */
+static int t_rows(const struct kv_menu *m)
+{
+	struct kv_popup p;
+
+	kv_menu_popup(m, &p);
+	return p.n;
+}
+
+static int t_at_row(const struct kv_menu *m, int r)
+{
+	struct kv_popup p;
+
+	kv_menu_popup(m, &p);
+	return r >= 0 && r < p.n && !(p.row[r].flags & KV_PR_RULE) ? p.row[r].id : -1;
+}
+
+static int t_row_of(const struct kv_menu *m, int i)
+{
+	struct kv_popup p;
+
+	kv_menu_popup(m, &p);
+	return kv_popup_row_of(&p, i);
+}
+
+static int t_first(const struct kv_menu *m)
+{
+	struct kv_popup p;
+	int id;
+
+	kv_menu_popup(m, &p);
+	id = kv_popup_first(&p);
+	return id < 0 ? 0 : id;
+}
+
+static int t_step(const struct kv_menu *m, int cur, int d)
+{
+	struct kv_popup p;
+
+	kv_menu_popup(m, &p);
+	return kv_popup_step(&p, cur, d);
+}
+
 static void menu_suite(void)
 {
 	int n;
@@ -189,13 +232,13 @@ static void menu_suite(void)
 						}
 					}
 					total++;
-					CK(kv_menu_rows(&m) == rows);
+					CK(t_rows(&m) == rows);
 					for (r = -2; r < 14; r++)
-						CK(kv_menu_at_row(&m, r) == (r >= 0 && r < 16 ? itemat[r] : -1));
+						CK(t_at_row(&m, r) == (r >= 0 && r < 16 ? itemat[r] : -1));
 					for (i = 0; i < n; i++)
-						CK(kv_menu_row_of(&m, i) == rowof[i]);
-					CK(kv_menu_row_of(&m, n) == -1 && kv_menu_row_of(&m, 99) == -1);
-					CK(kv_menu_first(&m) == first);
+						CK(t_row_of(&m, i) == rowof[i]);
+					CK(t_row_of(&m, n) == -1 && t_row_of(&m, 99) == -1);
+					CK(t_first(&m) == first);
 					for (cur = 0; cur < n; cur++)
 						for (d = -1; d <= 1; d += 2) {
 							int k = cur, want = cur, steps;
@@ -209,7 +252,7 @@ static void menu_suite(void)
 									break;
 								}
 							}
-							CK(kv_menu_step(&m, cur, d) == want);
+							CK(t_step(&m, cur, d) == want);
 						}
 				}
 	CK(total > 1000);
@@ -219,8 +262,8 @@ static void menu_suite(void)
 
 		memset(&m, 0, sizeof m);
 		m.n = 4;
-		CK(kv_menu_rows(&m) == 4 && kv_menu_at_row(&m, 3) == 3 && kv_menu_row_of(&m, 2) == 2 && kv_menu_first(&m) == 0 &&
-		   kv_menu_step(&m, 0, 1) == 1 && kv_menu_step(&m, 3, 1) == 3 && kv_menu_step(&m, 0, -1) == 0);
+		CK(t_rows(&m) == 4 && t_at_row(&m, 3) == 3 && t_row_of(&m, 2) == 2 && t_first(&m) == 0 &&
+		   t_step(&m, 0, 1) == 1 && t_step(&m, 3, 1) == 3 && t_step(&m, 0, -1) == 0);
 	}
 }
 

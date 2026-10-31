@@ -4,6 +4,7 @@
  */
 
 #include "ksb.h"
+#include <databases/diagsrc.h>
 
 /* ============================================================================
  * EXTRACT - read the declarations out of a signature source
@@ -72,23 +73,13 @@ static const struct macro macros[] = {
 static int widen(struct ksb_ctx *ksb, struct pat *o, int line)
 {
 	uint8_t out[KOF_HEX_MAX_PROG];
-	uint32_t i;
+	const char *why = NULL;
+	long w = kof_dsrc_widen(o->bytes, o->len, out, sizeof out, &why);
 
-	/*
-	 * REFUSED, NOT ENCODED WRONG. One byte and a zero is UTF-16LE only for
-	 * ASCII; for anything above it the real encoding is a different number
-	 * of bytes with different values, so writing two here would produce a
-	 * marker that is not the text the author wrote and would never fire.
-	 */
-	for (i = 0; i < o->len; i++) {
-		if (o->bytes[i] >= 0x80u) {
-			ksb_err(ksb, line, "a wide pattern must be ASCII: a byte above "
-					   "0x7F is not one UTF-16 unit");
-			return 0;
-		}
-	}
-	if (o->len * 2u > sizeof out) {
-		ksb_err(ksb, line, "wide pattern too long once widened");
+	/* The widening and its two refusals (a byte above 0x7F, a pattern too long once widened) are the library's: the
+	 * diagnose reader makes the same marker with the same function. */
+	if (w < 0) {
+		ksb_err(ksb, line, why);
 		return 0;
 	}
 
@@ -98,12 +89,7 @@ static int widen(struct ksb_ctx *ksb, struct pat *o, int line)
 		o->shown[o->len] = '\0';
 	}
 	o->wide = 1;
-
-	for (i = 0; i < o->len; i++) {
-		out[i * 2u]      = o->bytes[i];
-		out[i * 2u + 1u] = 0;
-	}
-	o->len *= 2u;
+	o->len = (uint32_t)w;
 	memcpy(o->bytes, out, o->len);
 	return 1;
 }
@@ -276,8 +262,6 @@ static void scan_decl_block(struct ksb_ctx *ksb, const struct macro *m,
 	if (!ksb_read_mask(ksb, p, lineno, &tmp))
 		return;
 	b->mask = tmp.mask;
-	if (!ksb_read_norm(ksb, p, lineno, b))
-		return;
 	if (!ksb_read_hashes(ksb, p, lineno, b))
 		return;
 	ksb->decl.nblks++;

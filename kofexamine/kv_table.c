@@ -333,3 +333,26 @@ int kv_tab_hit(const struct kv_tab_geo *g, int line, int col, uint32_t *row, int
 	*row = (uint32_t)line - (g->has_head ? 1u : 0u);
 	return 2;
 }
+
+int kv_tab_extent(const struct kv_tab_geo *g, uint32_t k, const char *text, uint32_t empty_w, int *x0, int *x1)
+{
+	uint32_t a = 0, b = (uint32_t)strlen(text), lo, hi;
+
+	if (k >= g->n_col || g->cw[k] <= 0)
+		return 0;
+	while (a < b && text[a] == ' ')
+		a++;
+	while (b > a && text[b - 1] == ' ')
+		b--;
+	if (a == b) {
+		a = 0;
+		b = empty_w;
+	}
+	lo = a > g->cfrom[k] ? a : g->cfrom[k];
+	hi = b < g->cfrom[k] + (uint32_t)g->cw[k] ? b : g->cfrom[k] + (uint32_t)g->cw[k];
+	if (hi <= lo)
+		return 0;
+	*x0 = g->cx[k] + (int)(lo - g->cfrom[k]);
+	*x1 = g->cx[k] + (int)(hi - g->cfrom[k]) - 1;
+	return 1;
+}

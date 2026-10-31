@@ -1911,6 +1911,70 @@ static void t_arm64_stack(void)
 	kgenome_diag_scan_free(s);
 }
 
+/*
+ * X11b: a stdcall callee (`ret N`) pops its own arguments, so the ring gives up N/4 slots at the call. Old tests missed it: (a) every ring
+ * test moved the stack pointer by an instruction of the walked function (push, pop, add esp, leave) and none put a call that pops between
+ * two pushes. The callee here is read from its first instruction to its `ret`: `mov eax,1; ret 8` (stdcall, two arguments), `ret` (cdecl,
+ * the caller's own `add esp` follows) and `ret 3` (not a whole number of words: nothing moves).
+ */
+static int id_seg(void *priv, uint64_t off, struct kgenome_image_seg *out)
+{
+	(void)priv; (void)off;
+	out->lo = 0;
+	out->hi = 0x1000u;
+	out->delta = 0;
+	return 1;
+}
+
+static uint64_t id_off(void *priv, uint64_t va)
+{
+	(void)priv;
+	return va < 0x1000u ? va : KGENOME_BROKEN;
+}
+
+static void t_x11b_stdcall_pop(void)
+{
+	static const uint8_t call_to_40[] = { 0xe8, 0x3b, 0, 0, 0 };            /* at 0: call 0x40 */
+	static const uint8_t ret8[] = { 0xb8, 1, 0, 0, 0, 0xc2, 0x08, 0x00 };   /* mov eax,1; ret 8 */
+	static const uint8_t ret_plain[] = { 0xb8, 1, 0, 0, 0, 0xc3 };
+	static const uint8_t ret3[] = { 0xb8, 1, 0, 0, 0, 0xc2, 0x03, 0x00 };
+	const struct { const char *what; const uint8_t *callee; unsigned n; unsigned arch; unsigned after; } row[] = {
+		{ "ret 8 pops two words", ret8, sizeof ret8, KGENOME_ARCH_X86, 1u },
+		{ "a plain ret moves nothing", ret_plain, sizeof ret_plain, KGENOME_ARCH_X86, 3u },
+		{ "ret 3 is no whole word: nothing moves", ret3, sizeof ret3, KGENOME_ARCH_X86, 3u },
+		{ "x86-64 has one convention: not followed", ret8, sizeof ret8, KGENOME_ARCH_X86_64, 3u },
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof row / sizeof row[0]; i++) {
+		static uint8_t code[0x80];
+		struct kgenome_diag_orgs w;
+		struct kgenome_diag_callees ce;
+		struct kgenome_cell_space sp;
+		struct kgenome_cell_insn in;
+
+		memset(code, 0x90, sizeof code);
+		memcpy(code, call_to_40, sizeof call_to_40);
+		memcpy(code + 0x40, row[i].callee, row[i].n);
+		memset(&sp, 0, sizeof sp);
+		sp.base = code;
+		sp.size = sizeof code;
+		sp.arch = row[i].arch;
+		sp.seg_at = id_seg;
+		sp.off_of_va = id_off;
+		ring_fresh(&w, 3);
+		CK(kgenome_cell_decode(row[i].arch, 0, code, sizeof call_to_40, 0, &in) == sizeof call_to_40);
+		CK(in.op == KGENOME_CELL_CALL && in.target == 0x40u);
+		kgenome_diag_callees_init(&ce, &sp, row[i].arch, 0, sizeof code);
+		kgenome_diag_org_call(&w, &ce, &in, 0);
+		if (w.n_stk != row[i].after)
+			printf("  %s: ring depth %u, expected %u\n", row[i].what, (unsigned)w.n_stk, row[i].after);
+		CK(w.n_stk == row[i].after);
+		if (row[i].after == 1u)
+			CK(w.stk[0] == 10u);                    /* the slot below the arguments keeps its producer */
+	}
+}
+
 static void t_x5_ring(void)
 {
 	struct kgenome_diag_orgs w;
@@ -2226,6 +2290,7 @@ int main(int argc, char **argv)
 	t_x3_tail();
 	t_x3_windows();
 	t_x5_ring();
+	t_x11b_stdcall_pop();
 	t_arm64_stack();
 	t_x8();
 	printf("diag_graph_bin: %d failure(s)\n", hk_fails);

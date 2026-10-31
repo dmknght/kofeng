@@ -33,6 +33,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kv_popup.h"
+
 /* ---- the terminal --------------------------------------------------------- */
 
 /*
@@ -121,6 +123,8 @@ struct out {
 	 * this API are not a screen and must not lose bytes to it.
 	 */
 	int      cl_t, cl_l, cl_b, cl_r;
+	/* A background to put back after every colour reset (ESC[0m) while it is set: a row shaded as a whole. NULL is none. */
+	const char *bg;
 	/* How wide the screen is, taken from the first rectangle set on the
 	 * frame. It is what says whether a later one is NARROWER than the
 	 * screen, which is the case in which an erase-to-end-of-line would
@@ -312,10 +316,8 @@ void out_fmt(struct out *o, const char *fmt, ...);
  * an item says, when it is available and what it does are the menu's own
  * business; where the rows go and which one the mouse hit are not.
  *
- * The three colours are the caller's because the two menus do not look alike -
- * the bar is white on dark grey, the context menu black on light - and making
- * them match is a decision about the tool's appearance rather than about this
- * widget. Passing them keeps that decision one line away.
+ * What an item says, when it is available and what it does stay the caller's; the box, the width, the rows and the colours are kv_popup's
+ * (one palette for every pop-up).
  */
 struct kv_menu {
 	int          n;                          /* items in the caller's table */
@@ -347,13 +349,12 @@ struct kv_menu {
 	int        (*rule_above)(void *ud, int i);
 	const char *(*label)(void *ud, int i);
 	/* Opens a submenu rather than acting. NULL when none of them can. */
-	int        (*has_sub)(void *ud, int i);
+	int        (*has_sub)(void *ud, int i);   /* a list only: a grid has no submenu */
 	/* A tick menu: NULL for none, else 1 when item i is ticked. The label then starts with "[x] " or "[ ] ". */
 	int        (*checked)(void *ud, int i);
 
-	int          w;                          /* column width, borders in */
+	int          w;                          /* the LEAST width of a column of items (a look); the box is as wide as its longest row needs, kv_popup_place */
 	int          cols;                       /* columns of items: 0 or 1 = one; a grid has no rules, items run down a column then the next */
-	const char  *c_on, *c_off, *c_cur;       /* usable, greyed, under cursor */
 };
 
 /* ---- what a FORMAT can be asked -------------------------------------------
@@ -463,25 +464,15 @@ void kv_scrollbar(struct out *o, int col, int top, int bot,
 void kv_scrollbar_h(struct out *o, int row, int left, int right,
 		    uint64_t off, uint64_t total, uint64_t shown);
 
-/* Drawn rows, rules included - what the caller needs to place the box. */
+/* A menu described by callbacks becomes the rows of a pop-up (kv_popup.h): the one adapter. */
+void kv_menu_popup(const struct kv_menu *, struct kv_popup *);
+/* The request for a menu's box: the screen, the menu's least width `w`, and the anchor (see kv_popup_req). A submenu then sets .parent. */
+void kv_menu_req(const struct kv_menu *, int ay, int ax, int anchor_h, struct kv_popup_req *);
+/* Rows a menu takes, rules included (a grid: its tallest column), for a caller that covers the box. */
 int  kv_menu_rows(const struct kv_menu *);
-/* The item on a drawn row, or -1 for a rule and for past the end. */
-int  kv_menu_at_row(const struct kv_menu *, int row);
-/* The item at (row, column) of a menu of several columns; the same as kv_menu_at_row for one column; -1 for none. */
-int  kv_menu_at_cell(const struct kv_menu *, int row, int col);
-/* And the reverse, for a caller anchoring a submenu to the row it opens on. */
-int  kv_menu_row_of(const struct kv_menu *, int item);
-/* The first item Enter could act on, so a menu never opens on a dead row. */
-int  kv_menu_first(const struct kv_menu *);
-/* The next choosable item in direction `d`, or `cur` when there is none: a
- * key that moves onto a greyed row and stops is a key that appears broken. */
-int  kv_menu_step(const struct kv_menu *, int cur, int d);
-/*
- * `sel2` is a second row to highlight - the bar draws its open submenu's parent
- * that way, so the trail from the bar to the submenu stays visible. Pass -1 for
- * a menu with no such thing.
- */
-void kv_menu_draw(struct out *, const struct kv_menu *, int top, int left,
-		  int sel, int sel2);
+/* The screen the viewer has now, as the frame of a request: rows 2 .. g_rows - 1 are usable. */
+void kv_popup_screen(struct kv_popup_req *);
+/* The ONE renderer of a pop-up: the rows `p` holds in the box it was placed in; `sel` and `sel2` are item ids to light (-1 none). */
+void kv_popup_draw(struct out *, const struct kv_popup *, int sel, int sel2);
 
 #endif /* KOFVIEW_H */

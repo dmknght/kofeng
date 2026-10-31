@@ -7,6 +7,7 @@
  */
 
 #include "kofexaminer_private.h"
+#include "../libkofeng/analyzers/cfgsign.h"
 
 /*
  * Everything this tool does to one object's bytes.
@@ -45,6 +46,7 @@ int kex_g_decl_view;           /* the object on hand is a normalised view */
 const char *kex_g_root_path;   /* the file a recovered object came from */
 
 struct blk_ctx {
+	const struct kof_obj_ctx *ctx;
 	kof_buf buf;
 	const struct kof_parser *fp;
 	const uint8_t *syms;
@@ -52,12 +54,42 @@ struct blk_ctx {
 	uint32_t units;
 };
 
+/* A function unit, printed from its CFG signature (kof_cfgsign_function, the engine's one signing function): the block count, the id as the table
+ * and a diagnose carry it, the canonical hash and the keys. An unsigned one says why. */
+static void blk_func(struct blk_ctx *c, const struct kgenome_func *first)
+{
+	struct kof_cfgsign cs;
+	struct kof_cfgsign_req rq;
+	uint32_t k;
+
+	memset(&rq, 0, sizeof rq);
+	rq.ctx = c->ctx;
+	rq.data = c->buf;
+	rq.off = first->off;
+	rq.len = first->len;
+	(void)kof_cfgsign_function(&rq, &cs);
+	if (cs.state != KOF_CFGSIGN_SIGNED) {
+		printf("  windows=-  block_id=-  (function unit: not signed: %s", kof_cfgsign_state_name(cs.state));
+		if (cs.state == KOF_CFGSIGN_BELOW_FLOOR)
+			printf(", %u reachable blocks, the floor is %u", cs.sign.n_blk, KGENOME_CFG_ANCHOR_MIN);
+		printf(")\n");
+		return;
+	}
+	printf("  windows=-  cfg_blocks=%u  block_id=%08x  canon=%016llx\n      block", cs.sign.n_blk, kof_mutation_fold(cs.sign.key, cs.sign.n_key),
+	       (unsigned long long)cs.sign.canon);
+	for (k = 0; k < cs.sign.n_key; k++)
+		printf(" %08x", cs.sign.key[k]);
+	printf("\n");
+}
+
 static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 		    uint32_t side, const struct kgenome_func *first)
 {
 	struct blk_ctx *c = user;
 	uint32_t np = 0, k, nb, block[KGENOME_MUTATION_MINHASH_K];
-	uint32_t *pool = kgenome_mutation_pool(c->buf.p + off, len, KGENOME_MUTATION_RAW, &np);
+	/* A function unit has a CFG signature, not windows (kgenome_mutation_signature): its row is printed by blk_func. */
+	int nosig = kgenome_mutation_signature(first) != KGENOME_MUTATION_SIG_WINDOWS;
+	uint32_t *pool = nosig ? NULL : kgenome_mutation_pool(c->buf.p + off, len, &np);
 	const char *rn = (c->fp && c->fp->region_name && region != KOF_SCAN_ALL)
 		       ? kof_region_label(c->fp->region_name(region)) : "ALL";
 	char sym[64];
@@ -66,19 +98,26 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 	if (first && c->syms)
 		kof_sym_name_at(c->syms, c->syms_n, first->value,
 				     (int)first->shndx, sym, sizeof sym);
-	nb = kgenome_mutation_minhash(c->buf.p + off, len, KGENOME_MUTATION_RAW, block);
+	nb = kgenome_mutation_unit_minhash(first, c->buf.p + off, len, block);
 	c->units++;
 	printf("    unit  region=%s  off=0x%llx  len=%llu  side=%s", rn,
 	       (unsigned long long)off, (unsigned long long)len,
 	       side == KGENOME_MUTATION_SIDE_LIB ? "LIB" : "USER");
 	if (first)
 		printf("  func=%s", sym[0] ? sym : "(no symbol)");
+	if (nosig) {
+		if (first)
+			blk_func(c, first);
+		else
+			printf("  windows=-  block_id=-  (no signature)\n");
+		return 0;
+	}
 	printf("  windows=%u", np);
-	if (nb >= KGENOME_MUTATION_MIN_HASH)
+	if (nb >= kgenome_mutation_block_min(region))
 		printf("  block_id=%08x\n      block", kof_mutation_fold(block, nb));
 	else
 		printf("  block_id=-  (under %u windows: no block)\n      block",
-		       KGENOME_MUTATION_MIN_HASH);
+		       kgenome_mutation_block_min(region));
 	for (k = 0; k < nb; k++)
 		printf(" %08x", block[k]);
 	printf("\n");
@@ -105,10 +144,15 @@ void kex_print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 	memset(&parent, 0, sizeof parent);
 	memset(&lib, 0, sizeof lib);
 	memset(&c, 0, sizeof c);
+	c.ctx = ctx;
 	c.buf = buf;
 	c.fp = kof_parser_of(ctx->format);
 	if (kex_g_decl_view && kex_g_root_path) {
 		/* The parent's functions, found again in this object's bytes. */
+		/* KNOWN DEFECT KXA-16 (2026-10-28, R) [sev M]: kex_print_blocks reads the whole root file a second time with fseek/ftell (long) and malloc(n), no cap, though the caller holds
+		 * the bytes in buf (two paths for one job). Trigger: a root file of several GB, or one that changed after the scan. Effect: a huge
+		 * allocation, or a silent skip when it fails; a short read gives a different object than the one listed. Reproducer: none.
+		 * Fix: use kex_g_root_path's bytes already mapped by the examiner (pass the root kof_buf in) and delete this read. */
 		FILE *f = fopen(kex_g_root_path, "rb");
 
 		if (f) {
@@ -164,8 +208,8 @@ void kex_print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 		 * many ranges the buffer holds and cuts there (it used to be told 4096). */
 		struct kof_ext_buf eb = kof_ext_fixed(ext, (uint32_t)(sizeof ext / sizeof ext[0]));
 
-		const struct kof_scan_cut basis = { &fs, have_lib ? &lib : NULL,
-						    kex_g_decl_fixed, kex_g_decl_fixed_n };
+		const struct kof_scan_cut basis = { .funcs = &fs, .lib = have_lib ? &lib : NULL,
+						    .fixed = kex_g_decl_fixed, .n_fixed = kex_g_decl_fixed_n };
 
 		kof_scan_mutation_units(ctx, buf, ~0u, &basis, &eb, blk_unit, &c);
 	}

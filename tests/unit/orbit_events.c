@@ -351,6 +351,29 @@ static void case_pev_self(void)
 	kof_mon_close(a);
 }
 
+/* a stat file that ends right after the state: there is no parent number, and the one after it must not be read from the stack */
+static void case_pev_short_stat(void)
+{
+	struct kofa_pev *p;
+	const struct kof_mon_api *a;
+	struct kof_evt e;
+
+	printf("\nprocess connector: a stat file cut after the state letter:\n");
+	fresh();
+	put_proc_fix(5000, 7, "/usr/bin/a", "a\0", 2);
+	put_proc_fix(5001, 0, "/usr/bin/b", "b\0", 2);
+	put_s(5001, "stat", "5001 (fix) S");
+	p = pev_open(1, NULL);
+	a = kofa_pev_api(p);
+	drain(a);
+	nl_exec(5000, 100);
+	ok(next_evt(a, &e) == 1 && e.ppid == 7, "a whole stat file: the parent number is read");
+	nl_exec(5001, 200);
+	ok(next_evt(a, &e) == 1 && e.verb == KOF_EVT_PROC_START && e.ppid == 0 && (e.miss & KOF_F_PPID),
+	   "a stat file ending at ') S': no parent (reported missing), not the digits the previous read left in the buffer");
+	kofa_pev_close(p);
+}
+
 static void case_pev_hostile(void)
 {
 	struct kofa_pev *p;
@@ -576,10 +599,9 @@ static void case_pev_fork_signal(void)
 		else if (sscanf(buf, "%d %d", &opened, &err) == 2) {
 			char w[200];
 
-			snprintf(w, sizeof w, "fork() refused (EAGAIN): the open says '%s' and returns %s: a resource failure reads as a refusal of the connector (WP12-25)",
+			snprintf(w, sizeof w, "fork() refused (EAGAIN): the open says '%s' and returns %s (a resource failure must not read as a refusal of the connector)",
 				 kofa_err_name(err), opened ? "a session" : "no session");
-			/* KNOWN DEFECT WP12-25 (2026-10-24, M): this row pins it, green until fixed. */
-			KM_CHECK(opened || err != KOFA_ERR_DENIED, w, "WP12-25: probe() maps a failed fork to 'no record seen', and the open to DENIED");
+			ok(opened || err == KOFA_ERR_OS || err == KOFA_ERR_NOMEM, w);
 		} else
 			ok(0, "the fork-limit child reported");
 	}
@@ -832,7 +854,7 @@ static void case_fan_hostile(void)
 	f = fan_open_dir(W, 0, NULL);
 	a = kofa_fan_api(f);
 	gn = fan_rec(good, FAN_CREATE, 77, FAN_EVENT_INFO_TYPE_DFID_NAME, fh, fhb, fht, "ok.txt");
-	for (i = 0; i < 20; i++) {
+	for (i = 0; i < 21; i++) {
 		struct fanotify_event_metadata *md;
 		struct fanotify_event_info_header *ih;
 
@@ -859,6 +881,7 @@ static void case_fan_hostile(void)
 		case 16: memset(buf, 0xff, n); break;
 		case 17: memset(buf, 0, n); break;
 		case 18: n = 0; break;
+		case 19: ih->info_type = 0xff; ih->len = 5; break;                                      /* an odd len: the next info header would sit at an odd address */
 		default: md->event_len = 24; break;                               /* cuts the info records off */
 		}
 		if (n) {
@@ -1299,6 +1322,7 @@ int main(void)
 	case_pev_fork_signal();
 	case_pev_verbs();
 	case_pev_self();
+	case_pev_short_stat();
 	case_pev_hostile();
 	case_pev_errors();
 	case_fan_verbs();

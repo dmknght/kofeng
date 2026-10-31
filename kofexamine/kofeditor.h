@@ -39,7 +39,9 @@
 #include "kofinspect.h"
 #include "../libkofeng/analyzers/parsers/binaries/funcs.h"
 #include "../libkofeng/analyzers/codenotes.h"
-#include "../libkofeng/databases/tagsrc.h"
+#include "../libkofeng/analyzers/callnames.h"
+#include "../libkofeng/analyzers/cfgview.h"
+#include "../libkofeng/analyzers/cfgsign.h"
 
 
 /* The parts, in dependency order: each needs what the ones above it declare.

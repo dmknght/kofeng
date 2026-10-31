@@ -420,16 +420,12 @@ static void tree_mark_refused(struct walk *w, struct layer_stack *sk, const stru
 	 * so this is a guard for the file that has not turned up yet
 	 * rather than a thing the scan does today.
 	 */
-	/* KNOWN DEFECT WP2-D7 (2026-10-24, M) [sev L]: The depth-allowance cut sets res->broken = KOF_BROKEN_LIMIT
-	 * without st.limit_hits++, though kofresult.h says limit_hits counts every cut object (the
-	 * child-quota stop, oc_scan_broken, likewise). Trigger: a nesting chain past the allowance (chain
-	 * 65). Effect: limit objects 1, limit_hits 0. Reproducer: tests/unit/ctr_nest.c (green until fixed).
-	 * Fix: count it here, or reword kofresult.h as per-entry only. */
 	if (!res->broken) {
 		for (i = 0; i < w->sc->child.n; i++)
 			if (cur->depth + 1u >
 			    depth_allowance(kof_src_buf(w->sc->child.list[i]).n)) {
 				res->broken = KOF_BROKEN_LIMIT;
+				w->sc->st.limit_hits++;
 				break;
 			}
 	}
@@ -455,6 +451,7 @@ static void tree_mark_refused(struct walk *w, struct layer_stack *sk, const stru
 				kof_src_label_of(w->sc->child.list[i])) + 1u;
 			if (need > room) {
 				res->broken = KOF_BROKEN_LIMIT;
+				w->sc->st.limit_hits++;
 				break;
 			}
 			room -= need;

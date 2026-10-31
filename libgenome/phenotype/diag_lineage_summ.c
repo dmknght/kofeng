@@ -517,7 +517,6 @@ static void demand_loop(struct kgenome_lineage *L, uint32_t fi)
 			L->can_defer = 1;
 			L->nontriv[list[i]] = (uint8_t)summary_nontrivial(L, list[i]);
 			L->skipped[list[i]] = 3u;           /* read, on demand */
-			L->st.demanded++;
 			any = 1;
 		}
 		L->deferred = 0;

@@ -75,7 +75,6 @@ static inline enum kgenome_status kgenome_arm32_decode(struct kgenome_arm32_insn
 {
 	const struct kgenome_arm32_row *r;
 
-	kgenome_arm32_ensure();
 	r = &kgenome_arm32_lists[kgenome_arm32_idx[kgenome_arm32_key(w)]];
 
 	/* the last row of every list matches whatever is left */
@@ -162,5 +161,27 @@ static inline uint32_t kgenome_arm32_shift_imm(struct kgenome_arm32_insn in) { r
 
 /* sxt, uxt: the rotation, in bytes 0..3 (bits 11:10). */
 static inline uint32_t kgenome_arm32_rot(struct kgenome_arm32_insn in) { return (in.w >> 10) & 3u; }
+
+/*
+ * ---- TEXT -----------------------------------------------------------------
+ *
+ * The instruction as the GNU assembler's disassembler spells it, ARM state only
+ * (arm32_fmt.c). One request, one result, as for AArch64 (arm64.h): `pc` is the
+ * address the instruction sits at (a branch and a pc-relative load are shown
+ * resolved against it, with the pipeline's +8 applied here). A word of a space
+ * this formatter does not spell - coprocessor, VFP, Advanced SIMD, saturating and
+ * parallel arithmetic - is KGENOME_UNSUPPORTED with the word as ".inst 0x........".
+ * Buffers of KGENOME_ARM32_TEXT bytes are always enough.
+ */
+#define KGENOME_ARM32_TEXT 96u
+
+struct kgenome_arm32_fmt_req {
+	const struct kgenome_arm32_insn *in;
+	uint64_t pc;
+	char    *buf;
+	size_t   cap;
+};
+
+void kgenome_arm32_format(const struct kgenome_arm32_fmt_req *req, struct kgenome_gt_fmt_res *res);
 
 #endif /* KGENOME_GENOTYPE_ARM32_H */

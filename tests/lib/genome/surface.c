@@ -185,8 +185,8 @@ static void mutation_window(void)
 		s ^= s << 13; s ^= s >> 17; s ^= s << 5;
 		p[i] = (uint8_t)s;
 	}
-	na = kgenome_mutation_minhash(p, sizeof p, 0, a);
-	nb = kgenome_mutation_minhash(p, sizeof p, 0, b);
+	na = kgenome_mutation_minhash(p, sizeof p, a);
+	nb = kgenome_mutation_minhash(p, sizeof p, b);
 	CK(na > 0 && na == nb);
 	CK(!memcmp(a, b, na * sizeof a[0]));
 	for (i = 1; i < na; i++)

@@ -13,9 +13,11 @@
 
 #include "kofeng.h"
 #include "databases/dbloader.h"
+#include "databases/pack/diagform.h"
 #include "detectors/pattern/kofpix.h"
 #include "scanners/scan.h"
 #include "kofcore/kofplatform.h"
+#include "verdictor/catnames.h"
 
 /*
  * OPEN A DATABASE UNDER THE ENGINE'S MEMORY BUDGET (kofcore/kofbudget.h): 512 MiB unless
@@ -26,6 +28,8 @@
  * accounting to keep in step. Where the allocator cannot say, the figure is 0 and the budget is
  * simply not reduced - which the doc below says.
  */
+static uint32_t names_make(kof_engine *e, const char *pathogens, const char *syndromes);
+
 kof_engine *keng_open(const char *db_path)
 {
 	kof_engine *e;
@@ -56,14 +60,95 @@ kof_engine *keng_open(const char *db_path)
 	e->budget = b;
 	e->budget->db = after > before ? after - before : 0;
 	(void)kof_budget_charge(e->budget, e->budget->db);
+	/* The names the database carries answer from the first scan; a host that names catalog directories adds to and overrides them. */
+	(void)names_make(e, NULL, NULL);
 	return e;
 }
 
 void keng_close(kof_engine *e)
 {
-	if (e)
+	if (e) {
+		kof_catnames_free(e->names, e->budget);
 		free(e->budget);
+	}
 	kof_db_free(e);
+}
+
+/*
+ * THE NAMES OF THE CATALOG IDS (verdictor/catnames.h). The engine holds one table of its own, so two engines may hold two catalogs and
+ * nothing is global. A second call replaces the first; a call is not safe against a scan running on the same engine (like
+ * keng_set_memory_cap, it is made before scanners work). The table is charged to the engine's budget; what it could not hold is in the
+ * flags and the info, never silent.
+ */
+_Static_assert((unsigned)KENG_CAT_OVER_BUDGET == (unsigned)KOF_CATNAMES_OVER_BUDGET &&
+	       (unsigned)KENG_CAT_FILES_REFUSED == (unsigned)KOF_CATNAMES_FILES_REFUSED &&
+	       (unsigned)KENG_CAT_UNREADABLE == (unsigned)KOF_CATNAMES_UNREADABLE &&
+	       (unsigned)KENG_CAT_NOMEM == (unsigned)KOF_CATNAMES_NOMEM, "keng_catalog flags are the table's flags");
+
+/* What the database itself names (names.kdig, kof_db_load_names): the answer for every id the host's catalog lacks. */
+static const char *db_name(const void *ctx, char kind, uint64_t id)
+{
+	return kof_db_cat_name(ctx, kind, id);
+}
+
+/* The engine's table: the host's catalog directories (either may be NULL: that half is empty) with the database's own names behind it. */
+static uint32_t names_make(kof_engine *e, const char *pathogens, const char *syndromes)
+{
+	struct kof_catnames_info info;
+
+	kof_catnames_free(e->names, e->budget);
+	e->names = kof_catnames_load(pathogens && pathogens[0] ? pathogens : NULL, syndromes && syndromes[0] ? syndromes : NULL, e->budget, &info);
+	kof_catnames_set_fallback(e->names, db_name, e);
+	return info.flags;
+}
+
+uint32_t keng_catalog_load(kof_engine *e, const char *pathogens, const char *syndromes)
+{
+	if (!e)
+		return KENG_CAT_NOMEM;
+	return names_make(e, pathogens, syndromes);
+}
+
+uint32_t keng_catalog_load_bases(kof_engine *e, const char *bases)
+{
+	char p[4096], t[4096];
+
+	if (!bases || !bases[0])
+		return keng_catalog_load(e, NULL, NULL);
+	if ((size_t)snprintf(p, sizeof p, "%s/pathogens", bases) >= sizeof p ||
+	    (size_t)snprintf(t, sizeof t, "%s/syndromes", bases) >= sizeof t)
+		return keng_catalog_load(e, NULL, NULL) | KENG_CAT_UNREADABLE;
+	return keng_catalog_load(e, p, t);
+}
+
+void keng_catalog_info(const kof_engine *e, struct keng_catalog_info *out)
+{
+	struct kof_catnames_info in;
+
+	if (!out)
+		return;
+	kof_catnames_info_of(e ? e->names : NULL, &in);
+	out->flags = in.flags;
+	out->families = in.families;
+	out->variants = in.variants;
+	out->tags = in.tags;
+	out->files_refused = in.files_refused;
+	out->bytes = in.bytes;
+}
+
+int kdb_family_name(const kof_engine *e, uint64_t id, char *out, size_t cap)
+{
+	return kof_catnames_family_text(e ? e->names : NULL, id, out, cap);
+}
+
+int kdb_variant_name(const kof_engine *e, uint64_t id, char *out, size_t cap)
+{
+	return kof_catnames_variant_text(e ? e->names : NULL, id, out, cap);
+}
+
+int kdb_tag_name(const kof_engine *e, uint64_t id, char *out, size_t cap)
+{
+	return kof_catnames_tag_text(e ? e->names : NULL, id, out, cap);
 }
 
 uint32_t kdb_mutation_status(const kof_engine *e, uint64_t *bytes, uint32_t *keys)
@@ -103,11 +188,6 @@ uint64_t keng_memory_db(const kof_engine *e)
 uint64_t keng_memory_peak(const kof_engine *e)
 {
 	return e && e->budget ? atomic_load(&e->budget->peak) : 0;
-}
-
-uint32_t kdb_records(const kof_engine *e)
-{
-	return e ? e->n_mods : 0;
 }
 
 uint32_t kdb_unpackers(const kof_engine *e)
@@ -154,6 +234,63 @@ uint32_t kdb_diagnose_disease(const kof_engine *e, uint32_t id)
 	const struct kof_diag *d = diag_by_id(e, id);
 
 	return d ? d->disease : 0u;
+}
+
+/* The catalog facts a diagnose carries (KDIG_SEC_META); 0 / -1 when it carries none or the id is not held. */
+uint64_t kdb_diagnose_family(const kof_engine *e, uint32_t id)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d ? d->family_id : 0u;
+}
+
+uint64_t kdb_diagnose_variant(const kof_engine *e, uint32_t id)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d ? d->variant_id : 0u;
+}
+
+uint64_t kdb_diagnose_tag(const kof_engine *e, uint32_t id)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d ? d->tag_id : 0u;
+}
+
+int kdb_diagnose_type(const kof_engine *e, uint32_t id)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d && d->family_id ? (int)d->type : -1;
+}
+
+int kdb_diagnose_form(const kof_engine *e, uint32_t id, struct kdb_diag_form *out)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	if (!d || !d->form)
+		return 0;
+	if (out) {
+		out->strings = d->form->n_str;
+		out->blocks = d->form->n_block;
+		out->matchers = d->form->n_match;
+		out->nodes = d->form->n_node;
+		out->similarity = d->form->n_sim != 0;
+	}
+	return 1;
+}
+
+size_t kdb_diagnose_form_expr(const kof_engine *e, uint32_t id, char *out, size_t cap)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	if (!d || !d->form) {
+		if (out && cap)
+			out[0] = 0;
+		return 0;
+	}
+	return kof_form_expr_text(d->form, out, cap);
 }
 
 const char *kdb_disease_name(const kof_engine *e, uint32_t id)

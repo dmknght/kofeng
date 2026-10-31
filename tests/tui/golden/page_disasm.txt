@@ -1,0 +1,51 @@
+# golden page_disasm: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2| ELF-x64                64608  | 00003000   48 83 EC 08 48 8B 05 DD AF 00 00 48 85 C0 74 02  H...H......H..t.                                                            ╿
+ 3|  HEADERS                2600  | 00003010   FF D0 48 83 C4 08 C3 00 00 00 00 00 00 00 00 00  ..H.............                                                            │
+ 4|* CODE                  30141  | 00003020   FF 35 E2 AF 00 00 FF 25 E4 AF 00 00 0F 1F 40 00  .5.....%......@.                                                            │
+ 5|  DATA                  17984  | 00003030   FF 25 E2 AF 00 00 68 00 00 00 00 E9 E0 FF FF FF  .%....h.........                                                            │
+ 6|  NOLOAD                 7331  | 00003040   FF 25 DA AF 00 00 68 01 00 00 00 E9 D0 FF FF FF  .%....h.........                                                            │
+ 7|  UNCLAIMED              6552  | 00003050   FF 25 D2 AF 00 00 68 02 00 00 00 E9 C0 FF FF FF  .%....h.........                                                            │
+ 8|  SYM_IMP                1432  | 00003060   FF 25 CA AF 00 00 68 03 00 00 00 E9 B0 FF FF FF  .%....h.........                                                            │
+ 9|  SYM_EXP                1801  | 00003070   FF 25 C2 AF 00 00 68 04 00 00 00 E9 A0 FF FF FF  .%....h.........                                                            │
+10|  //0:norm ELF-x64      54249  | 00003080   FF 25 BA AF 00 00 68 05 00 00 00 E9 90 FF FF FF  .%....h.........                                                            │
+11|   HEADERS               2600  | 00003090   FF 25 B2 AF 00 00 68 06 00 00 00 E9 80 FF FF FF  .%....h.........                                                            │
+12|   CODE                 29988  | 000030a0   FF 25 AA AF 00 00 68 07 00 00 00 E9 70 FF FF FF  .%....h.....p...                                                            │
+13|   DATA                 15954  | 000030b0   FF 25 A2 AF 00 00 68 08 00 00 00 E9 60 FF FF FF  .%....h.....`...                                                            │
+14|   NOLOAD                5557  | 000030c0   FF 25 9A AF 00 00 68 09 00 00 00 E9 50 FF FF FF  .%....h.....P...                                                            │
+15|   UNCLAIMED                6  | 000030d0   FF 25 92 AF 00 00 68 0A 00 00 00 E9 40 FF FF FF  .%....h.....@...                                                            │
+16|   SLIB_CODE              140  | 000030e0   FF 25 8A AF 00 00 68 0B 00 00 00 E9 30 FF FF FF  .%....h.....0...                                                            │
+17|   SLIB_DATA                4  | 000030f0   FF 25 82 AF 00 00 68 0C 00 00 00 E9 20 FF FF FF  .%....h..... ...                                                            │
+18|   SYM_IMP               1432  | 00003100   FF 25 7A AF 00 00 68 0D 00 00 00 E9 10 FF FF FF  .%z...h.........                                                            │
+19|   SYM_EXP               1731  | -- Disassembly  [x64] -------------------------------------------------------------------------------------------------------------- [x]│
+20|                               | 00003000  48 83 ec 08          SUB       rsp, 0x8                                                                                       ┃
+21|                               | 00003004  48 8b 05 dd af 00 00 MOV       rax, qword ptr [rel 0xdfe8]                                                                    ┃
+22|                               | 0000300b  48 85 c0             TEST      rax, rax  ; compare rax with 0                                                                 ┃
+23|                               | 0000300e  74 02                JZ        0x3012  ; jump if rax == 0                                                                     ╿
+24|                               | 00003010  ff d0                CALL      rax                                                                                            │
+25|                               | 00003012  48 83 c4 08          ADD       rsp, 0x8                                                                                       │
+26|                               | 00003016  c3                   RETN                                                                                                     │
+27|                               | 00003017  00 00                ADD       byte ptr [rax], al                                                                             │
+28|                               | 00003019  00 00                ADD       byte ptr [rax], al                                                                             │
+29|                               | 0000301b  00 00                ADD       byte ptr [rax], al                                                                             │
+30|                               | 0000301d  00 00                ADD       byte ptr [rax], al                                                                             │
+31|                               | 0000301f  00 ff                ADD       bh, bh                                                                                         │
+32|                               | 00003021  35 e2 af 00 00       XOR       eax, 0xafe2                                                                                    │
+33|                               | 00003026  ff 25 e4 af 00 00    JMP       qword ptr [rel 0xe010]                                                                         │
+34|                               | 0000302c  0f 1f 40 00          NOP       dword ptr [rax+0x0], eax                                                                       │
+35|                               | 00003030  ff 25 e2 af 00 00    JMP       qword ptr [rel 0xe018]                                                                         │
+36|                               | 00003036  68 00 00 00 00       PUSH      0x0                                                                                            │
+37|----------------------------------------------------------------------------------=======---------------------------------------------------------------------------------
+38| Family [ Mirai ]  Variant [ A ]  [Well known IOT botnet]                                                                                           [ Save ]  [ Discard ]
+39| Format  ELF  [+ Formats]
+40| Option  [+ Options]
+41|  Patterns  |  Blocks  |  Graphs
+42| Intron      attr       region [r] size  bytes
+43| [+ String]
+44| Region  None  [+ Scan region]
+45| Matchers
+46| [+ Matcher]
+47| Conditions
+48| [+ Condition]
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose

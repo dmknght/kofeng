@@ -4,7 +4,7 @@
  * reads the kofexamine sources, relative to the repository root where `make unit` runs it.
  *   SPL-1  (fixed with the dashboard click rewrite; now a plain check) kv_click.c click_dialog_text held `int a = c, b = c;` that nothing read
  *   SPL-2  kofexaminer_private.h includes kofinspect.h twice (and carries a stale comment; kv_panel.h opens with an orphan comment: not held) / kv_panel.h opens with an orphan comment
- *   SPL-3  kofeditor.c (a prototype) holds functions that are not the draft: obj_sha256, obj_emu_why, say_err, say_note
+ *   SPL-3  kofeditor.c (a prototype) holds functions that are not the draft: obj_sha256, say_err, say_note
  *   SPL-4  writable global state of the examiner: the kex_g_* and kex_C_* variables declared extern in kofexaminer_private.h (rule: no writable global state)
  * A row that cannot read its file FAILS (a moved file is not a fixed defect).
  */
@@ -55,7 +55,7 @@ int main(void)
 	char *click = slurp("kofexamine/kv_click.c"), *ed = slurp("kofexamine/kofeditor.c"),
 	     *priv = slurp("kofexamine/kofexaminer_private.h");
 	unsigned i, w = 0;
-	static const char *const fn[] = { "\nvoid obj_sha256(", "\nuint8_t obj_emu_why(", "\nvoid say_err(", "\nvoid say_note(" };
+	static const char *const fn[] = { "\nvoid obj_sha256(", "\nvoid say_err(", "\nvoid say_note(" };
 	const char *p;
 
 	if (!click || !ed || !priv) {
@@ -68,9 +68,9 @@ int main(void)
 		fails++;
 	}
 	KM_CHECK(count(priv, "#include \"kofinspect.h\"") <= 1, "kofexaminer_private.h includes kofinspect.h more than once", "SPL-2");
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < 3; i++)
 		w += count(ed, fn[i]);
-	KM_CHECK(w == 0, "kofeditor.c (a prototype) defines obj_sha256, obj_emu_why, say_err, say_note: not the draft", "SPL-3");
+	KM_CHECK(w == 0, "kofeditor.c (a prototype) defines obj_sha256, say_err, say_note: not the draft", "SPL-3");
 	/* the globals: every `extern` of a kex_g_ / kex_C_ name that is not a const object of constants */
 	w = 0;
 	for (p = priv; (p = strstr(p, "\nextern ")); p += 8) {

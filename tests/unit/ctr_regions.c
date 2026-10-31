@@ -7,7 +7,7 @@
  * checks are the ones parser_fuzz.c makes on its own generated objects; this file makes them on the WRITERS' archives for every
  * container format and every lie (the nine columns of ctr_liars.c), which parser_fuzz.c does not for lha, arj, cab and chm.
  *
- * WP2-D9 (KM_CHECK, found by the fuzz adapter container/parse_cab and parse_chm, reproducers in tests_wp2/findings):
+ * WP2-D9, D9b, D10 (fixed; found by the fuzz adapter container/parse_cab and parse_chm, reproducers in tests_wp2/findings):
  * a CAB whose first folder's data offset is 0 and a CHM whose directory section is absent declare a DATA / CONTENT region that
  * STARTS AT BYTE 0 and so overlaps the HEADERS region (cab_parse.c cab_resolve_scan, chm_parse.c chm_resolve_scan: `from` is
  * lifted past the names / the directory, not past the headers). chm_parse.c says in its own comment that a content offset
@@ -141,8 +141,7 @@ static int d9(void *unused)
 	CK(r.pc_failed == 0, "cab control: the unedited archive partitions");
 	cw_at32(&w, 36, 0);                       /* the folder record's coffCabStart */
 	r = check(KOF_FMT_CAB, w.p, w.n);
-	/* KNOWN DEFECT WP2-D9 (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(r.pc_failed == 0, "cab: a folder whose data offset is 0 leaves a DATA region that overlaps the headers", "WP2-D9");
+	CK(r.pc_failed == 0, "cab: a folder whose data offset is 0 leaves a DATA region that overlaps the headers (WP2-D9)");
 	cw_free(&w);
 
 	/* a CHM with no directory section and no content offset: ITSF offsets 72, 80 (the section) and 88 (the content) are zero */
@@ -153,8 +152,7 @@ static int d9(void *unused)
 	cw_at64(&w, 80, 0);
 	cw_at64(&w, 88, 0);
 	r = check(KOF_FMT_CHM, w.p, w.n);
-	/* KNOWN DEFECT WP2-D9b (2026-10-24, M): this row pins it, green until fixed. */
-	KM_CHECK(r.pc_failed == 0, "chm: no directory section leaves a CONTENT region that overlaps the headers", "WP2-D9");
+	CK(r.pc_failed == 0, "chm: no directory section leaves a CONTENT region that overlaps the headers (WP2-D9b)");
 	cw_free(&w);
 
 	/* WP2-D10: a CAB whose header says a reserved area follows it puts the folder table past the file table: HEADERS is [0, 172)
@@ -167,8 +165,7 @@ static int d9(void *unused)
 		cw_at16(&w, 30, 4);                   /* flags: the reserve field is present */
 		cw_at16(&w, 36, 132);                 /* cbCFHeader: the folder table moves to 36 + 4 + 132 */
 		r = check(KOF_FMT_CAB, w.p, w.n);
-		/* KNOWN DEFECT WP2-D10 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(r.pc_failed == 0, "cab: a reserved header area leaves HEADERS overlapping NAMES", "WP2-D10");
+		CK(r.pc_failed == 0, "cab: a reserved header area leaves HEADERS overlapping NAMES (WP2-D10)");
 		cw_free(&w);
 	}
 

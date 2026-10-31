@@ -508,7 +508,7 @@ static void kid_note_producer(struct kof_scanner *sc)
  *
  * A container's entry and a packer's payload are the same kind of object
  * to everything downstream, and they are not the same kind of evidence -
- * see KOF_UNPACK_KIND in kofsig.h.
+ * see kof_step_hides_program.
  */
 /*
  * And what the producing module said has to be done to it, spent here

@@ -70,6 +70,8 @@ void               kof_db_free_tables(struct kof_engine *);
 struct kof_engine *kof_db_load(const char *path);
 
 void               kof_db_free(struct kof_engine *);
+/* The name the database's own table (names.kdig) holds for an id: kind 'F' family, 'V' variant ("Family.A"), 'T' tag; NULL when it has none. */
+const char *kof_db_cat_name(const struct kof_engine *e, char kind, uint64_t id);
 
 /*
  * THE SAME LOAD WITH THE CALLER'S LEDGER. Every size the similarity index chooses comes from

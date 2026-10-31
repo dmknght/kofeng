@@ -16,7 +16,7 @@
  *                   room is a cut that says so
  *   DIAGNOSE STATE  kof_scan_diag_status reads the graph's own status live; kof_scan_incomplete says
  *                   incomplete for NOMEM / OVER_BUDGET, for TRUNCATED only when an analysis was asked
- *                   for; kof_scan_diag_drop gives the state back; kof_scan_verdict carries the flag
+ *                   for; kof_scan_diag_drop gives the state back; kof_scan_verdict_cat carries the flag
  *   NOTHING TO ASK  an object of no format, a context with no scanner: every one answers "nothing"
  *   EMULATE/SCRIPT  no source, wrong format: nothing attempted, nothing made; release is idempotent
  *   MUTATION        units of a plain buffer: sum within the buffer, a callback that stops the walk stops it
@@ -197,6 +197,7 @@ static void t_diag_state(void)
 	struct kgenome_diag_scan g;
 	struct kof_finding vf;
 	int incomplete;
+	struct kof_verdict_cat cat;
 	uint32_t n = 99;
 
 	CK(sc != NULL, "a scanner");
@@ -207,9 +208,14 @@ static void t_diag_state(void)
 
 	CK(kof_scan_diag_status(&c) == KGENOME_OK && kof_scan_incomplete(&c) == 0, "a fresh object is whole");
 	sc->obj.diag.status = KGENOME_NOMEM;
+	sc->obj.diag.ask = 0;
+	CK(kof_scan_diag_status(&c) == KGENOME_NOMEM && kof_scan_incomplete(&c) == 0, "NOMEM of an analysis nobody demanded says nothing about the object (BE-5)");
+	sc->obj.diag.ask = 1;
 	CK(kof_scan_diag_status(&c) == KGENOME_NOMEM && kof_scan_incomplete(&c) == 1, "NOMEM with no graph: read from the object, incomplete");
 	sc->obj.diag.status = KGENOME_OVER_BUDGET;
 	CK(kof_scan_incomplete(&c) == 1, "OVER_BUDGET is incomplete");
+	sc->obj.diag.ask = 0;
+	CK(kof_scan_incomplete(&c) == 0, "OVER_BUDGET of an analysis nobody demanded (the API-resolution run of every PE) is not (BE-5)");
 	sc->obj.diag.status = KGENOME_TRUNCATED;
 	sc->obj.diag.ask = 0;
 	CK(kof_scan_incomplete(&c) == 0, "TRUNCATED when nothing asked for the analysis says nothing about the object");
@@ -219,7 +225,7 @@ static void t_diag_state(void)
 	/* the graph's own status, read live and not cached */
 	memset(&g, 0, sizeof g);
 	sc->obj.diag.graph = &g;
-	sc->obj.diag.ask = 0;
+	sc->obj.diag.ask = 1;
 	CK(kof_scan_diag_status(&c) == KGENOME_OK && kof_scan_incomplete(&c) == 0, "a graph that ran whole");
 	kgenome_diag_note(&g, KGENOME_NOMEM);
 	CK(kof_scan_diag_status(&c) == KGENOME_NOMEM && kof_scan_incomplete(&c) == 1,
@@ -229,10 +235,11 @@ static void t_diag_state(void)
 	/* the verdict carries the same flag, whatever else it reads */
 	memset(&vf, 0xee, sizeof vf);
 	sc->obj.diag.status = KGENOME_NOMEM;
-	(void)kof_scan_verdict(&c, &vf, &incomplete);
-	CK(incomplete == 1, "kof_scan_verdict's incomplete follows kof_scan_incomplete");
+	sc->obj.diag.ask = 1;
+	(void)kof_scan_verdict_cat(&c, &vf, &cat, &incomplete);
+	CK(incomplete == 1, "kof_scan_verdict_cat's incomplete follows kof_scan_incomplete");
 	sc->obj.diag.status = KGENOME_OK;
-	CK(kof_scan_verdict(&c, &vf, &incomplete) == 0 && incomplete == 0 && vf.n_disease == 0,
+	CK(kof_scan_verdict_cat(&c, &vf, &cat, &incomplete) == 0 && incomplete == 0 && vf.n_disease == 0,
 	   "no disease found: no verdict, whole (%u diseases)", vf.n_disease);
 
 	/* drop gives the state back */

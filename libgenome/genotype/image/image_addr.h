@@ -8,7 +8,7 @@ struct kgenome_obj;
 /*
  * AN ADDRESS THE FILE USES, AS AN OFFSET INTO IT.
  *
- * A saved entry point is an address; every request a cure makes is an offset.
+ * A saved entry point is an address; every request a module makes is an offset.
  * PE answers this from its section table and ELF from its program headers,
  * and doing it here rather than in each rule is what stops a module
  * dispatching on format.

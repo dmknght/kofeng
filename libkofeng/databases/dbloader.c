@@ -132,7 +132,6 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		}
 		e->n_blk += h->n_blk;
 	}
-	e->n_blk_pool += h->n_pool;
 
 	for (i = 0; i < h->n_mods; i++) {
 		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
@@ -774,6 +773,7 @@ static void db_finish(struct db_load *L)
 			kof_db_load_diagnoses(L->e, L->dir_for_diag);
 			kof_db_refuse_retired(L->e, L->dir_for_diag);
 			kof_db_load_diseases(L->e, L->dir_for_diag);
+			kof_db_load_names(L->e, L->dir_for_diag);
 		}
 	}
 }
@@ -857,6 +857,15 @@ void kof_db_free_tables(struct kof_engine *e)
 	while (e->n_diag_user)                  /* the scratch of a load that did not end */
 		free(e->diag_user[--e->n_diag_user]);
 	free(e->diag_user);
+	/* The detection forms the diagnoses own (KDIG_SEC_FORM), then the blocks they put into the similarity set. */
+	{
+		uint32_t i;
+
+		for (i = 0; e->diag && i < e->n_diag; i++)
+			kof_diag_form_free(&e->diag[i]);
+	}
+	free(e->dblk);
+	free(e->dpool);
 	free(e->diag);
 	free(e->diag_node);
 	free(e->diag_name);
@@ -865,6 +874,8 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->diag_arena);
 	free(e->disease);
 	free(e->disease_pool);
+	free(e->cat_name);
+	free(e->cat_name_pool);
 	if (e->packs) {
 		uint32_t i;
 

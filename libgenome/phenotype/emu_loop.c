@@ -7,7 +7,7 @@
  * instruction wait in a small object with nothing found, and the stall stop (no
  * new page for 4M instructions) ended a 5M one in a bigger object. Raising either
  * bound is paid by every object whose run spins to it - measured on Mirai samples,
- * x2.8 (see KGENOME_DIAG_EMU_STOPS in diag_emu_private.h) - because a bound cannot
+ * x2.8 (see "THE TWO TIME BOUNDS OF THIS RUN THAT ARE NOT SCALED" in diag_emu_private.h) - because a bound cannot
  * tell a wait from a spin. The loop can: a delay has a COUNTER, and the number of
  * iterations it takes is arithmetic, not something to find out by running them.
  *

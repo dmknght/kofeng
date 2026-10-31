@@ -380,13 +380,15 @@ static int examine(const char *path, int dump)
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--dump] [--blocks|--hashes] [--scfind] [--db <dir>] <file>...\n"
+		"usage: %s [--dump] [--blocks|--hashes] [--scfind] [--db <dir>] [--bases <dir>] <file>...\n"
 		"\n"
 		"  --dump     also write each region of each file into a directory\n"
 		"             beside it: <path>/_<name>_dump/<region enum name>\n"
 		"  --db <dir> run that database's unpackers too, and report what\n"
 		"             they recovered. With --dump the recovered objects are\n"
 		"             written beside the regions as unpacked.<n>\n"
+		"  --bases <dir>  the catalogs <dir>/pathogens and <dir>/syndromes: a verdict\n"
+		"             then names its family, variant and tag. Needs --db.\n"
 		"  --debug    also print what modules worked out along the way -\n"
 		"             versions, methods, counts. Needs --db.\n"
 		"  --color    force colour on; --no-color forces it off. The default\n"
@@ -416,7 +418,7 @@ static void usage(const char *argv0)
  */
 int main(int argc, char **argv)
 {
-	const char *db = NULL;
+	const char *db = NULL, *bases = NULL;
 	kof_engine *eng = NULL;
 	int dump = 0, verbose = 0, colour = -1;
 	int i, files = 0, bad = 0;
@@ -452,6 +454,13 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			db = argv[i];
+		} else if (strcmp(argv[i], "--bases") == 0) {
+			if (++i >= argc) {
+				fprintf(stderr, "%s: --bases needs a directory\n",
+					argv[0]);
+				return 2;
+			}
+			bases = argv[i];
 		} else if (strcmp(argv[i], "--help") == 0 ||
 			   strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
@@ -483,6 +492,8 @@ int main(int argc, char **argv)
 				argv[0], db);
 			return 2;
 		}
+		if (bases)
+			(void)keng_catalog_load_bases(eng, bases);
 	}
 
 	/* Second pass: everything that was not an option is a file, and by now every
@@ -490,7 +501,7 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		int r;
 
-		if (strcmp(argv[i], "--db") == 0) {
+		if (strcmp(argv[i], "--db") == 0 || strcmp(argv[i], "--bases") == 0) {
 			i++;               /* its value, already taken */
 			continue;
 		}

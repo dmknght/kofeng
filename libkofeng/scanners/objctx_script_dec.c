@@ -94,12 +94,16 @@ void oc_script_dec_end(struct oc_script_dec *d)
 	free(d);
 }
 
-/* Room for `n` bytes in `b`, charged to the ceiling. 0 when the allowance, the ceiling or the allocator says no. */
-static int dbuf_want(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
+/*
+ * A buffer of `n` bytes, charged to the ceiling. 0 when the ceiling or the allocator says no.
+ * The decode allowance is NOT asked here: it bounds what a decode PRODUCES, and a buffer sized
+ * for the worst case of a form (dec_layer) is not that (BE-1).
+ */
+static int dbuf_size(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
 {
 	uint8_t *np;
 
-	if (n > d->room + 4096u || n > 0x7fffffffu) {
+	if (n > 0x7fffffffu) {
 		d->limit = 1;
 		return 0;
 	}
@@ -119,6 +123,16 @@ static int dbuf_want(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
 	b->p = np;
 	b->cap = (size_t)n;
 	return 1;
+}
+
+/* Room for `n` bytes a decode is about to produce: the allowance first, then the buffer. */
+static int dbuf_want(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
+{
+	if (n > d->room + 4096u) {
+		d->limit = 1;
+		return 0;
+	}
+	return dbuf_size(d, b, n);
 }
 
 struct inf_sink {
@@ -238,9 +252,16 @@ static int dec_layer(struct oc_script_dec *d, const uint8_t *p, uint64_t n, stru
 		return 0;
 	while (k < n && kof_is_blank_byte(p[k]))
 		k++;
+	/*
+	 * THE BUFFER IS SIZED FOR THE WORST CASE OF THE FORM (the layer, one and a half times, and
+	 * what its decodes may add), which the allowance does not bound: the allowance is the
+	 * decoded bytes in all (`room`), charged where each decode is made, and `extra` is already
+	 * no more than it. Asking the allowance for the whole request refused every layer with
+	 * 8n > room (BE-1: the body of a 12.7x chain, under the 32x allowance, read Limit).
+	 */
 	extra = d->room < 8u * n + 4096u ? d->room : 8u * n + 4096u;
 	cap = KGENOME_TEXTUAL_FORM_CAP(n) + extra;
-	if (!dbuf_want(d, dst, cap))
+	if (!dbuf_size(d, dst, cap))
 		return 0;
 	rq = (struct oc_script_form_req){ .lang = d->lang, .in = p, .n = (uint32_t)n, .out = dst->p,
 					  .cap = cap, .dec = d,

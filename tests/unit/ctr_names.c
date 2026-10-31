@@ -19,7 +19,7 @@
  * said; the members before and after the hostile one are opened whole (hash of the bytes); duplicates are three
  * distinct objects. A name too long for the format's own limit is clamped or counted (names_invalid) and the member kept.
  *
- *   WP2-D6 (KM_CHECK): a cab file whose name is not a C string the table can step over (an embedded NUL, 5000 bytes) ends
+ *   WP2-D6 (fixed, said as DAMAGED): a cab file whose name is not a C string the table can step over (an embedded NUL, 5000 bytes) ends
  *          the file table: every later file is dropped and broken stays 0.
  *
  * LONG NAMES: 200 zip members with 60000 byte names each (12 MB of names): the scan finishes, every member is a child and the
@@ -192,8 +192,7 @@ static int run_format(void *p)
 
 				snprintf(what, sizeof what, "cab/%s: the files after a name the table cannot take (a NUL in it, or 5000 bytes) are %s", R->what,
 					 post_found ? "kept" : "dropped with broken 0");
-				/* KNOWN DEFECT WP2-D6 (2026-10-24, M): this row pins it, green until fixed. */
-				KM_CHECK(post_found || r.broken > 0 || r.limit_hits > 0 || r.names_invalid > 0, what, "WP2-D6");
+				CK(post_found || r.broken > 0 || r.limit_hits > 0 || r.names_invalid > 0, "%s", what);
 			} else {
 				CK(has_hash(&r, cs_fnv(dpost, sizeof dpost)), "%s/%s: the member after is opened whole", F->name, R->what);
 				CK(has_hash(&r, cs_fnv(dbad, sizeof dbad)), "%s/%s: the hostile member itself is opened whole", F->name, R->what);

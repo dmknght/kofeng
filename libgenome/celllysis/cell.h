@@ -251,4 +251,63 @@ struct kgenome_cell_insn {
 	struct kgenome_cell_operand o[3];
 };
 
+/*
+ * THE SLOT AN INDIRECT BRANCH GOES THROUGH, or KGENOME_BROKEN when it is not a fixed one: `[rip+disp]` on x86-64, `[abs32]` on i386, and
+ * `[ebx+disp]` on i386 when the caller knows the GOT address `gotbase` (0 = it does not). `wide` is a 64-bit object. A base or index register of any
+ * other kind is a table lookup or a vtable call, and fs:/gs: is thread data: neither is an import slot. The ONE place that asks - the ELF import
+ * route, the PE import route and the call-name table all read a branch's slot through it.
+ */
+uint64_t kgenome_cell_slot_of(const struct kgenome_cell_insn *in, int wide, uint64_t gotbase);
+
+/*
+ * THE CALLS THAT GO THROUGH AN IMPORT TABLE - what a reader of an ELF's PLT/GOT or a PE's IAT has to decide for every instruction, and the one place
+ * that decides it. The ELF import route (diag_elfimp.c) and the call-name table (callnames.c) both read the same code for the same thing, a `call`/`jmp`
+ * through a slot that the loader fills; each keeps its own import list (the route only the names the vocabulary has a word for, the table every named
+ * one) and looks the slot up in it, and everything else is here:
+ *   - which sections hold STUBS (kgenome_elf_sec_is_stub), which decides only whether a `jmp [slot]` is a PLT entry or a tail call in the program's own code;
+ *   - the i386 GOT register (the lowest JUMP_SLOT is the first slot after the three reserved words, `ebx = lowest slot - 12`: a psABI fact);
+ *   - the `endbr64` / `endbr32` in front of an IBT stub, which belongs to the stub (a call lands on it).
+ * Feed every instruction of a code extent, in order, to kgenome_cell_plt_at; call it with NULL (or kgenome_cell_plt_reset) at the start of an extent.
+ *   kgenome_cell_plt_init      zero the state for an object of this width over these bytes
+ *   kgenome_cell_plt_import    one import of the object (its slot and relocation type): tells the lowest JUMP_SLOT; call it for EVERY import, kept or not
+ *   kgenome_cell_plt_ready     after the imports: the stub sections and the GOT register. `ei` NULL is a PE (a `jmp [iat]` is a thunk wherever it is)
+ * KGENOME_CELL_PLT_STUB is a `jmp [slot]` in a stub area; KGENOME_CELL_PLT_SLOT is any other `call`/`jmp [slot]`. The slot is not looked up here.
+ */
+struct kgenome_elf_info;
+
+enum kgenome_cell_plt_kind {
+	KGENOME_CELL_PLT_NONE = 0,
+	KGENOME_CELL_PLT_STUB,
+	KGENOME_CELL_PLT_SLOT
+};
+
+#define KGENOME_CELL_PLT_SECTIONS 128u          /* the most sections it remembers; the same bound as KGENOME_ELF_MAX_SECTIONS */
+
+struct kgenome_cell_plt {
+	const uint8_t *base;
+	uint64_t size;
+	uint64_t min_jslot;
+	uint64_t gotbase;
+	uint64_t prev_end_va, prev_va, prev_at;
+	uint32_t n_stubsec;
+	int      wide;
+	int      no_sections;           /* every `jmp [slot]` is taken for a stub: a PE, or an ELF with no section table to say */
+	uint8_t  prev_endbr;
+	struct { uint64_t lo, hi; } stubsec[KGENOME_CELL_PLT_SECTIONS];
+};
+
+struct kgenome_cell_plt_site {
+	uint64_t slot;                  /* the address the instruction goes through */
+	uint64_t endbr_at, endbr_va;    /* the `endbr` that directly precedes a STUB, when has_endbr: its offset and address */
+	uint8_t  kind;                  /* enum kgenome_cell_plt_kind */
+	uint8_t  has_endbr;
+};
+
+void kgenome_cell_plt_init(struct kgenome_cell_plt *p, const uint8_t *base, uint64_t size, int wide);
+void kgenome_cell_plt_import(struct kgenome_cell_plt *p, uint64_t slot, uint32_t reloc_type);
+void kgenome_cell_plt_ready(struct kgenome_cell_plt *p, const struct kgenome_elf_info *ei);
+void kgenome_cell_plt_reset(struct kgenome_cell_plt *p);
+/* One instruction (NULL resets). Returns the kind; `out` is filled for a STUB or a SLOT. */
+int kgenome_cell_plt_at(struct kgenome_cell_plt *p, const struct kgenome_cell_insn *in, struct kgenome_cell_plt_site *out);
+
 #endif /* KGENOME_CELL_H */

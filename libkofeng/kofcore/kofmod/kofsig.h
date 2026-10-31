@@ -101,6 +101,7 @@
 /* The two kinds of range kof_mark_infected takes. */
 #include "infected.h"
 #include "disease.h"      /* KOF_DECLARE_DISEASE, what a detector finds */
+#include "diseaselist.h"  /* KOF_DISEASE_ACT_* and KOF_DISEASE_OBJ_*: the list of diseases */
 #include "kofdecode.h"    /* struct kof_capsid, what a module asks the host to decrypt with */
 
 #include "kofabi.h"

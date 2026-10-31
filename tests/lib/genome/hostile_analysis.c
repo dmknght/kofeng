@@ -244,7 +244,7 @@ static int fam_mutation(void *arg)
 {
 	struct hk_rng r = { 0xaaaa5555ull + (uintptr_t)arg };
 	struct hk_gb g, bg;
-	unsigned n, norm, round;
+	unsigned n, round;
 
 	gb_init(&g, 2048);
 	gb_init(&bg, 4096);
@@ -255,23 +255,14 @@ static int fam_mutation(void *arg)
 
 			for (k = 0; k < sizeof src; k++)
 				src[k] = flatten == 0 ? 0x41 : flatten == 1 ? (uint8_t)k : (uint8_t)hk_next(&r);
-			for (norm = 0; norm < KGENOME_MUTATION_NORM_COUNT + 2u; norm++) {
+			{
 				const uint8_t *p = gb_put(&g, src, n);
 				uint32_t np = 0, *pool, mh[KGENOME_MUTATION_MINHASH_K + 4], got;
 				uint32_t i;
 
 				if (shared_seed)
-					*shared_seed = (uint64_t)n << 8 | norm;
-				pool = kgenome_mutation_pool(p, n, norm, &np);
-				if (norm >= KGENOME_MUTATION_NORM_COUNT) {
-					if (pool)
-						bad("pool: an out-of-range normalisation was accepted", norm);
-					free(pool);
-					got = kgenome_mutation_minhash(p, n, norm, mh);
-					if (got)
-						bad("minhash: an out-of-range normalisation was accepted", norm);
-					continue;
-				}
+					*shared_seed = (uint64_t)n << 8;
+				pool = kgenome_mutation_pool(p, n, &np);
 				if (pool) {
 					for (i = 1; i < np; i++)
 						if (pool[i] <= pool[i - 1u])
@@ -281,7 +272,7 @@ static int fam_mutation(void *arg)
 				} else if (n >= KGENOME_MUTATION_NG + 2u && flatten >= 2u) {
 					bad("pool: none for a span with distinct windows", n);
 				}
-				got = kgenome_mutation_minhash(p, n, norm, mh);
+				got = kgenome_mutation_minhash(p, n, mh);
 				if (got > KGENOME_MUTATION_MINHASH_K)
 					bad("minhash: more than K values", got);
 				if (pool) {
@@ -298,7 +289,7 @@ static int fam_mutation(void *arg)
 					uint32_t j, set = 0;
 
 					memset(bits, 0, nb);
-					kgenome_mutation_member(pool, np, p, n, norm, bits);
+					kgenome_mutation_member(pool, np, p, n, bits);
 					for (j = 0; j < np; j++)
 						set += (bits[j >> 3] >> (j & 7u)) & 1u;
 					if (np && !set && !flatten && n > KGENOME_MUTATION_NG + 8u)
@@ -310,7 +301,7 @@ static int fam_mutation(void *arg)
 						memset(bits2, 0, nb);
 						for (j = 0; j < n; j++)
 							other[j] = (uint8_t)~src[j];
-						kgenome_mutation_member(pool, np, gb_put(&g, other, n), n, norm, bits2);
+						kgenome_mutation_member(pool, np, gb_put(&g, other, n), n, bits2);
 					}
 					/* the core: the first k that qualify, none unless at least MIN_HASH */
 					{

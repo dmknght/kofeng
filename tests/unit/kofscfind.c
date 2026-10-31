@@ -400,7 +400,7 @@ static void hostile_tests(void)
 	}
 }
 
-/* KNOWN DEFECTS pinned (green until fixed): D18 and EX-9, both in kofscfind.c's own b64. */
+/* D18 and EX-9 (both were kofscfind.c's own b64), fixed: the finder decodes with kuncoat and a NUL with data after it is not base64. */
 static void b64_defect_rows(void)
 {
 	static struct kofscfind f;
@@ -410,20 +410,16 @@ static void b64_defect_rows(void)
 	uint64_t got = 0;
 	enum kuncoat_status ks;
 
-	/* EX-9 (2026-10-27, M) [sev L]: kofscfind.c b64() says "a NUL with data after it is not a string and not
-	 * base64" and `break`s on the first NUL whatever follows. Trigger: a base64 blob with a NUL at byte 64 and
-	 * text after it. Effect: the payload is decoded from its first half and shown as the loader's payload.
-	 * Expected (the comment): no decode. Fix: after the NUL, require only NULs to the end of the symbol. */
+	/* EX-9: a base64 blob with a NUL at byte 64 and text after it is not a string and not base64: no decode. */
 	len = build(img, INLINE_BASE64);
 	img[0x400 + 64] = 0;
 	if (find_run(len, &f) && f.found)
-		KM_CHECK(f.dec_n == 0, "b64 stops at a NUL in the middle of the text and decodes the first half", "EX-9");
+		CK(f.dec_n == 0);          /* b64 used to stop at the NUL and decode the first half */
 	else
-		KM_CHECK(0, "(EX-9 row could not reach the decode: the object is not found with a NUL inside)", "EX-9");
+		CK(0);                     /* the row could not reach the decode: the object is not found with a NUL inside */
 
-	/* D18: the examiner's decoder and kuncoat's disagree (measured, a space at byte 40 of 128 base64 characters:
-	 * kuncoat skips whitespace and decodes 95 bytes, the finder refuses the text; a NUL at byte 40: the finder
-	 * decodes 30 bytes, kuncoat answers BAD). */
+	/* D18: the finder and kuncoat give the same answer (a space at byte 40 of 128 base64 characters: kuncoat skips
+	 * whitespace and decodes 95 bytes; the finder used to refuse the text). */
 	len = build(img, INLINE_BASE64);
 	img[0x400 + 40] = ' ';
 	memset(&st, 0, sizeof st);
@@ -433,9 +429,9 @@ static void b64_defect_rows(void)
 	if (find_run(len, &f) && f.found) {
 		int agree = ks == KUNCOAT_OK ? (got == f.dec_n && !memcmp(ref, f.dec, f.dec_n)) : f.dec_n == 0;
 
-		KM_CHECK(agree, "kofscfind b64 and kuncoat B64 give different answers for a space inside the text", "D18");
+		CK(agree);
 	} else {
-		KM_CHECK(0, "(D18 row: the finder did not find the blob with a space inside)", "D18");
+		CK(0);                     /* the finder did not find the blob with a space inside */
 	}
 }
 

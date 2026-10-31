@@ -15,9 +15,9 @@ static void usage(void)
 	"\n"
 	"  --db D      load that database; without it there is one object\n"
 	"              and no markers\n"
-	"  --bases D   the content source tree, for Analysis > Rebuild database\n"
+	"  --bases D   the content source tree, for Manage > Rebuild database\n"
 	"  --syndromes D  the tag sources (default: <bases>/syndromes, or\n"
-	"              bases/syndromes), for Analysis > Syndrome table\n"
+	"              bases/syndromes), and Manage > Syndromes (its files)\n"
 	"  --pathogens D  where Manage > Pathogens keeps its files (default:\n"
 	"              <bases>/pathogens; without either Save is refused)\n"
 	"  --pid N     open a RUNNING PROCESS instead of a file, as a snapshot\n"
@@ -37,6 +37,120 @@ static void usage(void)
 static void file_close(struct view *v);
 
 /*
+ * WHAT A VIEW KEEPS WHEN IT MOVES TO ANOTHER FILE OR PROCESS, in one place.
+ *
+ * file_open and proc_open both clear the view wholesale (this struct has far too
+ * many members for a reset that names them) and then put the session back. The
+ * block was written twice and had already drifted (emu_mode is a file-only
+ * field); one pair of functions means a new session field is added once.
+ *
+ * The blocks a reader TICKED are compacted to the front by take, because the
+ * clear takes the count with it; what was not ticked was the engine's suggestion
+ * about the file being closed and goes with it.
+ */
+struct kv_session {
+	struct kof_range *ext, *ext2, *probe;
+	struct mtn_block *plg;
+	uint32_t          n_plg, cap;
+	struct kv_fam_ui *fam;      /* the Pathogens catalog is the session's: it outlives the file */
+	struct kv_tag_ui *tag;      /* and so is the Syndromes catalog */
+	int               heur_off; /* kept ACROSS files: how the reader asked to be shown a document */
+	char             *scr_last;      /* the terminal's, not the file's: see struct view */
+	size_t            scr_last_n;
+	int               scr_modal;
+	struct dlg_off    scr_prop;
+	char basedir[sizeof ((struct view *)0)->basedir];
+	char dbdir[sizeof ((struct view *)0)->dbdir];
+	char pathdir[sizeof ((struct view *)0)->pathdir];
+	char syndir[sizeof ((struct view *)0)->syndir];
+};
+
+_Static_assert(sizeof ((struct view *)0)->proc_rec == KOF_PROC_REC_MAX, "view.proc_rec is KOF_PROC_REC_MAX bytes");
+
+static void session_take(struct view *v, struct kv_session *k)
+{
+	k->ext   = v->ext;
+	k->ext2  = v->ext2;
+	k->probe = v->probe;
+	k->plg   = v->ed.dr.blk;
+	k->n_plg = 0;
+	k->cap   = v->ed.dr.decl_cap;
+	k->fam   = v->fam;
+	k->tag   = v->tag;
+	k->heur_off = v->heur_off;
+	k->scr_last = v->scr_last;
+	k->scr_last_n = v->scr_last_n;
+	k->scr_modal = v->scr_modal;
+	k->scr_prop = v->scr_prop;
+	snprintf(k->basedir, sizeof k->basedir, "%s", v->basedir);
+	snprintf(k->dbdir, sizeof k->dbdir, "%s", v->dbdir);
+	snprintf(k->pathdir, sizeof k->pathdir, "%s", v->pathdir);
+	snprintf(k->syndir, sizeof k->syndir, "%s", v->syndir);
+	if (k->plg) {
+		uint32_t pi;
+
+		for (pi = 0; pi < v->ed.dr.n_blk; pi++)
+			if (k->plg[pi].picked)
+				k->plg[k->n_plg++] = k->plg[pi];
+	}
+}
+
+/* After file_close and the clear: the session back, and the fields whose cleared value is not their resting value. */
+static void session_put(struct view *v, const struct kv_session *k)
+{
+	v->ext   = k->ext;
+	v->ext2  = k->ext2;
+	v->probe = k->probe;
+	v->ed.dr.blk   = k->plg;
+	v->ed.dr.n_blk = k->n_plg;
+	v->ed.dr.decl_cap = k->cap;
+	editor_attach(v);       /* the clear zeroed what it borrows */
+	snprintf(v->basedir, sizeof v->basedir, "%s", k->basedir);
+	snprintf(v->dbdir, sizeof v->dbdir, "%s", k->dbdir);
+	snprintf(v->pathdir, sizeof v->pathdir, "%s", k->pathdir);
+	snprintf(v->syndir, sizeof v->syndir, "%s", k->syndir);
+	v->fam = k->fam;
+	v->tag = k->tag;
+	v->heur_off = k->heur_off;
+	v->scr_last = k->scr_last;
+	v->scr_last_n = k->scr_last_n;
+	v->scr_modal = k->scr_modal;
+	v->scr_prop = k->scr_prop;
+
+	v->sel_a = v->sel_b = KGENOME_BROKEN;
+	v->find_at = KGENOME_BROKEN;
+	v->bar_open = -1;
+	v->bar_sel = -1;
+	v->bar_sub = -1;
+	/*
+	 * -1 IS NOWHERE, AND ZERO IS OBJECT ZERO.
+	 *
+	 * main says exactly this where it first builds the view, and the clear
+	 * above undid it - so it has to be said again here, which is what this
+	 * whole block is for.
+	 *
+	 * What it cost: on_object takes its first branch whenever into_obj is
+	 * not negative, and that branch folds only the VERDICT into a row that
+	 * already exists. It sets no name, no bytes and no parse, and it does
+	 * not count the object. So the first thing the engine reported - which
+	 * is THE FILE ITSELF - went into an empty row 0 and was then
+	 * overwritten by the first child.
+	 *
+	 * The file therefore had no row of its own, and with no row for the
+	 * file there were no REGION rows either: every one of them hangs off
+	 * the object whose extents they are. A PDF opened with a database
+	 * showed its children and nothing else - forty-seven rows of "Raw"
+	 * where the format and the regions belonged. Opened WITHOUT a database
+	 * there is no scan, on_object never runs, into_obj is never read, and
+	 * the same file came up perfectly. That difference is why this read as
+	 * the PDF parser having lost its regions rather than as the viewer
+	 * having lost the file.
+	 */
+	v->into_obj = -1;
+}
+
+
+/*
  * OPEN A RUNNING PROCESS. 1 when there is something to look at.
  *
  * Shaped like file_open deliberately: it resets the view the same way, sets
@@ -54,28 +168,12 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	struct kof_walk_option wo;
 	struct kof_walk_api   *w;
 	struct kof_proc_build  b;
-	static uint8_t rec[KOF_PROC_REC_MAX];
+	/* Built here and copied into the view after its clear: v->map points at the
+	 * view's own copy (v->proc_rec), so two views never share a record. */
+	uint8_t rec[KOF_PROC_REC_MAX];
 	uint32_t n = 0, pids[1];
 	int err = 0;
-	struct kof_range *ext   = v->ext;
-	struct kof_range *ext2  = v->ext2;
-	/*
-	 * The blocks a reader TICKED, and the mode they are in.
-	 *
-	 * Compacted to the front here rather than after the clear, because the
-	 * clear is what takes the count with it. What was not ticked was the
-	 * engine's suggestion about the file being closed and goes with it.
-	 */
-	struct mtn_block *plg   = v->ed.dr.blk;
-	uint32_t n_plg = 0;
-	struct kof_range *probe = v->probe;
-	uint32_t          cap   = v->ed.dr.decl_cap;
-	struct kv_syn    *syn   = v->syn;
-	char basedir[sizeof v->basedir];
-	char dbdir[sizeof v->dbdir];
-	char pathdir[sizeof v->pathdir];
-	struct kv_fam_ui *fam = v->fam;     /* the Pathogens catalog is the session's: it outlives the file */
-	int  heur_off = v->heur_off;
+	struct kv_session ses;
 
 	/*
 	 * ASKED ONCE HERE, BEFORE ANYTHING IS TORN DOWN. A pid that cannot be
@@ -102,47 +200,17 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 		return 0;
 	}
 
-	snprintf(basedir, sizeof basedir, "%s", v->basedir);
-	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
-	snprintf(pathdir, sizeof pathdir, "%s", v->pathdir);
-
-	if (plg) {
-		uint32_t pi;
-
-		for (pi = 0; pi < v->ed.dr.n_blk; pi++)
-			if (plg[pi].picked)
-				plg[n_plg++] = plg[pi];
-	}
-
+	session_take(v, &ses);
 	file_close(v);
 	memset(v, 0, sizeof *v);
-
-	v->eng   = eng;
-	v->ext   = ext;
-	v->ext2  = ext2;
-	v->probe = probe;
-	v->ed.dr.blk   = plg;
-	v->ed.dr.n_blk = n_plg;
-	v->ed.dr.decl_cap = cap;
-	v->syn   = syn;
-	editor_attach(v);
-	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
-	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
-	snprintf(v->pathdir, sizeof v->pathdir, "%s", pathdir);
-	v->fam = fam;
-	v->heur_off = heur_off;
-
-	v->sel_a = v->sel_b = KGENOME_BROKEN;
-	v->find_at = KGENOME_BROKEN;
-	v->bar_open = -1;
-	v->bar_sel = -1;
-	v->bar_sub = -1;
-	v->into_obj = -1;
+	v->eng = eng;
+	session_put(v, &ses);
 
 	v->proc_pid = pid;
 	snprintf(v->pathbuf, sizeof v->pathbuf, "pid:%lu", (unsigned long)pid);
 	v->path = v->pathbuf;
-	v->map = rec;
+	memcpy(v->proc_rec, rec, n);
+	v->map = v->proc_rec;
 	v->map_len = n;
 
 	if (v->eng)
@@ -219,6 +287,12 @@ static void file_close(struct view *v)
 	 * re-execing - and became a leak per file the moment it did not.
 	 */
 	draft_wipe(v);
+	kdet_run_free(v->det);
+	v->det = NULL;
+	kdet_run_free(v->det_own);
+	v->det_own = NULL;
+	kverdict_filemap_free(v->fmap);
+	v->fmap = NULL;
 	/*
 	 * The log's reader goes with the file, and so do the two buffers that
 	 * gather a submission out of it.
@@ -258,7 +332,7 @@ static void file_close(struct view *v)
 	free(v->evt_join);
 	free(v->evt_text);
 	v->evt_join = v->evt_text = NULL;
-	v->evt_join_len = v->evt_text_len = 0;
+	v->evt_text_len = 0;
 	v->evt_have = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
@@ -266,6 +340,7 @@ static void file_close(struct view *v)
 		free(o->diag);
 		kgenome_funcs_free(&o->funcs);
 		kof_codenotes_free(&o->notes);
+		kgenome_callnames_free(&o->calls, NULL);
 		kof_inspect_free(o->fmt, o->info);
 		free(o->sym);
 		dash_drop(o);
@@ -279,7 +354,7 @@ static void file_close(struct view *v)
 	v->n_obj = 0;
 	/*
 	 * ONLY A MAPPING IS UNMAPPED. A process view's v->map is the process
-	 * RECORD - static storage in proc_open, not a file this ever mapped -
+	 * RECORD - the view's own proc_rec, not a file this ever mapped -
 	 * and handing that to munmap is a page it does not own. proc_pid is
 	 * what tells the two apart, because it is the one field that is set
 	 * for one and clear for the other.
@@ -313,8 +388,9 @@ static void view_free(struct view *v)
 	free(v->ext2);
 	free(v->probe);
 	free(v->ed.dr.blk);
-	syn_free(v->syn);
 	fam_free(v);
+	tags_free(v);
+	cfgd_free(v);
 	free(v);
 }
 
@@ -339,37 +415,13 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	void       *map;
 	uint64_t    len;
 	int         fd;
-	/* The session. */
-	struct kof_range *ext   = v->ext;
-	struct kof_range *ext2  = v->ext2;
-	/*
-	 * The blocks a reader TICKED, and the mode they are in.
-	 *
-	 * Compacted to the front here rather than after the clear, because the
-	 * clear is what takes the count with it. What was not ticked was the
-	 * engine's suggestion about the file being closed and goes with it.
-	 */
-	struct mtn_block *plg   = v->ed.dr.blk;
-	uint32_t n_plg = 0;
-	struct kof_range *probe = v->probe;
-	uint32_t          cap   = v->ed.dr.decl_cap;
-	struct kv_syn    *syn   = v->syn;
-	char basedir[sizeof v->basedir];
-	char dbdir[sizeof v->dbdir];
-	char pathdir[sizeof v->pathdir];
-	struct kv_fam_ui *fam = v->fam;     /* the Pathogens catalog is the session's: it outlives the file */
+	struct kv_session ses;
 	char keep[KOF_DUMP_PATH_ROOM];
 	/*
 	 * Kept only when this is the same file being rebuilt - which is what
 	 * the menu item does - and dropped when it is a different one.
 	 */
 	int  emu_mode;
-	/*
-	 * Kept ACROSS files as well, unlike emu_mode: it is how the reader
-	 * asked to be shown a document, not an answer about one object, and a
-	 * researcher stepping through a directory with it set means it.
-	 */
-	int  heur_off = v->heur_off;
 
 	snprintf(keep, sizeof keep, "%s", path);
 	emu_mode = (v->path && strcmp(v->path, keep) == 0) ? v->emu_mode : 0;
@@ -395,68 +447,12 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 		return 0;
 	}
 
-	snprintf(basedir, sizeof basedir, "%s", v->basedir);
-	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
-	snprintf(pathdir, sizeof pathdir, "%s", v->pathdir);
-
-	if (plg) {
-		uint32_t pi;
-
-		for (pi = 0; pi < v->ed.dr.n_blk; pi++)
-			if (plg[pi].picked)
-				plg[n_plg++] = plg[pi];
-	}
-
+	session_take(v, &ses);
 	file_close(v);
 	memset(v, 0, sizeof *v);
-
-	v->eng   = eng;
-	v->ext   = ext;
-	v->ext2  = ext2;
-	v->probe = probe;
-	v->ed.dr.blk   = plg;
-	v->ed.dr.n_blk = n_plg;
-	v->ed.dr.decl_cap = cap;
-	v->syn   = syn;
-	editor_attach(v);       /* the clear above zeroed what it borrows */
-	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
-	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
-	snprintf(v->pathdir, sizeof v->pathdir, "%s", pathdir);
-	v->fam = fam;
+	v->eng = eng;
+	session_put(v, &ses);
 	v->emu_mode = emu_mode;
-	v->heur_off = heur_off;
-
-	/* The fields whose cleared value is not their resting value. */
-	v->sel_a = v->sel_b = KGENOME_BROKEN;
-	v->find_at = KGENOME_BROKEN;
-	v->bar_open = -1;
-	v->bar_sel = -1;
-	v->bar_sub = -1;
-	/*
-	 * -1 IS NOWHERE, AND ZERO IS OBJECT ZERO.
-	 *
-	 * main says exactly this where it first builds the view, and the clear
-	 * above undid it - so it has to be said again here, which is what this
-	 * whole block is for.
-	 *
-	 * What it cost: on_object takes its first branch whenever into_obj is
-	 * not negative, and that branch folds only the VERDICT into a row that
-	 * already exists. It sets no name, no bytes and no parse, and it does
-	 * not count the object. So the first thing the engine reported - which
-	 * is THE FILE ITSELF - went into an empty row 0 and was then
-	 * overwritten by the first child.
-	 *
-	 * The file therefore had no row of its own, and with no row for the
-	 * file there were no REGION rows either: every one of them hangs off
-	 * the object whose extents they are. A PDF opened with a database
-	 * showed its children and nothing else - forty-seven rows of "Raw"
-	 * where the format and the regions belonged. Opened WITHOUT a database
-	 * there is no scan, on_object never runs, into_obj is never read, and
-	 * the same file came up perfectly. That difference is why this read as
-	 * the PDF parser having lost its regions rather than as the viewer
-	 * having lost the file.
-	 */
-	v->into_obj = -1;
 
 	snprintf(v->pathbuf, sizeof v->pathbuf, "%s", keep);
 	v->path = v->pathbuf;
@@ -526,18 +522,21 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 				v->evt_text = malloc(EVT_TEXT_MAX);
 				log_scan_verbs(v);
 				log_window(v);
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "event log: %s/%s, sensor build %lu, "
+					 "%llu event(s)",
+					 kof_evt_platform_name((uint8_t)lh->platform),
+					 kof_evt_arch_name((uint8_t)lh->arch),
+					 (unsigned long)lh->build,
+					 (unsigned long long)v->log_events);
+				v->act_ok = 1;
 			} else {
+				/* The reader's own reason, kept: the success line
+				 * is only written for a log that opened. */
+				v->act_ok = 0;
 				snprintf(v->act_msg, sizeof v->act_msg,
 					 "event log: %s", why);
 			}
-			snprintf(v->act_msg, sizeof v->act_msg,
-				 "event log: %s/%s, sensor build %lu, "
-				 "%llu event(s)",
-				 kof_evt_platform_name((uint8_t)lh->platform),
-				 kof_evt_arch_name((uint8_t)lh->arch),
-				 (unsigned long)lh->build,
-				 (unsigned long long)v->log_events);
-			v->act_ok = 1;
 		}
 	}
 
@@ -715,19 +714,16 @@ int main(int argc, char **argv)
 	if (db)
 		snprintf(v->dbdir, sizeof v->dbdir, "%s", db);
 	/*
-	 * THE TAG SOURCES, loaded once for the session: the directory is
-	 * `<bases>/syndromes` unless --syndromes names another, and the
-	 * diagnose sources a tag is counted in are `<bases>/diagnoses`. With no
-	 * --bases the tree is the one in the working directory.
+	 * THE TAG CATALOG'S DIRECTORY: `<bases>/syndromes` unless --syndromes
+	 * names another. With no --bases the tree is the one in the working directory.
 	 */
 	{
-		char sdir[256], ddir[256];
+		char sdir[256];
 
 		snprintf(sdir, sizeof sdir, "%s/syndromes",
 			 base[0] ? base : "bases");
-		snprintf(ddir, sizeof ddir, "%s/diagnoses",
-			 base[0] ? base : "bases");
-		v->syn = syn_new(syn_dir ? syn_dir : sdir, ddir);
+		/* Manage > Syndromes keeps its files where the tag sources are (--syndromes, else <bases>/syndromes). */
+		snprintf(v->syndir, sizeof v->syndir, "%s", syn_dir ? syn_dir : sdir);
 		editor_attach(v);
 	}
 
@@ -769,6 +765,9 @@ int main(int argc, char **argv)
 		if (!v->eng)
 			fprintf(stderr, "kofviewer: cannot load a database from "
 					"%s\n", db);
+		else
+			/* The names of the catalog ids: the engine reads the directories the dialogs write, the verdict then shows them. */
+			(void)keng_catalog_load(v->eng, v->pathdir[0] ? v->pathdir : NULL, v->syndir);
 	}
 	/* A pid and a path are two ways of naming what to look at; the pid
 	 * wins when both are given, because it is the more specific ask. */

@@ -421,15 +421,18 @@ const char *kof_evt_verb_name(uint16_t verb)
 
 /* ---- reading a record back --------------------------------------------- */
 
-/* KNOWN DEFECT WP12-10 (2026-10-24, M) [sev M]: at() (and every reader of the text
- * arena; chan_posix.c kof_chan_next hands the record back verbatim) assumes a
- * NUL the producer need not write. Trigger: an arena of 540 bytes of "A".
- * Effect: object/image/cmdline/render/ field run off the record: SIGSEGV with a
- * guard page. Reproducer: orbit_evt.c case_hostile. Fix: bound the reads by
- * sizeof e->text (strnlen). */
+/*
+ * The text arena is not guaranteed to hold a NUL: a record from the channel is
+ * handed back verbatim and one from a log is whatever the file said. A string
+ * that does not end inside the arena is not a string, so it answers "" rather
+ * than letting a reader run off the record (the arena's other bytes stay
+ * reachable through kof_evt_content and the data accessors).
+ */
 static const char *at(const struct kof_evt *e, uint16_t off)
 {
 	if (!e || off == KOF_TEXT_NONE || off >= sizeof e->text)
+		return "";
+	if (!memchr(e->text + off, 0, sizeof e->text - off))
 		return "";
 	return e->text + off;
 }

@@ -184,13 +184,11 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	 */
 	switch (in->op) {
 	case KGENOME_CELL_CALL:
-		/* KNOWN DEFECT X11 (2026-10-24, R) [sev M]: kgenome_cell_state_track pushes a CALL's return address and
-		 * nothing pops it, because the callee's RET is never walked in line. Trigger: `push rbx; call f;
-		 * pop rbx`. Effect: the pop takes the return address, rbx becomes the known constant at_va+len
-		 * (0x400006) and a later syscall number or argument is read wrong. Reproducer: none committed
-		 * (hand-made ELF, report fix_gbin2/further_defects.md). Fix: push only for `call next`; for any
-		 * other call leave the model stack as it was (the callee pops its own return address). */
-		if (in->at_va != KGENOME_BROKEN)
+		/* A call that returns on its own leaves the model stack as it was (call_plain): its callee
+		 * pops its own return address, and a `pop` of the walked function must take its own push. */
+		if (k->call_plain)
+			;
+		else if (in->at_va != KGENOME_BROKEN)
 			stk_push(k, in->at_va + in->len, 1);
 		else
 			stk_push(k, 0, 0);

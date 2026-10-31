@@ -257,21 +257,26 @@ const uint8_t *view_bytes(const struct view *v, uint64_t *n)
 /* The file offset of byte `at` of the selected region, and how much of that
  * extent is left. Regions are not contiguous, so a pane that walked the file
  * would show bytes the region does not contain. */
-uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run)
+uint64_t ext_map(const struct kof_range *ext, uint32_t n_ext, uint64_t at, uint64_t *run)
 {
 	uint32_t i;
 
-	for (i = 0; i < v->n_ext; i++) {
-		if (at < v->ext[i].len) {
+	for (i = 0; i < n_ext; i++) {
+		if (at < ext[i].len) {
 			if (run)
-				*run = v->ext[i].len - at;
-			return v->ext[i].off + at;
+				*run = ext[i].len - at;
+			return ext[i].off + at;
 		}
-		at -= v->ext[i].len;
+		at -= ext[i].len;
 	}
 	if (run)
 		*run = 0;
 	return 0;
+}
+
+uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run)
+{
+	return ext_map(v->ext, v->n_ext, at, run);
 }
 
 /* The inverse of view_map: where in the region a file offset sits, or KGENOME_BROKEN

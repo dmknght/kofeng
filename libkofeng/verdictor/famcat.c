@@ -20,6 +20,15 @@ void kof_famcat_init(struct kof_famcat *c, struct kof_famcat_fam *fam, uint32_t 
 	c->cap_var = var ? cap_var : 0u;
 	c->n_fam = c->n_var = 0u;
 	c->rev = 0u;
+	c->hash = NULL;
+	c->hash_ud = NULL;
+	c->clash[0] = 0;
+}
+
+void kof_famcat_set_idhash(struct kof_famcat *c, kof_catid_hash_fn hash, void *ud)
+{
+	c->hash = hash;
+	c->hash_ud = ud;
 }
 
 uint32_t kof_famcat_cap_family(const struct kof_famcat *c)
@@ -45,11 +54,11 @@ const char *kof_famcat_status_text(enum kof_famcat_status st)
 	case KOF_FAMCAT_FULL:       return "the catalog is full";
 	case KOF_FAMCAT_NO_FAMILY:  return "no such family";
 	case KOF_FAMCAT_NO_TYPE:    return "Select at least one Malware type";
-	case KOF_FAMCAT_DUP_TYPES:  return "same types as another variant";
 	case KOF_FAMCAT_VARIANT_NAME: return "family name too long (variants)";
-	case KOF_FAMCAT_BAD_COMMENT: return "comment: no * or / and printable only";
-	case KOF_FAMCAT_COMMENT_TOO_LONG: return "comment is over 120 characters";
+	case KOF_FAMCAT_BAD_COMMENT: return kof_catcomment_text(KOF_CATCOMMENT_BAD_CHAR);
+	case KOF_FAMCAT_COMMENT_TOO_LONG: return kof_catcomment_text(KOF_CATCOMMENT_TOO_LONG);
 	case KOF_FAMCAT_NO_FREE_LETTER: return "no deleted variant name to reuse";
+	case KOF_FAMCAT_ID_CLASH:       return "that name makes the id of another item";
 	}
 	return "unknown status";
 }
@@ -65,15 +74,11 @@ enum kof_famcat_status kof_famcat_name_check(const char *name)
 
 enum kof_famcat_status kof_famcat_comment_check(const char *comment)
 {
-	size_t i;
-
-	if (!comment)
-		return KOF_FAMCAT_OK;
-	if (strnlen(comment, KOF_FAMCAT_COMMENT_MAX + 1u) > KOF_FAMCAT_COMMENT_MAX)
-		return KOF_FAMCAT_COMMENT_TOO_LONG;
-	for (i = 0; comment[i]; i++)
-		if (!kof_comment_char((unsigned char)comment[i]))
-			return KOF_FAMCAT_BAD_COMMENT;
+	switch (kof_catcomment_check(comment)) {
+	case KOF_CATCOMMENT_TOO_LONG: return KOF_FAMCAT_COMMENT_TOO_LONG;
+	case KOF_CATCOMMENT_BAD_CHAR: return KOF_FAMCAT_BAD_COMMENT;
+	default: break;
+	}
 	return KOF_FAMCAT_OK;
 }
 
@@ -179,17 +184,6 @@ static enum kof_famcat_status types_check(uint32_t types)
 	return types ? KOF_FAMCAT_OK : KOF_FAMCAT_NO_TYPE;
 }
 
-/* Does a variant of `fam` other than `skip` (an index, or UINT32_MAX for none) have exactly this set? */
-static int types_taken(const struct kof_famcat *c, uint32_t fam, uint32_t types, uint32_t skip)
-{
-	uint32_t i;
-
-	for (i = 0; i < c->n_var; i++)
-		if (i != skip && c->var[i].family == fam && c->var[i].types == types)
-			return 1;
-	return 0;
-}
-
 /* Does a variant of `fam` use letter number n? */
 static int letter_used(const struct kof_famcat *c, uint32_t fam, uint32_t n)
 {
@@ -212,26 +206,41 @@ uint32_t kof_famcat_free_letters(const struct kof_famcat *c, uint32_t fam)
 	return c->fam[fam].next - 1u - used;
 }
 
-/* The letter number the next variant of `fam` takes: the counter's, or with `reuse` the smallest below it no variant uses (0: none). */
-static uint32_t next_letter(const struct kof_famcat *c, uint32_t fam, int reuse)
+uint32_t kof_famcat_free_letter(const struct kof_famcat *c, uint32_t fam, uint32_t k)
 {
-	uint32_t n;
+	uint32_t n, m, i;
 
-	if (!reuse)
-		return c->fam[fam].next;
-	for (n = 1; n < c->fam[fam].next; n++)
-		if (!letter_used(c, fam, n))
+	if (fam >= c->n_fam || k >= kof_famcat_free_letters(c, fam))
+		return 0u;
+	/* The k-th unused number is the smallest n with n - (used numbers <= n) == k + 1. Start at k + 1 (never above the answer) and
+	 * add the used ones at or below n until n stops moving: at most one step per variant, whatever the counter is. */
+	n = k + 1u;
+	for (;;) {
+		m = 0u;
+		for (i = 0; i < c->n_var; i++)
+			m += c->var[i].family == fam && c->var[i].letter <= n;
+		if (n == k + 1u + m)
 			return n;
-	return 0u;
+		n = k + 1u + m;
+	}
 }
 
-enum kof_famcat_status kof_famcat_variant_name(const struct kof_famcat *c, uint32_t fam, int reuse, char *out, uint32_t cap)
+/* The letter number a new variant of `fam` takes: letter 0 is the counter's; another is taken only when it is a deleted one of this
+ * family (below the counter, no variant uses it), else 0: none. */
+static uint32_t next_letter(const struct kof_famcat *c, uint32_t fam, uint32_t letter)
+{
+	if (!letter)
+		return c->fam[fam].next;
+	return letter < c->fam[fam].next && !letter_used(c, fam, letter) ? letter : 0u;
+}
+
+enum kof_famcat_status kof_famcat_variant_name(const struct kof_famcat *c, uint32_t fam, uint32_t letter, char *out, uint32_t cap)
 {
 	uint32_t n;
 
 	if (fam >= c->n_fam)
 		return KOF_FAMCAT_NO_FAMILY;
-	n = next_letter(c, fam, reuse);
+	n = next_letter(c, fam, letter);
 	if (!n)
 		return KOF_FAMCAT_NO_FREE_LETTER;
 	return lettered(c->fam[fam].name, n, out, cap);
@@ -248,6 +257,151 @@ enum kof_famcat_status kof_famcat_first_variant_name(const struct kof_famcat *c,
 	if (strlen(family) > kof_famcat_family_max(c))
 		return KOF_FAMCAT_VARIANT_NAME;
 	return lettered(family, 1u, out, cap);
+}
+
+/* ---- ids: a function of the names (catstore.h), kept nowhere ----------------------------------------------------------- */
+
+static void var_letters(const struct kof_famcat *c, uint32_t v, char *out, uint32_t cap)
+{
+	out[0] = 0;
+	(void)kof_famcat_letter_text(c->var[v].letter, out, cap);
+}
+
+uint64_t kof_famcat_fam_id_at(const struct kof_famcat *c, uint32_t f)
+{
+	return f < c->n_fam ? kof_catid_of(c->hash, c->hash_ud, 'F', c->fam[f].name, NULL) : 0u;
+}
+
+uint64_t kof_famcat_var_id_at(const struct kof_famcat *c, uint32_t v)
+{
+	char letters[16];
+
+	if (v >= c->n_var || c->var[v].family >= c->n_fam)
+		return 0u;
+	var_letters(c, v, letters, sizeof letters);
+	return kof_catid_of(c->hash, c->hash_ud, 'V', c->fam[c->var[v].family].name, letters);
+}
+
+/* Does an item outside family `skip` (UINT32_MAX: none) already make `id`? Its name goes to who[] ("Mirai", "Mirai_A"). The family
+ * `skip` is the one being renamed: its own items are checked as new ids, not as old ones. */
+static int id_taken(const struct kof_famcat *c, uint64_t id, uint32_t skip, char *who, size_t cap)
+{
+	uint32_t i;
+
+	for (i = 0; i < c->n_fam; i++)
+		if (i != skip && kof_famcat_fam_id_at(c, i) == id) {
+			snprintf(who, cap, "%s", c->fam[i].name);
+			return 1;
+		}
+	for (i = 0; i < c->n_var; i++)
+		if (c->var[i].family != skip && kof_famcat_var_id_at(c, i) == id) {
+			snprintf(who, cap, "%s", c->var[i].name);
+			return 1;
+		}
+	return 0;
+}
+
+/* THE ONE CLASH CHECK of an item about to join: the id `id` of the item named `mine` against every item of the catalog outside family
+ * `skip`, and against `others` (ids of the same operation's other new items). Fills c->clash with both names (what a loader's reason
+ * and a dialog's row show) and answers KOF_FAMCAT_ID_CLASH, else OK. An id the names cannot make (0) is not a clash. */
+static enum kof_famcat_status clash_check(struct kof_famcat *c, uint64_t id, const char *mine, uint32_t skip,
+					  const uint64_t *others, const char *const *other_names, uint32_t n_others)
+{
+	char who[KOF_FAMCAT_NAME_MAX + 1];
+	uint32_t i;
+
+	if (!id)
+		return KOF_FAMCAT_OK;
+	if (!id_taken(c, id, skip, who, sizeof who)) {
+		for (i = 0; i < n_others; i++)
+			if (others[i] == id) {
+				snprintf(who, sizeof who, "%s", other_names[i]);
+				goto clash;
+			}
+		return KOF_FAMCAT_OK;
+	}
+clash:
+	snprintf(c->clash, sizeof c->clash, "id clash: \"%s\" and \"%s\" make the same id", mine, who);
+	return KOF_FAMCAT_ID_CLASH;
+}
+
+const char *kof_famcat_why(const struct kof_famcat *c, enum kof_famcat_status st)
+{
+	return st == KOF_FAMCAT_ID_CLASH && c->clash[0] ? c->clash : kof_famcat_status_text(st);
+}
+
+static int find_family(const struct kof_famcat *c, const char *family)
+{
+	uint32_t i;
+
+	for (i = 0; family && i < c->n_fam; i++)
+		if (!strcasecmp(c->fam[i].name, family))
+			return (int)i;
+	return -1;
+}
+
+/* The letter number of `variant` ("A" or "<family>_A") in family index `f`; 0 when it is not letters. */
+static uint32_t variant_letter(const struct kof_famcat *c, uint32_t f, const char *variant)
+{
+	size_t fl = strlen(c->fam[f].name);
+
+	if (!variant)
+		return 0;
+	if (!strncmp(variant, c->fam[f].name, fl) && variant[fl] == '_')
+		variant += fl + 1u;
+	return kof_famcat_letter_parse(variant);
+}
+
+/* The variant `variant` ("A" or "<family>_A") of family index `f`, or -1. */
+static int find_variant(const struct kof_famcat *c, uint32_t f, const char *variant)
+{
+	uint32_t i, n = variant_letter(c, f, variant);
+
+	for (i = 0; n && i < c->n_var; i++)
+		if (c->var[i].family == f && c->var[i].letter == n)
+			return (int)i;
+	return -1;
+}
+
+/*
+ * THE ONE DECISION "is this variant deleted?", used by the builder and by check-catalog (ksb_meta_check). A deleted variant is a letter the
+ * family ISSUED (below its counter, which never goes down) that no variant of it has now; a letter at or above the counter was never issued
+ * (a typo), and a family with no record at all cannot say. The state is derived from the catalog alone: nothing is stored in a diagnose.
+ */
+enum kof_famcat_letter_state kof_famcat_variant_state(const struct kof_famcat *c, const char *family, const char *variant)
+{
+	int f = find_family(c, family);
+	uint32_t n;
+
+	if (f < 0)
+		return KOF_FAMCAT_LS_NO_FAMILY;
+	n = variant_letter(c, (uint32_t)f, variant);
+	if (!n)
+		return KOF_FAMCAT_LS_BAD;
+	if (find_variant(c, (uint32_t)f, variant) >= 0)
+		return KOF_FAMCAT_LS_LIVE;
+	return n < c->fam[f].next ? KOF_FAMCAT_LS_DELETED : KOF_FAMCAT_LS_NEVER;
+}
+
+uint64_t kof_famcat_family_id(const struct kof_famcat *c, const char *family)
+{
+	int f = find_family(c, family);
+
+	return f < 0 ? 0u : kof_famcat_fam_id_at(c, (uint32_t)f);
+}
+
+uint64_t kof_famcat_variant_id(const struct kof_famcat *c, const char *family, const char *variant)
+{
+	int f = find_family(c, family), v = f < 0 ? -1 : find_variant(c, (uint32_t)f, variant);
+
+	return v < 0 ? 0u : kof_famcat_var_id_at(c, (uint32_t)v);
+}
+
+uint32_t kof_famcat_variant_types(const struct kof_famcat *c, const char *family, const char *variant)
+{
+	int f = find_family(c, family), v = f < 0 ? -1 : find_variant(c, (uint32_t)f, variant);
+
+	return v < 0 ? 0u : c->var[v].types;
 }
 
 enum kof_famcat_status kof_famcat_add_family(struct kof_famcat *c, const char *name, const char *comment, uint32_t types,
@@ -273,6 +427,14 @@ enum kof_famcat_status kof_famcat_add_family(struct kof_famcat *c, const char *n
 		return KOF_FAMCAT_FULL;
 	if (var_exists(c, first))
 		return KOF_FAMCAT_DUP_VARIANT;
+	{
+		uint64_t fid = kof_catid_of(c->hash, c->hash_ud, 'F', name, NULL);
+		uint64_t vid = kof_catid_of(c->hash, c->hash_ud, 'V', name, "A");
+
+		if ((st = clash_check(c, fid, name, UINT32_MAX, NULL, NULL, 0u)) != KOF_FAMCAT_OK ||
+		    (st = clash_check(c, vid, first, UINT32_MAX, &fid, (const char *const *)&name, 1u)) != KOF_FAMCAT_OK)
+			return st;
+	}
 	memcpy(c->fam[c->n_fam].name, name, strlen(name) + 1u);
 	memcpy(c->var[c->n_var].name, first, strlen(first) + 1u);
 	c->fam[c->n_fam].next = 2u;
@@ -288,12 +450,12 @@ enum kof_famcat_status kof_famcat_add_family(struct kof_famcat *c, const char *n
 	return KOF_FAMCAT_OK;
 }
 
-/* Add variant letter number n to family `fam`: the one code of add_variant (n from the counter or a reused letter) and of a loaded
+/* Add variant letter number n to family `fam`: the one code of add_variant (n from the counter or a chosen deleted letter) and of a loaded
  * file (n from the file). The counter never goes down; a letter at or above it moves it to n + 1. */
 static enum kof_famcat_status put_variant(struct kof_famcat *c, uint32_t fam, uint32_t n, const char *comment, uint32_t types,
 					  uint32_t *var)
 {
-	char name[KOF_FAMCAT_NAME_MAX + 1];
+	char name[KOF_FAMCAT_NAME_MAX + 1], letters[16];
 	enum kof_famcat_status st;
 
 	if (fam >= c->n_fam)
@@ -307,17 +469,19 @@ static enum kof_famcat_status put_variant(struct kof_famcat *c, uint32_t fam, ui
 	st = types_check(types);
 	if (st != KOF_FAMCAT_OK)
 		return st;
-	if (types_taken(c, fam, types, UINT32_MAX))
-		return KOF_FAMCAT_DUP_TYPES;
 	if (c->n_var >= c->cap_var)
 		return KOF_FAMCAT_FULL;
 	if (letter_used(c, fam, n) || var_exists(c, name))
 		return KOF_FAMCAT_DUP_VARIANT;
+	(void)kof_famcat_letter_text(n, letters, sizeof letters);
+	st = clash_check(c, kof_catid_of(c->hash, c->hash_ud, 'V', c->fam[fam].name, letters), name, UINT32_MAX, NULL, NULL, 0u);
+	if (st != KOF_FAMCAT_OK)
+		return st;
 	memcpy(c->var[c->n_var].name, name, strlen(name) + 1u);
 	comment_put(c->var[c->n_var].comment, comment);
 	c->var[c->n_var].letter = n;
 	if (n >= c->fam[fam].next)
-		c->fam[fam].next = n + 1u;      /* a reused letter is below the counter, which never goes down */
+		c->fam[fam].next = n + 1u;      /* a chosen deleted letter is below the counter, which never goes down */
 	c->var[c->n_var].family = fam;
 	c->var[c->n_var].types = types;
 	if (var)
@@ -328,14 +492,14 @@ static enum kof_famcat_status put_variant(struct kof_famcat *c, uint32_t fam, ui
 }
 
 enum kof_famcat_status kof_famcat_add_variant(struct kof_famcat *c, uint32_t fam, const char *comment, uint32_t types,
-					      int reuse, uint32_t *var)
+					      uint32_t letter, uint32_t *var)
 {
 	char name[KOF_FAMCAT_NAME_MAX + 1];
-	enum kof_famcat_status st = kof_famcat_variant_name(c, fam, reuse, name, sizeof name);
+	enum kof_famcat_status st = kof_famcat_variant_name(c, fam, letter, name, sizeof name);
 
 	if (st != KOF_FAMCAT_OK)
 		return st;
-	return put_variant(c, fam, next_letter(c, fam, reuse), comment, types, var);
+	return put_variant(c, fam, next_letter(c, fam, letter), comment, types, var);
 }
 
 /* ---- restoring a saved catalog (the loader's three steps) ------------------------------------------------------- */
@@ -352,6 +516,9 @@ enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *
 		return KOF_FAMCAT_VARIANT_NAME;
 	if (c->n_fam >= c->cap_fam)
 		return KOF_FAMCAT_FULL;
+	st = clash_check(c, kof_catid_of(c->hash, c->hash_ud, 'F', name, NULL), name, UINT32_MAX, NULL, NULL, 0u);
+	if (st != KOF_FAMCAT_OK)
+		return st;
 	memcpy(c->fam[c->n_fam].name, name, strlen(name) + 1u);
 	c->fam[c->n_fam].next = 1u;
 	if (fam)
@@ -432,7 +599,7 @@ int kof_famcat_dirty(const struct kof_famcat *c, const struct kof_famcat *snap)
 	return 0;
 }
 
-/* The checks of a change to variant `var`: it exists, the types are allowed and no sibling has the set, the comment is allowed. */
+/* The checks of a change to variant `var`: it exists, the types are allowed, the comment is allowed. */
 static enum kof_famcat_status variant_check(const struct kof_famcat *c, uint32_t var, const char *comment, uint32_t types)
 {
 	enum kof_famcat_status st;
@@ -442,8 +609,6 @@ static enum kof_famcat_status variant_check(const struct kof_famcat *c, uint32_t
 	st = types_check(types);
 	if (st != KOF_FAMCAT_OK)
 		return st;
-	if (types_taken(c, c->var[var].family, types, var))
-		return KOF_FAMCAT_DUP_TYPES;
 	return kof_famcat_comment_check(comment);
 }
 
@@ -470,6 +635,46 @@ enum kof_famcat_status kof_famcat_set_variant(struct kof_famcat *c, uint32_t var
 	return KOF_FAMCAT_OK;
 }
 
+/* The name and id the family (v == UINT32_MAX) or variant `v` of the family being renamed would have under `name`. */
+static uint64_t renamed(const struct kof_famcat *c, const char *name, uint32_t v, char *label, size_t cap)
+{
+	char letters[16];
+
+	if (v == UINT32_MAX) {
+		snprintf(label, cap, "%s", name);
+		return kof_catid_of(c->hash, c->hash_ud, 'F', name, NULL);
+	}
+	var_letters(c, v, letters, sizeof letters);
+	snprintf(label, cap, "%s_%s", name, letters);
+	return kof_catid_of(c->hash, c->hash_ud, 'V', name, letters);
+}
+
+/* The new ids of a renamed family (its own, last, and every variant's) against the other families' items and against each other.
+ * Quadratic in the variants of ONE family (a dialog operation); nothing is allocated. */
+static enum kof_famcat_status rename_clash(struct kof_famcat *c, uint32_t fam, const char *name)
+{
+	uint32_t i, j;
+
+	for (i = 0; i <= c->n_var; i++) {
+		uint32_t vi = i < c->n_var ? i : UINT32_MAX;
+		char label[KOF_FAMCAT_NAME_MAX + 1u], other[KOF_FAMCAT_NAME_MAX + 1u];
+		uint64_t id;
+		enum kof_famcat_status st;
+
+		if (vi != UINT32_MAX && c->var[vi].family != fam)
+			continue;
+		id = renamed(c, name, vi, label, sizeof label);
+		if ((st = clash_check(c, id, label, fam, NULL, NULL, 0u)) != KOF_FAMCAT_OK)
+			return st;
+		for (j = 0; id && j < i; j++)
+			if (c->var[j].family == fam && renamed(c, name, j, other, sizeof other) == id) {
+				snprintf(c->clash, sizeof c->clash, "id clash: \"%s\" and \"%s\" make the same id", label, other);
+				return KOF_FAMCAT_ID_CLASH;
+			}
+	}
+	return KOF_FAMCAT_OK;
+}
+
 enum kof_famcat_status kof_famcat_rename_family(struct kof_famcat *c, uint32_t fam, const char *name)
 {
 	enum kof_famcat_status st;
@@ -490,6 +695,9 @@ enum kof_famcat_status kof_famcat_rename_family(struct kof_famcat *c, uint32_t f
 	/* The longest suffix is the counter's, which deletes never lower. */
 	if (strlen(name) + 1u + letters_of(c->fam[fam].next) > KOF_FAMCAT_NAME_MAX)
 		return KOF_FAMCAT_VARIANT_NAME;
+	st = rename_clash(c, fam, name);
+	if (st != KOF_FAMCAT_OK)
+		return st;
 	/* A variant is "<family>_<letters>": the letters stay, the family part is the new name. */
 	old = strlen(c->fam[fam].name);
 	for (i = 0; i < c->n_var; i++)

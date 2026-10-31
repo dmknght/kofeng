@@ -389,12 +389,14 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 	 * says so: a path shortened without saying so is what a later rule
 	 * matches and is wrong about.
 	 */
-	/* KNOWN DEFECT WP12-19 (2026-10-24, M) [sev M]: kofw_evt_to_kof clamps text_len
-	 * to the DESTINATION arena (540) but the source arena is 484. Trigger: a
-	 * kofw_evt with text_len 485..540. Effect: up to 56 bytes copied from
-	 * past the record. Reproducer: fuzz orbit/wevt seed 1 iter 62. Fix:
-	 * clamp to sizeof in->text first. */
 	n = in->text_len;
+	/* A text_len above the SOURCE arena (a record that lies, or one cut in
+	 * transit) names bytes that are not in the record: the source bounds it
+	 * first, then the destination. */
+	if (n > sizeof in->text) {
+		n = sizeof in->text;
+		out->flags |= KOF_EF_TRUNCATED;
+	}
 	if (n > sizeof out->text) {
 		n = sizeof out->text;
 		out->flags |= KOF_EF_TRUNCATED;

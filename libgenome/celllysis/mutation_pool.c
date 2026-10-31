@@ -11,8 +11,7 @@
 
 #include "mutation.h"
 
-uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t norm,
-			  uint32_t *n_out)
+uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t *n_out)
 {
 	struct kgenome_mtn_win w;
 	uint32_t *v, got = 0, k = 0;
@@ -20,7 +19,7 @@ uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t norm,
 
 	if (n_out)
 		*n_out = 0;
-	if (!p || norm >= KGENOME_MUTATION_NORM_COUNT || !kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!p || !kgenome_mtn_win_begin(&w, p, n))
 		return NULL;
 	room = w.n - KGENOME_MUTATION_NG + 1u;
 	/* A span this size is not a block's input; refuse rather than wrap. */
@@ -51,10 +50,9 @@ uint32_t *kgenome_mutation_pool(const uint8_t *p, uint64_t n, uint32_t norm,
  * every older block was made with, now spelled as what it always was. Returns
  * the values ascending and distinct, never more than K.
  */
-uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
-			    uint32_t *out)
+uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t *out)
 {
-	uint32_t np = 0, got, *pool = kgenome_mutation_pool(p, n, norm, &np);
+	uint32_t np = 0, got, *pool = kgenome_mutation_pool(p, n, &np);
 
 	if (!pool)
 		return 0;
@@ -65,14 +63,13 @@ uint32_t kgenome_mutation_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
 }
 
 void kgenome_mutation_member(const uint32_t *pool, uint32_t n_pool, const uint8_t *p,
-		       uint64_t n, uint32_t norm, uint8_t *bits)
+		       uint64_t n, uint8_t *bits)
 {
 	struct kgenome_mtn_win w;
 	uint64_t *bloom = NULL, nb = 1u << 12;
 	uint32_t mask = 0;
 
-	if (!pool || !n_pool || !p || !bits || norm >= KGENOME_MUTATION_NORM_COUNT ||
-	    !kgenome_mtn_win_begin(&w, p, n, norm))
+	if (!pool || !n_pool || !p || !bits || !kgenome_mtn_win_begin(&w, p, n))
 		return;
 	/* Most windows of a sample are in no pool: a bit table says so without a
 	 * search. Without room for it the search is simply done every time. */

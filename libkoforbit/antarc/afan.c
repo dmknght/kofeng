@@ -440,13 +440,12 @@ static int to_evt(struct kofa_fan *f, const char *raw,
 	 * to the nested one, and it costs three comparisons per info record.
 	 */
 	h = (const void *)(raw + sizeof *m);
-	/* KNOWN DEFECT WP12-22 (2026-10-24, M) [sev L]: to_evt walks the info records by
-	 * their own len: an odd len makes h a misaligned pointer to a struct
-	 * that wants 2-byte alignment. Trigger: an odd len (the kernel keeps it
-	 * a multiple of 4). Effect: UBSAN alignment abort. Reproducer: fuzz
-	 * orbit/fan_stream seed 2 iter 6388. Fix: require h->len % 4 == 0 or
-	 * memcpy the header. */
-	while ((const char *)h + sizeof *h <= end && h->len >= sizeof *h &&
+	/* The walk steps by each record's own len, so an odd len would make h a
+	 * misaligned pointer to a struct that wants 2 (and the handle behind it
+	 * 4) bytes of alignment. The kernel keeps len a multiple of 4; a record
+	 * that does not is not one it wrote, and the walk stops there. */
+	while (((uintptr_t)h & 3u) == 0 &&
+	       (const char *)h + sizeof *h <= end && h->len >= sizeof *h &&
 	       (const char *)h + h->len <= end) {
 		const char *h_end = (const char *)h + h->len;
 

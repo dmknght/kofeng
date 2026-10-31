@@ -42,7 +42,7 @@ _Static_assert(sizeof(((struct kuncoat_lzx *)0)->len_len) == KUNCOAT_LZX_LEN_MAX
 _Static_assert(sizeof(((struct kuncoat_lzx *)0)->align_len) == KUNCOAT_LZX_ALIGN_MAX, "aligned tree lengths");
 _Static_assert(sizeof(((struct kuncoat_lzx_huff *)0)->symbol) / sizeof(int16_t) == KUNCOAT_LZX_MAIN_MAX, "the huffman symbols");
 
-_Static_assert(KUNCOAT_BZ_MAX_BLOCK == 900000u && KUNCOAT_BZ_GROUPS == 6u && KUNCOAT_BZ_MAX_CODELEN == 23u, "bzip2 limits");
+_Static_assert(KUNCOAT_BZ_MAX_BLOCK == 900000u && KUNCOAT_BZ_GROUPS == 6u && KUNCOAT_BZ_MAX_CODELEN == 20u, "bzip2 limits (libbz2 refuses a code length above 20: WP5-L-BZ-1)");
 _Static_assert(KUNCOAT_BZ_ALPHA == 256u + 2u, "bzip2: every byte value plus RUNA/RUNB, less one, plus end");
 _Static_assert(KUNCOAT_BZ_MAX_SELECT == 18002u, "bzip2 selector limit");
 _Static_assert(sizeof(((struct kuncoat_bunzip *)0)->tt) / sizeof(uint32_t) == KUNCOAT_BZ_MAX_BLOCK, "the block");

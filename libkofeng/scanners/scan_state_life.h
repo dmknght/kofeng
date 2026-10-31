@@ -134,7 +134,7 @@ struct kof_scan_obj_diag {
  * what the interpreter was asked and has done for ONE object
  *
  * Owner: objctx_emu.c, scan_unpack.c (the stance). Files that touch it:
- * objctx_emu.c, objctx_child.c, scan_unpack.c, scan.c, scan_heur.c.
+ * objctx_emu.c, objctx_child.c, scan_unpack.c, scan.c, scan_forms.c.
  */
 struct kof_scan_obj_emu {
 	/* Whether the emulator has produced a child from the object in hand.
@@ -239,7 +239,7 @@ struct kof_scan_obj_text {
  *
  * Owner: objctx_child.c, scan_walk.c, scan_unpack.c, scan_pipeline.c,
  * scan_facts.c. Files that touch it: objctx_child.c, objctx.c, scan_unpack.c,
- * scan_walk.c, scan_heur.c, scan_pipeline.c, objctx_emu.c, scan.c,
+ * scan_walk.c, scan_forms.c, scan_pipeline.c, objctx_emu.c, scan.c,
  * scan_facts.c.
  */
 struct kof_scan_obj_open {
@@ -267,6 +267,13 @@ struct kof_scan_obj_open {
 	 * when no earlier reason is there. Per object, cleared in obj_begin.
 	 */
 	uint8_t cut;
+	/*
+	 * THE STRUCTURE OF THIS OBJECT DOES NOT HOLD TOGETHER (oc_scan_damaged): a member or a
+	 * directory the parse found lies about where its bytes are. Same channel as `cut`, same
+	 * reason it is not `broken`; the result reads KOF_BROKEN_DAMAGED and limit_hits does not
+	 * move, because no bound fired. Per object, cleared in obj_begin.
+	 */
+	uint8_t damaged;
 	/*
 	 * And which module opened THE OBJECT BEING SCANNED - see
 	 * kof_result.opened_by. Set where that module produces a child,
@@ -355,6 +362,8 @@ struct kof_scan_obj_open {
  * scan.c, scan_verdict.c, objctx.c.
  */
 struct kof_scan_obj {
+	/* The scan's caller looks at the objects (kof_scan_option.reader): set for each object by sx_begin, after the wipe. */
+	uint8_t reader;
 	/* See enum kof_obj_latch. Cleared for every object, in obj_begin. */
 	uint8_t latch[KOF_OL_COUNT];
 	/* See enum kof_prodkind: how many times each product was made for this object. */

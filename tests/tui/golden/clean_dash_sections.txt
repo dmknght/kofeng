@@ -1,0 +1,51 @@
+# golden clean_dash_sections: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │   #  name                                                                               type            flags addr   offset size  link info entsize align entropy  │  │
+ 4| │   0                                                                                     SHT_NULL        -     0x0    0x0    0     0    0    0       0     -        │  │
+ 5| │   1  .note.gnu.build-id                                                                 SHT_NOTE        A     0x350  0x350  36    0    0    0       4     4.14     │  │
+ 6| │   2  .interp                                                                            SHT_PROGBITS    A     0x374  0x374  28    0    0    0       1     3.94     │  │
+ 7| │   3  .hash                                                                              SHT_HASH        A     0x390  0x390  320   5    0    4       8     1.26     │  │
+ 8| │   4  .gnu.hash                                                                          SHT_GNU_HASH    A     0x4d0  0x4d0  48    5    0    0       8     2.94     │  │
+ 9| │   5  .dynsym                                                                            SHT_DYNSYM      A     0x500  0x500  984   6    1    24      8     0.95     │  │
+10| │   6  .dynstr                                                                            SHT_STRTAB      A     0x8d8  0x8d8  582   0    0    0       1     4.90     │  │
+11| │   7  .gnu.version                                                                       SHT_GNU_VERSYM  A     0xb1e  0xb1e  82    5    0    2       2     1.93     │  │
+12| │   8  .gnu.version_r                                                                     SHT_GNU_VERNEED A     0xb70  0xb70  208   6    3    0       8     3.24     │  │
+13| │   9  .rela.dyn                                                                          SHT_RELA        A     0xc40  0xc40  600   5    0    24      8     1.62     │  │
+14| │   10 .rela.plt                                                                          SHT_RELA        AI    0xe98  0xe98  768   5    27   24      8     1.39     │  │
+15| │   11 .init                                                                              SHT_PROGBITS    AX    0x2000 0x2000 27    0    0    0       4     4.24     │  │
+16| │   12 .plt                                                                               SHT_PROGBITS    AX    0x2020 0x2020 528   0    0    16      16    4.12     │  │
+17| │   13 .plt.got                                                                           SHT_PROGBITS    AX    0x2230 0x2230 16    0    0    16      16    3.38     │  │
+18| │   14 .plt.sec                                                                           SHT_PROGBITS    AX    0x2240 0x2240 512   0    0    16      16    3.72     │  │
+19| │   15 .text                                                                              SHT_PROGBITS    AX    0x2440 0x2440 21183 0    0    0       64    6.20     │  │
+20| │   16 .fini                                                                              SHT_PROGBITS    AX    0x7700 0x7700 13    0    0    0       4     3.24     │  │
+21| │   17 .rodata                                                                            SHT_PROGBITS    A     0x8000 0x8000 2292  0    0    0       16    5.00     │  │
+22| │   18 .eh_frame_hdr                                                                      SHT_PROGBITS    A     0x88f4 0x88f4 652   0    0    0       4     4.47     │  │
+23| │   19 .eh_frame                                                                          SHT_PROGBITS    A     0x8b80 0x8b80 2724  0    0    0       8     4.83     │  │
+24| │   20 .gcc_except_table                                                                  SHT_PROGBITS    A     0x9624 0x9624 61    0    0    0       1     4.27     │  │
+25| │   21 .note.gnu.property                                                                 SHT_NOTE        A     0x9668 0x9668 80    0    0    0       8     1.90     │  │
+26| │   22 .note.ABI-tag                                                                      SHT_NOTE        A     0x96b8 0x96b8 32    0    0    0       4     1.56     │  │
+27| │   23 .init_array                                                                        SHT_INIT_ARRAY  WA    0xabf8 0x9bf8 32    0    0    8       8     1.41     │  │
+28| │   24 .fini_array                                                                        SHT_FINI_ARRAY  WA    0xac18 0x9c18 8     0    0    8       8     1.06     │  │
+29| │   25 .data.rel.ro                                                                       SHT_PROGBITS    WA    0xac20 0x9c20 128   0    0    0       32    1.37     │  │
+30| │   26 .dynamic                                                                           SHT_DYNAMIC     WA    0xaca0 0x9ca0 544   6    0    16      8     1.49     │  │
+31| │   27 .got                                                                               SHT_PROGBITS    WA    0xaec0 0x9ec0 320   0    0    8       8     1.43     │  │
+32| │   28 .data                                                                              SHT_PROGBITS    WA    0xb000 0xa000 48    0    0    0       8     1.11     │  │
+33| │   29 .bss                                                                               SHT_NOBITS      WA    0xb040 0xa030 3048  0    0    0       32    -        │  │
+34| │   30 .gnu_debugdata                                                                     SHT_PROGBITS    -     0x0    0xa030 2660  0    0    0       1     7.91     │  │
+35| │   31 .gnu_debuglink                                                                     SHT_PROGBITS    -     0x0    0xaa94 20    0    0    0       4     3.88     │  │
+36| │   32 .shstrtab                                                                          SHT_STRTAB      -     0x0    0xaaa8 318   0    0    0       1     4.32     │  │
+37|-│                                                                                                                                                                    │---
+38| │                                                                                                                                                                    │ ]
+39| │                                                                                                                                                                    │
+40| │                                                                                                                                                                    │
+41| │                                                                                                                                                                    │
+42| │                                                                                                                                                                    │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-33 of 33 items ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  no verdict

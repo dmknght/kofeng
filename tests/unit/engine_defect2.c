@@ -886,6 +886,52 @@ static void step_regions(const struct kof_obj_ctx *ctx)
 
 static void step_layout_overlap(const struct kof_obj_ctx *ctx);
 
+/* N-REGION16: n adjacent sections that alternate CODE and DATA are n + 1 regions with the header; kof_result.region holds KOF_MAX_REGIONS. */
+static unsigned many_n;
+
+static void step_regions_many(const struct kof_obj_ctx *ctx)
+{
+	unsigned k;
+
+	(void)ctx;
+	for (k = 0; k < many_n; k++)
+		note_rv(k & 1u ? kunp_rcstruct_section(".d", 0x1000 + k * 0x100, 0x100, KUNP_PERM_R | KUNP_PERM_W, KOF_SECF_DATA)
+			       : kunp_rcstruct_section(".c", 0x1000 + k * 0x100, 0x100, KUNP_PERM_R | KUNP_PERM_X, KOF_SECF_CODE));
+	note_rv(kunp_rcstruct_image());
+	note_rv(kunp_rcstruct_done());
+}
+
+static void e13_region_clip(void)
+{
+	struct run_out o;
+	int ci;
+
+	g_plus = 0;
+	run_case(step_regions, 0, &o);
+	CK(o.limit_hits == 0u);                         /* a table that fits is no cut */
+	got_free(&o.g);
+	many_n = KOF_MAX_REGIONS - 1u;                  /* exactly KOF_MAX_REGIONS regions: all delivered, no cut */
+	run_case(step_regions_many, 0, &o);
+	ci = child_of(&o.g);
+	CK(ci >= 0);
+	if (ci >= 0) {
+		CK(o.g.o[ci].n_region == KOF_MAX_REGIONS);
+		CK(o.limit_hits == 0u);
+		CK(o.g.o[ci].broken == 0u);
+	}
+	got_free(&o.g);
+	many_n = KOF_MAX_REGIONS;                     /* one region over */
+	run_case(step_regions_many, 0, &o);
+	ci = child_of(&o.g);
+	CK(ci >= 0);
+	if (ci >= 0) {
+		CK(o.g.o[ci].n_region == KOF_MAX_REGIONS);
+		CK(o.limit_hits >= 1u);                 /* the clip is said */
+		CK(o.g.o[ci].broken == KOF_BROKEN_LIMIT);
+	}
+	got_free(&o.g);
+}
+
 static void e13_regions(void)
 {
 	static const struct { uint32_t mask; uint64_t off, len; } want[] = {
@@ -1678,6 +1724,7 @@ int main(void)
 	e11_as();
 	e12_derive();
 	e13_regions();
+	e13_region_clip();
 	e13_edges();
 	e6_sections();
 	e6_full();

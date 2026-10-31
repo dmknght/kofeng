@@ -136,13 +136,11 @@ enum kuncoat_status kuncoat_lzw_decode(struct kuncoat_lzw *st, const uint8_t *in
 		 * handled below rather than refused.
 		 */
 		if (code > next || (code == next && prev >= KUNCOAT_LZW_CODES)) {
-			/* KNOWN DEFECT WP5-F-LZW-1 (2026-10-25, M) [sev L]: the status is decided before the flush's refusal (o.stopped) is looked at, so CORRUPT wins over STOPPED.
-			 * Trigger: a sink that refuses the final flush while the stream is also corrupt (a code it never built). Effect: CORRUPT, where inflate, bunzip, ovba and lzhuf say
-			 * STOPPED; no evidence is lost (the sink marks the entry itself), the statuses of the family disagree (same shape documented for lzx).
-			 * Reproducer: tests_wp5/findings/lzw_refused_final_flush_reports_corrupt.bin. Fix: return o.stopped ? KUNCOAT_STOPPED : KUNCOAT_CORRUPT (and in lzx.c), or document it. */
+			/* A refusal of the final flush is the host's stop and wins over the corrupt code,
+			 * as in inflate, bunzip, ovba and lzhuf. */
 			flush(&o);
 			*produced = o.total;
-			return KUNCOAT_CORRUPT;
+			return o.stopped ? KUNCOAT_STOPPED : KUNCOAT_CORRUPT;
 		}
 
 		if (code == next) {

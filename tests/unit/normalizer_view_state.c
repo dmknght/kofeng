@@ -550,10 +550,13 @@ static void products_published_and_adopted(void)
 	uint32_t old_n, old_views, bm, n_diag, k;
 	const struct kof_prod *p0, *p1;
 	uint8_t hit0, gate0, unk0;
+	uint64_t r0;
 
 	CK(sc != NULL);
 	if (!sc)
 		return;
+	/* outside a scan the ledger has no ceiling; the record of a product is charged to it (E-PROD) and refused when it does not fit */
+	sc->ledger.resident_max = 64u << 20;
 	old_list = sc->child.list;
 	old_n = sc->child.n;
 	old_views = sc->child.n_views;
@@ -578,7 +581,9 @@ static void products_published_and_adopted(void)
 	list[3] = normalised_child(1, KOF_ENT_NORMALIZED);
 	sc->child.list = list;
 	sc->child.n = 4;
+	r0 = sc->ledger.resident;
 	kof_prod_publish(sc);
+	CK(sc->ledger.resident > r0);                              /* E-PROD: the record is charged to the scan's ledger */
 	p0 = kof_src_prod_of(list[0]);
 	p1 = kof_src_prod_of(list[3]);
 	CK(p0 != NULL && p0 == p1);                               /* one record, shared */
@@ -641,6 +646,7 @@ static void products_published_and_adopted(void)
 	sc->child.list = old_list;
 	sc->child.n = old_n;
 	sc->child.n_views = old_views;
+	CK(sc->ledger.resident == r0);                             /* ... and goes back with the last view that held it */
 	kscan_free(sc);
 }
 

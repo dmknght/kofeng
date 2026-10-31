@@ -132,11 +132,10 @@ HV_GROUP(caps_and_cuts)
 HV_GROUP(exact)
 
 /*
- * A stream cut short is decoded on, out of the zero bytes the reader supplies past the end (KUNCOAT_ASPACK_LOOKAHEAD, 0x10e of them:
- * meant for the last symbol's look-ahead, used as symbols). Cut at 160 bytes of 812 the block still produces 5996 of 6002 bytes
- * that are not the stream's, and cut at 784 of 812 it says OK. Finding F-ASP-1 of WP5; a reproducer is made by this test's own
- * encoder (seed 5011, 6000 bytes, 3 blocks, flat offsets). Not fixed here (no engine edit): the KM_CHECK below goes red the day the
- * decoder stops fabricating, and then becomes a CK.
+ * A stream cut short must not be decoded on out of the zero bytes the reader supplies past the end
+ * (KUNCOAT_ASPACK_LOOKAHEAD, 0x10e of them: for the last symbol's look-ahead only). Before the fix a cut at 160 bytes of 812 produced
+ * 5996 of 6002 bytes that were not the stream's, and a cut at 784 of 812 said OK (finding F-ASP-1 of WP5; the reproducer is made by
+ * this test's own encoder: seed 5011, 6000 bytes, 3 blocks, flat offsets).
  */
 int main(void)
 {
@@ -167,9 +166,10 @@ int main(void)
 		}
 	}
 	printf("  aspack cuts: %u of %u cut streams gave bytes that are not the stream's or said OK\n", cut_fabricated, cut_cases);
-	/* KNOWN DEFECT WP5-F-ASP-1 (2026-10-25, M): this row pins it, green until fixed. */
-	KM_CHECK(cut_fabricated == 0, "a cut ASPack block decodes fabricated bytes out of the zero look-ahead pad (and may say OK)",
-		 "ASPACK_LOOKAHEAD libuncoat/decompressors/aspack.c:asp_fill pad lost: evidence");
+	/* WP5-F-ASP-1: the zero pad completes the last symbol's window only; a cut block is TRUNCATED, never
+	 * symbols decoded out of zeros. Old tests missed it: (c) cuts were run but only counted, and the
+	 * counter was pinned by a KNOWN-MISS row. */
+	CKF(cut_fabricated == 0, "%u of %u cut ASPack streams decoded fabricated bytes or said OK", cut_fabricated, cut_cases);
 	bad = hv_done("cov_aspack_roundtrip");
 	return bad || km_failed();
 }

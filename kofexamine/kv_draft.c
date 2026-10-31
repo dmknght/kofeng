@@ -11,9 +11,7 @@
 void draft_wipe(struct view *v)
 {
 	draft_clear(&v->ed);
-	v->gen_preview = 0;     /* the output listed a draft that is gone */
 	v->note_off = 0;
 	v->prow_off = 0;
-	v->prow_seen = 0;
 	v->prow_home = 1;
 }

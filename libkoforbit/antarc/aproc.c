@@ -344,17 +344,18 @@ static int a_sock_known(const uint64_t *ino, uint32_t n, uint64_t want)
 
 /* "0100007F:1F90" - the address is hex, in the byte order the kernel writes
  * it, which for v4 is one little-endian word. */
-/* KNOWN DEFECT WP12-2 (2026-10-24, M) [sev M]: a_net_addr reads hex[0..31] of the
- * 48-byte lh/rh buffer a_net_table fills. Trigger: a tcp6 row whose address has
- * fewer than 32 hex digits. Effect: uninitialised stack bytes are read (lh[48]
- * is not cleared). Reproducer: orbit_plist.c case_net (no crash only); fuzz
- * orbit/proc_text digests differ. Fix: memset lh/rh or check strlen(hex) >= 2 *
- * n before the loop. */
+/* A field shorter than the family's width (the table is the kernel's, but a
+ * pid's /proc is read as hostile text) is not an address: say "?" and read
+ * nothing past its NUL (the buffer a_net_table fills is not cleared). */
 static void a_net_addr(const char *hex, char *out, size_t cap, int v6)
 {
 	unsigned b[16];
 	unsigned i, n = v6 ? 16u : 4u;
 
+	if (strlen(hex) < 2u * n) {
+		snprintf(out, cap, "?");
+		return;
+	}
 	for (i = 0; i < n; i++) {
 		unsigned hi, lo;
 		char c;

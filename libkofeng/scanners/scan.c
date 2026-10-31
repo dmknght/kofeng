@@ -8,7 +8,7 @@
  *
  *   scan_facts.c    what is true of an object before a module looks (format, regions)
  *   scan_feed.c     the work shared by modules, done once per object (mutation, multi)
- *   scan_heur.c     the model score
+ *   scan_forms.c    the forms of a script, as objects
  *   scan_unpack.c   the OPEN stage: unpack modules and the interpreter's stance
  *   scan_norm*.c    the NORMALISE stage: the view of an object with noise removed
  *   scan_verdict.c  the diseases an object has and its verdict
@@ -57,6 +57,7 @@
  * so nothing else this file relied on changes. */
 #define _GNU_SOURCE
 
+#include "../kofcore/kofdebug.h"
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "../detectors/pattern/kofpix.h"
@@ -169,7 +170,7 @@ struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
 	{
 		size_t n = eng->n_diag ? eng->n_diag : 1u;
 
-		sc->diag.hit = calloc(3u * (sc->diag.bm ? sc->diag.bm : 1u), 1u);
+		sc->diag.hit = calloc(5u * (sc->diag.bm ? sc->diag.bm : 1u), 1u);
 		sc->diag.bind = calloc(n, sizeof *sc->diag.bind);
 		sc->diag.n_bind = calloc(n, 1u);
 		sc->diag.seq = calloc(n, sizeof *sc->diag.seq);
@@ -178,6 +179,8 @@ struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
 			goto fail;
 		sc->diag.gate = sc->diag.hit + (sc->diag.bm ? sc->diag.bm : 1u);
 		sc->diag.unk = sc->diag.gate + (sc->diag.bm ? sc->diag.bm : 1u);
+		sc->diag.fhit = sc->diag.unk + (sc->diag.bm ? sc->diag.bm : 1u);
+		sc->diag.fdone = sc->diag.fhit + (sc->diag.bm ? sc->diag.bm : 1u);
 	}
 	sc->match.live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->match.live);
 	if (eng->pix_regions) {
@@ -191,6 +194,9 @@ struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
 	}
 	if (why)
 		*why = KSCAN_NEW_OK;
+	KOF_TRACE("[mem] scanner made: fixed %llu charged to the ledger, diag tables for %u diagnose(s) (%u byte bitmaps), ledger used=%llu\n",
+		  (unsigned long long)sc->root_fixed, (unsigned)sc->diag.cap, (unsigned)sc->diag.bm,
+		  (unsigned long long)(eng->budget ? atomic_load(&eng->budget->used) : 0u));
 	return sc;
 
 fail:
@@ -203,12 +209,54 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	return kof_scan_make(eng, NULL);
 }
 
+int kof_scan_set_explain(struct kof_scanner *sc, int on)
+{
+	size_t n;
+	uint64_t bytes;
+
+	if (!sc)
+		return 0;
+	if (!on) {
+		sc->diag.explain = 0;
+		return 1;
+	}
+	if (sc->diag.explain)
+		return 1;
+	if (!sc->diag.rep) {
+		n = sc->diag.cap ? sc->diag.cap : 1u;
+		bytes = (uint64_t)n * (sizeof *sc->diag.rep + sizeof *sc->diag.xm);
+		if (sc->eng->budget && !kof_budget_charge(sc->eng->budget, bytes)) {
+			KOF_TRACE("[mem] explain tables refused by the budget: %llu bytes for %u diagnose(s)\n", (unsigned long long)bytes,
+				  (unsigned)sc->diag.cap);
+			return 0;
+		}
+		sc->diag.rep = calloc(n, sizeof *sc->diag.rep);
+		sc->diag.xm = calloc(n, sizeof *sc->diag.xm);
+		if (!sc->diag.rep || !sc->diag.xm) {
+			free(sc->diag.rep);
+			free(sc->diag.xm);
+			sc->diag.rep = NULL;
+			sc->diag.xm = NULL;
+			if (sc->eng->budget)
+				kof_budget_release(sc->eng->budget, bytes);
+			return 0;
+		}
+		sc->diag.expl_charged = sc->eng->budget ? bytes : 0u;
+		KOF_TRACE("[mem] explain tables made: %llu bytes charged for %u diagnose(s)\n", (unsigned long long)bytes, (unsigned)sc->diag.cap);
+	}
+	sc->diag.explain = 1;
+	return 1;
+}
+
 void kof_scan_free(struct kof_scanner *sc)
 {
 	uint32_t i;
 
 	if (!sc)
 		return;
+	KOF_TRACE("[mem] scanner freed: releases %llu fixed + %llu held; objects %llu, feeds %llu, verdicts %llu\n", (unsigned long long)sc->root_fixed,
+		  (unsigned long long)sc->root_held, (unsigned long long)sc->st.objects, (unsigned long long)sc->st.work_feeds,
+		  (unsigned long long)sc->st.work_verdicts);
 	if (sc->eng->budget && sc->root_fixed) {
 		kof_budget_release(sc->eng->budget, sc->root_fixed + sc->root_held);
 		atomic_fetch_sub(&sc->eng->budget->holders, 1u);
@@ -229,6 +277,9 @@ void kof_scan_free(struct kof_scanner *sc)
 	sc->obj.diag.apihash = NULL;
 	kgenome_pe_imptab_free(&sc->obj.diag.pe_imp);
 	free(sc->diag.rep);
+	free(sc->diag.xm);
+	if (sc->eng->budget && sc->diag.expl_charged)
+		kof_budget_release(sc->eng->budget, sc->diag.expl_charged);
 	free(sc->diag.hit);             /* and diag_gate and diag_unk, one block */
 	free(sc->diag.bind);
 	free(sc->diag.n_bind);
@@ -593,6 +644,12 @@ uint32_t kof_scan_prod_repeats(const struct kof_scanner *sc, enum kof_prodkind p
 
 void sx_obj_begin(struct kof_scanner *sc)
 {
+	/* [mem]/[work]: what the object that just ended left held, and how often this scanner built each product (audit_mem). One line per object. */
+	KOF_TRACE("[mem] object begins: ledger used=%llu root_held=%llu mutation held=%llu ledgered=%llu pix_ledgered=%llu | [work] objects=%llu feeds=%llu form_asks=%llu form_matchers=%llu verdicts=%llu catalogs=%llu\n",
+		  (unsigned long long)(sc->eng->budget ? atomic_load(&sc->eng->budget->used) : 0u), (unsigned long long)sc->root_held,
+		  (unsigned long long)sc->mutation.held, (unsigned long long)sc->mutation.ledgered, (unsigned long long)sc->match.pix_ledgered,
+		  (unsigned long long)sc->st.objects, (unsigned long long)sc->st.work_feeds, (unsigned long long)sc->st.work_form_asks,
+		  (unsigned long long)sc->st.work_form_matchers, (unsigned long long)sc->st.work_verdicts, (unsigned long long)sc->st.work_catalogs);
 	/*
 	 * RELEASE FIRST. Everything sc->obj owns that is not a plain value goes back
 	 * here, and each release leaves its field NULL or empty; the wipe below then
@@ -628,6 +685,8 @@ void sx_obj_begin(struct kof_scanner *sc)
 	 * no state to set, so one object's ask cannot become the next object's. */
 	memset(sc->diag.hit, 0, sc->diag.bm);
 	memset(sc->diag.unk, 0, sc->diag.bm);
+	memset(sc->diag.fhit, 0, sc->diag.bm);
+	memset(sc->diag.fdone, 0, sc->diag.bm);
 
 	/*
 	 * THE WIPE: the latches (one array, see enum kof_obj_latch), the symbol

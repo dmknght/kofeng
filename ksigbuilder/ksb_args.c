@@ -16,7 +16,9 @@ int ksb_opt_take(struct ksb_ctx *ksb, int *argc, char **argv)
 		{ "--ldscript", &ksb->opt.ldscript },
 		{ "--basedir",  &ksb->opt.basedir  },
 		{ "--triple",   &ksb->opt.triple   },
-		{ "--tmpdir",   &ksb->opt.tmpdir   }
+		{ "--tmpdir",   &ksb->opt.tmpdir   },
+		{ "--pathogens", &ksb->opt.pathogens },
+		{ "--syndromes", &ksb->opt.syndromes }
 	};
 	int i = 1, w = 1, n = *argc;
 
@@ -68,6 +70,10 @@ void ksb_usage(const char *argv0)
 		"                    artefacts to packs\n"
 		"\n"
 		"  --build           build identification\n"
+		"  --diagnose <src.c> <out.kdig>      one diagnose source to a record\n"
+		"  --catalog <diagnoses-dir>          check every diagnose's family, variant,\n"
+		"                    type and tag against the catalogs (--pathogens <dir>,\n"
+		"                    --syndromes <dir>); non-zero on an error\n"
 		"  --image <linked.elf> <out.blob>    a linked module to a blob\n"
 		"  --object <obj.o> <out.blob>        the same, unlinked\n"
 		"  --extract <signature.c> <out.pat.h> <out.names> <out.pre> <out.strs>\n"

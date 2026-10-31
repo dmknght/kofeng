@@ -183,6 +183,9 @@ static int is_command(const struct kgenome_dtx *x, uint32_t off, uint32_t open)
  * INTERP flag is the string's escapes (ruby's `"a #{b}"` has none set) and is no answer for a quoted string. */
 static int interpolates(const struct kgenome_dtx *x, const struct kgenome_textual_span *sp, uint32_t off)
 {
+	/* php's nowdoc, `<<<'LABEL'`: a here-document whose body is text, as a single-quoted string's is */
+	if (sp->open_len >= 4u && x->in[off] == '<' && x->in[off + 1u] == '<' && x->in[off + 2u] == '<' && x->in[off + 3u] == '\'')
+		return 0;
 	if (sp->open_len)
 		return x->in[off] != '\'';
 	return (sp->flags & KGENOME_TEXTUAL_F_INTERP) != 0;

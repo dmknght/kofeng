@@ -160,11 +160,6 @@ static void merge_sites(struct kgenome_diag_scan *s)
 	 * the same one as before.
 	 */
 	{
-		/* KNOWN DEFECT REV-D7g (2026-10-25, Inference) [sev L]: merge_sites (diag_scan.c) keeps a hand-rolled
-		 * open-addressing table of site representatives with its own multiplier, unseeded, instead of the shared helper
-		 * (diag_oatab.h). Trigger: a binary with many nodes at addresses chosen by the file. Effect: none measured (the
-		 * table is sized 2n, so probes stay short on honest input); duplicate logic. Reproducer: none. Fix: use
-		 * kgenome_oatab_* (diag_oatab.h). */
 		uint32_t tm = 1u, *tab = NULL;
 
 		while (tm < 2u * s->n_hit)
@@ -176,8 +171,7 @@ static void merge_sites(struct kgenome_diag_scan *s)
 			uint32_t hx = 0;
 
 			if (tab && at != KGENOME_BROKEN) {
-				hx = (uint32_t)(((at * 0x9e3779b97f4a7c15ull) ^
-						 ((uint64_t)s->hit[i].cap * 0xff51afd7ed558ccdull)) >> 32) & tm;
+				hx = kof_hash64_slot(at ^ ((uint64_t)s->hit[i].cap << 48)) & tm;
 				for (; tab[hx]; hx = (hx + 1u) & tm) {
 					j = tab[hx] - 1u;
 					if (s->hit[rep[j]].at == at &&
@@ -491,6 +485,11 @@ const struct kgenome_diag_apihash_set *kgenome_diag_apihash(struct kgenome_diag_
  * for the scanner, the diagnose routes and the viewer, so the answer cannot
  * differ between them.
  */
+/* CONSOLIDATION FUNC-4 (2026-10-30, M): KEEP (will be THE function-extent routine, one list for the scanner, the routes and the viewers; 3 direct
+ * callers + 4 through kgenome_diag_funcs_of). MERGE-FROM -> kgenome_elf_funcs_from_entries, diag_lineage.c fns_build (PE/gap completion, code-extent
+ * bound), fnprint_walk.c body_ends/skip_pad (end of body). Add evidence: FDE, .ARM.exidx, .dynsym. Entry-only reaches 64% x86-64, 72% ARM, 0.5% MIPS of
+ * symtab starts; with FDE 97.4%/72%/15.7%. Prove with: evmix.c union columns E+C+F+D per arch; ELF only today (PE:
+ * lineage only). */
 void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *data,
 			      uint64_t data_n, struct kgenome_diag_walk *walk,
 			      int want_trace, struct kgenome_func_set *out)
@@ -506,22 +505,23 @@ void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *
 		out->status = KGENOME_BAD_INPUT;
 		return;
 	}
+	/* KNOWN DEFECT CN-4 (2026-10-30, M) [sev M]: function extents never read .eh_frame, .ARM.exidx or .dynsym (grep: no reader; kgenome_elf_funcs_build takes .symtab only), so a stripped file falls to the entry walk.
+	 * Trigger: any stripped ELF. Effect: x86-64 start recall 64.3% entry walk vs 88.7% FDE vs 97.4% union; stripped .so 15 of 1197 exports by entry walk, all by FDE; FDE lengths equal symtab's in 99.9% (18936/18957).
+	 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (measured by fix_consol on 96 static ELF and 80 stripped .so).
+	 * Fix: read FDE, .ARM.exidx and .dynsym as extent evidence in the one routine, order symtab, FDE, exidx, pdata, call target + thunk (see FUNC-4). */
 	kgenome_funcs_build(obj->format, data, data_n, obj->file_header, out);
 	if (out->n || out->status != KGENOME_OK || obj->format != KGENOME_FMT_ELF || !obj->file_header)
 		return;
 	if (!walk)
 		walk = own = kgenome_diag_walk_new();
-	/* KNOWN DEFECT WP9-F9 (2026-10-25, M) [sev M]: kgenome_diag_funcs_with_walk ignores a failed
-	 * kgenome_diag_walk_ensure (no else branch). Trigger: allocation refused in the walk while the function
-	 * table of a stripped ELF is built. Effect: the table comes back short with out->status OK (struct
-	 * kgenome_func_set.status exists for NOMEM). Reproducer: tests/lib/genome/diag_bin_oom.c KNOWN-MISS F9
-	 * (funcs). Fix: add `else out->status = KGENOME_NOMEM;`. */
 	if (kgenome_diag_walk_ensure(walk, obj, data, data_n, want_trace)) {
 		ent = kgenome_diag_walk_entries(walk, &n);
 		if (n)
 			kgenome_elf_funcs_from_entries(kof_buf_make(data, data_n),
 						   obj->file_header, obj->entry_off,
 						   ent, n, out);
+	} else {
+		out->status = KGENOME_NOMEM;    /* the walk could not be held: a table that is short, said */
 	}
 	kgenome_diag_walk_free(own);
 }
@@ -626,13 +626,8 @@ static void rcall_put(void *user, uint64_t at, uint64_t target, const char *name
 	struct kgenome_diag_rcall *r;
 
 	if (g->n == g->cap) {
-		/* KNOWN DEFECT REV-D8p (2026-10-25, Inference) [sev L]: rcall_put (diag_scan.c) doubles a uint32 capacity (relocation calls)
-		 * with no overflow guard and no ledger charge. Trigger: 2^31 or more relocation calls in a relocatable object; the engine caps an object at 512 MiB,
-		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-		 * UINT32_MAX / 2 before doubling. */
-		uint32_t nc = g->cap ? g->cap * 2u : 64u;
-		struct kgenome_diag_rcall *nv = realloc(g->v, (size_t)nc * sizeof *nv);
+		uint32_t nc = kgenome_grow_cap(g->cap, 64u);
+		struct kgenome_diag_rcall *nv = nc ? realloc(g->v, (size_t)nc * sizeof *nv) : NULL;
 
 		if (!nv) {
 			g->oom = 1;

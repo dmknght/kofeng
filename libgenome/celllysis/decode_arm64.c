@@ -1537,6 +1537,10 @@ static const struct a64_ent g_ent[KGENOME_ARM64_I_COUNT] = {
  * needs to be shared between threads.
  */
 #define FRESH_OP { .reg = NOREG, .index = NOREG, .seg = NOREG }
+/* KNOWN DEFECT DEAD2-2 (2026-10-29, M) [sev L]: the comment above says the template is NOT const on purpose (a const one is folded back into the clear), and the declaration below IS const.
+ * Trigger: any decode. Effect: gcc -O2 and -O0 emit no reference to g_fresh (readelf: .rodata.g_fresh is not even kept at -O2), so `*out = g_fresh` is the memset-and-stores the comment measured at 22.2 ns, not the 16.8 ns copy.
+ * Reproducer: cc -O2 -c libgenome/celllysis/decode_arm64.c; readelf -SW | grep g_fresh.
+ * Fix: drop `const` and re-measure the decode (callgrind Ir, the 8.3 M word corpus); keep the comment only if the number holds. */
 static const struct kgenome_cell_insn g_fresh = {
 	.len = 4u, .target = KGENOME_BROKEN, .target_va = KGENOME_BROKEN,
 	.o = { FRESH_OP, FRESH_OP, FRESH_OP }

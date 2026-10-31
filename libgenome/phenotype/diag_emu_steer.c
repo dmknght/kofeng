@@ -85,66 +85,6 @@ enum kgenome_diag_emu_force_kind kgenome_diag_emu_cap_force_kind(uint16_t cap)
 	}
 }
 
-
-/*
- * ---- FILLING A FORCED READ: KEPT, DISABLED, AND NOT DEPENDED ON ----------
- *
- * A read whose result is forced returns n without putting n bytes anywhere,
- * which is a state no real machine is ever in. The obvious repair is to write
- * the buffer, and this did - with nops.
- *
- * IT IS OFF BECAUSE IT IS NOT DURABLE. The content would be THIS ROUTINE'S,
- * and a finding resting on it rests on a fabrication an author defeats
- * without effort: a stager that looks at what it received before using it - a
- * magic byte, a declared length, a checksum, a decryption that has to produce
- * something - compares against nops, fails, takes the other arm, and never
- * reaches the handover. The evasion costs three instructions.
- *
- * AND IT TURNED OUT TO BE UNNECESSARY, which is the better reason. It was
- * added on the claim that control entering a region is noticed only once the
- * page has been written. That was wrong: what was missing was
- * kgenome_emu_hop_add, declaring the range. MEASURED with it off - meter1,
- * meter2, meter3_encoded, meter4_encoded, rc4_1 and shikata_ga_nai each still
- * yield 5 nodes and 4 links, exec-memory among them.
- *
- * Left in rather than deleted because a forced read that writes nothing is
- * still a lie about the machine, and a routine that needs the buffer to hold
- * something - one following a decryptor - will want it. Whatever turns it on
- * must not let a finding depend on the bytes.
- */
-#define DIAG_EMU_FILL 4096u
-
-#if KGENOME_DIAG_EMU_FILL_ON
-
-void kgenome_diag_emu_fill_buffer(struct kgenome_emu *em, uint64_t at, uint64_t n)
-{
-	static const uint8_t nop[64] = {
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-		0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
-	};
-	uint64_t done = 0;
-
-	if (!at || n > DIAG_EMU_FILL)
-		n = n > DIAG_EMU_FILL ? DIAG_EMU_FILL : n;
-	while (done < n) {
-		unsigned k = (unsigned)(n - done);
-
-		if (k > sizeof nop)
-			k = (unsigned)sizeof nop;
-		if (!kgenome_emu_write(em, at + done, nop, k))
-			return;         /* unmapped: nothing to fill */
-		done += k;
-	}
-}
-#endif /* KGENOME_DIAG_EMU_FILL_ON */
-
-
 const unsigned kgenome_diag_emu_arg_reg64[6] = {
 	KGENOME_EMU_RDI, KGENOME_EMU_RSI, KGENOME_EMU_RDX,
 	KGENOME_EMU_R10, KGENOME_EMU_R8,  KGENOME_EMU_R9

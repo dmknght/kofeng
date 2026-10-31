@@ -148,8 +148,9 @@ static void t_plan(void)
 /* The names of imports that never return: the table in diag_lineage_chain.c, one name at a time, and what must not be in it. */
 static void t_noreturn_names(void)
 {
-	static const char *const yes[] = { "exit", "_exit", "abort", "__stack_chk_fail", "__assert_fail", "longjmp", "pthread_exit" };
-	static const char *const no[] = { "socket", "connect", "printf", "exitx", "Exit", "", "_ex", "longjmp2", "malloc", "read" };
+	static const char *const yes[] = { "exit", "_exit", "abort", "__stack_chk_fail", "__assert_fail", "longjmp", "pthread_exit",
+		"ExitProcess", "ExitThread", "RtlExitUserProcess", "RtlExitUserThread" };
+	static const char *const no[] = { "socket", "connect", "printf", "exitx", "Exit", "", "_ex", "longjmp2", "malloc", "read", "TerminateProcess", "CreateProcessA" };
 	unsigned i;
 
 	for (i = 0; i < sizeof yes / sizeof yes[0]; i++)
@@ -157,6 +158,22 @@ static void t_noreturn_names(void)
 	for (i = 0; i < sizeof no / sizeof no[0]; i++)
 		CK(!kgenome_diag_name_is_noreturn(no[i]));
 	CK(!kgenome_diag_name_is_noreturn(NULL));
+}
+
+/* WP9-F16: a reason bit past the word is no reason. `1u << bit` for bit >= 32 is undefined (x86 takes it mod 32, so bit 32 answered the stage of bit 0).
+ * Old tests missed it: (b) the one caller stays below 19 and no test crossed the word. */
+static void t_next_stage_range(void)
+{
+	unsigned bit;
+
+	for (bit = 32; bit < 70u; bit++)
+		CK(kgenome_diag_oblig_next_stage(bit) == 0u);
+	CK(kgenome_diag_oblig_next_stage(0xffffffffu) == 0u);
+	/* the bits that have a row still answer it */
+	for (bit = 0; bit < 32u; bit++)
+		if (kgenome_diag_oblig_next_stage(bit))
+			CK(kgenome_diag_oblig_next_stage(bit) != 0u);
+	CK(kgenome_diag_oblig_next_stage(__builtin_ctz(KGENOME_LINEAGE_W_ENTRY)) != 0u);
 }
 
 /* The lower bound the lookups of the stages share (kofcmp.h): every size up to 9, every key around the elements, a struct whose key
@@ -228,6 +245,7 @@ int main(int argc, char **argv)
 	t_crafted();
 	t_plan();
 	t_noreturn_names();
+	t_next_stage_range();
 	t_lower_bound();
 	t_first_ending_above();
 	printf("lineage_class: %d failure(s)\n", hk_fails);

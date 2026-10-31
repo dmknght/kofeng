@@ -26,7 +26,7 @@
  *   kof_scan_diag_*, _incomplete, _served_syms    objctx_diag.c the diagnose product
  *   kof_scan_script_forms                         objctx_script.c script forms
  *   kof_scan_mutation_*                           scan_feed.c   feeding similarity
- *   kof_scan_verdict                              scan_verdict.c  the verdict's diseases
+ *   kof_scan_verdict_cat                          scan_verdict.c  the verdict's diseases
  *
  * kof_scan_of is an inline of this header. A new function takes the word of the
  * unit that defines it and is added to this map.
@@ -179,11 +179,14 @@ typedef int (*kof_scan_unit_fn)(void *user, uint32_t region, uint64_t off,
  * producer already cut - a view's decoded ones, in the view's offsets, sorted and apart - which
  * the cut leaves whole. See kgenome_mutation_units.
  */
+struct kof_cfgsign_host;
 struct kof_scan_cut {
 	const struct kgenome_func_set *funcs;
 	const struct kgenome_true_all *lib;
 	const struct kof_range        *fixed;
 	uint32_t                       n_fixed;
+	/* The caller's ledger for the CFG signature of a function unit (cfgsign.h): the allocator that charges the scan. NULL = malloc (a tool). */
+	const struct kof_cfgsign_host *cfg;
 };
 void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b, uint32_t present,
 			   const struct kof_scan_cut *cut, struct kof_ext_buf *eb,
@@ -266,6 +269,15 @@ enum kgenome_status kof_scan_diag_status(const struct kof_obj_ctx *ctx);
 /* Free the object's diagnose graph and give back the bytes it was charged to this
  * scanner's memory ceiling - the one place the graph dies. */
 void kof_scan_diag_drop(struct kof_scanner *sc);
+
+/*
+ * THE REPORT, ASKED FOR (kscan_explain is the one caller that is not a white-box test): every diagnose is answered for the
+ * objects the scanner scans next and each carries its report (kof_result.diag, with the matchers of a detection form). The tables
+ * that hold it - one kof_diag_report and one matcher record per diagnose - are made here, charged to the engine's budget, and
+ * kept for the scanner's life; a budget that refuses them answers 0 and the report stays off (the object is then marked cut by
+ * the caller's next scan, never answered half). Off again with 0. A scan that never calls this allocates and records nothing.
+ */
+int kof_scan_set_explain(struct kof_scanner *sc, int on);
 /* Free the scan of the object's text that the constants stage kept for the diagnose stage (objctx_textscan.c), and give back what it was charged. */
 void kof_scan_text_drop(struct kof_scanner *sc);
 /* The symbol block the engine completed for this object, or NULL when it added
@@ -323,8 +335,9 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
  * limit was reached on the analysis it reads. The same all-diagnoses analysis as
  * kof_scan_diag_report, so asking costs what that costs and a normal scan runs it
  * only for a diagnose that declares a disease and can be answered on the object.
+ * `*cat` is what the catalog facts of the matched diagnoses made of it (struct
+ * kof_verdict_cat; zero when none carried any).
  */
-int kof_scan_verdict(const struct kof_obj_ctx *ctx, struct kof_finding *v,
-		     int *incomplete);
+int kof_scan_verdict_cat(const struct kof_obj_ctx *ctx, struct kof_finding *v, struct kof_verdict_cat *cat, int *incomplete);
 
 #endif /* KOFENG_SCAN_H */

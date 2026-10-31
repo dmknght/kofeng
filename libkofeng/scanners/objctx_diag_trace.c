@@ -107,8 +107,7 @@ void oc_diag_trace_scan(struct kof_scanner *sc)
 		return;
 	sc->obj.diag.traced = 1;
 	for (i = 0; i < sc->eng->n_diag && i < sc->diag.cap; i++) {
-		if (!sc->obj.diag.all && sc->eng->diag[i].users_known && !sc->eng->diag[i].n_users &&
-		    !sc->eng->diag[i].disease)
+		if (!oc_diag_used(sc, &sc->eng->diag[i]))
 			continue;
 		line_of(sc, i, sc->obj.diag.graph != NULL);
 	}

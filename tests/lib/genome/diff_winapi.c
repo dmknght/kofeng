@@ -295,7 +295,7 @@ static const struct doc DOC[] = {
 	{ "RtlAddFunctionTable", 3, K_VAL, 0x1, "TRUE" },
 	{ "RtlAllocateHeap", 3, K_VAL, 0x0, "the same allocator as HeapAlloc" },
 	{ "RtlFreeHeap", 3, K_VAL, 0x1, "the same as HeapFree" },
-	{ "NtQueryInformationProcess", 5, K_VAL, 0xc0000003, "STATUS_INVALID_INFO_CLASS for a class the environment does not answer" },
+	{ "NtQueryInformationProcess", 5, K_VAL, 0xc0000004, "class 0 and 26 are answered (all-zero arguments: a length that is not the class' size, STATUS_INFO_LENGTH_MISMATCH); every other class STATUS_INVALID_INFO_CLASS" },
 	{ "FreeLibrary", 1, K_VAL, 0x1, "TRUE" },
 	{ "LocalAlloc", 2, K_VAL, 0x0, "the same arena as HeapAlloc; 0 for size 0" },
 	{ "LocalFree", 1, K_VAL, 0x0, "0 (NULL) is success" },

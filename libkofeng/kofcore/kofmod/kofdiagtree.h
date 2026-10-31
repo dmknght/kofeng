@@ -1,4 +1,10 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * kofmod/kofdiagtree.h - A DIAGNOSE: what a program does, as a tree of nucleo
  * groups and the proven links between them.
  *
@@ -55,6 +61,8 @@
 
 #include "kofcap.h"
 #include "disease.h"      /* KOF_DECLARE_DISEASE */
+
+struct kof_form;          /* databases/pack/diagform.h: the detection form of a diagnose */
 
 /*
  * WHICH ANALYSIS THIS DIAGNOSE USES TO FIND ITS NODES, as a set.
@@ -355,6 +363,13 @@ enum kof_diag_fact {
 	 * than being started on every object and returning at once.
 	 */
 	KOF_FACT_FORMAT,
+	/* THE FORMAT IS ONE OF A SET: a bit per KOF_FMT_* value. KOF_FACT_FORMAT is equality with one format; the reader used to OR several
+	 * words' numbers into one value that names no format, so a diagnose for several formats has this fact (the reader writes it). */
+	KOF_FACT_FORMAT_SET,
+	/* THE OBJECT IS AT LEAST THIS MANY BYTES (a signature's KOF_TARGET_SIZE_MIN as a condition); no maximum, by design (kofsig.h). */
+	KOF_FACT_SIZE_MIN,
+	/* THE ARCHITECTURE IS ONE OF A SET (KOF_TARGET_ARCH): a bit per KOF_ARCH_* value; one past bit 63 is in no set. */
+	KOF_FACT_ARCH_SET,
 	KOF_FACT_COUNT
 };
 
@@ -458,6 +473,18 @@ struct kof_diag {
 	 */
 	uint32_t              disease;
 	uint8_t               disease_type;
+	/*
+	 * THE CATALOG FACTS - see KDIG_SEC_META. All zero when the record has no such
+	 * section (an old pack, or a diagnose that declares none): `family_id` zero is
+	 * "none", and `type` (a kof_maltype, where zero is Virus) means nothing then.
+	 */
+	uint64_t              family_id, variant_id, tag_id;
+	uint8_t               type;
+	/*
+	 * THE DETECTION FORM - see KDIG_SEC_FORM. NULL for a graph diagnose. Owned by the engine's tables (kof_db_free
+	 * gives it back); a caller of kof_diag_load that is handed one frees it with kof_diag_form_free.
+	 */
+	const struct kof_form *form;
 };
 
 /*
@@ -490,13 +517,38 @@ struct kof_diag {
  * joined to another - see the note on kof_diag_node.bits.
  */
 #define KOF_DIAG_NAME(id)
-#define KOF_DIAG_ANALYSIS(mask)
 /*
- * KOF_DIAG_USE_EMU() - run the emulator for this diagnose. Written, it is
- * true; left out, false. No argument: there is one emulator and the only
- * question is whether this diagnose needs it, which is what the nodes'
- * links and the names handed to calls are read with.
+ * THE DETECTION FORM, written as a signature wrote its declarations (KDIG_SEC_FORM; every rule is in databases/diagsrc_form.c),
+ * one to a line: KOF_TARGET_RANGE(code, KOF_SCAN_ELF_CODE | ...); KOF_DEFINE_STR / _STR_WIDE / _HEXSTR / _REGEX (name, text,
+ * case, word); KOF_MUTATION_BLOCK[_LIB](name, regions, hashes...); then what a kof_scan computed, as declarations:
+ *
+ *     KOF_DIAG_FIND(m0, KOF_FIND_ANY, code, s0, s1)     _ANY / _ALL / KOF_FIND_MULTI(n): kof_find_str_any / _all / _multi >= n
+ *     KOF_DIAG_FIND(m1, KOF_FIND_AT(KOF_ANCHOR_ENTRY, 236), s3)     kof_find_str_at at BOF, the entry point or EOF, plus a step
+ *     KOF_DIAG_SIMILAR(m2, 60, b0)                      kof_mutation_score >= 60 for every block it lists
+ *     KOF_DIAG_EXPR(m0 && !m1 || (m2 && m0))            the old `if`; absent, every matcher anded
+ *
+ * KOF_TARGET_FORMAT / _SUBTYPE and KOF_DIAG_HAS_ATTRB(KOF_FACT_SIZE_MIN | KOF_FACT_ARCH_SET, v) say which objects it is asked of. A
+ * form needs no head; a diagnose is a graph or a form, and a form's matchers are all strings (detect stage) or all blocks
+ * (similarity stage). The macros expand to nothing, like every other declaration here.
  */
+#define KOF_DIAG_FIND(...)
+#define KOF_DIAG_SIMILAR(...)
+#define KOF_DIAG_EXPR(...)
+/*
+ * WHAT THE DIAGNOSE BELONGS TO, by NAME (a researcher reads the source; ksigbuilder resolves
+ * the names to ids from the Pathogens and Syndromes catalogs). All four or none.
+ *
+ *     KOF_DIAG_FAMILY("Mirai");
+ *     KOF_DIAG_VARIANT("A");                 the variant's letters only (the family is above), as KOF_MALWARE_VARIANT("A")
+ *     KOF_DIAG_TYPE(KOF_MALTYPE_BOTNET);     ONE type, one of the variant's, never Packer
+ *     KOF_DIAG_TAG("flood");
+ */
+#define KOF_DIAG_FAMILY(name)
+#define KOF_DIAG_VARIANT(name)
+#define KOF_DIAG_TYPE(type)
+#define KOF_DIAG_TAG(name)
+#define KOF_DIAG_ANALYSIS(mask)
+/* KOF_DIAG_USE_EMU() - run the emulator for this diagnose: written, true; left out, false (there is one emulator). */
 #define KOF_DIAG_USE_EMU()
 #define KOF_DIAG_DECLARE_HEAD(cap, flags)
 /*
@@ -640,6 +692,37 @@ struct kof_diag {
 /* The disease: u32 id little endian, then the u8 maltype. See KOF_DECLARE_DISEASE. The
  * text is not in the record. */
 #define KDIG_SEC_DISEASE 8u
+/*
+ * THE CATALOG FACTS OF THE DIAGNOSE (owner approved this tag number, 2026-10-28; no KDGP
+ * version bump: a reader built before skips the section by its length, like tag 5).
+ *
+ * Fixed layout, length byte 25, all little endian:
+ *   offset  size  field
+ *        0     8  family id   (u64, made by the build from the family name: kof_catid_of, catstore.h)
+ *        8     8  variant id  (u64, made by the build from family name and letters)
+ *       16     8  tag id      (u64, made by the build from the tag name)
+ *       24     1  type        (a kof_maltype value, never Packer; ONE type per diagnose)
+ * The names are in the source and never in the record: ids are resolved at build time.
+ * THE BUILD WRITES IT OR NOTHING: a diagnose without the four declarations has no section,
+ * which a loader reads as ids 0 (an old pack). A record whose section is not 25 bytes, or
+ * whose id is 0, or whose type is no maltype, is refused whole like every other section.
+ * The legacy count byte before the sections is written whenever this section is, so an
+ * old reader does not take its tag for a count.
+ */
+#define KDIG_SEC_META 9u
+#define KDIG_META_LEN 25u
+
+/*
+ * THE DETECTION FORM OF THE DIAGNOSE (owner approved a section of the META kind, 2026-10-28; no KDGP version bump, no layout of an
+ * existing section changed: a reader built before skips it by its length, like tag 5). A diagnose is a GRAPH (the nodes above) or a
+ * FORM - what a signature declared (string markers, a named range, similarity blocks) and computed in its kof_scan (and / or / not
+ * over the matchers) - answered by the engine with the functions it always used: the pattern matcher over the resolved extents
+ * and kof_mutation_pct. A form has no nodes; a record with both is refused.
+ *
+ * THE BODY IS ONE STREAM cut into sections of at most 255 bytes: the loader concatenates the bodies of every section with this tag.
+ * Layout: databases/pack/diagform.h (the one encoder and decoder); a stream that does not add up refuses the record whole.
+ */
+#define KDIG_SEC_FORM 10u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,

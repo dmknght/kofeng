@@ -212,10 +212,37 @@ KOF_RUNS_RESOLVER(tar, struct kof_tar_info, tar_cls_bit, KOF_SCAN_TAR_UNCLAIMED)
 
 /* ---- the parse ---------------------------------------------------------------- */
 
+/* A header with the "ustar" magic. */
+static int tar_has_magic(kof_buf f, uint64_t at)
+{
+	return kof_in_range(f, at + KOF_TAR_MAGIC_AT, 5) &&
+	       memcmp(f.p + at + KOF_TAR_MAGIC_AT, "ustar", 5) == 0;
+}
+
+/*
+ * A header BLOCK: the magic, or, for the V7 format which has none (`tar --format=v7`, and
+ * the old-format members of an older archive), a checksum that is right over a non-empty
+ * name. The checksum is eight octal digits that must equal the sum of 512 bytes, which a
+ * file that is not a tar does not do by chance; the first byte and the field's digits are
+ * looked at before the sum is, so a file that is not a tar costs a few compares (WP2-D1c).
+ */
+static int tar_is_header(kof_buf f, uint64_t at)
+{
+	uint8_t d;
+
+	if (tar_has_magic(f, at))
+		return 1;
+	if (!kof_in_range(f, at, KOF_TAR_BLOCK) || f.p[at] == 0)
+		return 0;
+	d = f.p[at + T_CHKSUM];
+	if ((d < '0' || d > '7') && d != ' ')
+		return 0;
+	return tar_sum_ok(f, at);
+}
+
 int kof_tar_sniff(kof_buf file)
 {
-	return kof_in_range(file, KOF_TAR_MAGIC_AT, 5) &&
-	       memcmp(file.p + KOF_TAR_MAGIC_AT, "ustar", 5) == 0;
+	return tar_is_header(file, 0);
 }
 
 void kof_tar_release(struct kof_tar_info *t)
@@ -285,13 +312,13 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 			t->end_off = at;
 			break;
 		}
-		/* KNOWN DEFECT WP2-D1c (2026-10-24, R) [sev M]: The tar walk reads a header without "ustar" as the
-		 * end of the archive (WP2 O5). Trigger: ustar members, an old-format header, more members.
-		 * Effect: later members dropped, broken 0. Reproducer: none (read). Fix: accept a header
-		 * whose checksum is right, or mark DAMAGED when non-zero bytes follow the stop. */
-		if (!kof_in_range(file, at + KOF_TAR_MAGIC_AT, 5) ||
-		    memcmp(file.p + at + KOF_TAR_MAGIC_AT, "ustar", 5) != 0)
-			break;      /* not a header: the archive ends here */
+		/* Not a header: the archive ends here. Bytes that are neither zero blocks nor a header
+		 * are not read, and the object says so (TRUNCATED: what follows the stop is not in the
+		 * table). An old-format header (no magic, right checksum) is a header. */
+		if (!tar_is_header(file, at)) {
+			t->anomalies |= KOF_TAR_ANOM_TRUNCATED;
+			break;
+		}
 
 		/* One more row, or the walk stops HERE and says so: the headers that follow are in
 		 * the archive and not in the table. */

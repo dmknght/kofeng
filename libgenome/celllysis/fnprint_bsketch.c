@@ -14,6 +14,11 @@
  * functions are as well; so reached is never "author" (that is a decision about bytes, fnprint_libtab.c)
  * and unreached is never an exclusion.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified, see FUNC-11).
+ * Do not delete before that decision. */
 #include "fnprint.h"
 
 #include <stdlib.h>
@@ -140,6 +145,10 @@ uint64_t kgenome_fnprint_bsketch_main(const uint8_t *p, uint64_t n, uint64_t ent
 	return in_text(to, lo, hi) ? to : KGENOME_BROKEN;
 }
 
+/* CONSOLIDATION FUNC-11 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk. A byte search for e8/e9 lands on non-instructions: the comment in
+ * diag_wrapper_walk.c (not re-measured here) reports 20166 real call targets missed and 24734 invented on 255 ELF. Better logic here that the keeper
+ * lacks: none verified (no decode, no budget on a decode; kgenome_fnprint_bsketch_build has no caller outside tests). Prove with:
+ * tests/lib/genome/fnprint_adv_names.c / fnprint_reliability.c; count callers with grep (0 in libkofeng). */
 void kgenome_fnprint_bsketch_build(struct kgenome_fnprint_bsketch *g, const uint8_t *p, uint64_t lo, uint64_t hi,
 				   int64_t va_delta, uint64_t root, struct kgenome_ledger *led)
 {
@@ -178,16 +187,21 @@ void kgenome_fnprint_bsketch_build(struct kgenome_fnprint_bsketch *g, const uint
 	g->start = st.v; g->n_start = (uint32_t)st.n;
 	g->from = fr.v; g->to = to.v; g->n_edge = (uint32_t)fr.n;
 	g->bytes = charged;
-	/* KNOWN DEFECT WP9-F14 (2026-10-25, M) [sev L]: the bsketch builder publishes start/from/to with n_start >
-	 * 0 before reached is allocated, and on a refused allocation sets status NOMEM and returns with reached
-	 * NULL. Trigger: that calloc/malloc refused (fnprint is off the scan path). Effect: a reader of reached[i]
-	 * faults (UBSAN null load). Reproducer: fuzz diag/fnprint_bytes (failk); tests_wp9/findings/F14_note.txt.
-	 * Fix: allocate reached before publishing start/from/to, or on failure free them and zero n_start/n_edge. */
 	g->reached = calloc(g->n_start ? g->n_start : 1u, 1);
 	stk = malloc((g->n_start ? g->n_start : 1u) * sizeof *stk);
 	if (!g->reached || !stk) {
-		g->status = KGENOME_NOMEM;
+		/* A sketch has its reached flags or it has no starts and no edges: a reader that indexes
+		 * reached[] per start must not meet NULL. What was built is given back, the status says so. */
 		free(stk);
+		free(g->reached);
+		g->reached = NULL;
+		free(g->start); free(g->from); free(g->to);
+		g->start = NULL; g->from = NULL; g->to = NULL;
+		g->n_start = 0; g->n_edge = 0;
+		if (led)
+			kgenome_ledger_release(led, charged);
+		g->bytes = 0;
+		g->status = KGENOME_NOMEM;
 		return;
 	}
 	if (root != KGENOME_BROKEN && (j = kgenome_fnprint_bsketch_find(g, root)) != UINT32_MAX) {

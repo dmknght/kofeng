@@ -18,6 +18,7 @@
 #include "objctx_int.h"
 #include "scan_norm_endian.h"
 #include "../kofcore/kofcmp.h"
+#include "../kofcore/tabgrow.h"
 #include "../detectors/linkage/kofdiag.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../kofcore/kofmod/elf.h"
@@ -125,6 +126,22 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * over bytes already in the tree), and a second, identical test used to follow.
 	 */
 	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
+		return 0;
+	/*
+	 * AND NOT WHEN NOTHING CAN READ IT. A view exists for what reads it: a detector module, a
+	 * diagnose, the similarity blocks. A pack with none of them (the bare pack of a measurement,
+	 * a host that loaded only unpackers) gets no view from a pass that is 66% of the Ir of the
+	 * binary corpus then (callgrind, 50 files of corp300: kof_scan_mutation_units alone 38.6%, and
+	 * 286 of the 300 files end "No module targets this format" after that work: BE-4). A shipped
+	 * pack has all three, and for it nothing changes.
+	 */
+	/*
+	 * A CALLER THAT LOOKS AT THE OBJECTS (kof_scan_option.reader; kscan_explain sets it) IS A READER: kofviewer lists the view in the tree, shows its hex and cuts its blocks, and a
+	 * signature's first author has no pack that reads anything yet. Without this the bare pack that
+	 * BE-4 made cheap also made the viewer blind to the view (tui-test: //0:norm absent). A scan that
+	 * did not ask - kofscanner, a host - keeps the saving.
+	 */
+	if (!sc->eng || (!sc->eng->n_mods && !sc->eng->n_diag && !sx_mutation_loaded(sc) && !sc->obj.diag.all && !sc->obj.reader))
 		return 0;
 	/*
 	 * AND NOT A SCRIPT, BECAUSE A SCRIPT HAS ITS OWN NORMALISER.
@@ -481,13 +498,11 @@ static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
 	if (off > n)
 		off = n;
 	if (w->n_mark == w->cap_mark) {
-		/* KNOWN DEFECT REV-D8h (2026-10-25, Inference) [sev L]: mark_add (scan_norm.c) doubles a uint32 capacity
-		 * (normaliser marks) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of
-		 * this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly).
-		 * Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against
-		 * UINT32_MAX / 2 before doubling. */
-		uint32_t nc = w->cap_mark ? w->cap_mark * 2u : 64u;
-		uint64_t *g = realloc(w->mk, (size_t)nc * sizeof *g);
+		/* KNOWN DEFECT REV-D8h (2026-10-25, Inference) [sev L]: [narrowed 2026-10-28: the doubling is overflow-guarded, kof_cap_double] the normaliser marks table is not charged to the scanner's ledger.
+		 * Trigger: a hostile script/object with a very large table (bounded by the input, not by the ledger). Effect: resident bytes above the cap by the table. Reproducer: none (read).
+		 * Fix: scan_charge the growth and oc_scan_release it where the table is freed. */
+		uint32_t nc = kof_cap_double(w->cap_mark, 64u);
+		uint64_t *g = nc ? realloc(w->mk, (size_t)nc * sizeof *g) : NULL;
 
 		if (!g) {
 			w->cut = 1;     /* a place not asked about maps to itself - and it is said */
@@ -531,13 +546,11 @@ static int norm_unit(void *user, uint32_t region, uint64_t off, uint64_t len, ui
 	    !kof_exe_has_wide(w->tmp + off, len))
 		return 0;
 	if (w->n_fixed == w->cap_fixed) {
-		/* KNOWN DEFECT REV-D8r (2026-10-25, Inference) [sev L]: the fixed-range collector (scan_norm.c) doubles a uint32 capacity (fixed ranges of the normaliser view)
-		 * with no overflow guard and no ledger charge. Trigger: 2^31 or more fixed ranges; the engine caps an object at 512 MiB,
-		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
-		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
-		 * UINT32_MAX / 2 before doubling. */
-		uint32_t nc = w->cap_fixed ? w->cap_fixed * 2u : 64u;
-		struct kof_range *g = realloc(w->fixed, (size_t)nc * sizeof *g);
+		/* KNOWN DEFECT REV-D8r (2026-10-25, Inference) [sev L]: [narrowed 2026-10-28: the doubling is overflow-guarded, kof_cap_double] the normaliser fixed-range table is not charged to the scanner's ledger.
+		 * Trigger: a hostile script/object with a very large table (bounded by the input, not by the ledger). Effect: resident bytes above the cap by the table. Reproducer: none (read).
+		 * Fix: scan_charge the growth and oc_scan_release it where the table is freed. */
+		uint32_t nc = kof_cap_double(w->cap_fixed, 64u);
+		struct kof_range *g = nc ? realloc(w->fixed, (size_t)nc * sizeof *g) : NULL;
 
 		if (!g) {
 			w->cut = 1;     /* the view is cut as its own bytes say - and it is said */
@@ -574,7 +587,7 @@ static int norm_rewrote(const struct norm_work *w, kof_buf buf)
 static void norm_walk(struct norm_work *w, struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	struct kof_scanner *sc = w->sc;
-	const struct kof_scan_cut cut = { NULL, sc->cur.lib_ok ? &sc->cur.lib : NULL, NULL, 0 };
+	const struct kof_scan_cut cut = { .lib = sc->cur.lib_ok ? &sc->cur.lib : NULL };
 	struct norm_unit_ask ask = { w, buf };
 	uint32_t a;
 
@@ -1176,8 +1189,7 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/* A set the remap or the allocator cut short is a view whose functions are not all there, and a
 	 * rule that reads one sees "no such function": the object says so, as funcs_of does for the
 	 * parent's own set (norm_defect_engine N6). */
-	if (kgenome_status_is_cut(sc->pend.funcs.status))
-		oc_scan_limit(sc);
+	oc_status_said(sc, sc->pend.funcs.status);
 	norm_free_out(w);
 	if (sent == w->n) {
 		/*
@@ -1353,12 +1365,28 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * no second budget here and no path by which this can exceed the
 	 * ceiling the caller set.
 	 */
-	if (!norm_fits(sc, w))
-		return;
-	kof_mod_unpack_mode(ctx, 1);
-	norm_declare(sc, ctx, w);
-	norm_send_child(sc, ctx, buf, w);
-	kof_mod_unpack_mode(ctx, 0);
+	/*
+	 * THE OBJECT CAP IS THE BOUND OF AN ENTRY DECODED OUT OF A CONTAINER, NOT OF A VIEW: the view
+	 * is the parent's own bytes with a few runs changed, so it is the size of an object the scan
+	 * already holds whole (a root is not under the cap), and refusing it for the cap read
+	 * "Limit reached" on every PE or ELF over 16 MiB whose decode changed a byte (BE-10:
+	 * corp300/146_145.bin, 22.4 MB; both scan clean with --max-object 128 MiB). So for this one
+	 * child the cap is the view's size at least; the produced-bytes budget and the resident
+	 * ceiling, which are the tree's, are asked as before (norm_fits) and still refuse.
+	 */
+	{
+		const uint64_t cap0 = sc->ledger.obj_cap;
+
+		if (cap0 < w->n)
+			sc->ledger.obj_cap = w->n;
+		if (norm_fits(sc, w)) {
+			kof_mod_unpack_mode(ctx, 1);
+			norm_declare(sc, ctx, w);
+			norm_send_child(sc, ctx, buf, w);
+			kof_mod_unpack_mode(ctx, 0);
+		}
+		sc->ledger.obj_cap = cap0;
+	}
 }
 
 void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,

@@ -19,6 +19,7 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "notes.h"
+#include "../../libkofeng/scanners/scan.h"
 
 static int fails;
 
@@ -135,7 +136,7 @@ static struct got run(kof_scanner *sc, const uint8_t *b, uint64_t n, int report)
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
 	memset(&pend, 0, sizeof pend);
-	opt.report_diag = report;
+	(void)kof_scan_set_explain(sc, report);
 	kscan_bytes(sc, b, n, "x", &opt, on_object, &g);
 	return g;
 }

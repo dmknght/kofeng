@@ -1,5 +1,6 @@
 """Disassembler panel (Analysis > Show/Hide disassembly)."""
 from tui import *
+from dl import status  # noqa
 
 A = 'disasm'
 LABEL = re.compile(r'\| ([.A-Za-z_][\w.$@-]*):\s')
@@ -191,13 +192,42 @@ def panel_survives_a_temporary_shrink():
 
 
 @case(A)
-def not_offered_for_arm_and_script():
-    with Viewer(SAMPLES['gafgyt']) as v:
-        v.menu_open('Analysis')
-        check(not v.popup_item('disassembly'), 'disassembly offered for ARM: %r' % [t for _, _, t, _ in v.popup()])
+def not_offered_for_script():
     with Viewer(FIX('shell.php')) as v:
         v.menu_open('Analysis')
         check(not v.popup_item('disassembly'), 'disassembly offered for a script')
+
+
+ARM_MNEMONICS = {'PUSH', 'POP', 'LDR', 'STR', 'MOV', 'ADD', 'SUB', 'CMP', 'BL', 'BX', 'B', 'LDM', 'STM', 'AND', 'ORR'}
+A64_MNEMONICS = {'STP', 'LDP', 'MOV', 'ADD', 'SUB', 'LDR', 'STR', 'BL', 'B', 'RET', 'ADRP', 'CMP', 'CBZ', 'NOP'}
+A64_SAMPLE = '/mnt/games/virus_share/Bazaar.2026.08/HEUR-Backdoor.Linux.Mirai.gen-47c1bf90182c9aebbaa84b5f256da89f5c3b1f175282717fbc9be6a7dcd618c3'
+
+
+@case(A)
+def arm_state_code_is_disassembled():
+    """An ARM ELF is offered the panel and its rows are ARM text (the library has text for ARM state)."""
+    with Viewer(SAMPLES['gafgyt']) as v:
+        check(v.menu_item('Analysis', 'Show disassembly'), 'no Show disassembly item for ARM')
+        check(dis_head(v), 'panel did not open for ARM')
+        check('[a32]' in v.row(dis_head(v)), v.row(dis_head(v))[:80])
+        r = dis_rows(v)
+        check(len(r) >= 8, 'only %d decoded rows' % len(r))
+        for (y0, a, m), (y1, b, m1) in zip(r, r[1:]):
+            check(b == a + 4, 'ARM rows are not one word apart at row %d: %#x -> %#x' % (y1, a, b))
+        check({m for _, _, m in r} & ARM_MNEMONICS, {m for _, _, m in r})
+
+
+@case(A)
+def aarch64_code_is_disassembled():
+    if not os.path.exists(A64_SAMPLE):
+        raise Skip('no AArch64 sample on this machine')
+    with Viewer(prep_sample(A64_SAMPLE, 'a64_sample')) as v:
+        check(v.menu_item('Analysis', 'Show disassembly'), 'no Show disassembly item for AArch64')
+        check(dis_head(v), 'panel did not open for AArch64')
+        check('[a64]' in v.row(dis_head(v)), v.row(dis_head(v))[:80])
+        r = dis_rows(v)
+        check(len(r) >= 8, 'only %d decoded rows' % len(r))
+        check({m for _, _, m in r} & A64_MNEMONICS, {m for _, _, m in r})
 
 
 @case(A)
@@ -265,7 +295,7 @@ def fixture_panel():
 def only_engine_data_is_drawn_labels_for_functions_and_nothing_computed():
     # The panel computes no analysis: function labels come from the engine's
     # function table and symbol block; there is no syscall name, no callee
-    # name, no jump label, no loop mark and no invented sub_ name.
+    # name, no jump label, no loop mark and no invented fcn_ name.
     with fixture_panel() as v:
         rows = panel_text(v, pages=8)
         lab = rows.pop('labels')
@@ -364,13 +394,13 @@ def analysis_names_entries_of_a_stripped_elf_and_never_a_symbol():
     with Viewer(FIX('disfix_stripped.elf')) as v:
         v.click(10, 4)
         check(v.menu_item('Analysis', 'Show disassembly'))
-        check(row_with(v, 'sub_') is None and not [r for r in range(dis_head(v) + 1, v.rows) if LABEL.search(v.row(r))],
+        check(row_with(v, 'fcn_') is None and not [r for r in range(dis_head(v) + 1, v.rows) if LABEL.search(v.row(r))],
               'labels before the analysis, with no symbol to give one')
         analyse(v)
         rows = panel_text(v, pages=8)
         lab = rows.pop('labels')
-        check('sub_1000' in lab and 'spin' not in lab and 'emit' not in lab, 'labels: %r' % lab)
-        check('-> sub_1000' in rows[0x1051], rows[0x1051])
+        check('fcn_00001000' in lab and 'spin' not in lab and 'emit' not in lab, 'labels: %r' % lab)
+        check('-> fcn_00001000' in rows[0x1051], rows[0x1051])
         check('write (1)' in rows[0x1011], rows[0x1011])
 
 
@@ -384,7 +414,7 @@ def analysis_of_a_module_names_the_relocation_symbols():
         check(calls, 'no unrelocated call in the window')
         for t in calls:
             m = re.search(r'; -> ([A-Za-z_][\w.$@]*)', t)
-            check(m and not m.group(1).startswith(('sub_', '.L')), 'call not named by its relocation: %r' % t)
+            check(m and not m.group(1).startswith(('fcn_', '.L')), 'call not named by its relocation: %r' % t)
 
 
 @case(A)
@@ -395,9 +425,9 @@ def analysis_of_a_raw_stager_blob_in_32_bit_mode():
         analyse(v)
         rows = panel_text(v, pages=2)
         lab = rows.pop('labels')
-        check(lab == {'.L-7': 0x7, 'sub_10': 0x10}, 'labels: %r' % lab)
+        check(lab == {'.L-7': 0x7, 'fcn_00000010': 0x10}, 'labels: %r' % lab)
         check('-> .L-7 (backward)' in rows[0x9], rows[0x9])
-        check('-> sub_10' in rows[0xb], rows[0xb])
+        check('-> fcn_00000010' in rows[0xb], rows[0xb])
         check('linux: execve (11)' in rows[0x18], rows[0x18])
 
 
@@ -429,6 +459,55 @@ def a_jump_far_from_its_comparison_does_not_borrow_the_comparison_of_an_earlier_
         text = v.row(jz)
         check('jump if ZF=1 (equal / zero)' in text, 'with no comparison in view the jump says the flag: %r' % text[28:110])
         check('eax == ebx' not in text, 'the jump borrowed a comparison that is not in this window: %r' % text[28:110])
+
+
+
+# ---------------------------------------------------------- Analysis > Resolve call symbols
+RUN1 = '/home/dmknght/Desktop/MalwareLab/MalwareSourceCode/Linux/Mirai-Family/run1'    # x86-64 PIE, dynamic: `call 0x3360` at 0x80c6 is rand@plt
+
+
+def run1_at_call():
+    """run1 with the panel open and the instruction at 0x80c6 (a call to the rand PLT stub) on screen."""
+    if not os.path.exists(RUN1):
+        raise Skip('run1 is not on this machine')
+    v = Viewer(RUN1)
+    v.click(10, 2)
+    check(v.menu_item('Analysis', 'Show disassembly'), 'no Show disassembly item')
+    check(v.menu_item('Edit', 'Go to...'), 'no Go to item')
+    v.type('50b8')                                  # CODE region + 0x50b8 = file offset 0x80b8
+    v.click(*v.find('[ Go ]'))
+    v.pump(0.5)
+    v.click(60, 2)
+    check(row_with(v, '000080c6'), 'the call at 0x80c6 is not on screen')
+    return v
+
+
+@case(A)
+def analyze_names_the_plt_call_and_builds_the_notes():
+    with run1_at_call() as v:
+        r = row_with(v, '000080c6')
+        check('CALL' in v.row(r) and 'rand@plt' not in v.row(r), 'named before it was asked for: %r' % v.row(r)[30:100])
+        v.menu_open('Analysis')
+        names = [t for _y, _x, t, _en in v.popup()]
+        v.esc()
+        check(not any(t.startswith('Resolve call symbols') for t in names), 'Resolve call symbols is still in Analysis: %r' % names)
+        analyse(v)
+        r = row_with(v, '000080c6')
+        check(r and re.search(r'CALL\s+0x3360\s+; (-> )?rand@plt', v.row(r)), 'analysed: %r' % (v.row(r) if r else None))
+        check('analysed, resolved' in v.row(dis_head(v)), v.row(dis_head(v))[:90])
+        check('Resolved call symbols' in status(v) and 'Analysed the whole object' in status(v), status(v)[-100:])
+        # Analyze stays enabled so that it can be run again
+        v.menu_open('Analysis')
+        it = v.popup_item('Analyze disassembly')
+        check(it and it[3] is not False, 'Analyze disassembly is greyed after it ran: %r' % (it,))
+        v.esc()
+
+
+@case(A)
+def analyze_an_object_the_engine_cannot_resolve_has_no_names():
+    with code_viewer() as v:                        # a .ko is a relocatable object: it has no PLT and no import table
+        analyse(v)
+        check('resolved' not in v.row(dis_head(v)), v.row(dis_head(v))[:90])
 
 
 if __name__ == '__main__':

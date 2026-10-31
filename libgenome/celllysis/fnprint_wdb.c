@@ -14,6 +14,11 @@
  * of the object produced, on the block's side. A hot key (a window many blocks hold) is credited once
  * per object and side: its run is walked once, however many windows repeat it.
  */
+
+/* CONSOLIDATION fnprint-0 (2026-10-30, R): UNUSED by every engine path (0 callers in libkofeng, kofexamine, ksigbuilder, kofscanner, kofwatcher,
+ * libkoforbit; only tests and docs/exports_kept.txt hold it). Window hashes on function bodies, the same job the CFG signature (celllysis/cfg_*) takes
+ * over for function content. After CFG step 2 decide: DELETE with its tests and exports_kept entries, or REUSE what the CFG lacks (none verified).
+ * Do not delete before that decision. */
 #include "fnprint.h"
 
 #include <stdlib.h>
@@ -456,7 +461,7 @@ void kgenome_fnprint_wctx_credit(struct kgenome_fnprint_wctx *c, uint32_t v, uin
 {
 	const struct kgenome_fnprint_wdb *d = c->db;
 	struct kgenome_fnprint_kc *k = &c->kc[(v * 2654435761u) >> 20];
-	uint32_t want = (c->gen << 2) | (1u << (side & 1u)), lo, hi, walk0;
+	uint32_t want = (c->gen << 2) | (1u << (side & 1u)), lo, hi;
 
 	c->n_lookup++;
 	if (k->key == v && (k->tag >> 2) == c->gen && (k->tag & want & 3u)) {
@@ -510,7 +515,6 @@ void kgenome_fnprint_wctx_credit(struct kgenome_fnprint_wctx *c, uint32_t v, uin
 			*hs = (*hs >> 2) == c->gen ? (*hs | bit) : ((c->gen << 2) | bit);
 		}
 	}
-	walk0 = lo;
 	for (; lo < d->n_pair && d->key[lo] == v; lo++) {
 		uint32_t r = d->ref[lo], b = REF_BLK(r), s = REF_SLOT(r), *m;
 		const struct kgenome_fnprint_wblock *bk = &d->blk[b];
@@ -542,7 +546,6 @@ void kgenome_fnprint_wctx_credit(struct kgenome_fnprint_wctx *c, uint32_t v, uin
 		if (c->policy)
 			decide(c, bk, b, c->count[b]);
 	}
-	c->n_walked += lo - walk0;
 }
 
 /* ---- the pass --------------------------------------------------------------------- */
@@ -563,7 +566,7 @@ static void roll(struct wp *w, const uint8_t *p, uint64_t n)
 	uint64_t fmask = c->rfilter ? c->rfilter_mask : d->filter_mask, nrb = c->n_rebuild;
 	uint32_t top = c->rtop;
 
-	if (!d->n_pair || !kgenome_mtn_win_begin(&it, p, n, KGENOME_MUTATION_RAW))
+	if (!d->n_pair || !kgenome_mtn_win_begin(&it, p, n))
 		return;
 	do {
 		uint32_t v = kgenome_mtn_win_value(&it);
@@ -605,7 +608,6 @@ static void one_range(struct wp *w, const uint8_t *p, uint64_t n)
 {
 	uint64_t at = 0, run = 0;
 
-	w->st->bytes_in += n;
 	w->st->n_win += n >= KGENOME_MUTATION_NG ? n - KGENOME_MUTATION_NG + 1u : 0;
 	if (!(w->rq->flags & KGENOME_FNP_WP_SKIP_DATA)) {
 		roll(w, p, n);

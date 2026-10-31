@@ -32,8 +32,10 @@ int oc_expand_sink_fn(void *user, const uint8_t *p, uint32_t n)
 {
 	struct expand_sink *e = user;
 
-	if (n > e->left)
+	if (n > e->left) {
 		n = (uint32_t)e->left;
+		e->refused = 1;
+	}
 	if (n == 0)
 		return 0;              /* the receiver has had enough */
 	e->left -= n;
@@ -46,8 +48,8 @@ int oc_expand_sink_fn(void *user, const uint8_t *p, uint32_t n)
  * Eight callers wrote this out, each with its own spelling of which statuses
  * to tolerate - which is the part that genuinely differs - and all eight with
  * the SAME second clause, which is the part that does not. That clause is the
- * one that matters and the one most easily left out: `left == 0` means the
- * ratio clamp cut the stream, and without it a bomb's prefix is handed on as
+ * one that matters and the one most easily left out: `refused` (a write was cut to
+ * what was left) means the ratio clamp cut the stream, and without it a bomb's prefix is handed on as
  * though it were the whole entry. It was right in all eight, and nothing was
  * making it so.
  */
@@ -68,8 +70,8 @@ void oc_stream_note(struct kof_scanner *sc, enum kuncoat_status st,
 			oc_entry_cut(sc);
 		else
 			oc_scan_broken(sc, oc_broken_of_status(st));
-	} else if (snk->left == 0) {
-		/* The declared-ratio clamp: one stream's own header, said on that entry. */
+	} else if (snk->refused) {
+		/* The declared-ratio clamp cut bytes: one stream's own header, said on that entry. */
 		oc_entry_cut(sc);
 	}
 }
@@ -124,7 +126,7 @@ static uint64_t oc_inflate_members(struct kof_scanner *sc,
 				   uint64_t off, uint64_t len,
 				   uint64_t out_hint, int members)
 {
-	struct expand_sink e;
+	struct expand_sink e = { 0 };
 	uint64_t produced = 0;
 
 	e.ctx = ctx;
@@ -237,7 +239,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	    method == KOF_UNP_RUNLENGTH)
 		return oc_unpack_textcode(ctx, method, b, off, len);
 	if (method == KOF_UNP_LZW) {
-		struct expand_sink snk;
+		struct expand_sink snk = { 0 };
 		enum kuncoat_status st;
 		uint64_t got = 0;
 
@@ -262,7 +264,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	}
 
 	if (method == KOF_UNP_BZIP2) {
-		struct expand_sink snk;
+		struct expand_sink snk = { 0 };
 		enum kuncoat_status st;
 		uint64_t got = 0;
 
@@ -289,7 +291,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	}
 
 	if (method >= KOF_UNP_LZHUF_ARJ && method <= KOF_UNP_LZHUF_LH7) {
-		struct expand_sink snk;
+		struct expand_sink snk = { 0 };
 		enum kuncoat_status st;
 		uint64_t got = 0;
 

@@ -6,6 +6,7 @@
 
 #include "dbloader_int.h"
 #include "pack/dbcrc.h"
+#include <celllysis/mutation.h>
 
 /* ---- validation ------------------------------------------------------------- */
 
@@ -414,10 +415,10 @@ static int pack_check(const void *map, uint64_t len, uint64_t file_len,
 			if ((uint64_t)bk[k].first_hash + bk[k].n_hash > h->n_pool)
 				REFUSE("block %u slices hashes that are not "
 				       "there", k);
-			if (bk[k].n_hash < KGENOME_MUTATION_MIN_HASH ||
+			if (bk[k].n_hash < kgenome_mutation_block_min(bk[k].scan_mask) ||
 			    bk[k].n_hash > KOF_MUTATION_MAX_HASH)
 				REFUSE("block %u has %u hashes", k, bk[k].n_hash);
-			if (bk[k].norm >= KGENOME_MUTATION_NORM_COUNT)
+			if (bk[k].norm != 0)       /* the byte that was the normalizer: 0 now, any other value is an old XOR/SUB block */
 				REFUSE("block %u names normalizer %u", k,
 				       bk[k].norm);
 		}

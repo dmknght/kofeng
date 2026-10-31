@@ -24,6 +24,7 @@
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
 #include "../../libkofeng/detectors/linkage/kofdiag.h"
 #include <celllysis/nucleo.h>
+#include <phenotype/diag_private.h>
 #include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
@@ -55,6 +56,9 @@ static void put16(uint8_t *b, unsigned at, uint16_t v)
 	b[at + 1u] = (uint8_t)(v >> 8);
 }
 static unsigned char view[1u << 21];
+
+/* the one import the image names (13 bytes at most with its NUL); section 5 changes it */
+static const char *g_import = "VirtualAlloc";
 
 
 
@@ -133,7 +137,7 @@ static uint64_t pe_with_import(uint8_t *b, uint64_t cap, int wide,
 		put32(b, id + 0x60, rva_id + 0x90);
 		(void)w;
 		memcpy(b + id + 0x80, "kernel32.dll", 13);
-		memcpy(b + id + 0x92, "VirtualAlloc", 13);   /* after the 2-byte hint */
+		memcpy(b + id + 0x92, g_import, strlen(g_import) + 1u);   /* after the 2-byte hint */
 	}
 	return hdr + fa;
 }
@@ -259,7 +263,39 @@ int main(void)
 	CK(count(s) == 0);
 	kgenome_diag_scan_free(s);
 
-	printf("diag pe: import calls, data in the code, the x86 stub, a call that is not an import%s\n",
+	/*
+	 * 5. D10: AN IMPORT THAT NEVER RETURNS. `call [ExitProcess]` is no node (the vocabulary has no word for it) but it ends the
+	 *    block: the walk must not run on into the next function and hand it this one's state. The site is recorded for the lineage
+	 *    (kgenome_diag_site_noreturn), through a direct call and through a stub alike. Old tests missed it: (a) the table of names
+	 *    held C/glibc names only and no PE test asked for a noreturn site.
+	 */
+	g_import = "ExitProcess";
+	memset(code, 0x90, sizeof code);
+	code[0] = 0x06; code[1] = 0x06; code[2] = 0x06; code[3] = 0x06;
+	code[4] = 0xff; code[5] = 0x15;                       /* call [rip+disp] */
+	put32(code, 6, (uint32_t)((TEXT_RVA + IDATA_OFF + 0x60) - (TEXT_RVA + 4u + 6u)));
+	code[10] = 0xc3;
+	n = pe_with_import(b, sizeof b, 1, code, 0x100, 1);
+	s = scan(b, n, &ctx, "x64 ExitProcess");
+	CK(s && kgenome_diag_site_noreturn(s, 0x404u));
+	CK(s && !kgenome_diag_site_noreturn(s, 0x400u) && !kgenome_diag_site_noreturn(s, 0x40au));
+	for (i = 0; s && i < count(s); i++)
+		CK(kgenome_diag_scan_at(s, i)->at != 0x404u);  /* no node on it */
+	kgenome_diag_scan_free(s);
+	memset(code, 0x90, sizeof code);
+	code[0] = 0xe8; put32(code, 1, 0x20u - 5u);           /* call stub   */
+	code[5] = 0xe8; put32(code, 6, 0x20u - 10u);          /* call stub   */
+	code[10] = 0xc3;
+	code[0x20] = 0xff; code[0x21] = 0x25;                 /* jmp [abs32] */
+	put32(code, 0x22, 0x400000u + TEXT_RVA + IDATA_OFF + 0x60u);
+	n = pe_with_import(b, sizeof b, 0, code, 0x100, 1);
+	s = scan(b, n, &ctx, "x86 ExitProcess through a stub");
+	CK(s && kgenome_diag_site_noreturn(s, 0x400u) && kgenome_diag_site_noreturn(s, 0x405u));
+	CK(s && !kgenome_diag_site_noreturn(s, 0x420u));
+	kgenome_diag_scan_free(s);
+	g_import = "VirtualAlloc";
+
+	printf("diag pe: import calls, data in the code, the x86 stub, a call that is not an import, a call that never returns%s\n",
 	       fails ? " - FAILED" : " - ok");
 	return fails != 0;
 }

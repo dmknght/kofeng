@@ -1,10 +1,46 @@
 /*
+ * OLD-DISEASE (owner, 2026-10-28): the parts of this file about diseases are the OLD logic - a disease as (maltype, free-text
+ * behaviour path), its id and its records in the pack. The NEW disease is the pair (ACT, OBJ) of kofmod/diseaselist.h and has no
+ * text. Nothing is removed yet: this is marked for review and removal in the disease rework (changing the pack layout or version is
+ * the owner's decision). `grep -rn OLD-DISEASE` lists every marked place.
+ */
+/*
  * diagsrc_resolve.c - what a parsed diagnose source means: the rules about what a diagnose may say. Split from diagsrc.c; the text is unchanged. See diagsrc.h.
  */
 
 #include "diagsrc_int.h"
 
 /* ---- the tree -------------------------------------------------------------- */
+
+/* The formats a KOF_TARGET_FORMAT line names, as a bit per format; the answer is how many DISTINCT formats that is (0 when
+ * the words are not there or one is not a format). */
+static int fmt_set(const char *words, uint64_t *set)
+{
+	char tmp[KOF_DSRC_WORDS_LEN];
+	char *tok, *next;
+	int pop = 0;
+	uint64_t b;
+
+	*set = 0;
+	if (!words[0] || strlen(words) >= sizeof tmp)
+		return 0;
+	memcpy(tmp, words, strlen(words) + 1u);
+	for (tok = tmp; tok; tok = next) {
+		uint64_t v;
+
+		next = strchr(tok, '|');
+		if (next)
+			*next++ = 0;
+		if (!kof_dsrc_when_value(tok, &v) || v >= 64u) {
+			*set = 0;
+			return 0;
+		}
+		*set |= (uint64_t)1 << v;
+	}
+	for (b = *set; b; b >>= 1)
+		pop += (int)(b & 1u);
+	return pop;
+}
 
 /*
  * THE RULES ABOUT WHAT A DIAGNOSE MAY SAY, in one place, in the order the file
@@ -15,7 +51,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 		     const struct kof_dsrc_report *r)
 {
 	struct { char label[32]; char name[KOF_DSRC_NAME_LEN]; int used; } sy[8];
-	int n_sym = 0, errs = 0, i;
+	int n_sym = 0, errs = 0, i, has_form = 0;
 	uint32_t q;
 	int last = (int)d->lines;
 
@@ -43,6 +79,30 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			v->disease_type = (uint8_t)it->a;
 			break;
 		}
+		case KDS_FAMILY:
+		case KDS_VARIANT:
+		case KDS_TYPE:
+		case KDS_TAG: {
+			unsigned bit = it->kind == KDS_FAMILY ? KOF_DSRC_META_FAMILY :
+				       it->kind == KDS_VARIANT ? KOF_DSRC_META_VARIANT :
+				       it->kind == KDS_TYPE ? KOF_DSRC_META_TYPE :
+				       KOF_DSRC_META_TAG;
+
+			if (v->meta & bit) {
+				kof_dsrc_say_err(r, &errs, ln, "declared twice");
+				break;
+			}
+			v->meta |= bit;
+			if (it->kind == KDS_FAMILY)
+				memcpy(v->family, it->s1, sizeof v->family);
+			else if (it->kind == KDS_VARIANT)
+				memcpy(v->variant, it->s1, sizeof v->variant);
+			else if (it->kind == KDS_TAG)
+				memcpy(v->tag, it->s1, sizeof v->tag);
+			else
+				v->type = (uint8_t)it->a;
+			break;
+		}
 		case KDS_ANALYSIS:
 			v->analysis |= it->a;
 			break;
@@ -54,16 +114,28 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			uint16_t fact = it->kind == KDS_FORMAT
 					? (uint16_t)KOF_FACT_FORMAT
 					: (uint16_t)KOF_FACT_OBJ_KIND;
+			uint64_t val = it->v, set = 0;
 
 			if (v->n_when >= (int)KOF_DIAG_MAX_WHEN) {
 				kof_dsrc_say_err(r, &errs, ln, "too many conditions");
 				break;
 			}
+			/*
+			 * SEVERAL FORMATS ARE A SET, NOT A NUMBER: the words' values ORed into one number name no format (ELF | PE
+			 * is the number of a third one), so the diagnose is for any of them through KOF_FACT_FORMAT_SET, a bit per
+			 * format. One format keeps the fact it always had, bit for bit.
+			 */
+			if (it->kind == KDS_FORMAT && fmt_set(it->s1, &set) > 1) {
+				fact = (uint16_t)KOF_FACT_FORMAT_SET;
+				val = set;
+			}
 			for (k = 0; k < v->n_when; k++)
-				if (v->when[k].fact == fact)
+				if (v->when[k].fact == fact ||
+				    (it->kind == KDS_FORMAT && (v->when[k].fact == KOF_FACT_FORMAT ||
+								v->when[k].fact == KOF_FACT_FORMAT_SET)))
 					kof_dsrc_say_err(r, &errs, ln, "declared twice");
 			v->when[v->n_when].fact = fact;
-			v->when[v->n_when].val = it->v;
+			v->when[v->n_when].val = val;
 			v->n_when++;
 			break;
 		}
@@ -211,8 +283,24 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 	 */
 	if (d->bad)
 		return errs;
+	/*
+	 * THE DETECTION FORM, when the source declares one (diagsrc_form.c): a diagnose is a graph OR a form, never both -
+	 * the graph is answered by the analysis of the code and the form by the pattern matcher and the similarity set, at
+	 * different stages, and an AND of the two has no stage that can answer it. A form needs no analysis and no head.
+	 */
+	v->form = kof_dsrc_form_resolve(d, r, &errs, &has_form);
+	if (has_form && (v->n_nd || v->analysis || v->n_ref || v->has_seq))
+		kof_dsrc_say_err(r, &errs, last, "a diagnose is a graph or a form: this one declares "
+			"both a head, an analysis or a symbol and the declarations of a form");
 	if (!v->name[0])
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs KOF_DIAG_NAME");
+	/* The four catalog declarations go together: a diagnose with some of them has a
+	 * family nobody can tie to a variant, a tag or a type. None is an old-style diagnose. */
+	if (v->meta && v->meta != KOF_DSRC_META_ALL)
+		kof_dsrc_say_err(r, &errs, last, "KOF_DIAG_FAMILY, KOF_DIAG_VARIANT, "
+			"KOF_DIAG_TYPE and KOF_DIAG_TAG are written together or not at all");
+	if (has_form)
+		return errs;
 	if (!(v->analysis & (KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL |
 			     KOF_DIAG_ANALYSIS_APIHASH | KOF_DIAG_ANALYSIS_TEXT)))
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs KOF_DIAG_ANALYSIS");
@@ -268,4 +356,68 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 		kof_dsrc_say_warn(r, "a head with no tail, action or symbol says only "
 			    "that a call exists");
 	return errs;
+}
+
+static uint64_t mix(uint64_t h, uint64_t x)
+{
+	unsigned i;
+
+	for (i = 0; i < 8u; i++) {
+		h ^= (x >> (i * 8u)) & 0xffu;
+		h *= 1099511628211ull;
+	}
+	return h;
+}
+
+/* What the diagnose LOOKS FOR, without its name, disease or catalog facts, and without the local labels of its blocks and matchers (a view
+ * has them resolved to indexes): the one identity the builder refuses a collision by and the editor recognises a diagnose already in the tree by. */
+uint64_t kof_dsrc_view_body_hash(const struct kof_dsrc_view *v)
+{
+	uint64_t h = 1469598103934665603ull;
+	int i;
+	const char *p;
+
+	h = mix(h, v->analysis);
+	h = mix(h, (uint64_t)v->n_nd);
+	for (i = 0; i < v->n_nd; i++) {
+		h = mix(h, v->nd[i].cap);
+		h = mix(h, v->nd[i].flags);
+		h = mix(h, v->nd[i].bits);
+		h = mix(h, v->nd[i].val);
+		for (p = v->nd[i].sym; *p; p++)
+			h = mix(h, (unsigned char)*p);
+	}
+	for (i = 0; i < v->n_need; i++)
+		h = mix(h, v->need[i]);
+	for (i = 0; i < v->n_ref; i++)
+		for (p = v->ref[i]; *p; p++)
+			h = mix(h, (unsigned char)*p);
+	for (i = 0; i < v->n_when; i++) {
+		h = mix(h, v->when[i].fact);
+		h = mix(h, v->when[i].val);
+	}
+	h = mix(h, (uint64_t)v->has_seq);
+	h = mix(h, ((uint64_t)v->seq_first << 16) | v->seq_then);
+	/* A FORM IS WHAT A DIAGNOSE LOOKS FOR TOO: two with the same facts and different markers or blocks are two
+	 * diagnoses, and with no nodes to tell them apart they would hash alike and be refused as one. The stream is the
+	 * record's own bytes, so "the same" is what the loader would see. */
+	if (v->form) {
+		size_t k, n = kof_form_wire_size(v->form);
+		uint8_t *w = n ? malloc(n) : NULL;
+
+		if (w && kof_form_wire_write(v->form, w) == n)
+			for (k = 0; k < n; k++)
+				h = mix(h, w[k]);
+		free(w);
+	}
+	return h;
+}
+
+/* Two diagnoses that are one: see the note at the top of this file. */
+
+int kof_dsrc_view_same(const struct kof_dsrc_view *a, const struct kof_dsrc_view *b)
+{
+	return a && b && a->meta == KOF_DSRC_META_ALL && b->meta == KOF_DSRC_META_ALL && !strcmp(a->family, b->family) &&
+	       !strcmp(a->variant, b->variant) && !strcmp(a->tag, b->tag) && a->type == b->type &&
+	       kof_dsrc_view_body_hash(a) == kof_dsrc_view_body_hash(b);
 }

@@ -273,7 +273,8 @@ enum {
 	KOF_FP_WHY_TOO_BIG,     /* over the caller's per-file ceiling */
 	KOF_FP_WHY_BUDGET,      /* the run's total evidence budget was spent */
 	KOF_FP_WHY_NOT_ASKED,   /* collection was off */
-	KOF_FP_WHY_SHORT        /* the range is past the end of the file now */
+	KOF_FP_WHY_SHORT,       /* the range is past the end of the file now */
+	KOF_FP_WHY_IO           /* the copy could not be written: a full disk, a store path that does not fit */
 };
 
 /* A sentence for one of those. Never NULL. */
@@ -295,7 +296,7 @@ struct kof_fp_verdict {
 
 	/*
 	 * AN UNPACKER PRODUCED SOMETHING FROM IT - kof_result.from_packer on a
-	 * child, or a non-zero heur_depth on this object.
+	 * child.
 	 *
 	 * Taken from the engine rather than guessed from a name, because the
 	 * engine already had to decide it and a second opinion here would drift
@@ -304,6 +305,9 @@ struct kof_fp_verdict {
 	 * with the scanner, and that the field exists to retire the guess.
 	 */
 	uint8_t  packed;
+	/* KNOWN DEFECT DEAD4-2 (2026-10-29, R) [sev L]: depth has no producer in the tree since the scored model's heur_depth was deleted (kofwatcher set it from the root object's own depth, which is 0), so the JSON report says "depth":0 for every artefact.
+	 * Trigger: any report written by kof_report_write_json. Effect: a consumer reads a layer count that is never measured. Reproducer: grep -rnw depth libkoforbit/report kofwatcher.
+	 * Fix: remove the member and the "depth" key together at the next report-schema move (a host may fill it through the ask callback, so the owner decides), or count the unpack layers from the report's own children. */
 	uint8_t  depth;         /* executable packer layers above the payload */
 
 	/* kentropy_eighths over the object as scanned. A SHAPE and never a
@@ -567,6 +571,11 @@ struct kof_report;
  * legal and collects nothing - which is what a caller who only wants the
  * summary asks for.
  */
+/* What the three kof_report_write_* functions return when the sink failed
+ * (ferror set on the stream): the report was written short. 0 is success; a
+ * bad argument is KOF_ERR_ARG. */
+#define KOF_REPORT_ERR_WRITE (-5)
+
 struct kof_report *kof_report_open(const struct kof_report_info *info);
 void kof_report_close(struct kof_report *);
 

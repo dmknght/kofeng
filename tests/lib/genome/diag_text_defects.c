@@ -19,6 +19,7 @@
  *   G14  code a script computes nested past the layer bound, and a value past the evaluator's size bound, are said
  *   G15  the 64-bit key slot spreads over 32 bits (the tables it indexes may be larger than 2^24)
  *   G18  brackets nested past the frame bound are said
+ *   S2   a php double-quoted string that interpolates ("$f") carries its variable's flow: unlink("$f") is the link unlink($f) is
  * G9 (an allocation that fails) is diag_text_oom.c; G16 is tests/unit/text_scan_hold.c; G17 is cosmetic and has no test.
  *
  * usage: diag_text_defects
@@ -770,6 +771,32 @@ static void g18(void)
 	}
 }
 
+/* ---- S2-INTERP: a php string that interpolates ------------------------------------------------------------------------ */
+
+static int req_to_delete(const char *src)
+{
+	struct res r = run_s(KGENOME_TEXTUAL_LANG_PHP, src);
+	int l = r.s ? linked(r.s, KGENOME_NUCLEO_REQUEST, KGENOME_NUCLEO_FILE_DELETE, 0xff) : -1;
+
+	done(&r);
+	return l;
+}
+
+static void s2_interp(void)
+{
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink($f);") == 1, "S2: the plain variable (the control)");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(\"$f\");") == 1, "S2: \"$f\" carries the request (it was one token and no link)");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(\"d/$f\");") == 1, "S2: \"d/$f\"");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(\"{$f}\");") == 1, "S2: \"{$f}\"");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(\"${f}\");") == 1, "S2: \"${f}\"");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink('$f');") == 0, "S2: a single-quoted string holds no variable");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(\"\\$f\");") == 0, "S2: an escaped dollar is text");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(<<<'E'\n$f\nE\n);") == 0, "S2: a nowdoc holds no variable");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(<<<E\n$f\nE\n);") == 1, "S2: a heredoc interpolates");
+	CK(req_to_delete("<?php $f = $_GET[\"a\"]; unlink(<<<\"E\"\n$f\nE\n);") == 1, "S2: a heredoc with a double-quoted label interpolates");
+	CK(req_to_delete("<?php $f = 'x'; unlink(\"$f\");") == 0, "S2: a variable that is not from the request is no request");
+}
+
 int main(void)
 {
 	g1();
@@ -787,6 +814,7 @@ int main(void)
 	g14();
 	g15();
 	g18();
+	s2_interp();
 	if (fails) {
 		printf("diag_text_defects: %d failure(s)\n", fails);
 		return 1;

@@ -24,7 +24,6 @@
  * tests/unit/child_fuzz.c.
  */
 struct kof_scan_ledger {
-	const char *res_why;
 	/*
 	 * What is left of the produced-bytes budget for this top level object, and
 	 * whether it ran out. Charged across the whole tree, not per child.
@@ -354,6 +353,15 @@ struct kof_scan_diag {
 	 * kof_diag_match_known. Set where diag_hit is, cleared with it.
 	 */
 	uint8_t *unk;
+	/*
+	 * THE DETECTION FORMS' ANSWERS (KDIG_SEC_FORM), one bit per diagnose like the three above but NOT wiped with them by
+	 * oc_diag_ready: a form is not answered by the analysis of the code, it is answered by the pattern matcher at the
+	 * DETECT stage and by the similarity set at the SIMILAR one (objctx_diag_form.c). `fdone` says the diagnose was
+	 * asked on this object, `fhit` what the expression came to. Cleared per object with the others (sx_obj_begin).
+	 * The same block as hit / gate / unk: one allocation.
+	 */
+	uint8_t *fhit;
+	uint8_t *fdone;
 	/* The head sequences handed to the scan, which keeps the pointer while its
 	 * graph lives. */
 	struct kgenome_diag_seq *seq;
@@ -397,6 +405,13 @@ struct kof_scan_diag {
 	/* The report for the object being finished, built by kof_scan_diag_report and
 	 * lent to the caller for the length of its callback. */
 	struct kof_diag_report *rep;
+	/* What each matcher of each form diagnose came to on this object, recorded by objctx_diag_form.c only while the report
+	 * is asked for (obj.diag.all): cap x KOF_DIAG_REPORT_MATCH. NULL otherwise - a normal scan records nothing. A slot is
+	 * valid when the diagnose's `fdone` bit is set. */
+	struct kof_diag_match (*xm)[KOF_DIAG_REPORT_MATCH];
+	/* The report is being asked for (kof_scan_set_explain, kscan_explain), and the bytes the two tables above were charged to the engine's budget. */
+	uint8_t  explain;
+	uint64_t expl_charged;
 };
 
 #endif

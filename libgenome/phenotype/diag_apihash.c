@@ -388,7 +388,7 @@ static uint32_t pe_idle_slices(const struct kgenome_budget *bud)
 }
 
 
-static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
+static void run_resolver_in(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size,
 			 const struct kgenome_pe_imptab *imports,
 			 const struct kgenome_budget *bud)
@@ -399,21 +399,9 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 	uint32_t n_ev, i;
 
 	memset(&first, 0, sizeof first);
-	/* KNOWN DEFECT WP9-F2 (2026-10-25, M) [sev M]: run_resolver gives the first slice DIAG_PE_SLICE (16000)
-	 * instructions whatever budget->max_insn_resolve says. Trigger: kgenome_diag_apihash_run with
-	 * max_insn_resolve below 16000 and a PE that reads the loader data then spins. Effect: budget 100 spends
-	 * 16000 (the engine passes what the tree allowance has left): a cap bypass. Reproducer:
-	 * tests/lib/genome/diag_known_misses.c f2 (green until fixed). Fix: first.max_insn =
-	 * min(bud->max_insn_resolve, DIAG_PE_SLICE). */
-	first.max_insn = DIAG_PE_SLICE;
+	first.max_insn = bud->max_insn_resolve < DIAG_PE_SLICE ? bud->max_insn_resolve : DIAG_PE_SLICE;
 	first.insn_spent = bud->insn_spent;
 	memset(&rep, 0, sizeof rep);
-	/* KNOWN DEFECT WP9-F10 (2026-10-25, M) [sev M]: run_resolver passes `.imports = imports`; when the caller
-	 * gives none kgenome_emu_unp_run_pe builds its own table (kgenome_pe_imports, realloc) and its status is
-	 * not merged into the product. Trigger: allocation refused while that table is built. Effect: fewer API
-	 * calls found and the product status stays OK. Reproducer: tests/lib/genome/diag_bin_oom.c KNOWN-MISS F10.
-	 * Fix: build the table in run_resolver (kgenome_pe_imptab_build), merge its status into a->status and pass
-	 * it as `.imports`. */
 	em = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
 			.file = base,
 			.n = size,
@@ -444,7 +432,8 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 		       idle < idle_max) {
 			uint32_t now;
 
-			kgenome_emu_set_max_insn(em, done + DIAG_PE_SLICE);
+			/* a slice never takes the run past what the resolver was given */
+			kgenome_emu_set_max_insn(em, bud->max_insn_resolve - done < DIAG_PE_SLICE ? bud->max_insn_resolve : done + DIAG_PE_SLICE);
 			st = kgenome_emu_run(em);
 			done = kgenome_emu_insn_count(em);
 			now = kgenome_emu_win_event_count(em);
@@ -502,6 +491,29 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 	a->end_rip = kgenome_emu_get_rip(em);
 	a->end_from = kgenome_emu_last_branch_at(em);
 	kgenome_emu_free(em);
+}
+
+/*
+ * The import table is the caller's when it is of this buffer, and built here for this run when it is not;
+ * a table that was cut (thunk budget, memory) is a run that found fewer calls, and says so in the product.
+ */
+static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
+			 const uint8_t *base, uint64_t size,
+			 const struct kgenome_pe_imptab *imports,
+			 const struct kgenome_budget *bud)
+{
+	struct kgenome_pe_imptab own;
+	enum kgenome_status own_st = KGENOME_OK;
+
+	memset(&own, 0, sizeof own);
+	if (!kgenome_pe_imptab_is_of(imports, kof_buf_make(base, size))) {
+		kgenome_pe_imptab_build(kof_buf_make(base, size), kgenome_obj_pe(obj), &own);
+		own_st = own.status;
+		imports = &own;
+	}
+	run_resolver_in(a, obj, base, size, imports, bud);
+	a->status = kgenome_status_merge(a->status, own_st);
+	kgenome_pe_imptab_free(&own);
 }
 
 struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_obj *obj,

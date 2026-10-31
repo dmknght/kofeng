@@ -74,7 +74,7 @@ def dashboard_is_dragged_by_its_top_border_not_by_a_tab_or_close():
 def click_each_tab_shows_its_page():
     with Viewer(SAMPLES['gafgyt']) as v:
         open_dash_tab(v, 'Overview')
-        check(v.has('Object') and v.has('Regions') and v.has('Heuristic'), 'overview page incomplete')
+        check(v.has('Object') and v.has('Regions') and v.has('Anomalies'), 'overview page incomplete')
         for tab, needle in (('Segments', 'entropy'), ('Sections', 'entropy'), ('Imports', 'icase'), ('Exports', 'icase'), ('Overview', 'Anomalies')):
             v.click(*v.find(tab, rows=(1, 4)))
             v.pump_quiet()
@@ -122,7 +122,7 @@ def overview_renders_the_format_block_for_elf_and_pe():
     with Viewer(SAMPLES['gafgyt']) as v:
         open_dash_tab(v, 'Overview')
         t = '\n'.join(page_lines(v))
-        for needle in ('format', 'arch', 'symbols', 'entry', 'size', 'layout', 'Regions', 'Anomalies', 'Heuristic'):
+        for needle in ('format', 'arch', 'symbols', 'entry', 'size', 'layout', 'Regions', 'Anomalies'):
             check(needle in t, 'overview did not render %r' % needle)
     path = pick(SAMPLES['pe'], 1, 30000, 200000)[0]
     with Viewer(path) as v:

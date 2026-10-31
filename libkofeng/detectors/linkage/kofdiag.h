@@ -124,4 +124,8 @@ struct kof_diag_store {
 
 int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st);
 
+/* Give back the detection form a loaded record holds (KDIG_SEC_FORM); a graph record holds none. The engine does this
+ * for every diagnose it loaded when it is freed; a caller that loads a record itself does it when it is done. */
+void kof_diag_form_free(struct kof_diag *d);
+
 #endif /* KOFENG_KOFDIAG_H */

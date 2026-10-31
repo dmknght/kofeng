@@ -1,4 +1,4 @@
-"""Draft panel: Type / Family / Comment / Format / Region / Option / Strings."""
+"""Draft panel: Family / Variant / Comment / Format / Region / Option / Strings."""
 from tui import *
 from dl import *
 
@@ -6,8 +6,7 @@ A = 'draft'
 
 
 def ko(**kw):
-    v = Viewer(SAMPLES['ko'], rows=60, cols=200, **kw)
-    return v
+    return ko_cat(rows=60, cols=200, **kw)
 
 
 def line(v, label):
@@ -18,62 +17,53 @@ def line(v, label):
     return None
 
 
-# ---------------------------------------------------------------- type / family
+# ---------------------------------------------------------------- family / variant / comment
 @case(A)
-def type_popup_lists_types_and_selects():
+def family_popup_lists_the_catalog_families_and_selects():
     with ko() as v:
-        click_in_panel(v, '[Virus]')
-        for t in ('Virus', 'Trojan', 'Rootkit', 'Botnet', 'Ransom', 'Miner', 'Adware',
-                  'Exploit', 'Dropper', 'Hacktool', 'Packer'):
-            check(v.has(t, rows=(grip(v) + 1, v.rows)), 'type %s missing from the popup' % t)
-        pick_menu_item(v, 'Rootkit', rows=(grip(v) + 2, v.rows))
-        check('Type [Rootkit]' in v.row(head_row(v)), v.row(head_row(v))[:60])
-
-
-@case(A)
-def type_popup_every_entry_selectable():
-    with ko() as v:
-        seen = []
-        for t in ('Trojan', 'Botnet', 'Ransom', 'Miner', 'Adware', 'Exploit', 'Dropper', 'Hacktool', 'Packer', 'Virus'):
-            cur = re.search(r'Type \[(\w+)\]', v.row(head_row(v))).group(1)
-            click_in_panel(v, '[%s]' % cur)
-            pick_menu_item(v, t, rows=(grip(v) + 2, v.rows))
-            got = re.search(r'Type \[(\w+)\]', v.row(head_row(v))).group(1)
-            eq(got, t, 'type did not change')
-            seen.append(got)
+        click_in_panel(v, 'Family [')
+        for f in ('Mirai', 'Gafgyt', 'Zeus'):
+            check(v.has(f, rows=(grip(v) + 2, v.rows)), 'family %s missing from the list' % f)
+        pick_menu_item(v, 'Gafgyt', rows=(grip(v) + 2, v.rows))
+        check('Family [ Gafgyt ]' in head(v), head(v)[:60])
+        check('Variant [ A ]' in head(v), 'a family with one variant did not select it: %r' % head(v)[:70])
 
 
 @case(A)
-def type_popup_esc_and_click_away_keep_value():
+def family_popup_every_entry_selectable():
     with ko() as v:
-        click_in_panel(v, '[Virus]')
+        for f in ('Zeus', 'Mirai', 'Gafgyt', 'Zeus'):
+            cur = re.search(r'Family \[ (\S+) \]', head(v)).group(1)
+            click_in_panel(v, '[ %s ]' % cur)
+            pick_menu_item(v, f, rows=(grip(v) + 2, v.rows))
+            eq(re.search(r'Family \[ (\S+) \]', head(v)).group(1), f, 'family did not change')
+
+
+@case(A)
+def family_popup_esc_and_click_away_keep_value():
+    with ko() as v:
+        click_in_panel(v, 'Family [')
         v.esc()
-        check('Type [Virus]' in v.row(head_row(v)), 'Esc changed the type')
-        click_in_panel(v, '[Virus]')
+        check('Family [ ? ]' in head(v), 'Esc changed the family')
+        click_in_panel(v, 'Family [')
         v.click(100, 10)
-        check('Type [Virus]' in v.row(head_row(v)), 'click-away changed the type')
-        check(not v.has('Hacktool'), 'popup left on screen after click-away')
+        check('Family [ ? ]' in head(v), 'click-away changed the family')
+        check(not v.has('Gafgyt'), 'list left on screen after click-away')
 
 
 @case(A)
-def family_edit_commit_with_enter_cancel_with_esc():
+def header_family_is_not_a_text_field():
     with ko() as v:
-        click_in_panel(v, '[?]')
-        v.type('Zeus')
-        check('Family [Zeus' in v.row(head_row(v)), 'typing not shown')
-        v.key('enter')
-        check('Family [Zeus]' in v.row(head_row(v)), 'Enter did not commit: %r' % v.row(head_row(v))[:50])
-        click_in_panel(v, '[Zeus]')
-        v.type('X')
-        v.key('esc')
-        r = v.row(head_row(v))
-        check('Family [Zeus' in r, 'Esc lost the committed value: %r' % r[:50])
+        click_in_panel(v, 'Family [')
+        v.type('abc')
+        v.esc()
+        check('abc' not in head(v) and 'Family [ ? ]' in head(v), 'a typed family reached the header: %r' % head(v)[:60])
 
 
 @case(A)
-def family_field_editing_keys():
+def comment_field_editing_keys():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abcdef')
         v.key('left', 2); v.type('X')
         check('abcdXef' in v.row(head_row(v)), 'insert at caret: %r' % v.row(head_row(v))[:50])
@@ -89,29 +79,29 @@ def family_field_editing_keys():
 
 
 @case(A)
-def family_field_paste_bracketed():
+def comment_field_paste_bracketed():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.send('\x1b[200~PastedName\x1b[201~', 0.4)
         check('PastedName' in v.row(head_row(v)), 'bracketed paste not inserted: %r' % v.row(head_row(v))[:60])
         v.key('enter')
 
 
 @case(A)
-def family_field_long_text_scrolls_inside_field():
+def comment_field_long_text_scrolls_inside_field():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.send('A' * 80, 0.6)
         r = v.row(head_row(v))
-        check('Comment' in r or '[Comment' in r, 'long family overwrote the neighbouring field: %r' % r[:120])
+        check('Save' in r and 'Discard' in r, 'a long comment overwrote the buttons: %r' % r[:160])
         v.key('enter')
         check(v.alive())
 
 
 @case(A)
-def family_field_select_by_drag_and_replace():
+def comment_field_select_by_drag_and_replace():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abcdef')
         p = prow(v, '[abcdef')
         v.drag(p[0] - 3, p[1], p[0] + 2, p[1])
@@ -121,9 +111,9 @@ def family_field_select_by_drag_and_replace():
 
 
 @case(A)
-def family_non_ascii_and_control_chars():
+def comment_non_ascii_and_control_chars():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.send('café', 0.4)
         v.send('\x01\x02', 0.2)
         check(v.alive(), 'died on non-ascii / control input in a field')
@@ -142,11 +132,11 @@ def comment_edit_and_status_text():
 @case(A)
 def clicking_another_field_commits_the_open_one():
     with ko() as v:
-        click_in_panel(v, '[?]')
-        v.type('Alpha')
         click_in_panel(v, '[Comment...]')
-        check('Family [Alpha]' in v.row(head_row(v)), 'switching field lost the edit: %r' % v.row(head_row(v))[:60])
-        v.key('esc')
+        v.type('Alpha')
+        click_in_panel(v, '[+ Formats]')
+        v.esc()
+        check('[Alpha' in v.row(head_row(v)), 'switching field lost the edit: %r' % v.row(head_row(v))[:60])
 
 
 # ---------------------------------------------------------------------- format
@@ -189,7 +179,7 @@ def region_menu_lists_object_regions():
     with ko() as v:
         click_in_panel(v, '[+ Scan region]')
         for r in ('HEADERS', 'CODE', 'DATA', 'NOLOAD', 'UNCLAIMED', 'SYM_IMP', 'SYM_EXP', 'WHOLE-FILE'):
-            check(v.has(r, rows=(grip(v) + 1, v.rows)), 'region %s missing' % r)
+            check(v.has(r, rows=(line(v, 'Region') - 12, v.rows)), 'region %s missing' % r)
         v.esc()
 
 
@@ -197,7 +187,7 @@ def region_menu_lists_object_regions():
 def region_add_shows_unused_and_remove():
     with ko() as v:
         click_in_panel(v, '[+ Scan region]')
-        pick_menu_item(v, 'CODE', rows=(line(v, 'Region'), v.rows))
+        pick_near(v, line(v, 'Region'), 'CODE')
         r = v.row(line(v, 'Region'))
         check('CODE' in r, r[:60])
         check('(unused)' in r, 'a region no marker uses should be flagged: %r' % r[:60])
@@ -208,7 +198,7 @@ def region_add_two_and_both_listed():
     with ko() as v:
         for name in ('CODE', 'DATA'):
             click_in_panel(v, '[+ Scan region]')
-            pick_menu_item(v, name, rows=(line(v, 'Region'), v.rows))
+            pick_near(v, line(v, 'Region'), name)
         r = v.row(line(v, 'Region'))
         check('CODE' in r and 'DATA' in r, r[:80])
 
@@ -330,6 +320,48 @@ def string_hit_navigator_moves_between_occurrences():
 
 
 @case(A)
+def load_note_is_shown_by_the_dialog_even_when_the_family_list_loaded_the_catalog_first():
+    """GEN-1: the catalog's load note (a file that did not load) was handed to the dialog only when the
+    dialog was the catalog's first user; the diagnose panel's Family list loads it first."""
+    pd = os.path.join(VT, 'work', 'gen1_%d' % os.getpid(), 'pathogens')
+    os.makedirs(pd, exist_ok=True)
+    with open(os.path.join(pd, 'broken.c'), 'w') as f:
+        f.write('this is not a pathogen file\nKOF_MALWARE_VARIANT("A", KOF_MALTYPE_BOTNET);\n')
+    with open(os.path.join(pd, 'okfam.c'), 'w') as f:
+        f.write('KOF_MALWARE_FAMILY_NAME("Okfam");\nKOF_MALWARE_VARIANT("A", KOF_MALTYPE_TROJAN);\n')
+    with Viewer(SAMPLES['ko'], rows=60, cols=200, extra=('--pathogens', pd, '--syndromes', syndromes_dir_empty())) as v:
+        click_in_panel(v, 'Family [')                 # the list loads the catalog
+        check(v.has('Okfam', rows=(grip(v) + 2, v.rows)), 'the family list did not open')
+        v.esc()
+        check(v.menu_item('Manage', 'Pathogens'), 'no Pathogens item')
+        v.pump_quiet()
+        check(v.has('[ Add family ]'), 'the dialog did not open')
+        x0, y0, x1, y1, _ = v.dialog()
+        rule = v.row(y1)[x0 - 1:x1]
+        check('not loaded: broken.c' in rule, 'the dialog did not say what the catalog could not load: %r' % rule)
+
+
+@case(A)
+def string_hit_counter_shows_the_clipped_plus_at_two_digits():
+    """KXA-2: the counter is 'cur/total+' ('10/64+' is six characters); the '+' says the hit list
+    was clipped at 64 and must not be cut off by a five-wide field."""
+    d = os.path.join(VT, 'work', 'kxa2_%d' % os.getpid())
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, 'many_hits.bin')
+    with open(p, 'wb') as f:
+        f.write((b'needle ' + b'x' * 20 + b'\n') * 200)
+    with Viewer(p, copy=False) as v:
+        add_string(v, 'needle')
+        y = str_rows(v)[0]
+        check('/64+' in v.row(y), 'a clipped hit list shows no plus: %r' % v.row(y)[-40:])
+        nx = v.row(y).index('[>]') + 2
+        for _ in range(9):
+            v.click(nx, y)
+        r = v.row(y)
+        check('10/64+' in r, 'two-digit counter with the clipped plus is cut: %r' % r[-40:])
+
+
+@case(A)
 def string_hit_navigator_scrolls_hex_to_each_hit():
     with ko() as v:
         add_string(v, 'GCC: (Debian')
@@ -446,12 +478,12 @@ def string_longer_than_field():
 @case(A)
 def discard_resets_draft():
     with ko() as v:
-        click_in_panel(v, '[?]'); v.type('Zeus'); v.key('enter')
+        set_family(v, 'Zeus')
         add_string(v, 'GCC')
         click_in_panel(v, '[ Discard ]')
         check(v.alive())
         r = v.row(head_row(v))
-        check('[?]' in r or 'Zeus' not in r, 'draft not reset: %r' % r[:60])
+        check('Family [ ? ]' in r, 'draft not reset: %r' % r[:60])
         check(not str_rows(v), 'strings survived Discard')
 
 
@@ -465,7 +497,7 @@ def discard_asks_or_acts_with_nothing_to_discard():
 @case(A)
 def generate_with_empty_draft_says_why():
     with ko() as v:
-        click_in_panel(v, '[ Generate ]')
+        click_in_panel(v, '[ Save ]')
         check(v.alive())
         s = status(v)
         check(len(s) > 20, 'no feedback after Generate on an empty draft: %r' % s)
@@ -518,7 +550,7 @@ def panel_hscroll_with_shift_wheel():
 def region_item_click_offers_extend_and_remove():
     with ko() as v:
         click_in_panel(v, '[+ Scan region]')
-        pick_menu_item(v, 'CODE', rows=(line(v, 'Region'), v.rows))
+        pick_near(v, line(v, 'Region'), 'CODE')
         p = prow(v, 'CODE')
         v.click(*p)
         check(v.has('Extend with a region') and v.has('Remove scan range CODE'), 'region item menu missing entries')
@@ -531,11 +563,11 @@ def region_item_click_offers_extend_and_remove():
 def region_extend_with_a_second_region():
     with ko() as v:
         click_in_panel(v, '[+ Scan region]')
-        pick_menu_item(v, 'CODE', rows=(line(v, 'Region'), v.rows))
+        pick_near(v, line(v, 'Region'), 'CODE')
         v.click(*prow(v, 'CODE'))
         v.click(*v.find('Extend with a region'))
         check(v.has('DATA') or v.has('HEADERS'), 'no regions offered to extend with')
-        q = v.find('DATA', rows=(line(v, 'Region'), v.rows))
+        q = find_near(v, line(v, 'Region'), 'DATA')
         if q:
             v.click(*q)
             r = v.row(line(v, 'Region'))
@@ -582,10 +614,10 @@ def popup_menus_stay_inside_the_screen_near_the_bottom_and_right():
 @case(A)
 def keyboard_in_popup_menus():
     with ko() as v:
-        click_in_panel(v, '[Virus]')
+        click_in_panel(v, 'Family [')
         v.key('down'); v.key('enter')
         check(v.alive())
-        check('Type [Virus]' not in v.row(head_row(v)) or True)
+        check('Family [ ? ]' not in v.row(head_row(v)), 'the keyboard did not choose the first family: %r' % v.row(head_row(v))[:60])
 
 
 @case(A)
@@ -618,20 +650,20 @@ def option_subtype_chooser_applies():
 
 
 @case(A)
-def family_field_ctrl_a_selects_all_and_typing_replaces():
+def comment_field_ctrl_a_selects_all_and_typing_replaces():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abcdef')
         v.key('ctrl+a')
         v.type('X')
         v.key('enter')
-        check('Family [X]' in v.row(head_row(v)), v.row(head_row(v))[:50])
+        check('[X]' in v.row(head_row(v)), v.row(head_row(v))[:50])
 
 
 @case(A)
 def tab_and_unbound_chords_in_a_field_do_nothing_harmful():
     with ko() as v:
-        click_in_panel(v, '[?]')
+        click_in_panel(v, '[Comment...]')
         v.type('abc')
         for k in ('tab', 'backtab', 'ctrl+u', 'ctrl+e'):
             v.key(k)
@@ -640,5 +672,5 @@ def tab_and_unbound_chords_in_a_field_do_nothing_harmful():
         v.key('enter')
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main(A)

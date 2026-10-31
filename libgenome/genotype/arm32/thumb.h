@@ -63,7 +63,6 @@ static inline enum kgenome_status kgenome_thumb_decode_narrow(struct kgenome_thu
 {
 	unsigned e, id;
 
-	kgenome_thumb_ensure();
 	hw0 &= 0xffffu;
 	e = kgenome_thumb_idx_narrow[kgenome_thumb_narrow_key(hw0)];
 	if (e & KGENOME_ARM32_DIRECT) {
@@ -89,7 +88,6 @@ static inline enum kgenome_status kgenome_thumb_decode_wide(struct kgenome_thumb
 	uint32_t w = (hw0 & 0xffffu) << 16 | (hw1 & 0xffffu);
 	unsigned e, id;
 
-	kgenome_thumb_ensure();
 	e = kgenome_thumb_idx_wide[kgenome_thumb_wide_key(w)];
 
 	if (e & KGENOME_ARM32_DIRECT) {

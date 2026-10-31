@@ -20,27 +20,6 @@ enum kv_nav kv_nav_key(int key)
 	}
 }
 
-/*
- * Move a cursor over `n` rows, where -1 means NO CURSOR YET.
- *
- * A list opens with no row selected - pressing a control to see the choices is
- * not the same as pointing at the first one - so the first arrow BRINGS THE
- * CURSOR IN rather than moving it. Down lands on the first row and Up on the
- * last, which is the end nearest the control these lists are drawn above.
- *
- * Anything but PREV and NEXT returns the cursor unchanged.
- */
-int kv_nav_step(int sel, int n, enum kv_nav nav)
-{
-	if (n <= 0)
-		return -1;
-	if (nav == KV_NAV_NEXT)
-		return sel < 0 ? 0 : (sel + 1 < n ? sel + 1 : sel);
-	if (nav == KV_NAV_PREV)
-		return sel < 0 ? n - 1 : (sel > 0 ? sel - 1 : sel);
-	return sel;
-}
-
 static char   g_paste[4096];    /* the last bracketed paste */
 static size_t g_paste_n;
 
@@ -137,8 +116,11 @@ static int read_mouse_x10(void)
 	g_mod_shift = (b & 0x04) != 0;
 	g_mod_ctrl  = (b & 0x10) != 0;
 
-	if (b & 0x40)
+	if (b & 0x40) {
+		if ((b & 3) > 1)
+			return K_RESIZE;        /* a sideways notch: ignored (one repaint), see read_mouse */
 		return (b & 3) == 0 ? K_WHEEL_UP : K_WHEEL_DOWN;
+	}
 	if (b & 0x20)
 		return K_DRAG;
 	/* Button 3 in this encoding is "released", whichever was let go. */
@@ -149,11 +131,10 @@ static int read_mouse_x10(void)
 	return K_CLICK;
 }
 
-/* KNOWN DEFECT DASH-2 (2026-10-27, R) [sev L]: a horizontal wheel notch (SGR buttons 66 and 67: bit 0x40 with the low bits 2 and 3)
- * falls through the wheel tests below to `(b & 3) == 2` and arrives as K_RCLICK (67 as K_CLICK), so a tilt wheel clicks.
- * Trigger: a tilt wheel or a touchpad's sideways scroll over the viewer. Effect: a right or left click where the
- * pointer is. Reproducer: none yet (read; v.hwheel in tui.py sends shift+wheel, not these buttons).
- * Fix: map 66/67 to two new sideways events and let the dashboard's sideways scroll (prop_scroll) take them. */
+/* Buttons 64 and 65 are the vertical wheel. 66 and 67 are the horizontal one (a tilt
+ * wheel, a touchpad's sideways scroll): no interaction is defined for them, so they are
+ * ignored like an unparsable report (K_RESIZE, one repaint) and never reach the click
+ * tests below. */
 static int read_mouse(void)
 {
 	char t[32];
@@ -186,6 +167,8 @@ static int read_mouse(void)
 		return K_WHEEL_UP;
 	if ((b & 0x40) && (b & 3) == 1)
 		return K_WHEEL_DOWN;
+	if (b & 0x40)
+		return K_RESIZE;
 	if ((b & 3) == 2)
 		return K_RCLICK;
 	return K_CLICK;

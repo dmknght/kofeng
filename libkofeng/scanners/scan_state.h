@@ -33,6 +33,7 @@
 #define KOFENG_SCAN_STATE_H
 
 #include "scan_types.h"
+#include "../analyzers/cfgsign.h"
 #include "scan_state_life.h"
 #include "scan_state_child.h"
 #include "scan_state_stage.h"
@@ -57,6 +58,11 @@ struct kof_scanner {
 	 * what keeps a build with no mutation rules from allocating anything.
 	 */
 	struct kof_mutation_ctx mutation;
+	/*
+	 * The ledger a function unit's CFG signature is made under (analyzers/cfgsign.h): the allocator that charges this scanner's budget and
+	 * releases it when the call returns. Set by sx_feed_cut for every feed; owner scan_feed.c.
+	 */
+	struct kof_cfgsign_host cfgsign;
 	/*
 	 * Where notes go, when anybody wants them.
 	 *

@@ -9,6 +9,7 @@
  */
 
 #include "diagsrc_int.h"
+#include "pack/dbcore.h"
 #include <ctype.h>
 
 
@@ -60,7 +61,8 @@
 #define KOF_FACT_IDENTS(X) \
 	X(KOF_FACT_ENTRY_PERM) X(KOF_FACT_MAP_PERM) \
 	X(KOF_FACT_SECTIONS)   X(KOF_FACT_OBJ_KIND) \
-	X(KOF_FACT_FORMAT)
+	X(KOF_FACT_FORMAT)     X(KOF_FACT_FORMAT_SET) \
+	X(KOF_FACT_SIZE_MIN)   X(KOF_FACT_ARCH_SET)
 
 #define KOF_WHEN_VALUES(X) \
 	X(KOF_PERM_R) X(KOF_PERM_W) X(KOF_PERM_X) \
@@ -278,6 +280,10 @@ int kof_dsrc_arg(const char *p, int i, char *out, size_t cap)
 			return 0;
 		out[n++] = *q;
 	}
+	/* The text ended inside the argument list: the call was never closed (WD-1). Read as closed, a
+	 * typo built and an edit of the item wrote the closed form. */
+	if (!*q)
+		return 0;
 	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t' ||
 			 out[n - 1] == '\n' || out[n - 1] == '\r'))
 		n--;
@@ -422,7 +428,8 @@ void kof_dsrc_reads(const char *text, size_t n,
 int kof_dsrc_same(const struct kof_dsrc_item *a, const struct kof_dsrc_item *b)
 {
 	return a->kind == b->kind && a->a == b->a && a->b == b->b &&
-	       a->v == b->v && !strcmp(a->s1, b->s1) && !strcmp(a->s2, b->s2);
+	       a->v == b->v && !strcmp(a->s1, b->s1) && !strcmp(a->s2, b->s2) &&
+	       kof_dsrc_form_item_same(a, b);
 }
 
 /*
@@ -480,7 +487,7 @@ static size_t words_of(uint64_t v, unsigned fact, char *out, size_t cap)
 
 size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 {
-	char w1[160], w2[160];
+	char w1[KOF_DSRC_WORDS_LEN], w2[KOF_DSRC_WORDS_LEN];
 	const char *c1, *c2;
 	uint64_t tv = 0;
 	int n = 0;
@@ -494,9 +501,25 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 			struct kof_disease_decl dd;
 
 			dd.type = (uint8_t)it->a;
-			snprintf(dd.name, sizeof dd.name, "%s", it->s1);
+			snprintf(dd.name, sizeof dd.name, "%.*s", (int)sizeof dd.name - 1, it->s1);
 			return kof_disease_decl_print(&dd, out, cap);
 		}
+	case KDS_FAMILY:
+	case KDS_VARIANT:
+	case KDS_TAG:
+		if (!(it->kind == KDS_VARIANT ? kof_dsrc_variant_word_ok(it->s1)
+					      : kof_dsrc_catalog_word_ok(it->s1)))
+			return 0;
+		n = snprintf(out, cap, "%s(\"%s\");",
+			     it->kind == KDS_FAMILY ? "KOF_DIAG_FAMILY" :
+			     it->kind == KDS_VARIANT ? "KOF_DIAG_VARIANT" : "KOF_DIAG_TAG",
+			     it->s1);
+		break;
+	case KDS_TYPE:
+		if (it->a >= (uint16_t)KOF_MALTYPE_COUNT)
+			return 0;
+		n = snprintf(out, cap, "KOF_DIAG_TYPE(%s);", kof_maltype_ident(it->a));
+		break;
 	case KDS_USE_EMU:
 		n = snprintf(out, cap, "KOF_DIAG_USE_EMU();");
 		break;
@@ -602,7 +625,8 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		n = snprintf(out, cap, "KOF_DIAG_DECLARE_SEQUENCE(%s, %s);", c1, c2);
 		break;
 	default:
-		return 0;
+		/* The form's declarations: their own printer. */
+		return it->kind >= KDS_RANGE ? kof_dsrc_form_print(it, out, cap) : 0;
 	}
 	return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }
@@ -637,11 +661,12 @@ static void sb_put(struct sbuf *s, const char *t, size_t n)
 	s->p[s->n] = 0;
 }
 
-static void sb_line(struct sbuf *s, const struct kof_dsrc_ops *ops,
-		    const struct kof_dsrc_item *it)
+static void sb_line(struct sbuf *s, const struct kof_dsrc_item *it)
 {
-	char t[512];
-	size_t n = ops->print(it, ops->ud, t, sizeof t);
+	/* A marker line is up to ~1.1 KB escaped and a block's hash list ~1.7 KB: the room is the longest line a
+	 * source holds, not a typical one - a line that does not fit is a declaration lost from the file. */
+	char t[8192];
+	size_t n = kof_dsrc_print(it, t, sizeof t);
 
 	if (!n)
 		return;
@@ -649,8 +674,11 @@ static void sb_line(struct sbuf *s, const struct kof_dsrc_ops *ops,
 	sb_put(s, "\n", 1);
 }
 
-static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
-			 size_t n, const struct kof_dsrc *edited, size_t *out_n)
+/*
+ * THE DECLARATIONS BY LINE: the source with `edited` in place of its declarations,
+ * everything that is not a declaration passing through untouched.
+ */
+char *kof_dsrc_patch(const char *text, size_t n, const struct kof_dsrc *edited, size_t *out_n)
 {
 	struct kof_dsrc *old = calloc(1, sizeof *old);
 	struct sbuf sb = { NULL, 0, 0, 0 };
@@ -664,7 +692,7 @@ static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
 
 	if (!old)
 		return NULL;
-	if (ops->parse(text, n, old) > 0)
+	if (kof_dsrc_parse(text, n, old, NULL) > 0)
 		goto out;               /* a file this cannot read is not patched */
 	for (at = 0; at < n; at++)
 		if (text[at] == '\n')
@@ -716,7 +744,7 @@ static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
 		if (lineno == first_decl) {
 			for (q = 0; q < edited->n && !edited->item[q].line; q++)
 				if (!placed[q]) {
-					sb_line(&sb, ops, &edited->item[q]);
+					sb_line(&sb, &edited->item[q]);
 					placed[q] = 1;
 				}
 		}
@@ -725,7 +753,7 @@ static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
 			if (e < n)
 				sb_put(&sb, "\n", 1);
 		} else if (act[lineno] == 2) {
-			sb_line(&sb, ops, &edited->item[rep[lineno]]);
+			sb_line(&sb, &edited->item[rep[lineno]]);
 		}
 		anchor = lineno;
 		for (q = 0; q < edited->n; q++) {
@@ -736,7 +764,7 @@ static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
 			/* the new items right behind this one, up to the next with a line */
 			for (k = q + 1u; k < edited->n && !edited->item[k].line; k++)
 				if (!placed[k]) {
-					sb_line(&sb, ops, &edited->item[k]);
+					sb_line(&sb, &edited->item[k]);
 					placed[k] = 1;
 				}
 		}
@@ -750,7 +778,7 @@ static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
 		sb_put(&sb, "\n", 1);
 	for (q = 0; q < edited->n; q++)
 		if (!placed[q] && !edited->item[q].line) {
-			sb_line(&sb, ops, &edited->item[q]);
+			sb_line(&sb, &edited->item[q]);
 			placed[q] = 1;
 		}
 	ok = !sb.bad;
@@ -770,39 +798,151 @@ out:
 	return sb.p;
 }
 
-/* The diagnose's own reading and printing, as the patcher's two questions. */
-static int diag_parse(const char *text, size_t n, struct kof_dsrc *d)
-{
-	return kof_dsrc_parse(text, n, d, NULL);
-}
-
-static size_t diag_print(const struct kof_dsrc_item *it, void *ud, char *out,
-			 size_t cap)
-{
-	(void)ud;
-	return kof_dsrc_print(it, out, cap);
-}
-
 /*
- * THE DECLARATIONS BY LINE: the source with `edited` in place of its declarations,
- * everything that is not a declaration passing through untouched.
- *
- * ONE PATCHER FOR EVERY SOURCE THAT IS A LIST OF DECLARATIONS. What it needs from
- * a kind of file is two answers - how the file is read and how one declaration is
- * written - so those are the `ops`, and the tag sources (tagsrc.c) are patched by
- * this same loop instead of a second one.
+ * THE HEADER COMMENT (see kof_dsrc_head in diagsrc.h). The model is the block the old signatures opened with; the labels are
+ * theirs and nothing is added. ONE implementation: Save calls it for a new file, and the same call refreshes a block already there.
  */
-char *kof_dsrc_patch_with(const struct kof_dsrc_ops *ops, const char *text,
-			  size_t n, const struct kof_dsrc *edited,
-			  size_t *out_n)
+#define HEAD_BANNER "Generated by KOFViewer."
+#define HEAD_LEN    512u
+
+/* `s` as the comment may hold it: the characters kof_comment_char allows, trimmed, at most HEAD_LEN - 1. */
+static void head_clean(char *out, const char *s)
 {
-	return patch_lines(ops, text, n, edited, out_n);
+	size_t k = 0;
+
+	for (; *s && k + 1u < HEAD_LEN; s++)
+		if (kof_comment_char((unsigned char)*s) && !(k == 0 && *s == ' '))
+			out[k++] = *s;
+	while (k && out[k - 1u] == ' ')
+		k--;
+	out[k] = 0;
 }
 
-char *kof_dsrc_patch(const char *text, size_t n, const struct kof_dsrc *edited,
-		     size_t *out_n)
+/* One line of the new block: ` * <label><value>`, the value cleaned. */
+static void head_line(struct sbuf *sb, const char *label, const char *v)
 {
-	static const struct kof_dsrc_ops diag = { diag_parse, diag_print, NULL };
+	char c[HEAD_LEN];
 
-	return patch_lines(&diag, text, n, edited, out_n);
+	head_clean(c, v);
+	sb_put(sb, " * ", 3);
+	sb_put(sb, label, strlen(label));
+	sb_put(sb, c, strlen(c));
+	sb_put(sb, "\n", 1);
+}
+
+/* Whether the line [ls, le) of a block reads `label` after its leading space and star; `*rest` is where the label ends. */
+static int head_label(const char *text, size_t ls, size_t le, const char *label, size_t *rest)
+{
+	size_t l = strlen(label);
+
+	while (ls < le && (text[ls] == ' ' || text[ls] == '\t'))
+		ls++;
+	if (ls < le && text[ls] == '*')
+		ls++;
+	while (ls < le && (text[ls] == ' ' || text[ls] == '\t'))
+		ls++;
+	if (le - ls < l || memcmp(text + ls, label, l))
+		return 0;
+	*rest = ls + l;
+	return 1;
+}
+
+char *kof_dsrc_head(const char *text, size_t n, const struct kof_dsrc_meta *m, int *how, size_t *out_n)
+{
+	struct sbuf sb = { NULL, 0, 0, 0 };
+	char today[HEAD_LEN], eng[96];
+	size_t at = 0, end = 0, ls, le, r;
+	int kind = KOF_DSRC_HEAD_NEW;
+	char *res = NULL;
+
+	if (!m || !m->date || !text)
+		return NULL;
+	head_clean(today, m->date);
+	if (!today[0])
+		return NULL;
+	snprintf(eng, sizeof eng, "db format %u.%u, module ABI %u", (unsigned)KOF_PACK_MAJOR, (unsigned)KOF_PACK_MINOR,
+		 (unsigned)KOFSIG_ABI_VERSION);
+	while (at < n && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r' || text[at] == '\n'))
+		at++;
+	if (at + 1u < n && text[at] == '/' && text[at + 1u] == '/') {
+		kind = KOF_DSRC_HEAD_HAND;
+	} else if (at + 1u < n && text[at] == '/' && text[at + 1u] == '*') {
+		/* A block comment opens the text: the tool's when its first line is the banner, somebody's when not (or never closed). */
+		for (end = at + 2u; end + 1u < n && !(text[end] == '*' && text[end + 1u] == '/'); end++)
+			;
+		kind = KOF_DSRC_HEAD_HAND;
+		for (ls = at + 2u; end + 1u < n && ls < end; ls = le + 1u) {
+			for (le = ls; le < end && text[le] != '\n'; le++)
+				;
+			if (head_label(text, ls, le, "", &r) && r < le) {
+				if (head_label(text, ls, le, HEAD_BANNER, &r))
+					kind = KOF_DSRC_HEAD_REFRESHED;
+				break;
+			}
+		}
+	}
+	if (kind == KOF_DSRC_HEAD_HAND) {
+		sb_put(&sb, text, n);
+	} else if (kind == KOF_DSRC_HEAD_REFRESHED) {
+		/* Line by line, each as it was but the Created line's `updated` date and the Engine line; the text after the block too. */
+		sb_put(&sb, text, at + 2u);
+		for (ls = at + 2u; ls < end; ls = le + 1u) {
+			for (le = ls; le < end && text[le] != '\n'; le++)
+				;
+			if (head_label(text, ls, le, "Created", &r)) {
+				static const char up[] = ", updated ";
+				size_t q;
+
+				for (q = r; q + sizeof up - 1u <= le && memcmp(text + q, up, sizeof up - 1u); q++)
+					;
+				if (q + sizeof up - 1u <= le) {
+					sb_put(&sb, text + ls, q + sizeof up - 1u - ls);
+					sb_put(&sb, today, strlen(today));
+				} else {
+					sb_put(&sb, text + ls, le - ls);
+				}
+			} else if (head_label(text, ls, le, "Engine:", &r)) {
+				sb_put(&sb, text + ls, r - ls);
+				sb_put(&sb, "      ", 6);
+				sb_put(&sb, eng, strlen(eng));
+			} else {
+				sb_put(&sb, text + ls, le - ls);
+			}
+			if (le < end)
+				sb_put(&sb, "\n", 1);
+		}
+		sb_put(&sb, text + end, n - end);
+	} else {
+		char smp[HEAD_LEN * 2u + 16u], dates[HEAD_LEN * 2u + 16u];
+		static const char open_[] = "/*\n * " HEAD_BANNER "\n *\n";
+
+		sb_put(&sb, open_, sizeof open_ - 1u);
+		if (m->name && m->name[0]) {
+			char nm[HEAD_LEN], dg[HEAD_LEN];
+
+			head_clean(nm, m->name);
+			head_clean(dg, m->sha256 ? m->sha256 : "");
+			if (dg[0])
+				snprintf(smp, sizeof smp, "%s  sha256:%s", nm, dg);
+			else
+				snprintf(smp, sizeof smp, "%s", nm);
+			head_line(&sb, "Test sample: ", smp);
+		}
+		if (m->who && m->who[0])
+			head_line(&sb, "Researcher:  ", m->who);
+		snprintf(dates, sizeof dates, "%s, updated %s", today, today);
+		head_line(&sb, "Created ", dates);
+		head_line(&sb, "Engine:      ", eng);
+		sb_put(&sb, " */\n\n", 5);
+		sb_put(&sb, text, n);
+	}
+	if (!sb.bad && sb.p) {
+		res = sb.p;
+		*out_n = sb.n;
+		if (how)
+			*how = kind;
+	} else {
+		free(sb.p);
+	}
+	return res;
 }

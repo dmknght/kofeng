@@ -106,7 +106,12 @@ def fresh_bases():
     the repository (the viewer writes signatures into the --bases tree)."""
     if os.path.isdir(BASES_COPY):
         shutil.rmtree(BASES_COPY)
-    shutil.copytree(os.path.join(REPO, 'bases'), BASES_COPY)
+    # Without the diagnoses: what the reader generated and saved in the repository is not part of the
+    # fixture, and a case that counts the files Generate wrote must start from none (six saved by hand
+    # made generate_writes_one_source_per_condition... fail, and the cases pass or fail by who ran last).
+    shutil.copytree(os.path.join(REPO, 'bases'), BASES_COPY,
+                    ignore=lambda d, names: ['diagnoses'] if os.path.basename(d) == 'bases' else [])
+    os.makedirs(os.path.join(BASES_COPY, 'diagnoses'), exist_ok=True)
     return BASES_COPY
 
 

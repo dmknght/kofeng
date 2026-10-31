@@ -1,0 +1,51 @@
+# golden pe_dash_overview: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │ Object                                                                                                                                                             │  │
+ 4| │   name        pe_small.exe                                                                                                                                         │  │
+ 5| │   folder      /mnt/games/kofscratch/vt/work/golden/  [ Copy full path ]                                                                                            │  │
+ 6| │   sha256      05769b3b49e42c79016ecb36ba9e727dc785c447dd3b1355aedc5d3c339c1a63                                                                                     │  │
+ 7| │   size        34304 bytes (33.5 KiB)                                                                                                                               │  │
+ 8| │   compiler    .NET  runtime 2.5  metadata v4.0.30319  IL only                                                                                                      │  │
+ 9| │   linker      11.0                                                                                                                                                 │  │
+10| │   metadata    0x30b0  5 stream(s)                                                                                                                                  │  │
+11| │   #~          0x311c  7060 byte(s)                                                                                                                                 │  │
+12| │   #Strings    0x4cb0  8752 byte(s)                                                                                                                                 │  │
+13| │   #US         0x6ee0  1372 byte(s)                                                                                                                                 │  │
+14| │   #Blob       0x744c  2160 byte(s)                                                                                                                                 │  │
+15| │   #GUID       0x743c  16 byte(s)                                                                                                                                   │  │
+16| │   resources   0x2e30  638 byte(s)                                                                                                                                  │  │
+17| │ PE                                                                                                                                                                 │  │
+18| │   format      PE32 · EXE                                                                                                                                           │  │
+19| │   arch        x86 32-bit                                                                                                                                           │  │
+20| │   entry       R-X at .text                                                                                                                                         │  │
+21| │               RVA             0x9b0e                                                                                                                               │  │
+22| │               file offset     0x7d0e                                                                                                                               │  │
+23| │               section offset  0x7b0e                                                                                                                               │  │
+24| │   CLI header  managed (.NET) header at file offset 0x208 · 72 bytes · entry token 0x06000072                                                                       │  │
+25| │   stub        NT headers at file offset 0x80 · 64 bytes of DOS stub · headers end at 0x1f0, declared 512 bytes                                                     │  │
+26| │   summary     code 31744 bytes (31.0 KiB) · initialised data 2048 bytes (2.0 KiB) · uninitialised data 0 bytes                                                     │  │
+27| │ Regions                                                                                                                                                            │  │
+28| │   HEADERS     496         1.4%  2.5/8 bits                                                                                                                         │  │
+29| │   CODE        11638      33.9%  4.9/8 bits                                                                                                                         │  │
+30| │   DATA        664         1.9%  0.0/8 bits                                                                                                                         │  │
+31| │   RESOURCE    1384        4.0%  4.1/8 bits                                                                                                                         │  │
+32| │   CLR_HDR     108         0.3%  3.5/8 bits                                                                                                                         │  │
+33| │   #~          7060       20.6%  5.4/8 bits                                                                                                                         │  │
+34| │   #Strings    8752       25.5%  4.8/8 bits                                                                                                                         │  │
+35| │   #US         1372        4.0%  3.6/8 bits                                                                                                                         │  │
+36| │   #Blob       2176        6.3%  5.1/8 bits                                                                                                                         │  │
+37|-│   CLR_RES     638         1.9%  5.6/8 bits                                                                                                                         │---
+38| │   UNCLAIMED   16          0.0%  0.0/8 bits                                                                                                                         │ ]
+39| │ Anomalies                                                                                                                                                          │
+40| │   none                                                                                                                                                             │
+41| │                                                                                                                                                                    │
+42| │                                                                                                                                                                    │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-38 of 38 lines ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|PE  |  no verdict

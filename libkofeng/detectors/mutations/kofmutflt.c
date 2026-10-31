@@ -602,7 +602,7 @@ struct kof_mflt *kof_mflt_open(const struct kof_mflt_io *io, uint32_t w, uint32_
 				}
 				{
 					uint64_t end = part_start + (uint64_t)tab[cur].entries * (h.r / 8u);
-					uint64_t take = end - pos < n - k ? end - pos : n - k, x;
+					uint64_t take = end - pos < n - k ? end - pos : n - k;
 					uint8_t *dst = (uint8_t *)(uintptr_t)f->part[cur].arr;
 					scatter(dst, w, h.r, low_odd, pos - part_start, chunk + k, take);
 					k += take;

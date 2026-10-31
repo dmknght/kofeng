@@ -71,7 +71,6 @@ static void set_bottomk(struct set *s, uint32_t nb, uint32_t classes)
 		s->b[i].first_hash = s->np;
 		s->b[i].n_hash = 32;
 		s->b[i].scan_mask = 1u << (i % (classes ? classes : 1u));
-		s->b[i].norm = (uint8_t)(i % 3u);
 		s->b[i].side = (uint8_t)(i % 2u);
 		for (j = 0; j < 32u; j++) {
 			/* a spacing of about 2^32 / m, exponential enough to keep them distinct and ascending */
@@ -335,18 +334,22 @@ static void t_corrupt(void)
 	CK(k == NULL && (strstr(why, "agree") || strstr(why, "pack")));
 	file_close(&f);
 
-	/* the class table: a normaliser that does not exist, CRC repaired */
-	CK(file_make(&f, &s, "cls", NULL));
-	CK(kof_kix_probe(f.fd, f.size, &ft));
+	/* the class table: a normaliser byte that is not RAW, CRC repaired. 1 and 2 were the XOR and SUB forms (removed 2026-10-31):
+	 * an old index that carries one is refused like a byte that never meant anything. */
 	{
-		uint8_t bad = 200;
+		static const uint8_t bads[] = { 1, 2, 3, 200 };
+		size_t bi;
 
-		CK(pwrite(f.fd, &bad, 1, (off_t)(ft.trailer_off + 256u + 4u)) == 1);   /* class 0's norm */
+		for (bi = 0; bi < sizeof bads; bi++) {
+			CK(file_make(&f, &s, "cls", NULL));
+			CK(kof_kix_probe(f.fd, f.size, &ft));
+			CK(pwrite(f.fd, &bads[bi], 1, (off_t)(ft.trailer_off + 256u + 4u)) == 1);   /* class 0's norm */
+			repair_meta(&f);
+			k = open_it(&f, &s, why, sizeof why);
+			CK(k == NULL && strstr(why, "normaliser") != NULL);
+			file_close(&f);
+		}
 	}
-	repair_meta(&f);
-	k = open_it(&f, &s, why, sizeof why);
-	CK(k == NULL && strstr(why, "normaliser") != NULL);
-	file_close(&f);
 
 	/* the filter: a flipped byte is the filter's own CRC */
 	CK(file_make(&f, &s, "flt", NULL));
@@ -626,6 +629,10 @@ static void t_writer(void)
 	CK(kof_kix_make(&in, 0, 0, 0, &la, &res) == NULL && (res.status & KOF_KIX_B_BAD_BLOCK));
 	s.b[6].n_hash = 32;
 	s.b[7].norm = 100;
+	CK(kof_kix_make(&in, 0, 0, 0, &la, &res) == NULL && (res.status & KOF_KIX_B_BAD_BLOCK));
+	s.b[7].norm = 1;                                            /* the removed XOR */
+	CK(kof_kix_make(&in, 0, 0, 0, &la, &res) == NULL && (res.status & KOF_KIX_B_BAD_BLOCK));
+	s.b[7].norm = 2;                                            /* the removed SUB */
 	CK(kof_kix_make(&in, 0, 0, 0, &la, &res) == NULL && (res.status & KOF_KIX_B_BAD_BLOCK));
 	s.b[7].norm = 0;
 	for (i = 0; i < 300u && i < s.nb; i++)                      /* 300 distinct regions: more classes than a byte names */

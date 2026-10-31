@@ -402,6 +402,19 @@ it did not), and otherwise held up to the whole share and, past that, read as fa
 reported `KOF_BROKEN_LIMIT`. The one map left over input is the engine's own anonymous spill file
 (`kof_src_fd`), which has no name and so no writer. The database packs are mapped by the loader and
 are the remaining exposure (see `dbloader_packs.c`).
+**A function unit is signed by the SHAPE of its function (CFG step 2c, 2026-10-31).** A unit of a region that is cut a function at a time
+(`kgenome_mutation_by_function`, `first` not NULL in the unit callback) has no window sketch (measured ineffective: x86-64 5/60 pairs, 0 on every
+other architecture, `exp_cfg/report.md`); `kgenome_mutation_signature` is the one switch and answers `KGENOME_MUTATION_SIG_CFG`. The engine's ONE signing
+function is `kof_cfgsign_function` (`analyzers/cfgsign.c`: decode once, `kgenome_cfg_build`, `kgenome_cfg_sign`, the lib's floor `kgenome_cfg_anchor` = 12
+reachable blocks); the scanner's feed (`scan_feed.c`), the report that locates a block (`scan_explain.c`), `kofexaminer --blocks`, the viewer's table
+(`mtn_mark`) and the CFG dialog (`kof_cfgview_build`) all call it. A unit below the floor, undecodable, or over the lib's allowance for one call stays
+listed and unsigned with the reason (`kof_cfgsign_state_name`), and the object says so (`KOF_MTN_S_FUNC_UNSIGNED`, `kof_stats.mutation_unsigned_objects`).
+The keys are domain-separated from window hashes (`KGENOME_CFG_KEY_SEED`); a CFG block in a pack is the existing record (region CODE, norm RAW, 12..32
+u32, `kgenome_mutation_block_min`), so no layout or version moved. The matcher has ONE index and TWO scoring kinds (`kof_mutation_cfg_unit`,
+`kofmutation.c`): a window block is held by containment over the whole object, a CFG block by the Jaccard estimate of ONE function's sketch
+(`kgenome_cfg_overlap`), the best unit counting, and `kof_mutation_counts` reads back whichever is higher, so the diagnose, the part's pct and need, and the verdict
+path are unchanged. A unit that groups small functions is signed by its largest function (the cut's own `first`). Data units keep their windows.
+
 **The block (similarity) index and the pattern table are the model of it: their memory does not follow
 the database.** A pack's tail is one container (`databases/pack/dbkix.h`): a chain of parts that each end
 in the same 64-byte footer (`[old pack][pattern table, KPXF][block index, KIXF]`, either optional, probed
@@ -489,6 +502,22 @@ are called), the part is the job of that file in it.
   `KGENOME_NUCLEO_*`, one family and no longer `flow` beside it), `mutation`
   (`mutation_units`, `mutation_pool`, public header `mutation.h`). In libuncoat the
   MPRESS call filter is `mpress` and the bzip2 decoder is `bunzip`, as their symbols say.
+- `cfg` (`celllysis/cfg.h`, `cfg_private.h`): the control-flow graph of ONE function from instructions the caller decoded once
+  (`kgenome_cfg_build`: all blocks, successors as block indices, `reach`; `cfg_build.c`) and a signature of its shape
+  (`kgenome_cfg_sign`, `kgenome_cfg_pct`, `kgenome_cfg_anchor`, `kgenome_cfg_view_make`; `cfg_sign.c`, `cfg_anchor.c`, `cfg_view.c`).
+  What a branch, a return, a delay slot or a predicated exit does, per architecture, is read from ONE table, `cfg_isa.c`; nothing else
+  asks an architecture a control-flow question, and the lineage solver builds its blocks here. The extent of the function comes from the
+  caller (`kgenome_funcs_build`, `kgenome_diag_funcs_of`); the cfg finds no boundary of its own.
+- `gview` (`celllysis/gview.h`, `gview_data.c`, `gview_loops.c`, `cfg_gv.c`): THE GRAPH A VIEWER DRAWS, one generic DATA type (`struct kgenome_gv`: nodes with two text rows
+  and the count of their extra lines, edges with TWO independent properties - `cond` none / T / F and `loop` none / loop link / retreating - notes, an aside, a head). The engine
+  decides what a loop is (`kgenome_gv_loops`: a retreating edge whose target dominates its source is a loop link, its target a loop head, `@` in the first row; a retreating edge
+  that is not is RETREAT; past `KGENOME_GV_DOM_MAX` nodes or the work bound the marks are RETREAT and the status TRUNCATED). `cfg_gv.c` is the thin filler for a function's CFG (a
+  block's edges stand fall-through first, then the taken side); a lineage view fills the same type from its sites and links. The lib has NO layout and no text renderer: where a box
+  and a line go is presentation, and is the viewer's own pure module `kofexamine/kv_graph.c` (ranks, barycenter order, spine placement, virtual nodes, lanes, ports, tracks; geometry
+  first, then cells; every cut counted). The engine's on-request product is `kof_cfgview_build` (`analyzers/cfgview.c`, like `kof_codenotes_build`: signs through
+  `kof_cfgsign_function` with the object's byte order, then fills the graph and the facts text); the viewer's press on the NAME of a function row of the blocks table
+  (`hit_plg_cfg`, kv_decl.c) opens the CFG dialog (`kv_cfgdlg.c`, body rows in `kv_cfgbody.c`): the frame of the Syndromes and Pathogens dialogs (dragged by its title, a scrollbar,
+  the wheel down and shift or ctrl wheel sideways: `kv_main_body` in kv_form.c), the graph drawn by kv_graph.c. A function's name is `kof_func_name`: its symbol, or `fcn_<offset>`.
 - A family that is split across files has ONE private header,
   `<family>_private.h` (never `_int.h`: `int` says nothing). It holds the types
   the parts share and the prototypes of what one part offers another; it is not
@@ -560,10 +589,9 @@ decrypt splits from decompress when it grows.
   an id of its own (a 64-bit random number the tool generates once and never changes; ids below
   0x10000 are the seeds'), written in a file of its own named `<kind>_<name>_<first 8 hex of
   id>.c`. They are DATA: no pack carries them, `ksigbuilder --tree` skips the directory, and the
-  verdictor and the engine do not read them. The tools do, through `databases/tagsrc.h` and
-  nothing else (it patches a file by the same loop as a diagnose source, `kof_dsrc_patch_with`):
-  kofviewer's Analysis > Syndrome table and the diagnose panel's Tag cells, and `ksigbuilder
-  --tags <dir>`, which prints the Check and exits non-zero on an error. **The only place for the
+  verdictor and the engine do not read them. The tools do: kofviewer (`--syndromes`) and
+  `ksigbuilder --catalog ... --syndromes` (`make check-catalog`), which exits non-zero on an error.
+  (`databases/tagsrc*`, the Syndrome table and `ksigbuilder --tags` were deleted 2026-10-29.) **The only place for the
   word "syndrome" is this directory's name**: so in a path that names it (`bases/syndromes`,
   kofviewer's `--syndromes`) and in the menu item `Syndrome table`; every other name,
   comment and document says tag, activity, type or family. `make check-rules` fails on any other
@@ -790,3 +818,15 @@ member order is the ABI, so no cut by purpose exists that is not an ABI move.
   the machine worse.
 - **Write to the person in the language they are using.** The notes in the
   code stay in English, because that is what the rest of the tree is in.
+
+## Merge gate (owner, 2026-10-29: agents added logic nobody asked for)
+
+- Every delivered patch comes with a manifest written from the task in the owner's words: `allow touch <file>`,
+  `allow function|api|ui|key|hit|derive|golden|remove-* ...` (header of `tools/patch_gate.py`).
+- Before a merge the coordinator runs `make gate BASE=<base> MANIFEST=<manifest> PATCH=<result.patch>` under the heavy lock.
+  It fails on any added function, export, struct member, menu item, section title, viewer string, key, hit zone or tool-side loop
+  over engine results, on a removed test, a new file, a changed golden screen or a changed file that the manifest does not name,
+  and on a patch whose file list is not the manifest's.
+- A golden screen (`tests/tui/golden`) changes only with `allow golden <name>`; `golden_required_rows_are_present` keeps the rows the
+  owner named and bars the rows the owner rejected. `docs/api_surface.txt` is regenerated in the patch that moves the API.
+- `make gate-test` tests the gate itself and runs inside `make check-rules`.

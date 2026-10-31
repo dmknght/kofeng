@@ -64,6 +64,7 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
  * this with KGENOME_DIAG_LINK_PROVEN. */
 int kgenome_diag_name_is_noreturn(const char *name);
 int kgenome_diag_site_noreturn(const struct kgenome_diag_scan *s, uint64_t at);
+int kgenome_diag_noret_add(struct kgenome_diag_scan *s, uint64_t at);
 /* A link the RUN saw arrive: PROVEN, and it replaces a MAY the code-only routes recorded for the same relation
  * (kgenome_diag_note_in_how keeps the first statement). The fold of two nodes at one site (merge_sites) asks for it:
  * the run's node and the code-only route's meet there. */
@@ -220,12 +221,14 @@ struct kgenome_cell_space;
 struct kgenome_diag_callee_memo {
 	uint64_t target;
 	uint16_t writes;
+	uint16_t pop;           /* the bytes its `ret N` pops (a stdcall callee), 0 for a plain `ret` */
 	uint8_t  kind;          /* enum diag_callee_kind, 0 for an empty slot */
 };
 struct kgenome_diag_callees {
 	const struct kgenome_cell_space *sp;
 	uint64_t off, n;        /* the region a callee must lie in: file offsets [off, off + n) */
 	uint16_t caller_saved;  /* the registers the ABI lets a callee overwrite */
+	uint8_t  unit;          /* the stack word in bytes where a callee may pop its own arguments (i386 stdcall: 4), else 0 */
 	struct kgenome_diag_callee_memo memo[KGENOME_DIAG_CALLEE_MEMO];
 };
 void kgenome_diag_callees_init(struct kgenome_diag_callees *c, const struct kgenome_cell_space *sp, unsigned arch,

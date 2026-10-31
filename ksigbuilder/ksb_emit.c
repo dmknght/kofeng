@@ -152,19 +152,19 @@ void ksb_emit_rng_record(FILE *out, const struct rng *r, int idx)
 
 void ksb_emit_blk_id(FILE *out, const struct blk *b, int idx)
 {
-	fprintf(out, "/* line %d: block, region mask 0x%x, norm %u, %u hash(es) */\n",
-		b->line, b->mask, b->norm, b->n_hash);
+	fprintf(out, "/* line %d: block, region mask 0x%x, %u hash(es) */\n",
+		b->line, b->mask, b->n_hash);
 	fprintf(out, "#define kof_blockid_%s %d\n\n", b->name, idx);
 }
 
-/* b <id> <mask> <norm> <side> <n> <hashes in hex, no separator> */
+/* b <id> <mask> <side> <n> <hashes in hex, no separator> */
 void ksb_emit_blk_record(FILE *out, const struct blk *b, int idx)
 {
 	uint32_t i;
 
 	/* `side` sits before the count rather than after the hashes, so the
 	 * reader stays a fixed run of numeric fields followed by one blob. */
-	fprintf(out, "b\t%d\t%u\t%u\t%u\t%u\t", idx, b->mask, b->norm,
+	fprintf(out, "b\t%d\t%u\t%u\t%u\t", idx, b->mask,
 		b->side, b->n_hash);
 	for (i = 0; i < b->n_hash; i++)
 		fprintf(out, "%08x", b->hash[i]);

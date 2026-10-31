@@ -147,13 +147,6 @@ static void t_arm32_fields(void)
 			CK(kgenome_thumb_wide_key(w) < KGENOME_THUMB_WIDE_KEYS);
 		}
 	}
-	/* the lazy tables: ensure() is idempotent and leaves state 2; build() may be re-entered */
-	kgenome_arm32_ensure();
-	kgenome_arm32_ensure();
-	kgenome_thumb_ensure();
-	kgenome_thumb_ensure();
-	kgenome_arm32_build();
-	kgenome_thumb_build();
 	CK(kgenome_arm32_decode(&in, 0xe2810004u) == KGENOME_OK && in.id == KGENOME_ARM32_I_ADD_IMM);
 	/* every row list ends in a row that matches: scan the first rows of each key for a mask-0 end */
 	{

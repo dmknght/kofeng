@@ -12,6 +12,7 @@
 #include <genotype/image/elf_rebuild.h>
 #include <genotype/image/pe_rebuild.h>
 #include <kofcore.h>
+#include <uncoat.h>
 
 #include <celllysis/celllysis.h>
 #include <celllysis/xref.h>
@@ -156,54 +157,34 @@ static int xref_passes(uint32_t x)
 /* Base64, decoded, because that is the one wrapper that can be undone with no
  * guesswork: the alphabet is fixed and the transform is reversible. Returns the
  * bytes written, or 0 when the input is not base64 - which is most payloads,
- * and not a failure. */
-/* KNOWN DEFECT D18 (2026-10-24, R) [sev L]: b64 is a second base64 decoder inside the examiner; kuncoat already has
- * KUNCOAT_ALGO_B64 (decoders/codings.h) and a tool shows engine results, it does not decode. Trigger: any
- * payload the finder tries as base64. Effect: two decoders that can drift (padding, whitespace, lax mode).
- * Reproducer: none (read). Fix: call kuncoat_transform with KUNCOAT_ALGO_B64 and delete this function. */
+ * and not a failure.
+ *
+ * The decoding is kuncoat's (KUNCOAT_ALGO_B64): a tool shows what the library
+ * answers and does not carry a second decoder. What is decided HERE is only
+ * what the finder means by "a payload that is base64": the blob is a C string
+ * literal, so it ends at its NUL and only NULs may follow (a NUL with data
+ * after it is not a string, and not base64); at least 8 bytes; and the answer
+ * must be complete (KUNCOAT_OK: a character outside the alphabet is CORRUPT,
+ * and a decode that does not fit `cap` is refused rather than cut). */
 static uint32_t b64(const uint8_t *in, uint32_t n, uint8_t *out, uint32_t cap)
 {
-	uint32_t i, k = 0, acc = 0, bits = 0;
+	struct kuncoat_step st;
+	uint64_t got = 0;
+	uint32_t len = 0, i;
 
-	/*
-	 * Refused on the first byte that is not in the alphabet, rather than
-	 * skipped: a payload with a few base64-looking bytes in it is not base64,
-	 * and decoding the parts that happen to fit would produce a blob that
-	 * means nothing and looks like an answer.
-	 */
 	if (n < 8u)
 		return 0;
-	for (i = 0; i < n; i++) {
-		uint32_t sixbit;
-		uint8_t c = in[i];
-
-		/*
-		 * A NUL ENDS THE INPUT, it does not fail it: these blobs are
-		 * declared as C string literals, so sizeof includes the
-		 * terminator and the symbol's size is one more than the text.
-		 * Only at the END, though: a NUL with data after it is not a
-		 * string and not base64.
-		 */
-		if (!c)
-			break;
-		if (c == '=' || c == '\n' || c == '\r')
-			continue;
-		if (c >= 'A' && c <= 'Z')      sixbit = (uint32_t)(c - 'A');
-		else if (c >= 'a' && c <= 'z') sixbit = (uint32_t)(c - 'a') + 26u;
-		else if (c >= '0' && c <= '9') sixbit = (uint32_t)(c - '0') + 52u;
-		else if (c == '+')             sixbit = 62u;
-		else if (c == '/')             sixbit = 63u;
-		else                           return 0;
-		acc = (acc << 6) | sixbit;
-		bits += 6;
-		if (bits >= 8) {
-			bits -= 8;
-			if (k >= cap)
-				return 0;
-			out[k++] = (uint8_t)(acc >> bits);
-		}
-	}
-	return k;
+	while (len < n && in[len])
+		len++;
+	for (i = len; i < n; i++)
+		if (in[i])
+			return 0;
+	memset(&st, 0, sizeof st);
+	st.algo = KUNCOAT_ALGO_B64;
+	st.dir = KUNCOAT_DECODE;
+	if (kuncoat_transform(&st, in, len, out, cap, &got) != KUNCOAT_OK)
+		return 0;
+	return (uint32_t)got;
 }
 
 /* Undo a wrapper, if there is one: the payload as it sits is what `at` holds

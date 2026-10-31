@@ -194,6 +194,10 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 
 	if (v->n_obj >= MAX_OBJ || !len)
 		return 0;
+	if (!v->fmap)
+		v->fmap = kverdict_filemap_new();
+	if (v->fmap)
+		(void)kverdict_filemap_fold(v->fmap, name, res, 0);
 	/*
 	 * A scan of one object's bytes reports that object first, and it is
 	 * already in the tree - it is the row the reader picked. Dropped here
@@ -261,6 +265,7 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 	free(o->diag);
 	kgenome_funcs_free(&o->funcs);
 	kof_codenotes_free(&o->notes);
+	kgenome_callnames_free(&o->calls, NULL);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->broken = res->broken;
@@ -467,7 +472,6 @@ void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	sc = kscan_new(eng);
 	if (!sc)
 		return;
-	v->scan_sc = sc;
 
 	memset(&wo, 0, sizeof wo);
 	pids[0] = pid;
@@ -477,7 +481,6 @@ void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	wo.intent = KOF_WALK_MAP;
 	w = kof_walk_open(&wo, &err);
 	if (!w) {
-		v->scan_sc = NULL;
 		kscan_free(sc);
 		return;
 	}
@@ -683,18 +686,14 @@ void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 		}
 	}
 	w->close(w->self);
-	v->scan_sc = NULL;
 	kscan_free(sc);
 }
 
-void objects_collect(struct view *v, kof_engine *eng)
+/* The options the viewer scans with, for the tree and for the explanation of it (view_explain runs the same scan with the report on). */
+static void scan_option(const struct view *v, struct kof_scan_option *opt)
 {
-	struct kof_scan_option opt;
-	kof_scanner *sc;
-
-	memset(&opt, 0, sizeof opt);
-	/* The table under Strings - see draw_decl_diag. */
-	opt.report_diag = 1;
+	memset(opt, 0, sizeof *opt);
+	/* No report here: what each diagnose made of the object is a question a panel asks (view_explain), not something this scan computes. */
 	/*
 	 * LEVEL 2, and this is only expressible because the level and the
 	 * emulator became separate fields.
@@ -706,14 +705,16 @@ void objects_collect(struct view *v, kof_engine *eng)
 	 * means on the command line. Before these were two fields, asking for
 	 * one without the other was not possible.
 	 */
-	opt.heur_level = v->heur_off ? 0u : KOF_HEUR_LEVEL_MAX;
+	opt->heur_level = v->heur_off ? 0u : KOF_HEUR_LEVEL_MAX;
 	/*
 	 * AND WHETHER THE CHILDREN ARE SEPARATED AT ALL - see view.heur_off.
 	 *
 	 * Zero at rest, so the default is what it has always been: everything
 	 * the parse declared is opened before the tree is drawn.
 	 */
-	opt.heur_off = v->heur_off ? 1u : 0u;
+	opt->heur_off = v->heur_off ? 1u : 0u;
+	/* A person looks at the objects: the normalised view is built whatever the pack reads (kof_scan_option.reader). */
+	opt->reader = 1;
 	/*
 	 * NEVER rather than the zeroed AUTO, and ONLY when asked for.
 	 *
@@ -727,7 +728,15 @@ void objects_collect(struct view *v, kof_engine *eng)
 	 * useful to a scan - would be the one setting whose output nobody could
 	 * attribute to either.
 	 */
-	opt.emu_use = v->emu_mode ? KOF_EMU_ONLY : KOF_EMU_NEVER;
+	opt->emu_use = v->emu_mode ? KOF_EMU_ONLY : KOF_EMU_NEVER;
+}
+
+void objects_collect(struct view *v, kof_engine *eng)
+{
+	struct kof_scan_option opt;
+	kof_scanner *sc;
+
+	scan_option(v, &opt);
 	/*
 	 * The most this build's heuristic can be asked for.
 	 *
@@ -743,9 +752,69 @@ void objects_collect(struct view *v, kof_engine *eng)
 	sc = kscan_new(eng);
 	if (!sc)
 		return;
-	v->scan_sc = sc;
 	kscan_path(sc, v->path, &opt, on_object, v);
 	kscan_free(sc);
+}
+
+const struct kdet_object *view_explain(struct view *v, const struct object *ob)
+{
+	const struct object *up[64];
+	const struct object *root;
+	const struct kdet_object *k;
+	struct object *o;
+	uint32_t n;
+
+	if (!v->eng || v->log || v->proc_pid || !ob)
+		return NULL;
+	o = &v->obj[ob - v->obj];
+	n = obj_ancestors(v, ob, up, 64u);
+	root = n ? up[0] : ob;
+	if (v->det && v->det_root != (uint32_t)(root - v->obj)) {
+		kdet_run_free(v->det);
+		v->det = NULL;
+	}
+	if (!v->det) {
+		struct kof_scan_option opt;
+		kof_scanner *sc;
+
+		if (!root->buf.p || !root->buf.n || root->too_big)
+			return NULL;
+		sc = kscan_new(v->eng);
+		if (!sc)
+			return NULL;
+		scan_option(v, &opt);
+		v->det = kscan_explain(sc, root->buf.p, root->buf.n, root->name, &opt);
+		v->det_root = (uint32_t)(root - v->obj);
+		kscan_free(sc);
+	}
+	k = kdet_run_find(v->det, ob->name);
+	if (!k && ob->heur.has_verdict && ob->buf.p && ob->buf.n && !ob->too_big) {
+		/* The root's run does not hold this object: a child the emulator made on request. Its own bytes are scanned as a root,
+		 * once, when somebody looks at it and it has a verdict. */
+		uint32_t idx = (uint32_t)(ob - v->obj);
+
+		if (v->det_own && v->det_own_obj != idx) {
+			kdet_run_free(v->det_own);
+			v->det_own = NULL;
+		}
+		if (!v->det_own) {
+			struct kof_scan_option opt;
+			kof_scanner *sc = kscan_new(v->eng);
+
+			if (sc) {
+				scan_option(v, &opt);
+				v->det_own = kscan_explain(sc, ob->buf.p, ob->buf.n, ob->name, &opt);
+				v->det_own_obj = idx;
+				kscan_free(sc);
+			}
+		}
+		k = kdet_run_find(v->det_own, ob->name);
+	}
+	if (k && !o->explained) {
+		diag_keep(o, &k->res);
+		o->explained = 1;
+	}
+	return k;
 }
 
 /* Parse each object and ask the database about it. Done after the scan rather
@@ -1166,22 +1235,16 @@ static int examine_one(struct view *v, uint32_t i)
 		}
 
 		/*
-		 * THE DIGEST AND THE EMULATOR GATE ARE NOT COMPUTED HERE ANY
-		 * MORE, AND THAT IS THE WHOLE POINT OF SPILLING AN OBJECT.
+		 * THE DIGEST IS NOT COMPUTED HERE, AND THAT IS THE WHOLE POINT OF
+		 * SPILLING AN OBJECT.
 		 *
-		 * Both read every byte: the digest by definition, the gate by
-		 * walking the executable segments for their byte histogram. Run
-		 * on touch, they faulted a spilled object into memory in full -
-		 * a 16MB view read end to end to fill two lines of a properties
-		 * pane the reader may never open, when the hex pane beside it
-		 * shows twenty rows and needs twenty rows' worth of pages.
-		 * That undoes the reason a large child is written to a file and
-		 * mapped rather than copied; see the note on o->mapped.
-		 *
-		 * So each is worked out where it is SHOWN - obj_sha256 and
-		 * obj_emu_why below - and cached in the object exactly as
-		 * before, so it still happens once and still never happens
-		 * while drawing a row that does not ask for it.
+		 * It reads every byte. Run on touch, it faulted a spilled object
+		 * into memory in full - a 16MB view read end to end to fill a line
+		 * of a properties pane the reader may never open. That undoes the
+		 * reason a large child is written to a file and mapped rather than
+		 * copied; see the note on o->mapped. So it is worked out where it
+		 * is SHOWN - obj_sha256 - and cached in the object, so it still
+		 * happens once.
 		 */
 		if (o->fmt && o->info &&
 		    (o->ctx.format == KOF_FMT_ELF ||
@@ -1275,3 +1338,20 @@ void objects_examine(struct view *v, kof_engine *eng)
 
 
 int decl_top(void) { return g_rows - g_decl_rows; }
+
+/* The verdict of the file an object IS (the top-level one), from the engine's own roll-up; NULL when the object is a child or the file has none. */
+const char *file_verdict_of(const struct view *v, const struct object *ob)
+{
+	const struct kverdict_file *f = kverdict_filemap_of_file(v->fmap, ob->name);
+
+	return f && f->has_verdict ? f->name : NULL;
+}
+
+/* The matched diagnoses that decided what this object is to its file (the engine's: kdet_run_decided). */
+const struct kof_diag_report *decided_diags(struct view *v, const struct object *ob, uint32_t *n)
+{
+	const struct kdet_object *k = ob ? view_explain(v, ob) : NULL;
+
+	*n = 0;
+	return k ? kdet_run_decided(v->det, k, n) : NULL;
+}

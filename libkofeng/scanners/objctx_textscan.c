@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "objctx_int.h"
+#include "../kofcore/tabgrow.h"
 #include "../analyzers/parsers/scripts/script_apply.h"
 #include "../analyzers/parsers/scripts/script_parse.h"
 #include "../analyzers/parsers/scripts/script_route.h"
@@ -62,12 +63,12 @@ static void name_kept(void *user, const char *name, uint32_t len)
 	struct kof_scan_obj_text *t = user;
 
 	(void)len;
-	/* KNOWN DEFECT REV-D8b (2026-10-24, Inference) [sev L]: the name collector doubles a uint32 capacity (cap_name) with no overflow guard and no ledger charge.
-	 * Trigger: 2^31 names (not reachable below the tree's memory cap: the count is bounded by the text). Effect: `nc` wraps to 0, realloc(0) then writes past the table.
-	 * Reproducer: none. Fix: grow through one checked helper (uint64_t arithmetic, refuse past 0xffffffff, charge the scanner's ledger). */
 	if (t->n_name == t->cap_name) {
-		uint32_t nc = t->cap_name ? t->cap_name * 2u : 32u;
-		const char **nn = realloc(t->name, (size_t)nc * sizeof *nn);
+		/* KNOWN DEFECT REV-D8b (2026-10-25, Inference) [sev L]: [narrowed 2026-10-28: the doubling is overflow-guarded, kof_cap_double] the name collector's table is not charged to the scanner's ledger.
+		 * Trigger: a hostile script/object with a very large table (bounded by the input, not by the ledger). Effect: resident bytes above the cap by the table. Reproducer: none (read).
+		 * Fix: scan_charge the growth and oc_scan_release it where the table is freed. */
+		uint32_t nc = kof_cap_double(t->cap_name, 32u);
+		const char **nn = nc ? realloc(t->name, (size_t)nc * sizeof *nn) : NULL;
 
 		if (!nn) {
 			t->names_lost = 1;

@@ -1,20 +1,18 @@
 /*
  * arm32_table.h - what the ARM state and Thumb state decoders share and what their
- * inline decode reads: the shape of a table row, the first-level index, and the
- * guard that builds it. Included by arm32.h and thumb.h; the canonical rows and the
- * builders' statistics are in arm32_private.h.
+ * inline decode reads: the shape of a table row and the first-level index. Included by
+ * arm32.h and thumb.h; the canonical rows and the index's statistics are in
+ * arm32_private.h.
  *
  * A DECODE IS: INDEX, MATCH, EXTRACT. The canonical table is the hand-written rows
- * (arm32_rows.c, thumb_rows.c) in priority order. From them, the first time a
- * decode needs it, arm32_index.c derives a first-level index on a few bits of the
- * word, and for every key the short list of rows that can match it, in priority
+ * (arm32_rows.c, thumb_rows.c) in priority order. From them tools/genotype/arm_index_gen.c
+ * derives, once, a first-level index on a few bits of the word, and for every key the short list of rows that can match it, in priority
  * order, cut after the first the key alone decides - so the LAST row of every list
  * matches whatever is left and the decoder's loop needs no end test.
  */
 #ifndef KGENOME_GENOTYPE_ARM32_TABLE_H
 #define KGENOME_GENOTYPE_ARM32_TABLE_H
 
-#include <stdatomic.h>
 #include <stdint.h>
 
 struct kgenome_arm32_row {
@@ -63,41 +61,13 @@ static inline unsigned kgenome_thumb_wide_key(uint32_t w)
  * mispredicted branch into the lookup, decode alone 2.4 -> 4.7 ns, with no gain.) */
 #define KGENOME_ARM32_DIRECT 0x8000u
 
-/* THE DERIVED ONES the decoders read: static storage, filled by the builders. */
-extern struct kgenome_arm32_row kgenome_arm32_lists[];
-extern uint16_t kgenome_arm32_idx[2 * KGENOME_ARM32_KEYS];
-extern struct kgenome_arm32_row kgenome_thumb_lists[];
-extern uint16_t kgenome_thumb_idx_narrow[KGENOME_THUMB_NARROW_KEYS];
-extern uint16_t kgenome_thumb_idx_wide[KGENOME_THUMB_WIDE_KEYS];
-
-/*
- * BUILT ON FIRST USE, once, by whichever thread gets there first: the state is 0
- * (not built), 1 (being built) or 2 (ready). A thread that finds it 0 takes it to
- * 1 with a compare-and-swap and builds; one that finds it 1 waits for 2 (the build
- * is microseconds). The store of 2 is a release and every decode's check an
- * acquire, so a thread that sees 2 sees the whole index. The check in a decode is
- * one load and one predictable branch (a plain load on x86).
- */
-extern atomic_int kgenome_arm32_state, kgenome_thumb_state;
-void kgenome_arm32_build(void);
-void kgenome_thumb_build(void);
-
-#if defined(__GNUC__) || defined(__clang__)
-#define KGENOME_ARM32_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define KGENOME_ARM32_UNLIKELY(x) (x)
-#endif
-
-static inline void kgenome_arm32_ensure(void)
-{
-	if (KGENOME_ARM32_UNLIKELY(atomic_load_explicit(&kgenome_arm32_state, memory_order_acquire) != 2))
-		kgenome_arm32_build();
-}
-
-static inline void kgenome_thumb_ensure(void)
-{
-	if (KGENOME_ARM32_UNLIKELY(atomic_load_explicit(&kgenome_thumb_state, memory_order_acquire) != 2))
-		kgenome_thumb_build();
-}
+/* THE DERIVED ONES the decoders read: const data, written by tools/genotype/arm_index_gen.c from the hand-written rows
+ * (arm32_index_tab.c, checked in; `make genotype-arm-index`). Nothing is built at run time and nothing is written, so there
+ * is no state to guard and a decode on any thread is a plain read. */
+extern const struct kgenome_arm32_row kgenome_arm32_lists[];
+extern const uint16_t kgenome_arm32_idx[2 * KGENOME_ARM32_KEYS];
+extern const struct kgenome_arm32_row kgenome_thumb_lists[];
+extern const uint16_t kgenome_thumb_idx_narrow[KGENOME_THUMB_NARROW_KEYS];
+extern const uint16_t kgenome_thumb_idx_wide[KGENOME_THUMB_WIDE_KEYS];
 
 #endif /* KGENOME_GENOTYPE_ARM32_TABLE_H */

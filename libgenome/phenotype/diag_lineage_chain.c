@@ -155,11 +155,11 @@ void kgenome_lineage_preds(struct kgenome_lineage *L, struct kgenome_lineage_cfg
 		uint16_t pr = 0;
 		uint32_t i;
 
-		for (i = g->bfirst[b]; i < g->bfirst[b + 1u]; i++) {
+		for (i = kgenome_lineage_bfirst(g, b); i < kgenome_lineage_bend(g, b); i++) {
 			const struct kgenome_cell_insn *in = &L->in[i];
 
 			frame_step(&fs, i, in);
-			if (in->op == KGENOME_CELL_CALL || (in->op == KGENOME_CELL_JMP && kgenome_lineage_jmp_is_tail(L, in)))
+			if (in->op == KGENOME_CELL_CALL || (in->op == KGENOME_CELL_JMP && kgenome_lineage_jmp_is_tail(L, g, b, in)))
 				pr |= call_bits(L, in);
 			else if (in->op == KGENOME_CELL_JMP && (in->flags & KGENOME_CELL_F_INDIRECT))
 				pr |= P(ICALL);
@@ -275,16 +275,13 @@ int kgenome_lineage_seed_block(const struct kgenome_lineage_cfg *g, uint32_t b)
  * out, no jump through a register, and at least one call or syscall - what __stack_chk_fail, abort and _exit of a static binary
  * are. A noreturn function that tail-jumps or returns on some path is not found: said, not guessed.
  */
-/* KNOWN DEFECT D10 (2026-10-24, R) [sev M]: noreturn_names lists C/glibc names only; the Windows ones (ExitProcess,
- * ExitThread, TerminateProcess, RtlExitUserProcess, __fastfail) are missing. Trigger: a PE whose function ends in a
- * call to ExitProcess. Effect: the block is not ended, the walk runs into the next function and hands it this one's
- * state (the 540/f mechanism above, wrong links). Reproducer: none (read). Fix: add the names, keyed by the import
- * name the PE route reports. */
 static const char *const noreturn_names[] = {
 	"exit", "_exit", "_Exit", "abort", "quick_exit", "__stack_chk_fail", "__stack_chk_fail_local", "__assert_fail", "__assert",
 	"__assert_perror_fail", "__chk_fail", "__fortify_fail", "__libc_fatal", "longjmp", "_longjmp", "siglongjmp", "__longjmp_chk",
 	"pthread_exit", "__cxa_throw", "__cxa_rethrow", "__cxa_bad_cast", "__cxa_bad_typeid", "_Unwind_Resume", "err", "errx", "verr",
-	"verrx", "thrd_exit"
+	"verrx", "thrd_exit",
+	/* Windows: the imports a PE route reports by name. TerminateProcess is not here: it returns when the target is another process. */
+	"ExitProcess", "ExitThread", "RtlExitUserProcess", "RtlExitUserThread", "FatalExit", "_CxxThrowException", "_amsg_exit", "_invoke_watson"
 };
 
 int kgenome_diag_name_is_noreturn(const char *name)
@@ -295,6 +292,29 @@ int kgenome_diag_name_is_noreturn(const char *name)
 		if (!strcmp(name, noreturn_names[i]))
 			return 1;
 	return 0;
+}
+
+/* One call to an import that never returns, recorded at its file offset (a route that reads the code in address order keeps the list ascending; one that
+ * does not sorts it when it is done). 0 when the list could not grow: said. */
+int kgenome_diag_noret_add(struct kgenome_diag_scan *s, uint64_t at)
+{
+	if (s->n_noret == s->cap_noret) {
+		uint32_t nc = kgenome_grow_cap(s->cap_noret, 64u);
+		uint64_t *nv;
+
+		if (!nc || !kgenome_ledger_charge(&s->led, (uint64_t)(nc - s->cap_noret) * sizeof *nv))
+			return 0;
+		nv = realloc(s->noret_at, (size_t)nc * sizeof *nv);
+		if (!nv) {
+			kgenome_ledger_release(&s->led, (uint64_t)(nc - s->cap_noret) * sizeof *nv);
+			kgenome_diag_note(s, KGENOME_NOMEM);
+			return 0;
+		}
+		s->noret_at = nv;
+		s->cap_noret = nc;
+	}
+	s->noret_at[s->n_noret++] = at;
+	return 1;
 }
 
 /* Is the call at file offset `at` one to an import that does not return (the symbol route found it). */
@@ -395,12 +415,12 @@ static const struct lineage_next lineage_next[] = {
 	{ KGENOME_LINEAGE_W_SKIP, KGENOME_LINEAGE_S_DEMAND },
 };
 
-/* KNOWN DEFECT WP9-F16 (2026-10-25, Inference) [sev L]: kgenome_diag_oblig_next_stage shifts 1u by `bit`
- * with no range check. Trigger: bit >= 32 (not run: the adapter stays below 19). Effect: undefined shift
- * (UBSAN stops). Reproducer: none. Fix: `if (bit >= 32u) return 0u;` first. */
 unsigned kgenome_diag_oblig_next_stage(unsigned bit)
 {
 	unsigned i;
+
+	if (bit >= 32u)
+		return 0u;              /* no such reason: 1u << bit would be undefined */
 
 	for (i = 0; i < sizeof lineage_next / sizeof lineage_next[0]; i++)
 		if (lineage_next[i].why == (1u << bit))
@@ -548,7 +568,6 @@ void kgenome_lineage_obligations(struct kgenome_lineage *L)
 					o->role = role;
 					o->partial = (uint8_t)partial;
 					o->why = why;
-					o->fn_va = f == UINT32_MAX ? 0u : L->fn[f].va;
 				}
 				n++;
 			}

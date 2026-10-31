@@ -179,7 +179,7 @@ uint64_t oc_unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 	 * allocated for a coding that can be bounded.
 	 */
 	if (method == KOF_UNP_RUNLENGTH) {
-		struct expand_sink snk;
+		struct expand_sink snk = { 0 };
 
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, 0);

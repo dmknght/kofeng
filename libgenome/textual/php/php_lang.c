@@ -22,7 +22,7 @@
  * to `\0 \0`, where js, lua and every other row give `\0\0`). NUL is not an operator, so closing
  * two of them up makes no longer token and the space was an accident of the library call. No file of
  * the php lists (formhash, 71 files, and the engine over them) has a NUL between two tokens, so
- * nothing they hold changes; tests/lib/genome/textual_glue_nul.c pins it.
+ * nothing they hold changes; tests/lib/genome/textual_glue.c pins it.
  */
 static int php_glue(uint8_t a, uint8_t b)
 {

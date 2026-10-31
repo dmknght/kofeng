@@ -142,27 +142,34 @@ static uint32_t spell_import(char *out, const char *dll, const char *func)
  * and a rule written against it compares names. The slot is available to
  * anyone who reads the table, which is what the PE diagnose does.
  */
-static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_imptab *t)
+/*
+ * ONE IMPORT, SPELLED: "dll!func" with the function name read from `f` and made printable, or "dll!#ordinal". The block's records and the call-name table
+ * (kof_callnames_name) say an import the same way because both come through here. `out` holds KOF_PE_SPELL_MAX bytes. Returns the length.
+ */
+uint32_t kof_pe_import_spell(kof_buf f, const struct kgenome_pe_imp *e, const char *dll, char *out)
 {
 	char nm[KOF_SYM_NAME_MAX + 2u], clean[KOF_SYM_NAME_MAX + 2u];
-	char sym[DLL_ROOM + 1u + KOF_SYM_NAME_MAX + 2u];
+	uint32_t i;
+
+	if (kgenome_pe_imp_name(f, e, nm, sizeof nm)) {
+		for (i = 0; nm[i]; i++)
+			clean[i] = (nm[i] >= 0x20 && nm[i] < 0x7f) ? nm[i] : '?';
+		clean[i] = 0;
+	} else {
+		snprintf(clean, sizeof clean, "#%u", (unsigned)e->ordinal);
+	}
+	return spell_import(out, dll, clean);
+}
+
+static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_imptab *t)
+{
+	char sym[KOF_PE_SPELL_MAX];
 	uint32_t k;
 
 	for (k = 0; k < t->n; k++) {
-		const struct kgenome_pe_imp *e = &t->v[k];
-		const char *dll = t->dll[e->dll];
-		uint32_t i, len;
+		const char *dll = t->dll[t->v[k].dll];
+		uint32_t len = kof_pe_import_spell(f, &t->v[k], dll, sym);
 
-		if (kgenome_pe_imp_name(f, e, nm, sizeof nm)) {
-			for (i = 0; nm[i]; i++)
-				clean[i] = (nm[i] >= 0x20 && nm[i] < 0x7f)
-					 ? nm[i] : '?';
-			clean[i] = 0;
-			len = spell_import(sym, dll, clean);
-		} else {
-			snprintf(clean, sizeof clean, "#%u", (unsigned)e->ordinal);
-			len = spell_import(sym, dll, clean);
-		}
 		/* A name past KOF_SYM_NAME_MAX is cut by the writer, which says so
 		 * on the record. The MODULE part is cut here, at DLL_ROOM bytes ("api-ms-win-
 		 * core-synch-l1-2-0.dll" is 31): the record says so too, so a name that

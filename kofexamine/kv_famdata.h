@@ -15,6 +15,7 @@
 
 #include <verdictor/famcat.h>
 #include "kv_table.h"
+#include "kv_pick.h"
 #include "kv_dash_dialog.h"
 
 /* The caller's tables of the session's catalog, and so the limits the dialog reports (KOF_FAMCAT_FULL). */
@@ -31,6 +32,10 @@
 #define KV_FAM_COL_COMMENT 2
 /* Blank columns before a variant's name and before the add-variant button. */
 #define KV_FAM_INDENT 2u
+/* The Pathogens box never grows past this many columns and rows, whatever a comment holds (owner: a long comment must never make it
+ * overflow the screen): a longer line scrolls sideways inside the table, more rows scroll down. */
+#define KV_FAM_WIDTH_MAX KV_DD_CATALOG_WIDTH_MAX
+#define KV_FAM_HEIGHT_MAX KV_DD_CATALOG_HEIGHT_MAX
 /* Blank columns between the types column and the comment column. */
 #define KV_FAM_COMMENT_GAP 4u
 
@@ -52,6 +57,16 @@ uint32_t kv_fam_rows(const struct kof_famcat *c, struct kv_fam_row *out, uint32_
 /* The size the families dialog needs for these rows: the widest row or the button row, and a row each, with the frame. The
  * dialog is as big as its content and is clipped to the screen by the layout. */
 void kv_fam_content_size(const struct kof_famcat *c, const struct kv_fam_row *rows, uint32_t n_row, int *w, int *h);
+
+/* The catalog's family named `name` (exact), or -1; the variant named `name` (exact, "Mirai_A"), or -1. The diagnose panel keeps the
+ * NAMES it was given, not indices, so a rename or a delete in the dialog shows up there as "not found". */
+int32_t kv_fam_find_family(const struct kof_famcat *c, const char *name);
+int32_t kv_fam_find_variant(const struct kof_famcat *c, const char *name);
+/* The same by the catalog ids a diagnose carries (kdb_diagnose_family / kdb_diagnose_variant, which the engine makes with the library's
+ * own kof_famcat_fam_id_at / kof_famcat_var_id_at), or -1 (id 0 included). The engine SPELLS a variant "Mirai.A" for a reader and the catalog
+ * NAMES it "Mirai_A", so a name from kdet_diag_of finds nothing; the id is the one fact both sides hold. */
+int32_t kv_fam_find_family_id(const struct kof_famcat *c, uint64_t id);
+int32_t kv_fam_find_variant_id(const struct kof_famcat *c, uint64_t id);
 
 /* The three cells of a row: name (with its indent), types and comment (a variant's own; a family has none). A cell is "" when it
  * has nothing. */
@@ -88,20 +103,14 @@ void kv_fam_spec_widths(struct kv_tab_spec *t, struct kv_fam_tab *ft, const stru
 /* Is screen column `col` (from the table line's start, the geometry's own numbers) on the add-variant button of a row? */
 int kv_fam_button_at(const struct kv_tab_geo *g, int col);
 
-/* The buttons of the dialog's last body row: [ Add family ] at the left, [ Save ] and [ Discard ] at the right. Save and
- * Discard are enabled exactly when the catalog differs from its snapshot (`dirty`, the library's kof_famcat_dirty); otherwise they
- * are drawn GREYED and kv_fam_btn_at never answers them. One table serves the drawing and the hit test. */
-enum kv_fam_btn_id { KV_FAM_BTN_ADD_FAMILY = 0, KV_FAM_BTN_SAVE, KV_FAM_BTN_DISCARD, KV_FAM_BTN_COUNT };
-struct kv_fam_btn {
-	enum kv_fam_btn_id id;
-	const char *label;
-	int y, x0, x1;
-	int enabled;
-};
-/* Fills `out` left to right; returns how many fit in the box (all three, or only Add family, or none). */
-uint32_t kv_fam_buttons(const struct kv_dd_geo *g, int dirty, struct kv_fam_btn out[KV_FAM_BTN_COUNT]);
-/* The id of the ENABLED button under a screen point, or -1 (a greyed button answers nothing). */
-int kv_fam_btn_at(const struct kv_fam_btn *b, uint32_t n, int y, int x);
+/* The buttons of the dialog's last body row: [ Add family ] at the left, [ Save ] and [ Discard ] at the right (kv_dd_buttons, the one
+ * code both catalog dialogs use). Save and Discard are enabled exactly when the catalog differs from its snapshot (`dirty`). */
+#define KV_FAM_BTN_ADD_FAMILY KV_DD_BTN_ADD
+#define KV_FAM_BTN_SAVE KV_DD_BTN_SAVE
+#define KV_FAM_BTN_DISCARD KV_DD_BTN_DISCARD
+#define KV_FAM_BTN_COUNT KV_DD_BTN_COUNT
+#define kv_fam_btn kv_dd_btn                 /* the struct and the hit test are the shared ones (kv_dash_dialog.h) */
+#define kv_fam_btn_at kv_dd_btn_at
 
 /* The tick menu of a variant: item i is the i-th selectable type; its label, and whether the variant has it. */
 uint32_t kv_fam_menu_count(void);
@@ -109,6 +118,9 @@ const char *kv_fam_menu_label(uint32_t i);
 int kv_fam_menu_checked(const struct kof_famcat *c, uint32_t variant, uint32_t i);
 /* Flip item i of variant `variant` (the engine decides: the status comes back). */
 enum kof_famcat_status kv_fam_menu_toggle(struct kof_famcat *c, uint32_t variant, uint32_t i);
+
+/* The list of selectable types as the shared tick grid and menu read it (kv_pick.h: the bit of a type is its engine value). */
+struct kv_pick kv_fam_types(void);
 
 /* The mask of the types ticked in the Add variant dialog, flipped on item i. */
 uint32_t kv_fam_mask_flip(uint32_t mask, uint32_t i);

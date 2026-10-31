@@ -54,6 +54,7 @@
 
 #define _GNU_SOURCE
 
+#include "../kofcore/kofdebug.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -248,10 +249,12 @@ struct kof_engine *kof_db_load_opt(const char *path, const struct kof_db_load_op
 	 * the matcher builds the same structure in memory, under the allowance the engine's ledger
 	 * leaves, or is refused and says so.
 	 */
-	if (e->n_blk) {
+	if (e->n_blk || e->n_dblk) {
 		struct kof_mutation_build_res res;
 		struct kof_mutation_build_req rq;
-		struct kof_mutation_src *src = calloc(e->n_packs ? e->n_packs : 1u, sizeof *src);
+		/* One source per pack, and one more for the blocks of the diagnoses' forms (built in memory: a diagnose pack
+		 * carries no index trailer), numbered after every pack's. */
+		struct kof_mutation_src *src = calloc((e->n_packs ? e->n_packs : 1u) + 1u, sizeof *src);
 		uint32_t i, n_src = 0, base = 0;
 
 		if (!src) {
@@ -292,6 +295,15 @@ struct kof_engine *kof_db_load_opt(const char *path, const struct kof_db_load_op
 			}
 			n_src++;
 		}
+		if (e->n_dblk) {
+			src[n_src].base = base;
+			src[n_src].blocks = e->dblk;
+			src[n_src].n_blocks = e->n_dblk;
+			src[n_src].pool = e->dpool;
+			src[n_src].n_pool = e->n_dpool;
+			base += e->n_dblk;
+			n_src++;
+		}
 		memset(&rq, 0, sizeof rq);
 		rq.src = src;
 		rq.n_src = n_src;
@@ -299,6 +311,9 @@ struct kof_engine *kof_db_load_opt(const char *path, const struct kof_db_load_op
 		rq.max_bytes = opt ? opt->max_index_bytes : 0;
 		rq.res = &res;
 		e->mutation = kof_mutation_build_req(&rq);
+		KOF_TRACE("[load] similarity set: %u pack block(s) + %u form block(s) in %u source(s): %s, status %x, %u key(s)\n",
+			  (unsigned)e->n_blk, (unsigned)e->n_dblk, (unsigned)n_src, e->mutation ? "built" : "REFUSED",
+			  (unsigned)res.status, (unsigned)res.n_key);
 		free(src);
 		e->mutation_status = res.status;
 		e->mutation_bytes = res.bytes;
@@ -368,6 +383,11 @@ indexed:
 			kof_map_drop(e->packs[i].map, e->packs[i].len);
 	}
 
+	/* [mem] what this load made and keeps: built ONCE per engine (a second line for one engine is a table built twice). */
+	KOF_TRACE("[mem] engine loaded: %u diagnose(s) (%u form(s)), form blocks %u (dblk cap %u = %zu bytes), hashes %u (dpool cap %u = %zu bytes), string arenas %u, similarity set %s (%llu bytes, %u key(s))\n",
+		  (unsigned)e->n_diag, (unsigned)e->n_form, (unsigned)e->n_dblk, (unsigned)e->cap_dblk, (size_t)e->cap_dblk * sizeof *e->dblk,
+		  (unsigned)e->n_dpool, (unsigned)e->cap_dpool, (size_t)e->cap_dpool * sizeof *e->dpool, (unsigned)e->n_diag_arena,
+		  e->mutation ? "built" : "none", (unsigned long long)e->mutation_bytes, (unsigned)e->mutation_keys);
 	return e;
 }
 

@@ -266,10 +266,10 @@ struct variant {
 static const struct variant variants[] = {
 	{ "zip",  CW_L_EXTRA, 3, KOF_BROKEN_NONE,      1 },
 	{ "zip",  CW_L_CRYPT, 0, KOF_BROKEN_ENCRYPTED, 0 },
-	{ "tar",  CW_L_EXTRA, 2, KOF_BROKEN_NONE,      0 },
-	{ "lha",  CW_L_EXTRA, 0, KOF_BROKEN_DAMAGED,   0 },
+	{ "tar",  CW_L_EXTRA, 2, KOF_BROKEN_DAMAGED,   0 },       /* the third header has no magic and a wrong checksum: the walk ends there, and says so (WP2-D1c) */
+	{ "lha",  CW_L_EXTRA, 2, KOF_BROKEN_DAMAGED,   0 },       /* the two members after the one that cannot be decoded are opened (WP2-D13) */
 	{ "cab",  CW_L_EXTRA, 3, KOF_BROKEN_NONE,      1 },
-	{ "cab",  CW_L_CRYPT, 3, KOF_BROKEN_NONE,      0 },       /* the members come out, but shifted: WP2-D14 below */
+	{ "cab",  CW_L_CRYPT, 3, KOF_BROKEN_NONE,      0 },       /* a per-block reserve area: the members are their bytes (WP2-D14) */
 	{ "7z",   CW_L_EXTRA, 0, KOF_BROKEN_UNSUPPORTED, 0 },
 	{ "7z",   CW_L_CRYPT, 0, KOF_BROKEN_ENCRYPTED, 0 },
 	{ "pdf",  CW_L_EXTRA, 4, KOF_BROKEN_NONE,      0 },
@@ -329,8 +329,7 @@ static int variants_job(unsigned idx)
 			o2 = cs_find(&r, tail);
 			same += o2 && o2->len == e[i].len && o2->hash == cs_fnv(e[i].data, e[i].len);
 		}
-		/* KNOWN DEFECT WP2-D14 (2026-10-24, M): this row pins it, green until fixed. */
-		KM_CHECK(same == 3, "cab: with a per-block reserve area (cbCFData 2) the members are not their bytes (right length, shifted by the reserve)", "WP2-D14");
+		CK(same == 3, "cab: with a per-block reserve area (cbCFData 2) the members are their bytes (WP2-D14), %u of 3", same);
 	}
 	cs_free(&r);
 	cw_free(&w);

@@ -4,9 +4,8 @@
  *   fidset_file   a clean-file set of anything (a memfd named through /proc/self/fd): load, then every lookup. Seeds are
  *                 files the set itself saved. A set that loads must have the size its header says; a set that does not
  *                 must answer for nothing.
- *   fridge_file   the verdict cache file of anything. FZ_MAY_HIT_CAP: the header's entry count sizes an allocation before
- *                 the file's length is looked at (unit test orbit_store, row WP12-11), so a header that claims 4 million
- *                 entries meets the allocation cap here.
+ *   fridge_file   the verdict cache file of anything. A header that claims more entries than the file holds is refused
+ *                 before anything is allocated (unit test orbit_store, row WP12-11).
  *   fidset_ops    add / drop / has / save / reload on a scratch file against a plain array: the same answers before and
  *                 after the file round trip (differential oracle).
  *   seen_ops      the suppression table: marks, clears, stats; asked = fresh + repeat, never over capacity.
@@ -260,7 +259,7 @@ static int run_fridge(struct fz_ctx *c, const uint8_t *in, size_t n)
 
 FZ_ADAPTER(fridge_file, .name = "orbit/fridge_file",
 	   .covers = "koffridge_open koffridge_load koffridge_get koffridge_put koffridge_save koffridge_stats koffridge_describe koffridge_close",
-	   .shape = FZ_REQ, .flags = FZ_MAY_HIT_CAP, .backstop_s = 1800, .seeds = seeds_fridge, .run = run_fridge);
+	   .shape = FZ_REQ, .backstop_s = 1800, .seeds = seeds_fridge, .run = run_fridge);
 
 /* ------------------------------------------------------------------------------------------------- fidset_ops */
 

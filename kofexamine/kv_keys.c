@@ -540,22 +540,16 @@ int handle_chooser_key(struct view *v, int k)
 		case KV_NAV_PREV:
 		case KV_NAV_NEXT:
 			/*
-			 * OVER A SEPARATOR AND NOT ONTO IT. kv_nav_step stops
-			 * at the ends rather than wrapping, so a rule sitting
-			 * at the top or bottom would trap the cursor - the
-			 * loop gives up when a step changes nothing and the
-			 * selection is left where it was.
+			 * OVER A RULE AND NOT ONTO IT, and no further than the
+			 * ends: kv_popup_step skips what cannot be chosen and
+			 * leaves the cursor where it was when there is no next.
 			 */
 			{
-				int to = v->ch.sel, from;
+				struct kv_popup p;
+				int to;
 
-				do {
-					from = to;
-					to = kv_nav_step(to, v->ch.n, nav);
-				} while (to >= 0 && to < v->ch.n &&
-					 v->ch.sep[to] && to != from);
-				if (to >= 0 && to < v->ch.n && v->ch.sep[to])
-					to = v->ch.sel;
+				ch_popup(&v->ch, &p);
+				to = kv_popup_step(&p, v->ch.sel, nav == KV_NAV_NEXT ? 1 : -1);
 				v->ch.sel = to;
 				ch_follow(&v->ch);
 			}
@@ -598,8 +592,8 @@ int handle_chooser_key(struct view *v, int k)
 		return 1;
 	} else if (v->edit) {
 		/*
-		 * One editor, several fields. The code says which: 1 the
-		 * family, 4+i a condition's custom variant, 103+i a condition's
+		 * One editor, several fields. The code says which: 4+i a
+		 * condition's custom variant, 103+i a condition's
 		 * expression, 200+i an optional size, 300+i a matcher's
 		 * comment, 400+i a condition's comment.
 		 *
@@ -866,10 +860,6 @@ int handle_chooser_key(struct view *v, int k)
 		if (v->edit == 501) {
 			buf = v->ed.dr.note;
 			cap = sizeof v->ed.dr.note;
-		} else if (v->edit == 1) {
-			buf = v->ed.dr.family;
-			cap = sizeof v->ed.dr.family;
-			accept = kof_name_char;
 		} else if (v->edit >= 300) {
 			buf = v->ed.dr.grp[(v->edit - 300) % MAX_GROUP].note;
 			cap = sizeof v->ed.dr.grp[0].note;

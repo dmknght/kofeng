@@ -282,6 +282,36 @@ static void layers(void)
 	}
 }
 
+/*
+ * BE-1: a layer whose text is several times the file that carried it. The form of a layer is sized for its worst case
+ * (the layer and a half, and what its decodes may add), and that size was asked of the decode allowance (32 times the
+ * file and 64 KB): with 8n over what was left the layer was refused whole and the scan read Limit, though the layer is
+ * 40 KB and the allowance 78 KB. The payload here is a 40 KB run behind a canary: a 200 byte deflate stream.
+ */
+static void be1_big_layer(void)
+{
+	static const char head[] = "<?php\necho \"NormBE1Canary-52d9";
+	static const char tail[] = "\";\nsystem($_GET['c']);\n";
+	size_t n = sizeof head - 1u + 40000u + sizeof tail - 1u, sn, pn;
+	uint8_t *in = malloc(n), *st, *php;
+	struct seen s;
+
+	if (!in)
+		abort();
+	memcpy(in, head, sizeof head - 1u);
+	memset(in + sizeof head - 1u, 'a', 40000u);
+	memcpy(in + sizeof head - 1u + 40000u, tail, sizeof tail - 1u);
+	st = compress_to(in, n, -15, 9, &sn);
+	php = php_of("gzinflate", st, sn, &pn);
+	scan(php, pn, &s);
+	NCKF(!s.limit, "BE-1: a %zu byte layer behind a %zu byte file reads Limit", n, pn);
+	NCKF(view_has(&s, "NormBE1Canary-52d9"), "BE-1: the payload is not in the view (%u objects)", s.n_obj);
+	free(s.view);
+	free(php);
+	free(st);
+	free(in);
+}
+
 int main(void)
 {
 	if (!e2e_open(NULL)) {
@@ -291,6 +321,7 @@ int main(void)
 	valid();
 	damaged();
 	layers();
+	be1_big_layer();
 	bomb();
 	printf("script_decode_inflate: %u checks, %u failed\n", nr_ok + nr_bad, nr_bad);
 	return nr_bad != 0;

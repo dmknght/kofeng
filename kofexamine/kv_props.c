@@ -294,7 +294,7 @@ void prop_build(struct view *v)
 
 	/*
 	 * THE FORMAT BLOCK AND THE FACTS UNDER IT come from kv_dashdata.c as rows (dash_header, dash_regions,
-	 * dash_anomalies, dash_heuristic): this function only decides the order they are shown in, and prop_block
+	 * dash_anomalies): this function only decides the order they are shown in, and prop_block
 	 * draws them. Not for a normalised view: its headers describe the file before the padding came out, so
 	 * every offset in them is stale wherever something collapsed ahead of it - dash_header answers an empty block.
 	 */
@@ -303,6 +303,10 @@ void prop_build(struct view *v)
 	{
 		static struct dash_block blk;
 
+		/* The engine's detection facts come first: they are what a person opened the file to learn. The pull (why each diagnose matched)
+		 * is asked only for an object that has a verdict. */
+		dash_detection(v, ob, ob->heur.has_verdict ? view_explain(v, ob) : NULL, &blk);
+		prop_block(&blk);
 		dash_header(ob, &blk);
 		prop_block(&blk);
 		dash_regions(v, ob, &blk);
@@ -313,14 +317,10 @@ void prop_build(struct view *v)
 
 
 	/*
-	 * WHO OPENED IT, OR WHAT SAYS SOMETHING SHOULD HAVE.
+	 * WHO OPENED IT.
 	 *
-	 * Its own section rather than a line under Heuristic, because it is a
-	 * different kind of statement: the heuristic scores STRUCTURE and
-	 * reports a level, while this says a packer is involved and names the
-	 * one thing a reader can do about it. Filing them together put "the
-	 * code is hidden" beside "the file is truncated" as though they were
-	 * two readings of one measurement.
+	 * Its own section: it says a packer is involved, which is a different
+	 * kind of statement from the parser's anomalies above.
 	 */
 	/*
 	 * EVERY MODULE THE CHAIN WENT THROUGH, NOT ONLY THE LAST.
@@ -343,7 +343,7 @@ void prop_build(struct view *v)
 		if (name[0] && !(n_step && strcmp(step[n_step - 1u], name) == 0))
 			step[n_step++] = name;
 	}
-	if (n_step || emu_why_tag(ob->emu_why)) {
+	if (n_step) {
 		prop_head("Packer");
 		for (ks = 0; ks < n_step; ks++) {
 			char lab[16];
@@ -354,22 +354,5 @@ void prop_build(struct view *v)
 				snprintf(lab, sizeof lab, "module");
 			prop_add("  %-11s " A_BAD "%s" A_OFF, lab, step[ks]);
 		}
-		if (!n_step)
-			prop_add("  %-11s %s%s" A_OFF A_DIM "  %s" A_OFF,
-				 "verdict",
-				 ob->emu_why == KGENOME_EMU_UNP_WHY_DENSE
-				 ? A_BAD : A_WARN,
-				 emu_why_tag(ob->emu_why),
-				 emu_why_reason(ob->emu_why));
-		if (!n_step)
-			prop_add(A_DIM "  %-11s Analysis > Examine with "
-				 "emulator" A_OFF, "try");
-	}
-
-	{
-		static struct dash_block blk;
-
-		dash_heuristic(ob, &blk);
-		prop_block(&blk);
 	}
 }

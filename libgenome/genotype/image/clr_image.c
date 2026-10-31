@@ -58,6 +58,18 @@ static void clip_stream(struct kgenome_clr_stream *s, uint64_t obj_size,
 		s->off = 0;
 }
 
+/* Does `s`, just clipped, share a byte with another stream already read? */
+static int stream_overlaps(const struct kgenome_clr_meta *m, const struct kgenome_clr_stream *s)
+{
+	const struct kgenome_clr_stream *all[5] = { &m->tables, &m->strings, &m->us, &m->blob, &m->guid };
+	unsigned i;
+
+	for (i = 0; i < 5u; i++)
+		if (all[i] != s && all[i]->len && all[i]->off < s->off + s->len && s->off < all[i]->off + all[i]->len)
+			return 1;
+	return 0;
+}
+
 /*
  * Which of the six a stream name is.
  *
@@ -224,14 +236,14 @@ int kgenome_clr_read(kof_buf obj, uint64_t clr_off, kgenome_clr_rva rva,
 			/* Two headers claiming the same heap. The first wins;
 			 * honouring the second would put one heap's bytes in two
 			 * places, which is what the partition forbids. */
-			/* KNOWN DEFECT E-CLROVER (2026-10-24, R) [sev L]: KGENOME_CLR_ANOM_STREAM_OVER fires only for a repeated stream name, not for
-			 * two differently named streams whose byte ranges overlap. Trigger: #Strings and #Blob headers naming overlapping
-			 * ranges. Effect: one byte is in two heaps (searched twice, the partition's rule broken) and no anomaly is said.
-			 * Reproducer: none (read). Fix: compare clip_stream's range against every earlier slot, set the bit on overlap. */
 			out->anomalies |= KGENOME_CLR_ANOM_STREAM_OVER;
 			continue;
 		}
 		clip_stream(slot, obj.n, mroot + off, len, &out->anomalies);
+		/* Two differently named streams over the same bytes: both are kept (a heap is
+		 * still a heap), and it is said. */
+		if (slot->len && stream_overlaps(out, slot))
+			out->anomalies |= KGENOME_CLR_ANOM_STREAM_OVER;
 		if (slot->len && slot->off + slot->len > end_max)
 			end_max = slot->off + slot->len;
 	}

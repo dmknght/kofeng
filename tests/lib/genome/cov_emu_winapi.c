@@ -852,6 +852,24 @@ static void t_misc(unsigned bits)
 	/* the Nt layer */
 	r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 7, DATA + 0x400, 8, 0, 0, 0, 0);
 	CK((uint32_t)r.ret == 0xc0000003u && get(e, DATA + 0x400, 8) == 0, "ProcessDebugPort: refused, the buffer left zero: no debugger is the answer");
+	/* EMU-NTQIP: the classes a loader reads are answered (old tests missed it: (c) only the debugger class was
+	 * ever asked, and "refused" was pinned for it alone). ProcessBasicInformation: 6 pointers; WoW64: zero. */
+	{
+		unsigned pw = bits == 32 ? 4u : 8u;
+
+		r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 0, DATA + 0x400, 6u * pw, DATA + 0x440, 0, 0, 0);
+		CK(r.ret == 0 && get(e, DATA + 0x440, 4) == 6u * pw, "ProcessBasicInformation: success, the length it wrote");
+		CK(get(e, DATA + 0x400, pw) == 0x103u && get(e, DATA + 0x400 + 4u * pw, pw) == 0x1000u, "ProcessBasicInformation: STILL_ACTIVE, the process id GetCurrentProcessId says");
+		r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 0, DATA + 0x400, 6u * pw - 1u, DATA + 0x440, 0, 0, 0);
+		CK((uint32_t)r.ret == 0xc0000004u, "a short buffer: STATUS_INFO_LENGTH_MISMATCH");
+		r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 0, 0, 6u * pw, 0, 0, 0, 0);
+		CK((uint32_t)r.ret == 0xc0000005u, "no buffer: STATUS_ACCESS_VIOLATION");
+		{ uint64_t ones = ~0ull; put(e, DATA + 0x480, &ones, pw); }
+		r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 26, DATA + 0x480, pw, 0, 0, 0, 0);
+		CK(r.ret == 0 && get(e, DATA + 0x480, pw) == 0, "ProcessWow64Information: native, zero");
+		r = call(e, bits, "NtQueryInformationProcess", (uint64_t)-1, 0x1e, DATA + 0x400, 8, 0, 0, 0, 0);
+		CK((uint32_t)r.ret == 0xc0000003u, "ProcessDebugObjectHandle: still refused");
+	}
 	r = C1(e, bits, "RtlGetVersion", DATA + 0x500);
 	w = (uint32_t)get(e, DATA + 0x504, 4);
 	CK(r.ret == 0 && get(e, DATA + 0x500, 4) == 284 && w == 10 && get(e, DATA + 0x50c, 4) == 19045,

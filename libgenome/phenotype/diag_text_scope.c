@@ -526,6 +526,5 @@ int kgenome_dtx_scopes(struct kgenome_dtx *x)
 		}
 	}
 	free(stk);
-	x->nscope = nsc;
 	return 1;
 }

@@ -9,7 +9,7 @@
  *   dash_header      the format block of the overview, as meaning: format, abi, linking, entry, size, layout, declared counts
  *   dash_regions     the engine's division of the object, the share of each, and the partition check
  *   dash_anomalies   what the parser thought was wrong
- *   dash_heuristic   the engine's heuristic result and its traces
+ *   dash_detection   the engine's detection facts (kdet_*): verdict, family/variant/tag, basis, each diagnose and why it matched
  *   dash_layout      the segment and section tables (columns, rows, what was declared)
  *   dash_syms        the import or export rows after the filter, and why there are none when there are none
  *   dash_infect_*    the Infection dialog's first page: where a binary is commonly infected, the engine's ranges flagged
@@ -35,7 +35,7 @@ enum dash_tone { DT_NONE = 0, DT_DIM, DT_ID, DT_LOC, DT_SIZE, DT_WARN, DT_BAD, D
  * carries its own padding, so a column of rows lines up without the renderer knowing the columns. */
 struct dash_span {
 	enum dash_tone tone;
-	char text[72];
+	char text[160];
 };
 
 struct dash_row {
@@ -58,7 +58,8 @@ int dash_has_header(const struct object *ob);
 void dash_header(const struct object *ob, struct dash_block *b);
 void dash_regions(const struct view *v, const struct object *ob, struct dash_block *b);
 void dash_anomalies(const struct object *ob, struct dash_block *b);
-void dash_heuristic(const struct object *ob, struct dash_block *b);
+/* The engine's detection facts for the object (kdet_*); `why` is the run of kscan_explain for its root, or NULL. */
+void dash_detection(const struct view *v, const struct object *ob, const struct kdet_object *why, struct dash_block *b);
 
 /* ---- the layout tables ---------------------------------------------------------------------------------- */
 
@@ -103,7 +104,7 @@ struct dash_filter {
 
 int dash_filter_ok(const struct dash_filter *f, const char *name, uint32_t n);
 
-enum dash_why { DASH_OK = 0, DASH_NA, DASH_NONE, DASH_FILTER, DASH_RX };
+enum dash_why { DASH_OK = 0, DASH_NA, DASH_NONE, DASH_FILTER, DASH_RX, DASH_NOMEM /* the rows could not be allocated: not "none found" */ };
 
 #define DASH_SYM_COLS 9u
 

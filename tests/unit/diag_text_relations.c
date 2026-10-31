@@ -11,7 +11,7 @@
  * of the second on the second line (`direct`), reached through a chain of links (`path`: a decode's result reaches the eval through the decode that came between), or not found (listed with
  * the reason the reader wrote). A relation the route does not make is a gap in the analysis, said here, and not a failure: the test fails only for a table it cannot read.
  *
- * usage: diag_text_relations [table.tsv] [-v]     (default: tests/data/diag_text_expect.tsv)
+ * usage: diag_text_relations [table.tsv] [-v] [-root DIR]     (default: tests/data/diag_text_expect.tsv; the sample paths of the table are relative to DIR)
  */
 
 #define _GNU_SOURCE
@@ -161,15 +161,12 @@ static int reach(const struct kgenome_diag_scan *s, uint32_t from, uint32_t to, 
 
 int main(int argc, char **argv)
 {
-	/* KNOWN DEFECT S2-TSV (2026-10-24, M) [sev L]: rows of tests/data/diag_text_expect.tsv state relations the engine does not or should not produce, so the gate counts them as "not found".
-	 * Trigger: the first 100 rows (all php): STALE capability names rows 0,3,9,15,16,17,39; WRONG rows 47,48,49 (eval inside a single-quoted string) and 84 (shared belongs to L664, not L665); SHAPE rows 37,38.
-	 * Effect: 24 of 100 rows read as misses (75 found directly), so the found/missing numbers this test prints are not a coverage measure. Reproducer: /mnt/games/normtest/fix_script2/red_report.md section 9.
-	 * Fix: correct the rows (the engine's spelling, the real sample line) and keep the real gaps as rows; the table is data, so the comment is here, where it is read. */
 	const char *table = "tests/data/diag_text_expect.tsv";
+	const char *root = "/mnt/games";        /* where the corpora are on the owner's host; -root DIR for another place */
 	int verbose = 0, a, i;
 	int found_direct[4] = { 0 }, found_path[4] = { 0 }, missing[4] = { 0 }, nones = 0, none_with_links = 0, absent = 0, unread = 0, samples = 0;
 	static const char *const SN[4] = { "must", "may", "shared", "none" };
-	char cur[1100] = "";
+	char cur[1100] = "", full[1200];
 	uint8_t *buf = NULL;
 	struct kgenome_diag_scan *s = NULL;
 	long sz = 0;
@@ -177,6 +174,8 @@ int main(int argc, char **argv)
 	for (a = 1; a < argc; a++) {
 		if (!strcmp(argv[a], "-v"))
 			verbose = 1;
+		else if (!strcmp(argv[a], "-root") && a + 1 < argc)
+			root = argv[++a];
 		else
 			table = argv[a];
 	}
@@ -208,11 +207,11 @@ int main(int argc, char **argv)
 			free(buf);
 			buf = NULL;
 			snprintf(cur, sizeof cur, "%s", r->path);
-			/* KNOWN DEFECT REV-D12 (2026-10-24, M) [sev L]: the table names its samples by absolute path (1035 rows start with /mnt/games/normtest/s3/), and a sample that is not there is only counted in `absent`.
-			 * Trigger: any checkout without the corpus at that path (CI, another machine). Effect: every row of the missing files is skipped, the test exits 0 and checks nothing.
-			 * Reproducer: tests/data/diag_text_expect.tsv. Fix: store paths relative to a corpus root given as an argument, and fail (or report loudly) when a named file is absent. */
-			f = fopen(r->path, "rb");
+			snprintf(full, sizeof full, "%s/%s", root, r->path);
+			f = fopen(full, "rb");
 			if (!f) {
+				/* a sample that is not there is named, not only counted: a run on a checkout without the corpus checks nothing and says so */
+				printf("  ABSENT %s\n", full);
 				absent++;
 				continue;
 			}
@@ -282,7 +281,9 @@ int main(int argc, char **argv)
 	}
 	kgenome_diag_scan_free(s);
 	free(buf);
-	printf("diag_text_relations: %d rows, %d samples scanned (%d not present, %d not scanned)\n", nrows, samples, absent, unread);
+	printf("diag_text_relations: %d rows, %d samples scanned (%d not present, %d not scanned), corpus root %s\n", nrows, samples, absent, unread, root);
+	if (!samples)
+		printf("diag_text_relations: NO SAMPLE WAS FOUND under %s: nothing was checked\n", root);
 	for (a = 0; a < 3; a++)
 		printf("  %-6s expected %4d: found as a link %4d, through a chain %4d, not found %4d\n", SN[a], found_direct[a] + found_path[a] + missing[a], found_direct[a], found_path[a], missing[a]);
 	printf("  none   %d samples that expect no relation; the route made links in %d of them\n", nones, none_with_links);

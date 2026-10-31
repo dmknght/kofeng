@@ -379,11 +379,66 @@ static void check_hostile(void)
 	}
 }
 
+/*
+ * E-PEDIR: a parent directory whose RVA falls in alignment padding. A PAD section is not written to the
+ * section table, so the directory would name a place no written section holds; it is dropped, the one
+ * in a written section is kept. Old tests missed it: (a) the loop that places directories was only run
+ * with the declarations of check_roundtrip, which carry no PAD section.
+ */
+static void check_pad_directory(void)
+{
+	struct kgenome_sec_decl decl[3];
+	struct kgenome_dir_decl none[16];
+	struct kgenome_pe_info *pe = calloc(1, sizeof *pe);
+	uint8_t *out = calloc(1, 0x1000);
+	uint64_t wrote;
+	uint32_t at;
+
+	if (!pe || !out) {
+		fail("pad directory", "out of memory");
+		free(pe);
+		free(out);
+		return;
+	}
+	memset(decl, 0, sizeof decl);
+	memset(none, 0, sizeof none);
+	memcpy(decl[0].name, ".text", 5);   decl[0].rva = 0x1000; decl[0].vsize = 0x100;
+	memcpy(decl[1].name, ".pad", 4);    decl[1].rva = 0x2000; decl[1].vsize = 0x100; decl[1].flags = KGENOME_SECF_PAD;
+	memcpy(decl[2].name, ".data", 5);   decl[2].rva = 0x3000; decl[2].vsize = 0x100;
+	pe->valid = 1;
+	pe->machine = 0x014c;
+	pe->image_base = 0x400000;
+	pe->dir[2].rva = 0x2010; pe->dir[2].size = 8;     /* inside the padding */
+	pe->dir[3].rva = 0x3010; pe->dir[3].size = 8;     /* inside .data */
+	wrote = kgenome_pe_write_hdr(out, 0x1000, pe, decl, 3, 0x1000, 0x3100, none);
+	if (!wrote) {
+		fail("pad directory", "the header was not written");
+	} else {
+		for (at = 0; at + 4u < wrote && memcmp(out + at, "PE\0\0", 4); at++)
+			;
+		at += SIG_LEN + COFF_LEN + 96u;               /* the data directories of a PE32 */
+		if (at + 32u > wrote)
+			fail("pad directory", "no directory table found");
+		else {
+			uint32_t d2 = (uint32_t)out[at + 16] | (uint32_t)out[at + 17] << 8 | (uint32_t)out[at + 18] << 16;
+			uint32_t d3 = (uint32_t)out[at + 24] | (uint32_t)out[at + 25] << 8 | (uint32_t)out[at + 26] << 16;
+
+			if (d2 != 0)
+				fail("pad directory", "a directory in padding was carried into the header");
+			if (d3 != 0x3010)
+				fail("pad directory", "a directory in a written section was lost");
+		}
+	}
+	free(pe);
+	free(out);
+}
+
 int main(void)
 {
 	check_layout_of();
 	check_roundtrip();
 	check_hostile();
+	check_pad_directory();
 
 	printf("pe rebuild: layout round trip %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

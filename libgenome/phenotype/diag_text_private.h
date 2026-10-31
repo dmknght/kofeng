@@ -420,7 +420,6 @@ struct kgenome_dtx {
 	struct kgenome_dtx_vchunk *vchunk;
 	uint32_t       vcap, vn;
 	uint32_t      *scope;   /* per token: the function body it is in (0: none) - one pass, kgenome_dtx_scopes */
-	uint32_t       nscope;
 	uint32_t      *sparent; /* per scope: the scope it is written in (only for a language whose row says `lexical`) */
 	struct kgenome_dtx_alias *al;
 	uint32_t      *alt;     /* open addressing over (scope, name): index + 1 of the NEWEST alias of that key, 0 an empty slot */

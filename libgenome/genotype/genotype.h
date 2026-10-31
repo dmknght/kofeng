@@ -28,6 +28,9 @@
  * not an instruction. The decoders kept saying INVALID; it is an alias and not a
  * seventh value, so a status means one thing in every part of the lib.
  */
+#include <stddef.h>
+#include <stdint.h>
+
 #include "../kgenome_status.h"
 #define KGENOME_INVALID KGENOME_BAD_INPUT
 
@@ -35,6 +38,38 @@
 enum kgenome_gt_arch {
 	KGENOME_GT_ARCH_X86_32,
 	KGENOME_GT_ARCH_X86_64
+};
+
+
+/*
+ * WHAT A FORMATTER ANSWERS BESIDES THE TEXT: how control leaves the instruction
+ * and, for a direct branch, where it goes. One result struct for every
+ * architecture's formatter (kgenome_arm32_format, kgenome_arm64_format), so the
+ * one entry above them (celllysis/disasm.h) hands the caller the same record
+ * whatever the architecture.
+ *
+ * `status` is KGENOME_OK when `text` is the instruction in full; UNSUPPORTED when
+ * the bytes decode as an instruction of a space the formatter does not spell yet
+ * (the text is then the word as data, ".inst 0x..."): the length is still right;
+ * BAD_INPUT when they are not an instruction; TRUNCATED when `cap` was too small.
+ * `target` is meaningful only when `has_target`: a direct branch's destination, in
+ * the address space of the `pc` the caller passed. An indirect branch has none.
+ */
+enum kgenome_gt_flow {
+	KGENOME_GT_FLOW_NEXT = 0,       /* falls through */
+	KGENOME_GT_FLOW_JUMP,           /* unconditional branch */
+	KGENOME_GT_FLOW_COND,           /* conditional branch */
+	KGENOME_GT_FLOW_CALL,
+	KGENOME_GT_FLOW_RET,
+	KGENOME_GT_FLOW_TRAP            /* system call, breakpoint, undefined */
+};
+
+struct kgenome_gt_fmt_res {
+	enum kgenome_status status;
+	size_t   len;                   /* characters written, without the terminator */
+	uint8_t  flow;                  /* enum kgenome_gt_flow */
+	uint8_t  has_target;
+	uint64_t target;
 };
 
 #endif /* KGENOME_GENOTYPE_H */

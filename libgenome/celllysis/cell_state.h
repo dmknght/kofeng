@@ -43,6 +43,14 @@ struct kgenome_cell_state {
 	 * of the architecture. The cursor sets it before it tracks a call (kgenome_cell_call_keeps).
 	 */
 	uint16_t call_keeps;
+	/*
+	 * A CALL THAT RETURNS ON ITS OWN pushes nothing the walk keeps: the callee takes its return address
+	 * off the stack itself, so the next `pop` of the function being walked is its own push's (X11).
+	 * The cursor sets this to 1 before it tracks such a call; it is 0 for `call next` and for a callee
+	 * that begins with `pop` (the get-pc idioms, where the pushed address is the point), and in a state
+	 * no cursor works on, which pushes the return address as it always did.
+	 */
+	uint8_t  call_plain;
 };
 
 void kgenome_cell_state_reset(struct kgenome_cell_state *k);

@@ -538,7 +538,15 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * kof_objtree_may_open is checked inside, at the top, so this is one
 	 * call rather than a call and a guard that could disagree.
 	 */
-	if (!sc->obj.open.broken && kof_objtree_declared(ctx, opt))
+	/* NOT `broken`: that is any reason, and one member that could not be decoded (DAMAGED) ended
+	 * the opening of the members the container declares, so the stored ones after it were never
+	 * opened (WP2-D13: lha and arj, 0 of 2 where zip and rar open both). DAMAGED is said by the
+	 * decode of one entry and says nothing of the others; any other reason (a module that does
+	 * not read this container, an encrypted one) still stands in the way, as pinned by
+	 * view_oldpack and ctr_valid. The tree's own stop (a budget) ends it in every case. */
+	if (!sc->obj.open.stop &&
+	    (!sc->obj.open.broken || sc->obj.open.broken == KOF_BROKEN_DAMAGED) &&
+	    kof_objtree_declared(ctx, opt))
 		applies = 1;
 
 	kof_mod_unpack_mode(ctx, 0);

@@ -1016,9 +1016,15 @@ static void mt_report(struct mt_run *m)
 			/* No colour into a file. The escapes would make it
 			 * ungreppable, which is the one thing a report of this
 			 * shape is read with. */
-			kof_report_write_text(m->rep, f, 0);
-			fclose(f);
-			fprintf(stderr, "   %s\n", path);
+			int wrc = kof_report_write_text(m->rep, f, 0);
+
+			/* The status says whether the sink took it all; fclose
+			 * is where a buffered failure shows when the stream
+			 * was not yet flushed. */
+			if (fclose(f) != 0 || wrc != 0)
+				fprintf(stderr, "   cannot write %s completely\n", path);
+			else
+				fprintf(stderr, "   %s\n", path);
 		} else {
 			fprintf(stderr, "   cannot write %s\n", path);
 		}
@@ -1026,9 +1032,15 @@ static void mt_report(struct mt_run *m)
 		snprintf(path, sizeof path, "%s/report.json", m->rep_dir);
 		f = kof_fopen_trunc(path);
 		if (f) {
-			kof_report_write_json(m->rep, f);
-			fclose(f);
-			fprintf(stderr, "   %s\n", path);
+			int wrc = kof_report_write_json(m->rep, f);
+
+			/* The status says whether the sink took it all; fclose
+			 * is where a buffered failure shows when the stream
+			 * was not yet flushed. */
+			if (fclose(f) != 0 || wrc != 0)
+				fprintf(stderr, "   cannot write %s completely\n", path);
+			else
+				fprintf(stderr, "   %s\n", path);
 		} else {
 			fprintf(stderr, "   cannot write %s\n", path);
 		}
@@ -1036,9 +1048,15 @@ static void mt_report(struct mt_run *m)
 		snprintf(path, sizeof path, "%s/candidates.tsv", m->rep_dir);
 		f = kof_fopen_trunc(path);
 		if (f) {
-			kof_report_write_candidates(m->rep, f);
-			fclose(f);
-			fprintf(stderr, "   %s\n", path);
+			int wrc = kof_report_write_candidates(m->rep, f);
+
+			/* The status says whether the sink took it all; fclose
+			 * is where a buffered failure shows when the stream
+			 * was not yet flushed. */
+			if (fclose(f) != 0 || wrc != 0)
+				fprintf(stderr, "   cannot write %s completely\n", path);
+			else
+				fprintf(stderr, "   %s\n", path);
 		} else {
 			fprintf(stderr, "   cannot write %s\n", path);
 		}

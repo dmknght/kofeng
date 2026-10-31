@@ -138,7 +138,8 @@ static int chan_names(const char *base, char *d, char *c, char *w, size_t cap)
 /*
  * IS AN EXISTING CHANNEL WRECKAGE RATHER THAN A LIVE ONE.
  *
- * Zero magic means a publisher tore it down and is gone. A pid nobody owns
+ * Zero magic means a publisher tore it down and is gone - or is making it
+ * this instant, which is why a young one is left alone. A pid nobody owns
  * means one died without tearing anything down. Anything else is somebody
  * publishing right now and must be refused - see the note at the top.
  *
@@ -146,9 +147,13 @@ static int chan_names(const char *base, char *d, char *c, char *w, size_t cap)
  * mistake in that direction costs a refused start with a clear reason; the
  * other direction silently steals a running sensor's channel.
  */
+/* How long a channel with no magic may be taken for one that is being made. */
+#define KOF_CHAN_GRACE_S 5
+
 static int stale_channel(const char *nd)
 {
 	struct kof_chan_hdr h;
+	struct stat sb;
 	int fd = shm_open(nd, O_RDONLY, 0);
 	void *m;
 	int stale;
@@ -163,14 +168,21 @@ static int stale_channel(const char *nd)
 	}
 	memcpy(&h, m, sizeof h);
 	munmap(m, sizeof h);
+	if (fstat(fd, &sb) != 0)
+		sb.st_mtime = 0;
 	close(fd);
 
-	/* KNOWN DEFECT WP12-12 (2026-10-24, R) [sev L]: stale_channel counts magic 0 (a
-	 * header not yet initialised) as stale. Trigger: a second sensor starts
-	 * inside the first one's initialisation window. Effect: it deletes the
-	 * first one's names. Reproducer: none (unit row shows magic 0 replaced;
-	 * the race is read). Fix: treat magic 0 as stale only when pid is 0 and
-	 * the file is older than a grace period. */
+	/* Magic 0 is also what a publisher still initialising looks like (the
+	 * magic is written LAST): a second sensor that starts inside that window
+	 * must not delete the first one's names. A segment made in the last
+	 * KOF_CHAN_GRACE_S seconds is taken for live; an older one with no magic
+	 * is wreckage. A magic that is not zero is some other file: stale. */
+	if (h.magic == 0u && sb.st_mtime != 0) {
+		time_t now = time(NULL);
+
+		if (now >= sb.st_mtime && now - sb.st_mtime < KOF_CHAN_GRACE_S)
+			return 0;
+	}
 	if (h.magic != KOF_CHAN_MAGIC)
 		return 1;
 	if (h.pid == 0u)
@@ -764,9 +776,18 @@ const struct kof_chan_hdr *kof_chan_sub_header(const struct kof_chan_sub *s)
 	return s ? s->hdr : NULL;
 }
 
+static uint64_t mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
 int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out, uint32_t wait_ms)
 {
 	uint32_t left = wait_ms;
+	const uint64_t start = mono_ms();
 
 	if (!s || !out)
 		return 0;
@@ -832,12 +853,15 @@ int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out, uint32_t wait_ms)
 				ts.tv_nsec = (long)(slice % 1000u) * 1000000L;
 				(void)nanosleep(&ts, NULL);
 			}
-			/* KNOWN DEFECT WP12-13 (2026-10-24, M) [sev M]: kof_chan_next
-			 * charges a full slice for a wait that returned at once
-			 * (the wake semaphore is never drained). Trigger: a wait
-			 * after a plain read. Effect: a 120 ms wait takes 0 ms.
-			 * Reproducer: orbit_chan.c case_ring. Fix: drain it. */
-			left -= slice;
+			/* What is left is what the CLOCK says, not what the
+			 * slice promised: the wake semaphore keeps the count
+			 * of every publish a reader that never waited did not
+			 * take back, so a timed wait can return at once. */
+			{
+				uint64_t used = mono_ms() - start;
+
+				left = used >= wait_ms ? 0u : (uint32_t)(wait_ms - used);
+			}
 		}
 	}
 }

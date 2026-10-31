@@ -1031,7 +1031,7 @@ static int c_options(void)
 			o.max_resident_bytes = u64s[b];
 			o.max_produced_bytes = u64s[(b + 1u) % 6u];
 			o.max_object_bytes = u64s[(b + 2u) % 6u];
-			o.report_diag = (int)u32s[a];
+			o.reader = (int)u32s[a];
 			o.recurse_dirs = (int)u32s[b % 7u];
 			memset(&t, 0, sizeof t);
 			rc = kscan_bytes(v.sc, z.p, z.n, "opts.zip", &o, he_on_object, &t);

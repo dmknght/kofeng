@@ -1,0 +1,51 @@
+# golden run1_dash_sections: 170x50
+ 1|  File  Edit  Analysis  Manage  Help
+ 2|*╭─ Overview ─ Segments ─ Sections ─ Imports ─ Exports ──────────────────────────────────────────────────────────────────────────────────────────────────── [ Close ]─╮  ╿
+ 3| │   #  name                                                                               type            flags addr   offset size  link info entsize align entropy  │  │
+ 4| │   0                                                                                     SHT_NULL        -     0x0    0x0    0     0    0    0       0     -        │  │
+ 5| │   1  .interp                                                                            SHT_PROGBITS    A     0x2a8  0x2a8  28    0    0    0       1     3.94     │  │
+ 6| │   2  .note.gnu.build-id                                                                 SHT_NOTE        A     0x2c4  0x2c4  36    0    0    0       4     4.08     │  │
+ 7| │   3  .note.ABI-tag                                                                      SHT_NOTE        A     0x2e8  0x2e8  32    0    0    0       4     1.56     │  │
+ 8| │   4  .gnu.hash                                                                          SHT_GNU_HASH    A     0x308  0x308  36    5    0    0       8     1.72     │  │
+ 9| │   5  .dynsym                                                                            SHT_DYNSYM      A     0x330  0x330  1464  6    1    24      8     0.86     │  │
+10| │   6  .dynstr                                                                            SHT_STRTAB      A     0x8e8  0x8e8  540   0    0    0       1     4.53     │  │
+11| │   7  .gnu.version                                                                       SHT_GNU_VERSYM  A     0xb04  0xb04  122   5    0    2       2     1.12     │  │
+12| │   8  .gnu.version_r                                                                     SHT_GNU_VERNEED A     0xb80  0xb80  64    6    1    0       8     2.73     │  │
+13| │   9  .rela.dyn                                                                          SHT_RELA        A     0xbc0  0xbc0  4512  5    0    24      8     1.85     │  │
+14| │   10 .rela.plt                                                                          SHT_RELA        AI    0x1d60 0x1d60 1320  5    23   24      8     1.44     │  │
+15| │   11 .init                                                                              SHT_PROGBITS    AX    0x3000 0x3000 23    0    0    0       4     3.91     │  │
+16| │   12 .plt                                                                               SHT_PROGBITS    AX    0x3020 0x3020 896   0    0    16      16    3.94     │  │
+17| │   13 .plt.got                                                                           SHT_PROGBITS    AX    0x33a0 0x33a0 8     0    0    8       8     2.75     │  │
+18| │   14 .text                                                                              SHT_PROGBITS    AX    0x33b0 0x33b0 29185 0    0    0       16    5.96     │  │
+19| │   15 .fini                                                                              SHT_PROGBITS    AX    0xa5b4 0xa5b4 9     0    0    0       4     2.50     │  │
+20| │   16 .rodata                                                                            SHT_PROGBITS    A     0xb000 0xb000 4657  0    0    0       8     5.82     │  │
+21| │   17 .eh_frame_hdr                                                                      SHT_PROGBITS    A     0xc234 0xc234 484   0    0    0       4     4.69     │  │
+22| │   18 .eh_frame                                                                          SHT_PROGBITS    A     0xc418 0xc418 2040  0    0    0       8     4.72     │  │
+23| │   19 .init_array                                                                        SHT_INIT_ARRAY  WA    0xdde8 0xcde8 8     0    0    8       8     1.06     │  │
+24| │   20 .fini_array                                                                        SHT_FINI_ARRAY  WA    0xddf0 0xcdf0 8     0    0    8       8     1.06     │  │
+25| │   21 .dynamic                                                                           SHT_DYNAMIC     WA    0xddf8 0xcdf8 480   6    0    16      8     1.49     │  │
+26| │   22 .got                                                                               SHT_PROGBITS    WA    0xdfd8 0xcfd8 40    0    0    8       8     0.00     │  │
+27| │   23 .got.plt                                                                           SHT_PROGBITS    WA    0xe000 0xd000 464   0    0    8       8     1.78     │  │
+28| │   24 .data                                                                              SHT_PROGBITS    WA    0xe1e0 0xd1e0 1624  0    0    0       32    2.05     │  │
+29| │   25 .bss                                                                               SHT_NOBITS      WA    0xe840 0xd838 16504 0    0    0       32    -        │  │
+30| │   26 .comment                                                                           SHT_PROGBITS    MS    0x0    0xd838 39    0    0    1       1     3.82     │  │
+31| │   27 .symtab                                                                            SHT_SYMTAB      -     0x0    0xd860 4728  28   57   24      8     2.12     │  │
+32| │   28 .strtab                                                                            SHT_STRTAB      -     0x0    0xead8 2301  0    0    0       1     4.97     │  │
+33| │   29 .shstrtab                                                                          SHT_STRTAB      -     0x0    0xf3d5 263   0    0    0       1     4.27     │  │
+34| │                                                                                                                                                                    │  │
+35| │                                                                                                                                                                    │  │
+36| │                                                                                                                                                                    │  │
+37|-│                                                                                                                                                                    │---
+38| │                                                                                                                                                                    │ ]
+39| │                                                                                                                                                                    │
+40| │                                                                                                                                                                    │
+41| │                                                                                                                                                                    │
+42| │                                                                                                                                                                    │
+43| │                                                                                                                                                                    │
+44| │                                                                                                                                                                    │
+45| │                                                                                                                                                                    │
+46| │                                                                                                                                                                    │
+47| │                                                                                                                                                                    │
+48| ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1-30 of 30 items ╯
+49|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50|ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose
