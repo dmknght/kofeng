@@ -28,8 +28,8 @@
 #define EXPECT_ERR_MEAN 1.1
 #define EXPECT_ERR_MAX 20.0
 
-/* The element of a sketch for (label, k-th occurrence), spelled out: the high word of the mix that starts at the domain seed (cfg.h). */
-#define KEYOF(l, k) ((uint32_t)(rmix(rmix(KGENOME_CFG_KEY_SEED, (l)), (k)) >> 32))
+/* The element of a sketch for (label, k-th occurrence), spelled out: the high word of the mix that starts at the domain seed (cfg.h), the run avalanched first (rkey in cfg_kit.h). */
+#define KEYOF(l, k) rkey((l), (k))
 /* ... and the element the sketch had before the domain separation: no key of today may be one of these by construction. */
 #define KEY_UNSEEDED(l, k) ((uint32_t)(rmix((l), (k)) >> 32))
 

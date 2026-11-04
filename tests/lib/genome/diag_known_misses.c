@@ -232,7 +232,7 @@ static void f5(void)
 	img[0x100] = 0xe8; ds_p32(img, 0x101, 0); img[0x105] = 0xc3;
 	CK(parse_elf(0x300));
 	memset(&m, 0, sizeof m);
-	CK(kgenome_codemap_build(&obj, img, 0x300, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, img, 0x300, NULL, NULL, &m) == 1);
 	CK(m.n == 4);                                      /* both extents were read: four refs */
 	for (i = 0; i < m.n; i++)
 		found += kgenome_codemap_at(&m, m.v[i].at) == &m.v[i];
@@ -254,7 +254,7 @@ static void f5(void)
 		img[0x100] = 0xe8; ds_p32(img, 0x101, 0); img[0x105] = 0xc3;
 		CK(parse_elf(0x300));
 		memset(&m, 0, sizeof m);
-		CK(kgenome_codemap_build(&obj, img, 0x300, NULL, &m) == 1);
+		CK(kgenome_codemap_build(&obj, img, 0x300, NULL, NULL, &m) == 1);
 		found = 0;
 		for (i = 0; i < m.n; i++)
 			found += kgenome_codemap_at(&m, m.v[i].at) == &m.v[i];

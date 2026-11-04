@@ -9,7 +9,6 @@
  *   dash_header      the format block of the overview, as meaning: format, abi, linking, entry, size, layout, declared counts
  *   dash_regions     the engine's division of the object, the share of each, and the partition check
  *   dash_anomalies   what the parser thought was wrong
- *   dash_detection   the engine's detection facts (kdet_*): verdict, family/variant/tag, basis, each diagnose and why it matched
  *   dash_layout      the segment and section tables (columns, rows, what was declared)
  *   dash_syms        the import or export rows after the filter, and why there are none when there are none
  *   dash_infect_*    the Infection dialog's first page: where a binary is commonly infected, the engine's ranges flagged
@@ -58,8 +57,6 @@ int dash_has_header(const struct object *ob);
 void dash_header(const struct object *ob, struct dash_block *b);
 void dash_regions(const struct view *v, const struct object *ob, struct dash_block *b);
 void dash_anomalies(const struct object *ob, struct dash_block *b);
-/* The engine's detection facts for the object (kdet_*); `why` is the run of kscan_explain for its root, or NULL. */
-void dash_detection(const struct view *v, const struct object *ob, const struct kdet_object *why, struct dash_block *b);
 
 /* ---- the layout tables ---------------------------------------------------------------------------------- */
 

@@ -64,16 +64,20 @@ enum kof_famcat_status {
 	KOF_FAMCAT_ID_CLASH         /* the name makes the id of another family or variant (catstore.h): kof_famcat_why names both */
 };
 
-/* The longest comment of a variant (a comment belongs to a VARIANT only; a family has none). A bound on what a person types into a dialog row (the table column scrolls
- * sideways), chosen to keep one catalog line readable; the character rule is the engine's kof_comment_char, not a copy. */
+/* The longest comment of a family or of a variant: ONE constant for both (a family's own comment and a variant's are two separate
+ * values, kof_famcat_family_comment / kof_famcat_comment, but the same bound and the same rule). A bound on what a person types into
+ * a dialog row (the table column scrolls sideways), chosen to keep one catalog line readable; the character rule is the engine's
+ * kof_comment_char, not a copy. */
 #define KOF_FAMCAT_COMMENT_MAX KOF_CATSTORE_COMMENT_MAX   /* 120; the one constant of both catalogs (catstore.h) */
 
-/* A family carries a COUNTER of the next variant letter (1 = "A"; it starts at 1 and NEVER goes down: deleting a variant does not
- * lower it, so by default a variant name is never used twice). A variant carries its own letter number. What Save will have to
- * write later, per family, is this counter and the letter of every variant (the names follow from the family name and the
- * letters); nothing is written now. */
+/* A family carries its own comment ("" = none; kof_famcat_family_comment, kof_famcat_set_family_comment - a dialog's Note row,
+ * never a variant's comment, see KOF_FAMCAT_COMMENT_MAX above) and a COUNTER of the next variant letter (1 = "A"; it starts at 1
+ * and NEVER goes down: deleting a variant does not lower it, so by default a variant name is never used twice). A variant carries
+ * its own letter number. What Save writes, per family, is the name, the comment, this counter and the letter of every variant (the
+ * names follow from the family name and the letters). */
 struct kof_famcat_fam {
 	char     name[KOF_FAMCAT_NAME_MAX + 1];
+	char     comment[KOF_FAMCAT_COMMENT_MAX + 1];
 	uint32_t next;              /* the letter number the next variant takes unless it is given a deleted one */
 };
 
@@ -138,8 +142,8 @@ uint32_t kof_famcat_type_mask_all(void);
  * The one check add_family, add_variant and set_comment use. */
 enum kof_famcat_status kof_famcat_comment_check(const char *comment);
 
-/* Add a family and its first variant "<name>_A" carrying `types` and `comment` (NULL = none; the first variant's comment, a family
- * has none). On OK *fam is the family's index. Nothing is added on a failure. */
+/* Add a family and its first variant "<name>_A" carrying `types` and `comment` (NULL = none; the FIRST VARIANT'S comment, kept
+ * apart from the family's own, kof_famcat_set_family_comment). On OK *fam is the family's index. Nothing is added on a failure. */
 enum kof_famcat_status kof_famcat_add_family(struct kof_famcat *c, const char *name, const char *comment, uint32_t types,
 					     uint32_t *fam);
 /* The name a new variant of family `fam` would get, into out[cap] (KOF_FAMCAT_NAME_MAX + 1 is always enough). `letter` 0 is the
@@ -169,6 +173,9 @@ enum kof_famcat_status kof_famcat_set_variant(struct kof_famcat *c, uint32_t var
 /* Rename family `fam`: the family rules of add_family (name rule, the 63-character rule with the longest variant suffix, no other
  * family of that name ignoring letter case). Every variant of it is renamed with it: "<family>_<letters>", the letters stay. */
 enum kof_famcat_status kof_famcat_rename_family(struct kof_famcat *c, uint32_t fam, const char *name);
+/* Rename family `fam` AND replace its own comment together, or neither (the Edit family dialog's OK): the rules of rename_family
+ * and of the comment (kof_famcat_comment_check), same shape as kof_famcat_set_variant. */
+enum kof_famcat_status kof_famcat_set_family(struct kof_famcat *c, uint32_t fam, const char *name, const char *comment);
 /* Remove a variant, or a family with all its variants; the others keep their order and indices shift down. A freed letter is
  * the family's counter is NOT lowered (a deleted name is not used again unless add_variant is given that letter). A family left with no variant stays. */
 enum kof_famcat_status kof_famcat_delete_variant(struct kof_famcat *c, uint32_t var);
@@ -179,14 +186,21 @@ enum kof_famcat_status kof_famcat_set_comment(struct kof_famcat *c, uint32_t var
 /* The comment of variant `var` ("" when there is none or the index is not the catalog's). */
 const char *kof_famcat_comment(const struct kof_famcat *c, uint32_t var);
 
+/* The family's OWN comment (never a variant's): "" when there is none or `fam` is not the catalog's. */
+const char *kof_famcat_family_comment(const struct kof_famcat *c, uint32_t fam);
+/* Replace the family's own comment; the name, the counter and every variant are never touched. The comment rule
+ * (kof_famcat_comment_check); NO_FAMILY for an index the catalog does not have. */
+enum kof_famcat_status kof_famcat_set_family_comment(struct kof_famcat *c, uint32_t fam, const char *comment);
+
 /* Display order: families in creation order, each followed by its variants in creation order. Writes at most `cap`
  * items and returns how many the catalog has (so a short buffer is seen, not silent). */
 uint32_t kof_famcat_list(const struct kof_famcat *c, struct kof_famcat_item *out, uint32_t cap);
 
 /* ---- restoring a saved catalog: the three steps a loader takes, each with the checks of the dialog's own call --------------- */
 
-/* A family with no variant and the counter at 1 (add_family always makes its first variant). The name rules of add_family. */
-enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *name, uint32_t *fam);
+/* A family with no variant and the counter at 1 (add_family always makes its first variant). The name rules of add_family;
+ * `comment` (NULL = none) is the FAMILY'S OWN (kof_famcat_comment_check), the same shape as load_variant's. */
+enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *name, const char *comment, uint32_t *fam);
 /* Raise the counter of family `fam` to `next` (it never goes down: a lower number is accepted and changes nothing); the name rule
  * of rename_family on the longest suffix. */
 enum kof_famcat_status kof_famcat_load_next(struct kof_famcat *c, uint32_t fam, uint32_t next);
@@ -240,14 +254,19 @@ int kof_famcat_dirty(const struct kof_famcat *c, const struct kof_famcat *snap);
  * compiled, read line by line:
  *     // Generated by Manage > Pathogens; edit by hand with care.
  *     KOF_MALWARE_FAMILY_NAME("Mirai");
+ *     // comment of the family (the family has at most one; none = no line)
  *     KOF_MALWARE_NEXT_VARIANT("C");
  *     // comment of the variant (a variant has at most one; none = no line)
  *     KOF_MALWARE_VARIANT("A", KOF_MALTYPE_ROOTKIT, KOF_MALTYPE_BOTNET);
  * `KOF_MALWARE_NEXT_VARIANT` is the family's counter (the letters suffix of the next variant, "C" = 3); the variant lines carry the
- * letters suffix only and the engine's KOF_MALTYPE_* names, in engine order; variants are written in letter order. NO ID IS WRITTEN:
- * an id is made from the names (catstore.h). A file saved by an older tool has KOF_MALWARE_FAMILY_ID / KOF_MALWARE_VARIANT_ID lines;
- * they are read as lines not understood (counted as ignored, never an error) and the next Save writes the file without them. A reader takes the lines it knows and counts the others (blank lines and comments that belong
- * to no variant excepted); Save writes only what the model holds, so a line it did not understand is not written back. */
+ * letters suffix only and the engine's KOF_MALTYPE_* names, in engine order; variants are written in letter order. THE FAMILY'S OWN
+ * COMMENT is the `//` line directly above `KOF_MALWARE_NEXT_VARIANT` (never above `KOF_MALWARE_FAMILY_NAME`: that position already
+ * holds the fixed header line above, so a comment there is read as the header's and dropped, same as a file saved before this
+ * comment existed has no line there and loads with an empty family comment - not an error). NO ID IS WRITTEN: an id is made from the
+ * names (catstore.h). A file saved by an older tool has KOF_MALWARE_FAMILY_ID / KOF_MALWARE_VARIANT_ID lines; they are read as lines
+ * not understood (counted as ignored, never an error) and the next Save writes the file without them. A reader takes the lines it
+ * knows and counts the others (blank lines and comments that belong to no variant and no family excepted); Save writes only what the
+ * model holds, so a line it did not understand is not written back. */
 
 /* The directory and its numbers are catstore.h's. */
 void kof_famcat_store_init(struct kof_catstore *s);

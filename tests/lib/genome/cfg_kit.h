@@ -426,6 +426,19 @@ static CK_UNUSED uint64_t rmix(uint64_t h, uint64_t v)
 	h *= 0xff51afd7ed558ccdull;
 	return h ^ (h >> 33);
 }
+/* The element of a sketch for (label, k-th occurrence), spelled out in the test (S1, 2026-11-03): the run is avalanched BEFORE it is mixed in, so the keys of the
+ * occurrences of one label are independent (tests/lib/genome/cfg_estimator.c measures that; mixed in as a small integer they were a near-arithmetic progression). */
+static CK_UNUSED uint64_t rav(uint64_t x)
+{
+	x += 0x9e3779b97f4a7c15ull;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+	return x ^ (x >> 31);
+}
+static CK_UNUSED uint32_t rkey(uint64_t lab, uint64_t run)
+{
+	return (uint32_t)(rmix(rmix(KGENOME_CFG_KEY_SEED, lab), rav(run)) >> 32);
+}
 static CK_UNUSED int rcmp64(const void *a, const void *b)
 {
 	const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
@@ -497,7 +510,7 @@ static CK_UNUSED void ref_sign(const struct refg *g, unsigned rounds, struct ref
 	s->el = malloc((size_t)(nr ? nr : 1u) * sizeof *s->el);
 	for (i = 0; i < nr; i++) {
 		run = i && lab[i] == lab[i - 1u] ? run + 1u : 0u;
-		s->el[i] = (uint32_t)(rmix(rmix(KGENOME_CFG_KEY_SEED, lab[i]), run) >> 32);   /* the domain-separated element (cfg.h) */
+		s->el[i] = rkey(lab[i], run);   /* the domain-separated element (cfg.h) */
 	}
 	qsort(s->el, nr, sizeof *s->el, rcmp32);
 	s->n_el = nr;

@@ -27,7 +27,6 @@ struct kgenome_cfg_isa {
 	uint8_t predicated;             /* a ret / indirect jump carries a condition in `cond` (ARM) */
 	uint8_t always_cond;            /* value of `cond` that means "always" for a predicated instruction */
 	uint8_t jcc_always_lo, jcc_always_hi;   /* values of `cond` that make a JCC unconditional (0xff: none) */
-	uint8_t read_word;              /* the decoder gives no branch registers: read the word (MIPS, CS-4) */
 	uint8_t int_syscall;            /* `int N` with N = this is a syscall (x86: 0x80); 0 none */
 };
 
@@ -40,8 +39,12 @@ static inline int kgenome_cfg_op_is_flow(unsigned op)
 	       op == KGENOME_CELL_RET || op == KGENOME_CELL_IRET || op == KGENOME_CELL_UD;
 }
 
-/* The class of one instruction. `bytes`/`n` are the object bytes `in->at` indexes (may be NULL unless read_word);
- * `*degraded` is set when the table needed the bytes and did not have them. */
+/*
+ * The class of one instruction. `be`/`bytes`/`n`/`degraded` are unused since CS-4 (fixed, 2026-11-05: MIPS was
+ * the only row that ever read the object bytes, and now reads the decoded `cond`/operands instead) - kept in the
+ * signature so it need not change again for every caller and test the day another architecture's decoder leaves
+ * something out that only the bytes can supply.
+ */
 enum kgenome_cfg_x kgenome_cfg_isa_class(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, int be,
 					 const uint8_t *bytes, uint64_t n, int *degraded);
 
@@ -56,9 +59,7 @@ static inline int kgenome_cfg_isa_is_syscall(const struct kgenome_cfg_isa *isa, 
 
 /* ---- memory and the budget (cfg_build.c) ---- */
 
-/* One allocation through the caller's allocator (NULL callbacks: malloc / free). NULL when refused. */
-void *kgenome_cfg_alloc(const struct kgenome_cfg_mem *mem, size_t n);
-void kgenome_cfg_release(const struct kgenome_cfg_mem *mem, void *p, size_t n);
+/* (kgenome_cfg_alloc / kgenome_cfg_release, the one allocation through the caller's allocator, are in cfg.h: the frame and the signing use them too.) */
 /* Would holding `bytes` exceed the call's allowance (budget->max_bytes; none or 0: no allowance)? */
 int kgenome_cfg_over(const struct kgenome_budget *bud, uint64_t bytes);
 
@@ -71,10 +72,29 @@ static inline uint64_t kgenome_cfg_mix(uint64_t h, uint64_t v)
 	return h ^ (h >> 33);
 }
 
-/* The element of a sketch for label `lab`, its `run`-th occurrence: the high 32 bits of a mix that starts at KGENOME_CFG_KEY_SEED (domain separation, cfg.h). */
+/* Full avalanche of one word (the splitmix64 finalizer): every input bit changes every output bit with probability 1/2. */
+static inline uint64_t kgenome_cfg_avalanche(uint64_t x)
+{
+	x += 0x9e3779b97f4a7c15ull;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+	return x ^ (x >> 31);
+}
+
+/*
+ * The element of a sketch for label `lab`, its `run`-th occurrence: the high 32 bits of a mix that starts at KGENOME_CFG_KEY_SEED (domain separation, cfg.h).
+ *
+ * THE RUN IS AVALANCHED BEFORE IT IS MIXED IN (defect S1, 2026-11-03). The bottom-k estimate (kgenome_cfg_overlap) is unbiased with variance J(1-J)/32 only
+ * when the elements' keys are independent. With `run` mixed in as the small integer it is, the keys of one label were a near-arithmetic progression (correlation
+ * of the keys of runs 0 and 1: 0.93) and a label that repeats n times put about 16 of its elements, not 6 (n = 183), below all the others: cmake 0x3c5510 (77
+ * blocks) against doxygen 0x23f4a0 (183 blocks) gave pct 100 for an exact J of 0.42, mean |error| 0.183 and worst 0.635 against 0.059 for independent keys
+ * (survey, agent-reported). Proved by tests/lib/genome/cfg_estimator.c: records, serial correlation, avalanche, estimate against the exact multiset Jaccard.
+ * Not done: avalanching the label too. The labels are WL hashes or a mix of the caller's identity, and the test with consecutive small identities passes.
+ * Every element changes, so a pack that holds CFG keys made by the old function does not match.
+ */
 static inline uint32_t kgenome_cfg_key(uint64_t lab, uint32_t run)
 {
-	return (uint32_t)(kgenome_cfg_mix(kgenome_cfg_mix(KGENOME_CFG_KEY_SEED, lab), run) >> 32);
+	return (uint32_t)(kgenome_cfg_mix(kgenome_cfg_mix(KGENOME_CFG_KEY_SEED, lab), kgenome_cfg_avalanche(run)) >> 32);
 }
 
 #endif /* KGENOME_CFG_PRIVATE_H */

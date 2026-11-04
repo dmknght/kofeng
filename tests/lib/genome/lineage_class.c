@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <kofcmp.h>
 #include "lineage_check.h"
+#include <phenotype/diag_lineage_private.h>
 
 static unsigned class_of_image(const struct lg_img *g, int target)
 {
@@ -160,6 +161,111 @@ static void t_noreturn_names(void)
 	CK(!kgenome_diag_name_is_noreturn(NULL));
 }
 
+/* A call recorded by the symbol route as an import that never returns ends the call's block, whatever the function table says: the answer comes from the
+ * site list alone (no function table, no frames). The site list is searched by file offset; a neighbouring offset is not the site. */
+static void t_site_noreturn(void)
+{
+	struct kgenome_diag_scan s;
+	struct kgenome_lineage L;
+	struct kgenome_cell_insn in;
+
+	memset(&s, 0, sizeof s);
+	memset(&L, 0, sizeof L);
+	memset(&in, 0, sizeof in);
+	kgenome_ledger_init(&s.led, 1u << 20);
+	L.s = &s;
+	in.op = KGENOME_CELL_CALL;
+	in.at = 0x40u;
+	in.target_va = KGENOME_BROKEN;
+	CK(!kgenome_lineage_call_noreturn(&L, &in));
+	CK(kgenome_diag_noret_add(&s, 0x40u));
+	CK(kgenome_lineage_call_noreturn(&L, &in));
+	in.at = 0x41u;
+	CK(!kgenome_lineage_call_noreturn(&L, &in));
+	in.at = 0x3fu;
+	CK(!kgenome_lineage_call_noreturn(&L, &in));
+	free(s.noret_at);
+}
+
+/*
+ * WHICH FUNCTIONS NEVER RETURN, decided from the bytes of each case (kgenome_lineage_noret, diag_lineage_summ.c): none of the reachable blocks ends in a `ret`, leaves the extent, or runs out of it
+ * into the next function's code. A function of `ud2` alone is a trap and does not return; a loop with no exit never leaves; one that is a call and ends there is a call that does not come back
+ * (the compiler ends a function that way when the callee does not return); `nop; nop` runs into whatever follows and returns; so does `mov eax,1`, a jump through a register (a thunk: control
+ * goes on elsewhere) and a `ret`. The earlier rule asked for a call or a system call in a reachable block: it called `ud2` alone and `jmp $` functions that return (RED), and a function that
+ * ran out after a `nop` and made a call earlier was one that never returns.
+ */
+static void t_noret_rule(void)
+{
+	static const struct { const char *name; const uint8_t b[12]; unsigned n; int noret; } row[] = {
+		{ "ud2", { 0x0f, 0x0b }, 2, 1 },
+		{ "jmp $", { 0xeb, 0xfe }, 2, 1 },
+		{ "call [rip+0]", { 0xff, 0x15, 0, 0, 0, 0 }, 6, 1 },
+		{ "xor eax,eax; syscall", { 0x31, 0xc0, 0x0f, 0x05 }, 4, 1 },
+		{ "call [rip+0]; nop", { 0xff, 0x15, 0, 0, 0, 0, 0x90 }, 7, 0 },
+		{ "nop; nop", { 0x90, 0x90 }, 2, 0 },
+		{ "mov eax,1", { 0xb8, 1, 0, 0, 0 }, 5, 0 },
+		{ "jmp rax", { 0xff, 0xe0 }, 2, 0 },
+		{ "ret", { 0xc3 }, 1, 0 },
+		{ "jz over ud2; ret", { 0x74, 0x02, 0x0f, 0x0b, 0xc3 }, 5, 0 },
+		{ "jz over ret; ud2", { 0x74, 0x01, 0xc3, 0x0f, 0x0b }, 5, 0 },
+	};
+	enum { N = sizeof row / sizeof row[0], NX = N + 2 };
+	uint8_t code[N * 16u];
+	struct kgenome_func v[NX];
+	struct kgenome_func_set fs;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj obj;
+	struct kgenome_lineage L;
+	unsigned i;
+
+	memset(code, 0xcc, sizeof code);
+	memset(&ei, 0, sizeof ei);
+	ei.elf_data = 1;
+	ei.e_type = KGENOME_ELF_REL;                         /* no address map: a function's address is its offset */
+	memset(&obj, 0, sizeof obj);
+	obj.format = KGENOME_FMT_ELF;
+	obj.arch = KGENOME_ARCH_X86_64;
+	obj.obj_size = sizeof code;
+	obj.file_header = &ei;
+	memset(v, 0, sizeof v);
+	for (i = 0; i < N; i++) {
+		memcpy(code + 16u * i, row[i].b, row[i].n);
+		v[i].off = 16u * i;
+		v[i].len = row[i].n;
+	}
+	v[N].off = 0;                                        /* an entry with no length, and one that starts past the object: nothing to read, so a function that returns */
+	v[N].len = 0;
+	v[N + 1u].off = sizeof code + 64u;
+	v[N + 1u].len = 8;
+	memset(&fs, 0, sizeof fs);
+	fs.v = v;
+	fs.n = NX;
+	memset(&L, 0, sizeof L);
+	L.obj = &obj;
+	L.base = code;
+	L.size = sizeof code;
+	L.fs = &fs;
+	L.n_fn = NX;
+	L.noret_fn = calloc(NX, 1);
+	L.fsrc.obj = &obj;
+	L.fsrc.base = code;
+	L.fsrc.size = sizeof code;
+	L.fsrc.fs = &fs;
+	L.fsrc.facts = 1;
+	CK(L.noret_fn != NULL);
+	for (i = 0; L.noret_fn && i < N; i++) {
+		const int got = kgenome_lineage_noret(&L, i);
+
+		if (got != row[i].noret)
+			printf("  %s: %s, wanted %s\n", row[i].name, got ? "never returns" : "returns", row[i].noret ? "never returns" : "returns");
+		CK(got == row[i].noret);
+		CK(kgenome_lineage_noret(&L, i) == row[i].noret);        /* the memo says the same */
+	}
+	for (i = N; L.noret_fn && i < NX; i++)
+		CK(!kgenome_lineage_noret(&L, i));
+	free(L.noret_fn);
+}
+
 /* WP9-F16: a reason bit past the word is no reason. `1u << bit` for bit >= 32 is undefined (x86 takes it mod 32, so bit 32 answered the stage of bit 0).
  * Old tests missed it: (b) the one caller stays below 19 and no test crossed the word. */
 static void t_next_stage_range(void)
@@ -245,6 +351,8 @@ int main(int argc, char **argv)
 	t_crafted();
 	t_plan();
 	t_noreturn_names();
+	t_site_noreturn();
+	t_noret_rule();
 	t_next_stage_range();
 	t_lower_bound();
 	t_first_ending_above();

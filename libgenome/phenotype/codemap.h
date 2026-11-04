@@ -21,6 +21,8 @@
 #include "../genotype/image/obj.h"
 #include "../kgenome_status.h"
 
+struct kgenome_diag_walk;
+
 struct kgenome_elf_relocs;
 
 enum kgenome_codemap_kind {
@@ -69,9 +71,10 @@ struct kgenome_codemap {
  * header is all code) - and fill `out`. `relocs`, when not NULL, is the object's CODE relocation table (kgenome_elf_reloc_table): a branch whose
  * displacement a relocation patches is flagged KGENOME_CMF_RELOC and given no target. Returns 1 when `out` holds an answer (possibly empty), 0 when
  * the architecture has no decoder or memory was refused; `out` is then empty and owns nothing. Free it with kgenome_codemap_free.
+ * `wk`, when not NULL, is the object's walk: an instruction it holds is read from its trace and not decoded again (kgenome_diag_code_run).
  */
 int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, uint64_t size,
-			  const struct kgenome_elf_relocs *relocs, struct kgenome_codemap *out);
+			  const struct kgenome_elf_relocs *relocs, struct kgenome_diag_walk *wk, struct kgenome_codemap *out);
 void kgenome_codemap_free(struct kgenome_codemap *m);
 
 /* The reference of the instruction at `at`, or NULL. */

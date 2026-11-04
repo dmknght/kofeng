@@ -9,6 +9,9 @@
 #include "../../libkofeng/analyzers/genome_obj.h"
 #include "../../kofexamine/kofview.h"
 #include "../../kofexamine/kv_graph.h"
+#include "../../kofexamine/kv_graph_rank.c"
+#include "../../kofexamine/kv_graph_route.c"
+#include "../../kofexamine/kv_graph_paint.c"
 #include "../../kofexamine/kv_graph.c"
 
 #define BASE_OFF 0x40u

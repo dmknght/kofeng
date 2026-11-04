@@ -185,7 +185,7 @@ static uint32_t kof_syms_declared(uint32_t format, const uint8_t *data, uint64_t
  * any section; a relocatable object's values are section-relative, so there the
  * section is part of the answer. Empty when no record matches.
  */
-void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value,
+void kof_sym_name_at(const uint8_t *blk, uint32_t n, const uint64_t *value,
 			int shndx, char *out, size_t cap)
 {
 	const uint8_t *r;
@@ -197,7 +197,7 @@ void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value,
 	for (k = 0; (r = kof_sym_rec(blk, n, k)); k++) {
 		uint32_t j;
 
-		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != value ||
+		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != *value ||
 		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
 					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
 			continue;
@@ -226,7 +226,7 @@ int kof_func_name(const struct kgenome_func *f, const uint8_t *blk, uint32_t n, 
 		return 0;
 	out[0] = 0;
 	if (f && blk)
-		kof_sym_name_at(blk, n, f->value, (int)f->shndx, out, cap);
+		kof_sym_name_at(blk, n, &f->value, (int)f->shndx, out, cap);
 	if (out[0])
 		return 1;
 	kof_fcn_name(f ? f->off : 0u, out, cap);

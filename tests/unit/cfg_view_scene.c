@@ -34,8 +34,29 @@
 #include <celllysis/disasm.h>
 
 #include "../../kofexamine/kofview.h"
+#include "../../kofexamine/kv_graph_rank.c"
+#include "../../kofexamine/kv_graph_route.c"
+#include "../../kofexamine/kv_graph_paint.c"
 #include "../../kofexamine/kv_graph.c"
 #include "../../kofexamine/kv_cfgbody.c"
+
+/* A row as text: the Overview rows carry the colours of kv_cfgbody_text_attr as the Graph rows carry theirs; the pins below read the words. */
+static void plain(char *row)
+{
+	char *w = row, *q;
+
+	for (q = row; *q; q++) {
+		if (*q == 0x1b) {
+			while (*q && *q != 'm')
+				q++;
+			if (!*q)
+				break;
+			continue;
+		}
+		*w++ = *q;
+	}
+	*w = 0;
+}
 
 static int fails;
 
@@ -604,6 +625,56 @@ out:
 	free(img);
 }
 
+/* THE COLOURS OF THE OVERVIEW, data first: the attribute of a label and of a value, read through kv_cfgbody_text_attr off the engine's plain lines. */
+static void overview_colours(void)
+{
+	static const struct { const char *row; const char *at_label, *at_value; size_t i_label, i_value; } T[] = {
+		{ "function cv_loop", A_DIM, A_ID, 0, 9 },
+		{ "unit   0123abcd", A_DIM, A_ID, 0, 7 },
+		{ "keys   0123abcd 4567ef01", A_DIM, A_ID, 0, 16 },
+		{ "       0123abcd 4567ef01", A_ID, A_ID, 7, 16 },
+		{ "extent  0x200 +256 bytes  x86-64 64-bit little-endian  instructions=207", A_DIM, A_LOC, 0, 8 },
+		{ "extent  0x200 +256 bytes  x86-64 64-bit little-endian  instructions=207", A_DIM, NULL, 62, 75 },
+		{ "CFG  reachable=13  edges=19", A_DIM, NULL, 0, 18 },
+		{ "CFG  reachable=13  edges=19  status=truncated", A_DIM, A_WARN, 30, 38 },
+		{ "unreachable blocks: 1", A_DIM, NULL, 0, 20 },
+		{ "  0x249 n_insn=183", A_LOC, NULL, 2, 17 },
+		{ "  0x249 n_insn=183", A_DIM, NULL, 8, 17 },
+		{ "  block  offset  kind  target  name", A_DIM, A_DIM, 2, 10 },
+		{ "  B4  0x2a  call  0x10  rand", A_LOC, A_ID, 6, 24 },
+		{ "  B4  0x2a  call indirect  -  rand", A_LOC, A_ID, 6, 32 },
+		{ "calls: 3", A_DIM, NULL, 0, 7 },
+	};
+	char row[256];
+	size_t i;
+
+	for (i = 0; i < sizeof T / sizeof T[0]; i++) {
+		const char *l = kv_cfgbody_text_attr(T[i].row, T[i].i_label), *v = kv_cfgbody_text_attr(T[i].row, T[i].i_value);
+
+		CKM(l == T[i].at_label && v == T[i].at_value, "colours of '%s': label %p want %p, value %p want %p", T[i].row, (const void *)l, (const void *)T[i].at_label, (const void *)v,
+		    (const void *)T[i].at_value);
+	}
+	CK(kv_cfgbody_text_attr("anything", 100) == NULL && kv_cfgbody_text_attr(NULL, 0) == NULL);
+	/* the row the dialog draws carries them: the label dim, the value coloured, closed again */
+	{
+		struct kv_cfg_body bd;
+
+		memset(&bd, 0, sizeof bd);
+		bd.tab = KV_CFG_TAB_OVERVIEW;
+		bd.n_ol = 1;
+		{
+			static char text[] = "unit   0123abcd";
+			static char *list[1] = { text };
+
+			bd.ol = list;
+		}
+		kv_cfgbody_row(&bd, 0, 0, 100, row, sizeof row);
+		CKM(!strcmp(row, " " A_DIM "unit" A_OFF "   " A_ID "0123abcd" A_OFF), "row '%s'", row);
+		kv_cfgbody_row(&bd, 0, 7, 100, row, sizeof row);
+		CKM(!strcmp(row, " " A_ID "0123abcd" A_OFF), "scrolled row '%s'", row);
+	}
+}
+
 static void self_test(void)
 {
 	uint8_t *img;
@@ -671,7 +742,7 @@ static void self_test(void)
 	/* cv_small: 4 blocks, hashed now, a call named by the symbol block, a syscall, an indirect call */
 	request(&rq, &o, f[0]->off, f[0]->len);
 	CK(kof_cfgview_build(&rq, &v) == 1);
-	CKM(v.view.n_blk == 4 && v.anchor_pass && v.view.n_key == 4 && strstr(v.text, ": PASS\n") != NULL && strstr(v.text, "is hashed") == NULL, "cv_small: %u blocks", v.view.n_blk);
+	CKM(v.view.n_blk == 4 && v.anchor_pass && v.view.n_key == 4 && strstr(v.text, "anchor") == NULL && strstr(v.text, "canon") == NULL && strstr(v.text, "status=") == NULL, "cv_small: %u blocks", v.view.n_blk);
 	CKM(v.n_call == 3, "cv_small: %u calls", v.n_call);
 	if (v.n_call == 3) {
 		CKM(v.call[0].kind == KGENOME_CFG_CK_DIRECT && !strcmp(v.call[0].name, "cv_loop") && v.call[0].target == f[1]->off, "call 0 -> '%s'", v.call[0].name);
@@ -692,9 +763,11 @@ static void self_test(void)
 		bd.tab = KV_CFG_TAB_OVERVIEW;
 		CKM(bd.n_head >= 3 && nr > bd.n_head + 4u, "overview: %u rows, head %u", nr, bd.n_head);
 		kv_cfgbody_row(&bd, 0, 0, 4000, row, sizeof row);
+		plain(row);
 		CKM(!strcmp(row, " function cv_small"), "overview row 0 '%s'", row);
 		for (r = 0; r < nr; r++) {
 			kv_cfgbody_row(&bd, r, 0, 4000, row, sizeof row);
+			plain(row);
 			hdr += strstr(row, "block") != NULL && strstr(row, "offset") && strstr(row, "kind") && strstr(row, "target") && strstr(row, "name");
 			CK(strstr(row, "nucleo") == NULL && strstr(row, "activit") == NULL);      /* no column for what the engine does not expose on a call */
 		}
@@ -732,6 +805,7 @@ static void self_test(void)
 		CKM(nr == bd.g.height + bd.n_xl && nr > 4u, "graph: %u rows, drawing %u", nr, bd.g.height);
 		for (r = 0; r < nr; r++) {
 			kv_cfgbody_row(&bd, r, 0, 4000, row, sizeof row);
+			plain(row);
 			CK(strstr(row, "extent  0x") == NULL && strstr(row, "canon  0x") == NULL && strstr(row, "kind") == NULL);
 		}
 		kv_cfgbody_free(&bd);
@@ -740,7 +814,8 @@ static void self_test(void)
 	/* cv_loop: passes the anchor and has loop links (back edges into a node that dominates its source) */
 	request(&rq, &o, f[1]->off, f[1]->len);
 	CK(kof_cfgview_build(&rq, &v) == 1);
-	CKM(v.view.n_blk >= 12 && v.anchor_pass && strstr(v.text, ": PASS\n") != NULL && strstr(v.text, "is hashed") == NULL, "cv_loop: %u blocks", v.view.n_blk);
+	CKM(v.view.n_blk >= 12 && v.anchor_pass && strstr(v.text, "anchor") == NULL && strstr(v.text, "unit   ") != NULL && strstr(v.text, "all=") == NULL && strstr(v.text, "unreachable=") == NULL, "cv_loop: %u blocks", v.view.n_blk);
+	CKM(v.n_call == 0 && strstr(v.text, "  calls=0") != NULL, "cv_loop: no calls say so on the extent line");
 	{
 		uint32_t k, links = 0, heads = 0;
 
@@ -924,6 +999,7 @@ int main(int argc, char **argv)
 	if (argc == 4 && !strcmp(argv[3], "--insn"))
 		return dump(argv[1], argv[2], 4);
 	self_test();
+	overview_colours();
 	one_name();
 	if (fails) {
 		printf("cfg_view_scene: %d failure(s)\n", fails);

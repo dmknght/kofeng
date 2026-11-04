@@ -303,10 +303,6 @@ void prop_build(struct view *v)
 	{
 		static struct dash_block blk;
 
-		/* The engine's detection facts come first: they are what a person opened the file to learn. The pull (why each diagnose matched)
-		 * is asked only for an object that has a verdict. */
-		dash_detection(v, ob, ob->heur.has_verdict ? view_explain(v, ob) : NULL, &blk);
-		prop_block(&blk);
 		dash_header(ob, &blk);
 		prop_block(&blk);
 		dash_regions(v, ob, &blk);

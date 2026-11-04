@@ -118,6 +118,9 @@ struct kof_scan_obj_diag {
 	 * functions are cut from and the wrapper resolution's sites and trace.
 	 * Filled by the first reader - see oc_walk. Per object. */
 	struct kgenome_diag_walk *walk;
+	/* THE FRAMES OF THE OBJECT'S FUNCTIONS (libgenome/phenotype/frame.h): the graph and the facts of each function's decoded code, made on the first ask by whoever
+	 * asks (the signing of a function, the lineage) and read by both; charged to the scanner's ledger, freed with the object. NULL until asked (oc_frames). */
+	struct kgenome_frame_cache *frames;
 	/*
 	 * WHAT THE CODE DOES WITH EACH DATA ADDRESS, swept once for the same
 	 * reason the symbol block is built once: the sweep costs a decode per

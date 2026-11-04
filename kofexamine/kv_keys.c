@@ -754,7 +754,7 @@ int handle_chooser_key(struct view *v, int k)
 			}
 			return r2;
 		}
-		if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
+		if (v->edit >= ED_STR && v->edit - ED_STR < (int)v->ed.dr.n_decl) {
 			uint32_t si = (uint32_t)(v->edit - ED_STR);
 			/* The cap is the declaration's, not the scratch's: see
 			 * DECL_HEXS_CAP. They are the same size today, and

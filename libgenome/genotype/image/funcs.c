@@ -1,6 +1,6 @@
 /*
  * funcs.c - the function extents of an object: the dispatch (kgenome_funcs_build),
- * the common finish, the remap into a view, and the two builders.
+ * the remap into a view, and the exact symbol-table strategy of the function table (fntab.h; .pdata is fntab_pe_pdata.c).
  *
  * Moved here from sym_any.c (dispatch, finish, free, remap), elf_sym.c
  * (kgenome_elf_funcs_build, kgenome_elf_funcs_from_entries) and pe_sym.c
@@ -20,9 +20,8 @@
 #include "endian.h"
 #include "elf_image.h"
 #include "pe_image.h"
+#include "fntab_private.h"
 
-static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
-			 struct kgenome_func_set *out);
 
 
 /*
@@ -30,56 +29,27 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
  * functions through exports and the exception directory, and which of those is
  * the source is not settled - an empty set is what it answers until then.
  */
-/* CONSOLIDATION FUNC-1 (2026-10-30, M): KEEP (will be the single primitive for table/symbol evidence of function extents; 1 caller,
- * kgenome_diag_funcs_with_walk). Gaps it must close, measured on 96 static ELF: symtab-only, so .eh_frame FDEs (88.7% of x86-64 symtab starts, FDE range
- * == symtab size in 99.9% of matches), .ARM.exidx (29/40 ARM files have it) and .dynsym are unused. Prove with: evmix.c harness (fix_consol/h): FDE vs
- * symtab per arch; stripped .so: dynsym starts 1197, entry walk finds 15 (1.3%), FDE finds all. */
+/* THE SYMBOL STRATEGIES ALONE (kgenome_fntab_symtab, kgenome_fntab_pdata), merged as every table is: the exact sources, which need no decode. The whole function table - the unwind data
+ * (.eh_frame), .dynsym and the entry walk as well, chosen by the selector - is kgenome_diag_funcs_with_walk (phenotype/fntab_build.c), the one routine every consumer asks. */
 void kgenome_funcs_build(uint32_t format, const uint8_t *data, uint64_t data_n,
 		     const void *info, struct kgenome_func_set *out)
 {
+	struct kgenome_fntab_list l;
+
 	memset(out, 0, sizeof *out);
+	memset(&l, 0, sizeof l);
 	if (!info)
 		return;
+	/* The SYMBOL strategies alone (the exact ones), merged as every table is. The whole table - the unwind data and the walk too - is
+	 * kgenome_diag_funcs_with_walk (phenotype/fntab_build.c), which needs the decode this layer does not have. */
 	if (format == KGENOME_FMT_ELF)
-		kgenome_elf_funcs_build(kof_buf_make(data, data_n), info, out);
+		kgenome_fntab_symtab(kof_buf_make(data, data_n), info, 0, &l);
 	else if (format == KGENOME_FMT_PE)
-		kgenome_pe_funcs_build(kof_buf_make(data, data_n), info, out);
-}
-
-static int func_cmp(const void *a, const void *b)
-{
-	const struct kgenome_func *x = a, *y = b;
-
-	if (x->off != y->off)
-		return x->off < y->off ? -1 : 1;
-	/* the longer extent first, so it is the one that stands */
-	return x->len < y->len ? 1 : x->len > y->len ? -1 : 0;
-}
-
-/*
- * The last step of every format's builder, once: sort by offset, keep one
- * function per address (the longer extent stands) and no label inside another
- * body. Takes the malloc'd array `v` of `n` entries into `out`; frees it when
- * nothing is left.
- */
-static void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgenome_func_set *out)
-{
-	uint32_t i, k = 0;
-
-	if (!n) {
-		free(v);
+		kgenome_fntab_pdata(kof_buf_make(data, data_n), info, &l);
+	else
 		return;
-	}
-	qsort(v, n, sizeof *v, func_cmp);
-	for (i = 0; i < n; i++) {
-		/* One function per address, and no label inside another body. */
-		if (k && v[i].off < v[k - 1u].off + v[k - 1u].len &&
-		    v[i].off + v[i].len <= v[k - 1u].off + v[k - 1u].len)
-			continue;
-		v[k++] = v[i];
-	}
-	out->v = v;
-	out->n = k;
+	kgenome_fntab_merge(&l, 0, out);
+	kgenome_fntab_list_free(&l);
 }
 
 void kgenome_funcs_free(struct kgenome_func_set *s)
@@ -88,6 +58,46 @@ void kgenome_funcs_free(struct kgenome_func_set *s)
 		return;
 	free(s->v);
 	memset(s, 0, sizeof *s);
+}
+
+/* The index of the function that holds `off`: the first entry whose END is above it (the table's ends rise with its starts: the merge removes a
+ * body that lies inside the body before it), when that entry starts at or below `off`. */
+uint32_t kgenome_funcs_at(const struct kgenome_func_set *fs, uint64_t off)
+{
+	uint32_t lo, hi;
+
+	if (!fs || !fs->n)
+		return KGENOME_FUNCS_NONE;
+	lo = 0;
+	hi = fs->n;
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->v[mid].off + fs->v[mid].len <= off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo < fs->n && fs->v[lo].off <= off ? lo : KGENOME_FUNCS_NONE;
+}
+
+uint32_t kgenome_funcs_start(const struct kgenome_func_set *fs, uint64_t off)
+{
+	uint32_t lo, hi;
+
+	if (!fs || !fs->n)
+		return KGENOME_FUNCS_NONE;
+	lo = 0;
+	hi = fs->n;
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->v[mid].off < off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo < fs->n && fs->v[lo].off == off ? lo : KGENOME_FUNCS_NONE;
 }
 
 /* How many bytes of `a` and `b` agree from the start, up to `len`: what one candidate costs. */
@@ -243,6 +253,9 @@ static void funcs_remap(const uint8_t *par, uint64_t par_n,
 	}
 	free(pat);
 	out->status = st;
+	out->ccase = pf->ccase;         /* the view's table is the parent's: it says what the parent's says */
+	out->state = pf->state;
+	out->partial = pf->partial;
 	if (!n) {
 		free(v);
 		return;
@@ -282,248 +295,138 @@ void kgenome_funcs_remap_endian(const uint8_t *par, uint64_t par_n,
  * measured on a static Mirai, 419 declared starts and every one outside the code
  * range - see the history of the sweep that reads these.)
  */
-/* CONSOLIDATION FUNC-2 (2026-10-30, M): KEEP (symtab STT_FUNC extents, the most exact evidence when present; MERGE-FROM ->
- * kgenome_elf_funcs_from_entries for stripped files). Not yet handled, see CN-2 (Thumb bit) and CN-3 (IFUNC, size-0 FUNC); .dynsym is never read here
- * (KGENOME_ELF_SYMTAB_FULL). Callers: kgenome_funcs_build only. Prove with: evmix.c: ARM odd start offsets 1078/15909, x86-64 IFUNC 365, size-0 FUNC
- * 106; tests/lib/genome/hostile_image.c for the hostile-table rows. */
-static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
-			 struct kgenome_func_set *out)
+/* THE SYMBOL-TABLE STRATEGY of the function table (fntab.h): the exact one, start and end from st_size. The loop is the one this file always had; what
+ * the table of cases added to it is IFUNC, NOTYPE-with-size and size-0 symbols (CN-3), the Thumb bit (CN-2), and the choice of .symtab or .dynsym. */
+#define EM_ARM_ 40u
+#define STT_NOTYPE_ 0u
+#define STT_FUNC_ 2u
+#define STT_GNU_IFUNC_ 10u
+
+static int offcmp(const void *a, const void *b)
+{
+	const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+void kgenome_fntab_symtab(kof_buf file, const struct kgenome_elf_info *e, int dyn, struct kgenome_fntab_list *out)
 {
 	struct kgenome_elf_symtab t;
-	struct kgenome_func *v = NULL;
-	uint32_t cap = 0, n = 0;
 	uint64_t si;
+	const uint32_t first = out->n;
+	uint32_t i, n_zero = 0;
+	const uint8_t src = dyn ? KGENOME_FN_S_DYNSYM : KGENOME_FN_S_SYMTAB;
 
-	memset(out, 0, sizeof *out);
 	if (!file.p || !e || !e->valid)
 		return;
-	if (!kgenome_elf_symtab_of(file, e, KGENOME_ELF_SYMTAB_FULL, &t))
+	if (!kgenome_elf_symtab_of(file, e, dyn ? KGENOME_ELF_SYMTAB_DYN : KGENOME_ELF_SYMTAB_FULL, &t))
 		return;
 	for (si = 1; si < t.n; si++) {
 		struct kgenome_elf_symbol sy;
 		const struct kgenome_elf_sec *sec;
-		uint64_t off;
-
+		struct kgenome_func f;
+		uint64_t off, value;
 		if (!kgenome_elf_symbol_at(file, &t, si, &sy))
 			break;
-		/* KNOWN DEFECT CN-3 (2026-10-30, M) [sev M]: kgenome_elf_funcs_build drops, without a report, symbols of an executable section that are
-		 * functions: STT_GNU_IFUNC (10), NOTYPE with a size, FUNC of size 0. Trigger: static glibc (IFUNC resolvers), assembly functions without .size.
-		 * Effect: the function is missing from the set (its bytes fall into the neighbour's extent): 365 IFUNC + 2 NOTYPE + 106 size-0 in 19 x86-64
-		 * files, 512 size-0 in 40 ARM files. Reproducer: evmix.c column `exec-section syms dropped`. Fix: accept type 10; give a size-0 symbol the
-		 * extent to the next symbol or section end and mark it so. */
-		if ((sy.info & 0xfu) != 2u || !sy.size)         /* sized STT_FUNC */
-			continue;
+		/* WHAT IS A FUNCTION HERE (CN-3, fixed): STT_FUNC, STT_GNU_IFUNC (a resolver: its body is code), and a NOTYPE symbol that declares a size
+		 * (an assembly label with .size). A FUNC or IFUNC that declares no size names a place and no body: it is listed with the flag SIZE0 and its
+		 * end is the next symbol or the end of its section (below), never an exact end. */
+		{
+			const unsigned ty = sy.info & 0xfu;
+			const int is_func = ty == STT_FUNC_ || ty == STT_GNU_IFUNC_ || (ty == STT_NOTYPE_ && sy.size);
+
+			if (!is_func)
+				continue;
+			memset(&f, 0, sizeof f);
+			f.kind = ty == STT_GNU_IFUNC_ ? KGENOME_FN_IFUNC : KGENOME_FN_FUNC;
+		}
 		if (!sy.shndx || sy.shndx >= e->sec_count ||
 		    sy.shndx >= KGENOME_ELF_MAX_SECTIONS)
 			continue;
 		sec = &e->sec[sy.shndx];
+		/* KNOWN DEFECT ELF-SEC-EXEC-CODE (2026-11-05, M) [sev M]: gates on the SECTION flag SHF_EXECINSTR
+		 * alone, never cross-checked against diag_code.c's own authoritative segment-level definition of
+		 * ELF code (PT_LOAD && PF_X). Trigger: a crafted ELF with a FUNC symbol in a SHF_EXECINSTR section
+		 * whose VA falls outside any executable PT_LOAD segment. Effect: bytes outside real code get
+		 * decoded, CFG-signed and mutation-hashed as a function - the same signature-poisoning class as
+		 * PE-RSRC-EXEC-CODE. Fix: cross-check sec's VA against the segment-level code definition here. */
 		if (!(sec->flags & KGENOME_ELF_SHF_EXEC))
 			continue;
+		value = sy.value;
+		/* THUMB (CN-2, fixed): an ARM function symbol has bit 0 set when it is Thumb code; the address is the even one and the mode is a field. */
+		if (e->e_machine == EM_ARM_ && (sy.info & 0xfu) == STT_FUNC_ && (value & 1u)) {
+			value &= ~(uint64_t)1u;
+			f.isa_mode = KGENOME_FN_ISA_THUMB;
+		}
 		/* By the object's type, not by whether this section has an
 		 * address: a linked file's section at address zero would be read
 		 * as relocatable. */
-		/* KNOWN DEFECT CN-2 (2026-10-30, M) [sev M]: kgenome_elf_funcs_build uses sy.value as it is: an ARM Thumb function has bit 0 set (st_value | 1)
-		 * and its file offset is odd. Trigger: an ARM ELF with Thumb functions and a symtab. Effect: the extent starts one byte late and ends one byte
-		 * late, and any decode from `off` is misaligned: 1078 of 15909 symtab starts in 40 ARM files are odd. Reproducer: evmix.c (fix_consol/h) on
-		 * fix_cfg_survey/samples ARM files, column `odd`. Fix: clear bit 0 for EM_ARM, keep a per-function Thumb flag for a Thumb-state decode. */
 		if (e->e_type != KGENOME_ELF_REL) {
-			if (!kgenome_elf_va_to_off(e, sy.value, sy.size, &off))
+			if (!kgenome_elf_va_to_off(e, value, sy.size ? sy.size : 1u, &off))
 				continue;
 		} else {
-			if (sy.value > file.n || sec->file_off > file.n - sy.value)
+			if (value > file.n || sec->file_off > file.n - value)
 				continue;
-			off = sec->file_off + sy.value;
+			off = sec->file_off + value;
 		}
 		/* Both forms: the body lies inside the file. The segment table is
 		 * the file's own claim and is not clipped by the parse. */
 		if (off > file.n || sy.size > file.n - off)
 			continue;
-		if (n == cap) {
-			uint32_t nc = kgenome_grow_cap(cap, 256u);
-			struct kgenome_func *nv = nc ? realloc(v, (size_t)nc * sizeof *nv) : NULL;
-
-			if (!nv) {
-				out->status = KGENOME_NOMEM;
-				free(v);
-				return;
-			}
-			v = nv;
-			cap = nc;
+		f.off = off;
+		f.len = sy.size;
+		f.value = sy.value;
+		f.shndx = sy.shndx;
+		f.source = src;
+		if (sy.size) {
+			f.end_source = KGENOME_FN_E_SYMBOL;
+		} else {
+			f.flags = KGENOME_FN_F_SIZE0;
+			n_zero++;
 		}
-		v[n].off = off;
-		v[n].len = sy.size;
-		v[n].value = sy.value;
-		v[n].shndx = sy.shndx;
-		n++;
+		if (!kgenome_fntab_list_add(out, &f))
+			return;
 	}
-	kgenome_funcs_finish(v, n, out);
-}
-
-/*
- * THE FUNCTIONS OF AN ELF THAT KEPT NO SYMBOLS, from the entries the code has -
- * see kgenome_diag_walk_ensure, which finds them. Each entry inside an executable
- * segment starts a function that runs to the next entry or to the end of the
- * segment; the object's own entry point is one as well. No decoding here: this
- * only cuts the segments where the entries say.
- */
-/* CONSOLIDATION FUNC-6 (2026-10-30, M): DROP -> kgenome_diag_funcs_with_walk (the cut becomes one static step there, fed by every evidence source, not
- * only call targets). Its extent rule (to the next entry or the end of the code segment) is the weak part: 14154 symtab functions had the right start
- * and another end, 17419 were exact (CS-1). Better logic here that the keeper lacks: none verified; the end rule of fnprint body_ends/skip_pad is
- * better. Prove with: tests/lib/genome/api_diag.c funcs_of rows; fix_cfg_survey out_ext.txt (symtab vs stripped extents). */
-void kgenome_elf_funcs_from_entries(kof_buf file, const struct kgenome_elf_info *e,
-				uint64_t entry_off, const uint64_t *ent,
-				uint32_t n_ent, struct kgenome_func_set *out)
-{
-	struct kgenome_func *v;
-	uint32_t i, n = 0;
-	uint64_t *all;
-
-	memset(out, 0, sizeof *out);
-	if (!file.p || !e || !e->valid || !n_ent)
+	if (!n_zero)
 		return;
-	all = malloc(((size_t)n_ent + 1u) * sizeof *all);
-	v = malloc(((size_t)n_ent + 1u) * sizeof *v);
-	if (!all || !v) {
-		free(all);
-		free(v);
-		out->status = KGENOME_NOMEM;
-		return;
-	}
-	memcpy(all, ent, (size_t)n_ent * sizeof *all);
+	/* The end of a symbol that declares none: the next symbol of this table above it, or the end of its section, whichever is first. */
 	{
-		uint32_t m = n_ent;
+		const uint32_t cnt = out->n - first;
+		uint64_t *offs = malloc((size_t)cnt * sizeof *offs);
 
-		if (entry_off < file.n) {
-			uint32_t k;
-
-			for (k = 0; k < m && all[k] != entry_off; k++)
-				;
-			if (k == m) {
-				/* in order: the entries are sorted */
-				for (k = m; k > 0 && all[k - 1u] > entry_off; k--)
-					all[k] = all[k - 1u];
-				all[k] = entry_off;
-				m++;
-			}
+		if (!offs) {
+			out->status = KGENOME_NOMEM;
+			return;
 		}
-		n_ent = m;
-	}
-	for (i = 0; i < n_ent; i++) {
-		uint32_t s;
-		uint64_t end = 0;
+		for (i = 0; i < cnt; i++)
+			offs[i] = out->v[first + i].off;
+		qsort(offs, cnt, sizeof *offs, offcmp);
+		for (i = first; i < out->n; i++) {
+			struct kgenome_func *f = &out->v[i];
+			uint64_t end, lo = 0, hi = cnt;
+			const struct kgenome_elf_sec *sec = &e->sec[f->shndx];
 
-		for (s = 0; s < e->seg_count && s < KGENOME_ELF_MAX_SEGMENTS; s++) {
-			const struct kgenome_elf_seg *g = &e->seg[s];
+			if (!(f->flags & KGENOME_FN_F_SIZE0))
+				continue;
+			while (lo < hi) {               /* the first start above f->off */
+				uint64_t mid = (lo + hi) / 2u;
 
-			if (kgenome_elf_seg_is_code(g) &&
-			    g->file_off < file.n && all[i] >= g->file_off &&
-			    all[i] - g->file_off < g->file_size) {
-				uint64_t lim = g->file_off + g->file_size;
-
-				end = lim < file.n ? lim : file.n;
-				break;
+				if (offs[mid] <= f->off)
+					lo = mid + 1u;
+				else
+					hi = mid;
 			}
+			end = sec->file_off + sec->file_size;
+			if (lo < cnt && offs[lo] < end)
+				end = offs[lo];
+			if (end > file.n)
+				end = file.n;
+			f->len = end > f->off ? end - f->off : 0;
+			f->end_source = KGENOME_FN_E_NEXT_START;
+			f->flags |= KGENOME_FN_F_END_OPEN;
 		}
-		if (!end)
-			continue;       /* not in code: an entry of nothing */
-		/* KNOWN DEFECT CS-1 (2026-10-30, M) [sev M]: kgenome_diag_funcs_of on a stripped file: a function runs to the next ENTRY found, so a missing entry merges neighbours and padding stays in.
-		 * Trigger: any ELF without symtab. Effect (55218 symtab functions of 5 archs): 17419 exact, 14154 right start with another end, 4898 extents hold >= 2 symbols; MIPS 32 of 10891 exact (cause for MIPS Inference: the walk finds no entry).
-		 * Reproducer: /mnt/games/normtest/fix_cfg_survey/out_ext.txt (harness h/cfgsv.c, py/); the signature quality on such extents is unmeasured.
-		 * Fix: end a body at the last ret/jump after the farthest forward target (fnprint body_ends/skip_pad) and add FDE, .ARM.exidx and .dynsym starts (see FUNC-4). */
-		if (i + 1u < n_ent && all[i + 1u] < end)
-			end = all[i + 1u];
-		if (end <= all[i])
-			continue;
-		v[n].off = all[i];
-		v[n].len = end - all[i];
-		v[n].value = 0;         /* recovered from the code: no symbol */
-		v[n].shndx = 0;
-		n++;
+		free(offs);
 	}
-	free(all);
-	kgenome_funcs_finish(v, n, out);
 }
 
-
-/* ---- the functions ------------------------------------------------------------ */
-
-#define PE_MACHINE_AMD64 0x8664u
-#define UNW_FLAG_CHAININFO 0x4u
-
-/*
- * The functions of an x64 PE - see funcs.h.
- *
- * Each RUNTIME_FUNCTION is three RVAs: where the function begins, where it ends,
- * and its unwind information. A chained entry (the unwind flags say so) is a
- * fragment of a function that has an entry of its own, so it is not listed; an
- * entry whose unwind address has the low bit set is an indirect one and is not
- * listed either. An entry that does not resolve to bytes of the file is
- * skipped, and the table is read as far as the file holds it.
- */
-/* CONSOLIDATION FUNC-3 (2026-10-30, R): KEEP (the PE evidence source, .pdata RUNTIME_FUNCTION: exact start and end, chained fragments left out; x64
- * only, 1 caller kgenome_funcs_build). A leaf function has no unwind entry and x86 PE has no table: the completion lives in diag_lineage.c fns_build
- * today and moves into kgenome_diag_funcs_with_walk. Better logic here that the keeper lacks: none (this is part of the keeper). Prove with: a PE x64
- * fixture with one leaf function (tests/lib/genome/hostile_image.c style): funcs_of misses it, lineage lists it. */
-void kgenome_pe_funcs_build(kof_buf file, const struct kgenome_pe_info *p,
-			struct kgenome_func_set *out)
-{
-	struct kgenome_func *v = NULL;
-	uint32_t cap = 0, n = 0, i, n_ent;
-	uint64_t tab;
-
-	memset(out, 0, sizeof *out);
-	if (!file.p || !p || !p->valid || p->machine != PE_MACHINE_AMD64 ||
-	    !p->pe32_plus)
-		return;
-	if (!p->dir[KGENOME_PE_DIR_EXCEPTION].rva || !p->dir[KGENOME_PE_DIR_EXCEPTION].size)
-		return;
-	tab = kgenome_pe_rva_to_off(p, p->dir[KGENOME_PE_DIR_EXCEPTION].rva);
-	if (tab == KGENOME_BROKEN || tab >= file.n)
-		return;
-	/* As many entries as the directory declares and the file holds. */
-	{
-		uint64_t by_dir = p->dir[KGENOME_PE_DIR_EXCEPTION].size / 12u;
-		uint64_t by_file = (file.n - tab) / 12u;
-
-		n_ent = (uint32_t)(by_dir < by_file ? by_dir : by_file);
-	}
-	for (i = 0; i < n_ent; i++) {
-		uint32_t b, e, u;
-		uint64_t off, uo;
-		uint8_t flags = 0;
-
-		if (!kof_rd_u32(file, tab + (uint64_t)i * 12u, 0, &b) ||
-		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 4u, 0, &e) ||
-		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 8u, 0, &u))
-			break;
-		if (!b || e <= b || (u & 1u))
-			continue;
-		uo = kgenome_pe_rva_to_off(p, u);
-		if (uo != KGENOME_BROKEN && uo < file.n)
-			flags = (uint8_t)(file.p[uo] >> 3);
-		if (flags & UNW_FLAG_CHAININFO)
-			continue;
-		off = kgenome_pe_rva_to_off(p, b);
-		if (off == KGENOME_BROKEN || off >= file.n ||
-		    (uint64_t)(e - b) > file.n - off)
-			continue;
-		if (n == cap) {
-			uint32_t nc = kgenome_grow_cap(cap, 256u);
-			struct kgenome_func *nv = nc ? realloc(v, (size_t)nc * sizeof *nv) : NULL;
-
-			if (!nv) {
-				out->status = KGENOME_NOMEM;
-				free(v);
-				return;
-			}
-			v = nv;
-			cap = nc;
-		}
-		v[n].off = off;
-		v[n].len = e - b;
-		v[n].value = 0;         /* .pdata names nothing */
-		v[n].shndx = 0;
-		n++;
-	}
-	kgenome_funcs_finish(v, n, out);
-}
+/* The PE strategy (.pdata) and kgenome_pe_funcs_build, its wrapper, are fntab_pe_pdata.c: one file a case. */

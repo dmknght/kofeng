@@ -24,7 +24,6 @@ static const char *term_name(unsigned t)
 static void head_lines(struct kgenome_gv *gv, const struct kgenome_cfg_gv_req *r)
 {
 	const struct kgenome_cfg_view *v = r->v;
-	const uint32_t amin = r->anchor_min ? r->anchor_min : KGENOME_CFG_ANCHOR_MIN;
 	uint32_t nk = v->n_key, shown = r->max_keys ? r->max_keys : 16u, i, j;
 	unsigned t;
 
@@ -32,9 +31,11 @@ static void head_lines(struct kgenome_gv *gv, const struct kgenome_cfg_gv_req *r
 	for (t = 0; t < 2u; t++)
 		if (r->title[t] && r->title[t][0])
 			HL("%s", r->title[t]);
-	HL("CFG  reachable=%u  edges=%u  unreachable=%u  all=%u  status=%s", (unsigned)v->n_blk, (unsigned)v->n_edge, (unsigned)v->n_unr,
-	   (unsigned)(v->n_blk + v->n_unr), kgenome_status_name(v->status));
-	HL("canon  0x%016llx", (unsigned long long)v->canon);
+	/* The counts the list below repeats (unreachable, all) are not here, and the status is said only when it is not ok: a cut is reported (rule 4), a clean run is not a fact. */
+	if (v->status == KGENOME_OK)
+		HL("CFG  reachable=%u  edges=%u", (unsigned)v->n_blk, (unsigned)v->n_edge);
+	else
+		HL("CFG  reachable=%u  edges=%u  status=%s", (unsigned)v->n_blk, (unsigned)v->n_edge, kgenome_status_name(v->status));
 	if (shown > KGENOME_CFG_KEYS)
 		shown = KGENOME_CFG_KEYS;
 	if (shown > nk)
@@ -53,10 +54,6 @@ static void head_lines(struct kgenome_gv *gv, const struct kgenome_cfg_gv_req *r
 		if (gv->n_head < KGENOME_GV_HEAD_MAX)
 			gv->n_head++;
 	}
-	if (v->n_blk >= amin)
-		HL("anchor  %u reachable blocks >= %u: PASS", (unsigned)v->n_blk, (unsigned)amin);
-	else
-		HL("anchor  %u reachable blocks < %u: BELOW", (unsigned)v->n_blk, (unsigned)amin);
 #undef HL
 }
 

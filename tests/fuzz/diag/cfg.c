@@ -33,6 +33,7 @@ static void gview(struct fz_ctx *c, const uint8_t *in, size_t n)
 	struct kgenome_gv gv;
 	uint32_t i, k, heads = 0;
 	uint64_t d1 = 0, d2 = 0;
+	enum kgenome_status st1, st2;
 	char buf[64];
 
 	if (kgenome_gv_alloc(&gv, &(const struct kgenome_gv_size){ .n_node = nn, .n_edge = ne, .n_xline = in[3] % 5u, .n_note = in[3] % 5u, .n_aside = in[4] % 3u },
@@ -54,7 +55,7 @@ static void gview(struct fz_ctx *c, const uint8_t *in, size_t n)
 		gv.xline[i].node = i % nn;
 		snprintf(gv.xline[i].text, KGENOME_GV_LINE, "call %u", (unsigned)i);
 	}
-	(void)kgenome_gv_loops(&gv, NULL, NULL);
+	st1 = kgenome_gv_loops(&gv, NULL, NULL);
 	for (i = 0; i < ne; i++) {
 		FZ_CHECK(c, gv.edge[i].loop <= KGENOME_GV_LOOP_RETREAT, "a loop value out of range");
 		d1 = d1 * 31u + gv.edge[i].loop;
@@ -63,10 +64,13 @@ static void gview(struct fz_ctx *c, const uint8_t *in, size_t n)
 			heads++;
 		}
 	}
-	(void)kgenome_gv_loops(&gv, NULL, NULL);                    /* the same marks again: the result does not depend on what was there */
+	st2 = kgenome_gv_loops(&gv, NULL, NULL);                    /* the same marks again: the result does not depend on what was there */
 	for (i = 0; i < ne; i++)
 		d2 = d2 * 31u + gv.edge[i].loop;
-	FZ_CHECK(c, d1 == d2, "marking the loops twice gives different marks");
+	/* A-D7: the marks are a function of the graph when both calls COMPUTED them. A call the harness's allocator refused (NOMEM) marks nothing and says so: the edges keep what they had (none), so a
+	 * refused first call and a granted second one differ - the status is the answer, and the fuzz seed that hit it (3) was this, not a loop mark that moves. */
+	if (st1 != KGENOME_NOMEM && st2 != KGENOME_NOMEM)
+		FZ_CHECK(c, d1 == d2 && st1 == st2, "marking the loops twice gives different marks");
 	for (i = 0; i < nn; i++)
 		for (k = 0; k < 2u + KGENOME_GV_BOX_X + 2u; k++) {
 			const char *t = kgenome_gv_box_line(&gv, i, k, buf, sizeof buf);

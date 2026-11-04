@@ -217,3 +217,26 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	kunp_rcstruct_window(off, len);
 }
+
+/*
+ * IMPROVE appended-carve-1 (owner, 2026-11-01; NOTE ONLY, not reviewed yet: the owner says this carve is WRONG and the module needs review and tuning) - Sink: kof_unpack.
+ * Sample: /home/dmknght/Desktop/MalwareLab/MalwareSourceCode/Linux/Rootkits/Linux.Ark.a/ark (ELF i386, dynamically linked, stripped, 18034 bytes, 29 sections declared,
+ * entry 0x80484e0; two PT_LOAD of 6879 and 256 bytes, so most of the file is the tail past the loaded segments). `kofexaminer --db D --debug` says: anomalies SHSTRNDX_BAD,
+ * regions HEADERS=1404 CODE=6635 DATA=256 UNCLAIMED=9739, `packer Carve:ELF?Appended`, `recovered 1 7612 bytes`, `unpacked 1 object(s)`: this module made a 7612-byte object out of it.
+ * Not examined: where that object starts and ends, what it holds, and what in the tail (the section header table and the section contents lie there: SHSTRNDX_BAD) made
+ * the module take it for an appended ELF. To check next: the carved bytes against the file's own sections and symbol/string tables; whether the carve should have refused a tail
+ * that is the original file's own section area.
+ * EXPERIMENT (owner order 2026-11-01, measured, harness /mnt/games/normtest/fix_elf_end/exp/rule.py, header parsing only; nothing in the engine changed): the ELF's own extent = the union of the
+ * ELF header, the program header table, every PT_LOAD file extent, the section header table and every non-NOBITS section, each counted only when whole inside the file; logical end = its maximum.
+ * What this module does today: it takes the WIDEST UNCLAIMED run ANYWHERE (not the tail), needs >= 4096 bytes and entropy >= 2 bits, skips up to 4096 leading zero bytes, and refuses only when
+ * SHOFF_PAST_EOF / SEC_PAST_EOF / SECTAB_MISSING is set (SHSTRNDX_BAD is not in that list). Ark: EOF 18034, logical end by the header 15908, tail 2126: NOT equal, because the declared section
+ * table (e_shoff 14748) reads as garbage (SHSTRNDX_BAD); the real table is at 14732 and the last real section ends at 18052, 18 bytes past EOF: the 2126 tail bytes are the file's own .strtab, so
+ * the plain rule is a false positive on a lying table. The 7612 bytes carved are, by arithmetic 14748-7136 [Inference], [7136, 14748), entirely BEFORE the logical end: bytes of the file itself.
+ * Corpus of 513 ELF (261 under MalwareSourceCode/Linux, 252 of Bazaar.2026.08): EOF == logical end 481; EOF > logical end 32 = 28 files with a lying section table but consistent PT_LOAD, 2 truncated,
+ * 2 clean with a tail of 1-2 text bytes; first bytes of the 32 tails: 26 other, 6 text, none ELF/PE/ZIP/gzip/xz/UPX/zeros: NO real appended executable exists in this corpus. This module carved 3 files, all
+ * false of the Ark kind (0x333MD5Hash-lnxbin 4528 bytes, bigram 13191, ark 7612; all SHSTRNDX_BAD); 29 files have a tail by the rule and are not carved (flag, or tail under 4096); on 4 synthetic files with an
+ * appended ELF / noise / zeros the module carves exactly the appended part and nothing for 8000 zeros or 100 bytes. 176 of 513 files have section contents AFTER the section header table: a rule must
+ * not assume the table is last. Every file with a tail of 264 bytes or more carries a flag on the section/program tables: the rule is trustworthy only when the tables are NOT flagged (SHSTRNDX_BAD,
+ * SEC_PAST_EOF, SHOFF_PAST_EOF, SECTAB_MISSING, SEG_PAST_EOF, PHOFF_PAST_EOF); when flagged the tail is the file's own or the file is truncated. Not measured: a gap of a page or more in the MIDDLE of a file
+ * (this module would carve it, the rule says nothing is appended). If a fix is ordered: add SHSTRNDX_BAD (and SEG/PHOFF_PAST_EOF) to the refusal list (alone it removes the 3 false carves and changes
+ * no correct case measured) and replace the widest-UNCLAIMED-anywhere choice by [logical end, EOF) with the logical end computed once in libgenome/genotype/image. */

@@ -935,6 +935,98 @@ static void escape_view(void)
 }
 
 /*
+ * A ONE-BYTE STRING TABLE (executables_strtab.c). The records are `text xor K` with the NUL coded too, in
+ * the free tail of an ELF; the key is read out of the records, so the same table under two keys is read
+ * both times, and the view holds the text where the parent holds none. A table of fifteen records is below
+ * the floor and gives no view; a table in the kept code of a stripped object is not decoded (the evidence
+ * would be code's) and gives no view. The old tests missed it: (a) the line did not exist.
+ */
+static size_t strtab_tail(uint8_t *out, unsigned nrec, uint8_t k)
+{
+	size_t o = 0;
+	unsigned i;
+
+	out[o++] = 0;
+	for (i = 0; i < nrec; i++) {
+		char t[96];
+		int l = snprintf(t, sizeof t, "NormStrTabCanary-%02u: some neutral text, 4 words", i);
+		int j;
+
+		for (j = 0; j < l; j++)
+			out[o++] = (uint8_t)((uint8_t)t[j] ^ k);
+		out[o++] = k;
+		out[o++] = 0;
+	}
+	return o;
+}
+
+static void strtab_view(void)
+{
+	struct kof_scan_option opt;
+	static const uint8_t keys[] = { 0x22, 0x5a, 0xc3, 0xe7 };
+	unsigned i;
+
+	defaults(&opt, 0);
+	for (i = 0; i < sizeof keys; i++) {
+		struct fx f;
+		struct fx_at at;
+		struct er r;
+		static uint8_t tail[4096];
+		const struct eo *v;
+		uint64_t n;
+
+		base_fx(&f);
+		f.tail = tail;
+		f.tail_n = strtab_tail(tail, 24u, keys[i]);
+		n = fx_elf(img, &f, &at);
+		scan(e2e_sc, img, n, &opt, &r);
+		v = view_of(&r);
+		NCKF(r.n == 2u && v, "key %02x: %u objects", keys[i], r.n);
+		NCKF(v && memmem(v->bytes, v->len, "NormStrTabCanary-23: some neutral text, 4 words", 47u) != NULL,
+		     "key %02x: the text is not in the view", keys[i]);
+		NCKF(!memmem(img, n, "NormStrTabCanary", 16u), "key %02x: the parent holds the text", keys[i]);
+		NCKF(v && v->len > 0 && v->kind != 0, "key %02x: the view is not marked", keys[i]);
+		er_free(&r);
+	}
+	/* fifteen records: below the floor, and nothing else in the object makes a view */
+	{
+		struct fx f;
+		struct fx_at at;
+		struct er r;
+		static uint8_t tail[4096];
+		uint64_t n;
+
+		base_fx(&f);
+		f.tail = tail;
+		f.tail_n = strtab_tail(tail, 15u, 0x22);
+		n = fx_elf(img, &f, &at);
+		scan(e2e_sc, img, n, &opt, &r);
+		NCKF(r.n == 1u && !view_of(&r), "fifteen records: %u objects", r.n);
+		er_free(&r);
+	}
+	/* the same table in the kept code of a stripped object: not decoded, no view */
+	{
+		struct fx f;
+		struct fx_at at;
+		struct er r;
+		static uint8_t tail[4096], big[8192];
+		size_t tn = strtab_tail(tail, 24u, 0x22);
+		uint64_t n;
+
+		memset(big, 0x90, sizeof big);
+		memcpy(big + 100, tail, tn);
+		base_fx(&f);
+		f.sections = 0;
+		f.code = big;
+		f.code_len = 6000;
+		n = fx_elf(img, &f, &at);
+		scan(e2e_sc, img, n, &opt, &r);
+		NCKF(r.n == 1u && !view_of(&r), "table in kept code: %u objects", r.n);
+		er_free(&r);
+	}
+}
+
+/*
  * WHAT IS KEPT OF CODE. An instruction stream has no text in it to reveal and every
  * byte of it is somebody's operand, so an ELF's executable SECTIONS and a PE's
  * sections that are not writable come through the view byte for byte - a zero run
@@ -1398,6 +1490,7 @@ int main(void)
 	one_for_one_view();
 	fixed_units();
 	escape_view();
+	strtab_view();
 	limits_propagate();
 	reuse_and_threads();
 	scripts();

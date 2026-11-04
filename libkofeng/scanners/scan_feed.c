@@ -48,10 +48,11 @@ struct mutation_feed {
 	uint64_t n_bytes;
 	uint32_t n_nosig;       /* function units listed and not signed: below the floor, undecodable, no rules for the architecture, over the lib's allowance */
 	uint32_t n_cfg;         /* function units whose CFG signature was credited */
+	struct kgenome_mutation_tally tally;    /* what the cut left out of the function region(s): said on the object (KOF_MTN_S_FUNC_DROPPED) */
 };
 
 /*
- * A FUNCTION UNIT is signed by the shape of its first (largest) function - kof_cfgsign_function, the one place a function is decoded for a
+ * A FUNCTION UNIT is signed by the shape of its function - kof_cfgsign_function, the one place a function is decoded for a
  * graph - and the sketch is credited to the blocks of the region by the matcher's second scoring kind (kof_mutation_cfg_unit: containment
  * is not what a CFG sketch means, the Jaccard of two sketches is). The window sketch of a function unit is not computed any more (measured
  * ineffective, exp_cfg/report.md). A CFG block is region CODE, norm RAW. A unit below the
@@ -70,6 +71,9 @@ static int mutation_feed_func(struct mutation_feed *f, uint64_t len, uint32_t si
 	rq.off = first->off;
 	rq.len = first->len;
 	rq.host = f->cfg;
+	rq.wk = kof_scan_of(f->ctx)->obj.diag.walk;     /* the table's decode, read and not made again */
+	rq.fs = oc_funcs(f->ctx);                       /* the unit is an entry of the table: its frame is the object's, made once for every reader */
+	rq.frames = oc_frames(f->ctx);
 	if (kof_cfgsign_function(&rq, &cs) != KOF_CFGSIGN_SIGNED) {
 		if (!f->n_nosig++)
 			kof_mutation_note_unsigned(f->pc);
@@ -234,6 +238,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 	f.n_bytes = 0;
 	f.n_nosig = 0;
 	f.n_cfg = 0;
+	memset(&f.tally, 0, sizeof f.tally);
 	KOF_TRACE("[feed] format %u, %s, %llu byte(s), present %x, from_packer %d\n", (unsigned)ctx->format,
 		  has_regions(ctx, fp) ? "parsed regions" : "no regions (one region, ALL)", (unsigned long long)b.n,
 		  (unsigned)present, from_packer);
@@ -312,6 +317,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 					.n_fixed = cut->n_fixed,
 					.fn = mutation_feed_unit,
 					.user = &f,
+					.tally = &f.tally,
 				});
 		}
 		fp = NULL;
@@ -357,8 +363,10 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 				.n_fixed = cut->n_fixed,
 				.fn = mutation_feed_unit,
 				.user = &f,
+				.tally = &f.tally,
 			});
 	}
+	kof_mutation_note_dropped(pc, f.tally.lib, f.tally.outside);
 	KOF_TRACE("[feed] done: %u unit(s) sketched, %llu byte(s), %u function unit(s) signed by shape, %u unsigned\n", (unsigned)f.n_units, (unsigned long long)f.n_bytes, (unsigned)f.n_cfg, (unsigned)f.n_nosig);
 }
 
@@ -398,29 +406,6 @@ int sx_mutation_loaded(const struct kof_scanner *sc)
 	return sc->eng && sc->eng->mutation && sc->mutation.set;
 }
 
-/* The allocator the CFG signature of a function unit runs under: every byte is charged to the scanner's ledger as any other allocation is, and
- * refused (NULL: the unit is unsigned with the reason NOMEM, said) when the object's share has no room. */
-static void *cfg_alloc(void *user, size_t n)
-{
-	struct kof_scanner *sc = user;
-	void *p;
-
-	if (n > oc_scan_room(sc))
-		return NULL;
-	p = malloc(n);
-	if (p)
-		scan_charge(sc, n);
-	return p;
-}
-
-static void cfg_release(void *user, void *p, size_t n)
-{
-	if (!p)
-		return;
-	oc_scan_release(user, n);
-	free(p);
-}
-
 /*
  * WHAT THE CUT IS TOLD ABOUT THE OBJECT IN HAND - the one place it is made, for the feed above and for the report that locates a block
  * (scan_explain.c): the object's functions when some block would be credited from a region cut a function at a time, its library, the
@@ -433,8 +418,8 @@ void sx_feed_cut(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t
 			     ? oc_funcs(ctx) : NULL;
 	cut->lib = sc->cur.lib_ok ? &sc->cur.lib : NULL;
 	cut->fixed = kof_src_fixed_of(sc->cur.src, &cut->n_fixed);
-	sc->cfgsign.mem.alloc = cfg_alloc;
-	sc->cfgsign.mem.release = cfg_release;
+	sc->cfgsign.mem.alloc = oc_cfg_alloc;
+	sc->cfgsign.mem.release = oc_cfg_release;
 	sc->cfgsign.mem.user = sc;
 	cut->cfg = &sc->cfgsign;
 }
@@ -491,6 +476,7 @@ void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->st.mutation_trunc_objects = ms.life_trunc_objects;
 		sc->st.mutation_io_objects = ms.life_io_objects;
 		sc->st.mutation_unsigned_objects = ms.life_unsigned_objects;
+		sc->st.mutation_dropped_objects = ms.life_dropped_objects;
 		sc->st.mutation_io_bytes = ms.life_io_bytes + ms.io_bytes;
 		/* The state the feed grew is the object's: charged to the ledger the way a produced
 		 * buffer is, and given back when the next object begins (scan_pipeline.c). */

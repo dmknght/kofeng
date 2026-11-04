@@ -167,67 +167,36 @@ static int grow(struct kgenome_diag_scan *s, void **v, uint32_t *cap, uint32_t n
 	return 1;
 }
 
-static void walk_code(struct kgenome_diag_scan *s, const struct kgenome_obj *obj,
-		      const uint8_t *base, uint64_t size, uint64_t off,
-		      uint64_t n, int wide, struct pe_walk *w)
+/* One instruction of the object's one decode (kgenome_diag_code_run: the walk's trace, the decoder where the trace is not held). A call through an import slot is a node; a direct
+ * call is kept until the stubs are known, because a call to a stub is a call to the import. A byte the decoder cannot read arrives as NULL and is stepped over by the reader: a
+ * switch table of 32-bit offsets inside the code is not the end of the section (measured on a 180 KB MSVC .text: a loop that stopped there saw the first fifth of the file). */
+struct pe_obs {
+	struct kgenome_diag_scan *s;
+	struct pe_walk *w;
+	int wide;
+};
+
+static void pe_observe(void *user, const struct kgenome_cell_insn *in)
 {
-	struct kgenome_cell_cur k;
-	struct kgenome_cell_space sp;
-	struct kgenome_cell_insn in;
+	struct pe_obs *o = user;
+	struct pe_walk *w = o->w;
 
-	kgenome_cell_space_init(&sp, obj, base, size);
-	memset(&k, 0, sizeof k);
-	if (!kgenome_cell_seek(&k, off, 0))
+	if (!in || o->s->halt)
 		return;
-	while (k.at < off + n) {
-		/*
-		 * A BYTE THE DECODER CANNOT READ IS STEPPED OVER, NOT THE END.
-		 * kgenome_cell_step answers zero and leaves the cursor where it was, so
-		 * a loop that treats zero as "finished" stops at the first piece of
-		 * data inside the code: MEASURED on a 180 KB MSVC .text, it stopped
-		 * at offset 0x583c, a switch jump table of 32-bit offsets, with
-		 * 5400 instructions decoded and the rest of the section never
-		 * looked at - 98 nodes, all in the first fifth of the file.
-		 * x86 resynchronises within a few instructions of garbage, and a
-		 * wrong decode costs nothing here: a node needs the operand to be
-		 * the address of an import slot, exactly.
-		 */
-		if (!kgenome_cell_step(&k, &sp, &in)) {
-			k.at++;
-			continue;
-		}
-		if ((in.op == KGENOME_CELL_CALL || in.op == KGENOME_CELL_JMP) &&
-		    (in.flags & KGENOME_CELL_F_INDIRECT) && in.n_op &&
-		    in.o[0].kind == KGENOME_CELL_O_MEM) {
-			uint64_t slot = kgenome_cell_slot_of(&in, wide, 0);
-			const struct pe_imp *im;
+	if (in->op == KGENOME_CELL_CALL && (in->flags & KGENOME_CELL_F_INDIRECT) && in->n_op &&
+	    in->o[0].kind == KGENOME_CELL_O_MEM) {
+		const uint64_t slot = kgenome_cell_slot_of(in, o->wide, 0);
+		const struct pe_imp *im = slot == KGENOME_BROKEN ? NULL : imp_find(&w->imp, slot);
 
-			if (slot == KGENOME_BROKEN)
-				continue;
-			im = imp_find(&w->imp, slot);
-			if (!im)
-				continue;
-			if (in.op == KGENOME_CELL_CALL) {
-				add_node(s, in.at, im);
-			} else if (in.at_va != KGENOME_BROKEN &&
-				   grow(s, (void **)&w->thunk, &w->cap_thunk,
-					w->n_thunk, sizeof *w->thunk)) {
-				struct pe_imp *t = &w->thunk[w->n_thunk++];
+		if (im)
+			add_node(o->s, in->at, im);
+	} else if (in->op == KGENOME_CELL_CALL && !(in->flags & KGENOME_CELL_F_INDIRECT) &&
+		   in->target_va != KGENOME_BROKEN &&
+		   grow(o->s, (void **)&w->call, &w->cap_call, w->n_call, sizeof *w->call)) {
+		struct pe_call *c = &w->call[w->n_call++];
 
-				*t = *im;
-				t->slot = in.at_va;     /* the stub's own address */
-			}
-		} else if (in.op == KGENOME_CELL_CALL && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
-			   in.target_va != KGENOME_BROKEN &&
-			   grow(s, (void **)&w->call, &w->cap_call, w->n_call,
-				sizeof *w->call)) {
-			struct pe_call *c = &w->call[w->n_call++];
-
-			c->at = in.at;
-			c->target_va = in.target_va;
-		}
-		if (s->halt)
-			return;
+		c->at = in->at;
+		c->target_va = in->target_va;
 	}
 }
 
@@ -267,9 +236,12 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 {
 	const struct kgenome_pe_info *p;
 	struct pe_walk w;
+	struct pe_obs ob;
+	struct kgenome_diag_walk *wk;
+	const struct kgenome_diag_stub *stub;
 	const struct kgenome_pe_imptab *tab;
 	kof_buf f;
-	uint32_t i;
+	uint32_t i, n_stub;
 	int wide;
 
 	if (!obj || obj->format != KGENOME_FMT_PE)
@@ -279,6 +251,7 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 		return;
 	wide = p->pe32_plus != 0;
 	memset(&w, 0, sizeof w);
+	ob = (struct pe_obs){ s, &w, wide };
 	f.p = base;
 	f.n = size;
 	tab = kgenome_diag_imports(s, obj);
@@ -290,21 +263,37 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 		qsort(w.imp.v, w.imp.n, sizeof *w.imp.v, kof_cmp_u64);
 
 	/*
-	 * EVERY CODE SECTION (kgenome_pe_sec_is_code), from its first byte. Unlike an ELF segment a PE
-	 * section does not contain the headers, so there is no desync to avoid; a
-	 * section is decoded where its raw data begins.
+	 * EVERY CODE SECTION (kgenome_pe_sec_is_code), from its first byte, read through the object's one decode. Unlike an ELF segment a PE
+	 * section does not contain the headers, so there is no desync to avoid; a section is decoded where its raw data begins.
 	 */
+	wk = kgenome_diag_scan_walk(s);
+	if (!kgenome_diag_walk_ensure(wk, obj, base, size, 1)) {
+		kgenome_diag_note(s, KGENOME_NOMEM);    /* the code could not be held: no nodes, said */
+		goto out;
+	}
 	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
-		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
+		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at), va;
 
-		if (have)
-			walk_code(s, obj, base, size, at, have, wide, &w);
+		if (!have || (va = kgenome_image_off_to_addr(obj, at)) == KGENOME_BROKEN)
+			continue;
+		kgenome_diag_code_run(&(const struct kgenome_diag_code_req){
+			.obj = obj, .base = base, .size = size, .off = at, .n = have, .va = va,
+			.fn = pe_observe, .user = &ob, .wk = wk });
 		if (s->halt)
 			goto out;
 	}
 
-	/* The stubs, now that all of them are known: a direct call to one is a
-	 * call to the import. */
+	/* The stubs, now that all of them are known (the walk met every `jmp [slot]` through a fixed slot): a direct call to one whose slot is an import is a call to the import. */
+	stub = kgenome_diag_walk_thunks(wk, &n_stub);
+	for (i = 0; i < n_stub; i++) {
+		const struct pe_imp *im = imp_find(&w.imp, stub[i].slot);
+		const uint64_t va = im ? kgenome_image_off_to_addr(obj, stub[i].at) : KGENOME_BROKEN;
+
+		if (va == KGENOME_BROKEN || !grow(s, (void **)&w.thunk, &w.cap_thunk, w.n_thunk, sizeof *w.thunk))
+			continue;
+		w.thunk[w.n_thunk] = *im;
+		w.thunk[w.n_thunk++].slot = va;         /* the stub's own address */
+	}
 	if (w.n_thunk) {
 		qsort(w.thunk, w.n_thunk, sizeof *w.thunk, kof_cmp_u64);
 		for (i = 0; i < w.n_call; i++) {

@@ -28,12 +28,6 @@
 #include <genotype/image/elf_types.h>
 #include <genotype/image/pe_types.h>
 
-/* Small functions are grouped up to this many bytes, and are "next to each
- * other" within this gap; a group below the floor is a stub and is not a unit. */
-#define FN_GROUP 256u
-#define FN_GAP   32u
-#define FN_MIN   64u
-
 _Static_assert((unsigned)KGENOME_SCAN_ELF_CODE == (unsigned)KGENOME_SCAN_PE_CODE, "kgenome_mutation_block_min tests one bit for both formats");
 
 int kgenome_mutation_by_function(uint32_t format, uint32_t mask)
@@ -79,43 +73,32 @@ static int fn_lib(const struct kgenome_true_all *lib, const struct kgenome_func 
 
 /* A function-region walk. A function the library owns is not offered. Answers 1 when the
  * callback said stop, so the caller does not offer it anything else. */
-/* KNOWN DEFECT CS2-1 (2026-10-31, M) [sev M]: a run of small functions (each under FN_GROUP, within FN_GAP of the next) is ONE unit whose `first` is its largest function, and the CFG
- * signature is of `first` alone (kof_cfgsign_function): the other functions of the group have no signature, no row id and are never held by a block. Trigger: two functions of 12+ blocks
- * less than 32 bytes apart. Effect: a diagnose made from the smaller one never fires on the object that holds it (the larger one is scored instead). Reproducer: tests/unit/cfg_sig_match.c
- * (the row `grouped`), cs_build_gap with gap 0. Fix: with a CFG signature a function that reaches the floor is a unit of its own (the grouping was made to give a window sketch enough bytes). */
-static int by_function(const struct kof_range *ext, uint32_t n_ext,
-			const struct kgenome_func_set *funcs,
-			const struct kgenome_true_all *lib,
-			kgenome_mutation_unit_fn fn, void *user)
+/* ONE UNIT PER FUNCTION (owner, 2026-11-03: no fixed size for a function). The function table is the list of units: there is no minimum length, no
+ * grouping of neighbours into one unit signed by its largest (that grouping, FN_MIN 64 / FN_GAP 32 / FN_GROUP 256 bytes, cost start recall: x86-64 64% -> 38%,
+ * ARM 77% -> 42%, Mirai.b 100% -> 50%, exp_funcdet, agent-reported), and no cap on the number of units. Whether a function can be hashed is decided after the
+ * decode, from its metadata (kof_cfgsign_function), and a unit that cannot is listed unsigned with the reason. `first` is the function itself. */
+static int by_function(const struct kgenome_mutation_req *rq)
 {
-	uint32_t i = 0;
+	struct kgenome_mutation_tally none;
+	struct kgenome_mutation_tally *t = rq->tally ? rq->tally : &none;
+	uint32_t i;
 
-	while (funcs && i < funcs->n) {
-		const struct kgenome_func *f = &funcs->v[i], *best = f;
-		uint64_t lo = f->off, hi = f->off + f->len;
-		uint32_t m = i;
+	memset(&none, 0, sizeof none);
+	for (i = 0; rq->funcs && i < rq->funcs->n; i++) {
+		const struct kgenome_func *f = &rq->funcs->v[i];
 
-		if (!fn_in(ext, n_ext, f) || fn_lib(lib, f)) {
-			i++;
+		t->funcs++;
+		/* a function that is not wholly in this region is not this region's; a function the library owns is not the author's: both are COUNTED (FP-18), neither is offered */
+		if (!fn_in(rq->ext, rq->n_ext, f)) {
+			t->outside++;
 			continue;
 		}
-		while (f->len < FN_GROUP && hi - lo < FN_GROUP &&
-		       m + 1u < funcs->n) {
-			const struct kgenome_func *g = &funcs->v[m + 1u];
-
-			if (g->len >= FN_GROUP || g->off < hi ||
-			    g->off - hi > FN_GAP || !fn_in(ext, n_ext, g) ||
-			    fn_lib(lib, g))
-				break;
-			hi = g->off + g->len;
-			if (g->len > best->len)
-				best = g;
-			m++;
-		}
-		i = m + 1u;
-		if (hi - lo < FN_MIN)
+		if (fn_lib(rq->lib, f)) {
+			t->lib++;
 			continue;
-		if (fn(user, lo, hi - lo, KGENOME_MUTATION_SIDE_USER, best))
+		}
+		t->units++;
+		if (rq->fn(rq->user, f->off, f->len, KGENOME_MUTATION_SIDE_USER, f))
 			return 1;
 	}
 	return 0;
@@ -359,7 +342,7 @@ void kgenome_mutation_units(const struct kgenome_mutation_req *rq)
 	if (!rq->p || !rq->fn)
 		return;
 	if (kgenome_mutation_by_function(rq->format, rq->mask)) {
-		if (!by_function(rq->ext, rq->n_ext, rq->funcs, rq->lib, rq->fn, rq->user))
+		if (!by_function(rq))
 			by_bytes(rq, 0);
 		return;
 	}

@@ -38,6 +38,15 @@ import os
 import re
 import sys
 
+# REVIEW OPEN (owner, 2026-11-01; NOTE ONLY, nothing run beyond the count): are TESTS MISSING for the known defects? On this date main holds 57 KNOWN DEFECT comments
+# (sev H 5, M 24, L 28: the defects of the unmerged comment patches are not counted). An id match of each id in tests/ (text only: a test that covers a defect without
+# naming its id is not seen, so this over-counts the missing) finds 8 ids with a test reference and 49 without.
+# Without a test reference, H: DF-1 DF-2 DF-5 DF-7 DF-8
+# Without a test reference, M: CN-2 CN-3 CN-4 CN-5 CN-6 CS-1 CS-2 D15a D15b D15c DEAD2-1 DEFS6 DF-6 G3-GEL4Y KXA-16 REV-D1
+# (CL-3 and CS-4 fixed 2026-11-05, their comments removed; see tests/lib/genome/cfg_isa.c and cfg_build.c.)
+# Without a test reference, L: BE-11 BE-3 CAT1-1 CAT1-2 CFGTAB-1 D18b DA-A64NEW DA-ARM32ROWS DEAD2-2 DEAD2-3 DEAD4-1 DEAD4-2 E-CERT E-RWX MEM-3 MEM-6 REV-D3 REV-D7a REV-D7b REV-D7c REV-D7d REV-D8b REV-D8c REV-D8h REV-D8r WP5-L-LZMA-1 WP9-F6
+# To do later, per id: write the red test (a defect needs one before its fix), or record why none is needed. `tools/known_defects.py --tsv` prints the list again.
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {'build', 'build_det', '.git', 'LICENSES'}
 HEAD = re.compile(r'KNOWN DEFECT\b')

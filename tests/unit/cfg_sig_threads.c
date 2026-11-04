@@ -5,7 +5,7 @@
  *
  * What is shared is the engine's index (the set, its filters, the pack's reads) and the object bytes' parse; what is per scanner is the matcher's state
  * (the votes, the best result per block), the allocator that charges the scan's ledger and the signing call's own memory. The objects: the reference
- * function (every diagnose fires), a variant (some fire), a function below the floor and a clean one (none), each scanned 30 times by each thread
+ * function (every diagnose fires), a variant (some fire), a small function (8 of the reference's 24 blocks: signed, fires the diagnoses up to a third) and a longer one with a jump changed, each scanned 30 times by each thread
  * in a different order.
  */
 #include <pthread.h>
@@ -195,7 +195,9 @@ int main(void)
 				    job[i].got[k].verdict, job[0].got[k].verdict, job[i].got[k].fired, job[0].got[k].fired);
 		}
 		OKF(job[0].got[0].fired == (1u << N_TH) - 1u && job[0].got[0].verdict[0], "the reference fires every diagnose (%05x, \"%s\")", job[0].got[0].fired, job[0].got[0].verdict);
-		OKF(job[0].got[2].fired == 0 && !job[0].got[2].verdict[0], "the function below the floor fires nothing");
+		/* THE SMALL FUNCTION IS SIGNED (owner, 2026-11-01: the floor is one reachable block, KGENOME_CFG_ANCHOR_MIN; it was twelve keys): its 8 blocks are 8 of the reference's 24, a third of them (33%),
+		 * so the diagnose of threshold t (t * 5 percent of the reference's blocks) fires for t <= 6: the first six, and no other. The test expected "nothing" from the era of the old floor. */
+		OKF(job[0].got[2].fired == (1u << 6) - 1u && job[0].got[2].verdict[0], "the small function (8 of 24 blocks) fires the diagnoses up to 30%% and no more (fired %05x, \"%s\")", job[0].got[2].fired, job[0].got[2].verdict);
 		OKF(job[0].got[1].fired != 0 && job[0].got[1].fired != (1u << N_TH) - 1u, "the variant fires some diagnoses, not all (%05x)", job[0].got[1].fired);
 		keng_close(ENG);
 	}

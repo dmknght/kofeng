@@ -50,7 +50,7 @@
  *   kv_consts.h      limits, widths and edit codes
  *   kv_chooser.h     the chooser popup's kinds and state
  *   kv_objects.h     the tree node, a hit, the object limits
- *   kv_view.h        struct view (one struct, over 1000 lines on purpose: see its header)
+ *   kv_view.h        struct view (one struct, its body in kv_view_<region>.inc fragments: see its header)
  *   kv_panel.h       the event panel, panel division, format categories, the page
  *   kv_barmenu.h     the menu bar and the properties tabs
  *   kv_input.h       keys, navigation, the framed dialogs
@@ -59,6 +59,20 @@
  *
  * The units that define those prototypes are named in kv_proto_decl.h.
  */
+/*
+ * IMPROVE kx-restructure-1 (owner, 2026-11-03: "kofexamine thì note comment lại xử lý sau"; DEFERRED, nothing of it is being built now). The restructure of
+ * kofexamine/ was started and then parked so that the ENGINE's function/decode/sniff pipeline is rewritten first (the viewer only shows what the engine returns).
+ * DONE and merged: kofeditor.c split (kofeditor_*.c), struct view split into kv_view_<region>.inc (18 pieces, members unchanged), kv_decl.c / kv_chooser.c / kv_bar.c /
+ * kofview.c / kv_graph.c / kv_evt.c / kv_tree.c split by responsibility, the chooser's open/take tables unified into one struct ch_kind, the marker table (MAX_DECL) made dynamic.
+ * NOT DONE (plan: /mnt/games/normtest/fix_vsplit_plan/plan.md, packages by disjoint file sets): P5 disasm/hex/text (kv_disasm.c 1396, kv_hex.c, kv_text.c), P7 dashboard/props
+ * (kv_dashdata.c 1261, kv_dash_dialog, kv_props*), P8 catalog/forms/dialogs (kv_families.c, kv_form*, kv_dialogs.c 1053, kv_find.c), P9 input/dispatch/state (kv_click.c 1155,
+ * kv_events.c, kv_keys.c, kv_input.c, kv_main.c, kv_collect.c 1357, kv_view.c, kv_proto_decl.h), P10 the CLI (kofexaminer*.c, kofinspect*.c, kofscfind.c), and the model's other
+ * caps (MAX_GROUP 8, GRP_SIM_MAX 8, MAX_RANGE 8, DRAFT_LOADED_MAX; the strings table has no scroll window of its own; MAX_OBJ 128 and HIT_MAX 512 drop silently, rule 4);
+ * `.inc` regions may become named sub-structs one at a time (text, find, props, catalog, menu first). Viewer-side work the engine rewrite will make unnecessary or must feed:
+ * dis_func_at (kv_disasm.c) filters the engine's function set by NAME (audit FP-13: a stripped or PE function with no symbol is not a function there), kv_mutation.c computes
+ * mtn_segment / mtn_rescore / mtn_mark on its own (rule 11), KXV-EVT-1 (kv_evt_load.c), P3-1 (kv_bar_items.c). When the engine publishes ONE function table per object
+ * (see IMPROVE func-size-1 and the fntab note in libgenome/phenotype/diag_scan.c), every function row of the viewer reads that table and nothing else. */
+
 #ifndef KV_H
 #define KV_H
 

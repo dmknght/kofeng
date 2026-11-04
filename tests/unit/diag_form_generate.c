@@ -153,7 +153,7 @@ static void write_catalogs(const char *base)
 
 static struct decl *decl_text(const uint8_t *p, uint32_t n)
 {
-	struct decl *d = &E.dr.decl[E.dr.n_decl++];
+	struct decl *d = decl_push(&E);
 
 	memset(d, 0, sizeof *d);
 	d->bytes = malloc(n);
@@ -164,7 +164,7 @@ static struct decl *decl_text(const uint8_t *p, uint32_t n)
 
 static struct decl *decl_hex(const char *hexs)
 {
-	struct decl *d = &E.dr.decl[E.dr.n_decl++];
+	struct decl *d = decl_push(&E);
 
 	memset(d, 0, sizeof *d);
 	d->hex = DECL_HEX;
@@ -205,6 +205,7 @@ static void free_draft(void)
 
 	for (i = 0; i < E.dr.n_decl; i++)
 		free(E.dr.decl[i].bytes);
+	free(E.dr.decl);
 	free(E.dr.blk);
 	memset(&E.dr, 0, sizeof E.dr);
 }

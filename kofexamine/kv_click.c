@@ -173,6 +173,13 @@ static int click_scrollbar(struct view *v)
 					? v->dis_len : dis_hex_shown(v);
 				off = (uint64_t)v->dis_bias;
 				shown = dis_span_of(v);
+			} else if (which == 5) {
+				int full;
+
+				top = 0; bot = 0;
+				(void)blk_win_rows(v, &top, &bot, &full);
+				total = v->blk_nshown; off = v->blk_off;
+				shown = v->blk_nwin;
 			} else {
 				top = decl_top() + 1;
 				bot = decl_top() + g_decl_rows - 2;
@@ -827,7 +834,7 @@ static void click_leave_edit(struct view *v)
 	 * word - the row still showed the old bytes, which reads as the edit
 	 * having been saved until it is opened again and is not there.
 	 */
-	if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
+	if (v->edit >= ED_STR && v->edit - ED_STR < (int)v->ed.dr.n_decl) {
 		uint32_t si = (uint32_t)(v->edit - ED_STR);
 
 		v->edit = 0;

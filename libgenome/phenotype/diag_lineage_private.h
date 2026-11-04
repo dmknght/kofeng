@@ -28,6 +28,7 @@
 #include <celllysis/cfg.h>
 #include "emu.h"
 #include "codemap.h"
+#include "frame.h"
 
 /*
  * HOW MANY TOKENS A VALUE HOLDS. Sixteen. The research prototype's eight overflowed on 14 of the 300 corpus files (a large switch
@@ -96,13 +97,7 @@ struct kgenome_lineage_abi {
 	uint8_t  callee_pops;           /* a call to a site pops what was pushed for it unless an `add esp` follows (PE x86) */
 };
 
-/* A function by its entry address, for the lookup (the address is the first member: kofcmp.h). */
-struct kgenome_lineage_fnva {
-	uint64_t va;
-	uint32_t fn;
-};
-
-/* One function of the object. */
+/* One function of the object as the stage reads it (kgenome_lineage_fn_get): the table's entry with its extent clamped to the object, and the address of its entry. */
 struct kgenome_lineage_fn {
 	uint64_t off, len, va;          /* file offset, length, address of the entry */
 };
@@ -167,9 +162,18 @@ struct kgenome_lineage {
 	unsigned act;                   /* ... of those, the ones active on the block being stepped (its predicates hold) */
 	struct kgenome_lineage_abi abi;
 	struct kgenome_diag_walk *wk;   /* the object's decode, or NULL */
-	/* the functions, sorted by offset and disjoint */
-	struct kgenome_lineage_fn *fn;
+	/* THE FUNCTIONS: the engine's table, read by index (`fs`) */
+	const struct kgenome_func_set *fs;
+	struct kgenome_func_set own;
+	/* THE FRAMES (phenotype/frame.h): the cache of the object's, and what a frame is made from. `fsrc.fs` is the table the cache is keyed by: a function that is an entry of it is read from the cache, any other (an extent the table clamps) is made and given back after its solve. */
+	struct kgenome_frame_cache *frames;
+	struct kgenome_frame_src fsrc;
+	uint64_t own_charged;
 	uint32_t n_fn;
+	struct kgenome_lineage_fnva { uint64_t va; uint32_t fn; } *by_va;   /* the entry address of each function the stage can read, with its index, sorted by address (the first member: kofcmp.h) */
+	uint32_t n_by_va;
+	uint32_t *site_fn;              /* per site: the function that holds it (KGENOME_FUNCS_NONE: none), decided once */
+	uint32_t *ref_from, *ref_to;    /* per codemap reference: the function that holds the instruction / its target (the second array is the first's tail), decided once */
 	/* the sites: nodes at a call or a jump, sorted by `at` */
 	uint64_t *site_at;
 	uint32_t *site_node;
@@ -177,6 +181,7 @@ struct kgenome_lineage {
 	/* the decoded function in hand */
 	struct kgenome_cell_insn *in;
 	uint32_t n_in, cap_in;
+	uint64_t n_skip;                /* bytes of the function in hand that decoded as nothing */
 	/* every function's summary, in the wrapper's own format and the wrapper's own pool functions */
 	struct kgenome_diag_wrapper_ctx sums;
 	/* what reaches each consumer: the object's table, the function-in-hand's, and the one adds go to */
@@ -195,7 +200,7 @@ struct kgenome_lineage {
 	uint32_t cur_fn;
 	uint32_t *callers;              /* per function: the direct calls into it */
 	int      fn_store;              /* the function in hand holds a store to a place beyond the frame (in a block the walk reached) */
-	uint8_t  *noret_fn;             /* per function: no way to return (no ret, no jump out, no jump through a register, a call or a syscall) */
+	uint8_t  *noret_fn;             /* per function: 0 not asked, 1 no way to return (kgenome_lineage_noret), 2 it can; NULL: the stage does not use it */
 	uint8_t  *fn_run;               /* per function: the stages of its last run */
 	uint8_t  *has_site;             /* per function: it holds a node */
 	uint8_t  *skipped;              /* per function: not read because nothing in it or below it is useful; 2 = a caller needs its return */
@@ -204,7 +209,6 @@ struct kgenome_lineage {
 	int      can_defer, no_defer, deferred;    /* the solve in hand must merge (no_defer); the last solve left its merge for a second read (deferred) */
 	uint8_t  *nontriv;              /* per function: its summary has a sink, or returns a producer or a parameter */
 	uint64_t *sumhash;              /* per function: what its summary was when last published */
-	struct kgenome_lineage_fnva *fn_by_va;  /* the functions ordered by entry address */
 	int      dry;                   /* solve to learn a summary, and write no link (a recursive group iterating) */
 	int16_t  *pop;                  /* per function: the bytes its returns pop (an i386 stdcall callee), or -1 when not known */
 	int16_t  *argc;                 /* per node: the stdcall argument count of the API it is, -1 when not known, -2 not asked yet */
@@ -258,7 +262,8 @@ void kgenome_lineage_uncharge(struct kgenome_lineage *L, uint64_t n);
  */
 struct kgenome_lineage_cfg {
 	uint32_t nb;
-	struct kgenome_cfg cfg;         /* the blocks (celllysis/cfg.h): `first`, `n_insn` and successors as block indices; nb == cfg.n_all */
+	const struct kgenome_frame *fr; /* the function's frame (phenotype/frame.h), read only: its graph is `cfg`, its facts of each block `fr->bits` */
+	struct kgenome_cfg cfg;         /* the frame's graph (a copy of the header; the arrays are the frame's): `first`, `n_insn` and successors as block indices; nb == cfg.n_all */
 	struct kgenome_lineage_state *bs;
 	uint32_t *wl;                   /* the blocks to look at, a ring of nb */
 	uint8_t  *inq;
@@ -279,7 +284,9 @@ void kgenome_lineage_cfg_enter(struct kgenome_lineage_cfg *g, uint32_t b, struct
  * names (diag_lineage_chain.c), or every one of them when `all`. */
 void kgenome_lineage_seed(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, int all);
 /* Is this call one the program does not come back from. */
-int  kgenome_lineage_call_noreturn(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
+int  kgenome_lineage_call_noreturn(struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
+/* Has function `fi` no way to return: read from its FRAME's reachable blocks, once (a memo in `noret_fn`). */
+int  kgenome_lineage_noret(struct kgenome_lineage *L, uint32_t fi);
 /* The node of an instruction (see diag_lineage_solve.c). */
 int  kgenome_lineage_site_in(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in, uint32_t *node);
 int  kgenome_lineage_site_of(const struct kgenome_lineage *L, uint64_t at, uint32_t *node);
@@ -298,16 +305,20 @@ static inline uint32_t kgenome_lineage_bend(const struct kgenome_lineage_cfg *g,
 }
 /* Does the node's capability hand a handle on in its result. */
 int  kgenome_lineage_hands_on(const struct kgenome_lineage *L, const struct kgenome_diag_hit *h);
-/* The function whose entry is the address, or UINT32_MAX. */
-uint32_t kgenome_lineage_fn_of_va(const struct kgenome_lineage *L, uint64_t va);
-/* The function an offset lies in, or UINT32_MAX. */
-uint32_t kgenome_lineage_fn_at(const struct kgenome_lineage *L, uint64_t off);
+/* The function whose entry is the target of the call or jump `in`, or UINT32_MAX. */
+uint32_t kgenome_lineage_fn_of_insn(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
+/* The function `fi` as the stage reads it; 0 when it has no code the stage can read (outside the object, no length, no address). */
+int kgenome_lineage_fn_get(const struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineage_fn *out);
+/* What a frame of a function is made from (the allocator is the lineage's ledger): `table` is the engine's function table, the cache's key. */
+void kgenome_lineage_frame_src(struct kgenome_lineage *L, const struct kgenome_func_set *table);
+/* The function of each end of every reference of `cm`, decided once (L->ref_from, L->ref_to); 0 when memory or the ledger refused. Idempotent. */
+int kgenome_lineage_refs(struct kgenome_lineage *L, const struct kgenome_codemap *cm);
 void kgenome_lineage_agg_add(struct kgenome_lineage *L, uint32_t node, uint8_t role,
 			     const struct kgenome_lineage_val *v, int uncertain);
 /* The words an i386 stdcall callee pops, for a call through the import slot at `slot` - or -1. */
 int  kgenome_lineage_slot_pop(const struct kgenome_lineage *L, uint64_t slot);
 /* The decoded body of function `fi`, into L->in. 0 when memory ran out. */
-int  kgenome_lineage_decode(struct kgenome_lineage *L, uint32_t fi);
+int  kgenome_lineage_decode(struct kgenome_lineage *L, const struct kgenome_lineage_fn *f);
 
 /* The object's codemap, built on the first ask (NULL when memory or the ledger refused). */
 const struct kgenome_codemap *kgenome_lineage_codemap(struct kgenome_lineage *L);

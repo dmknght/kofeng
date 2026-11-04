@@ -174,6 +174,7 @@ static void new_draft(void)
 
 	for (i = 0; i < E.dr.n_decl; i++)
 		free(E.dr.decl[i].bytes);
+	free(E.dr.decl);
 	free(E.dr.blk);
 	memset(&E.dr, 0, sizeof E.dr);
 	E.dr.blk = calloc(64, sizeof *E.dr.blk);
@@ -588,7 +589,7 @@ static void small_function_round_trip(void)
 	chain(&b, 6);
 	b.kind[1] = CS_JUMP;
 	b.t[1] = 3;
-	for (i = 0; i < 6u; i++)        /* nops that change no shape: a function under the cut's minimum (FN_MIN, 64 bytes) is no unit at all */
+	for (i = 0; i < 6u; i++)        /* nops that change no shape: a small function, which is a unit of its own (no minimum size) */
 		a.pad[i] = b.pad[i] = 8;
 	CK(cs_build(&OA, &a, 1, 0x40));
 	CK(cs_build(&OB, &b, 1, 0x40));

@@ -72,4 +72,8 @@ const char *kof_gzip_anomaly_name(unsigned index);
 extern const uint32_t kof_gzip_region_bits[];
 #define KOF_GZIP_REGION_COUNT 5u   /* asserted against the array in the .c */
 
+/* A gzip at the start of `f` that is a variable's data: reserved flags zero and a stream that inflates.
+ * `*extent` is exact when the stream ends within the probe, else 0; `*work` is the allowance, spent. */
+int kof_gzip_embedded(kof_buf f, uint64_t *extent, uint64_t *work);
+
 #endif /* KOFENG_GZIP_PARSE_H */

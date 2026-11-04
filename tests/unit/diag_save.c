@@ -106,6 +106,10 @@ static char *slurp_path(const char *path, size_t *n)
 	fseek(f, 0, SEEK_END);
 	L = ftell(f);
 	fseek(f, 0, SEEK_SET);
+	if (L < 0 || L > (1L << 30)) {  /* not a regular file (a FIFO, a device; a directory answers LONG_MAX): no size worth reading - malloc(LONG_MAX + 1) asks for 8 EiB */
+		fclose(f);
+		return NULL;
+	}
 	b = malloc((size_t)L + 1u);
 	if (b && fread(b, 1, (size_t)L, f) != (size_t)L) {
 		free(b);
@@ -217,6 +221,72 @@ static void copy_real(const char *stem)
 	char *b;
 	FILE *f;
 
+	/* THE REAL FILES THE ROWS NAME ARE THE OWNER'S, AND THE OWNER RENAMED AND REMADE THEM: the six `mirai-flood_01..06`, `mirai-wordlist_01` and `mirai-ops-str_01` the rows were written for are now
+	 * five `flood_01..05` and the data diagnoses `mirai-strings_01`, `_02`. The rows keep their names and take the bytes of what stands in their place (the model is the editor's: which
+	 * bytes a block holds is not what the rows ask): flood_0N for N <= 5; the sixth is the fifth again; the two data ones are the two data diagnoses. The name inside is the name of the row. */
+	static const struct { const char *row, *real, *real_tag, *row_tag; int tweak; } src[] = {
+		/* flood_01 and flood_02 of the real set hold the SAME block: the rows need six different ones, so the second takes flood_03 and so on, and the last two are flood_05 and flood_01 with the last key of
+		 * the block moved by one (`tweak`: another block, which no row compares by content) */
+		{ "botnet_mirai_mirai-flood_01", "botnet_mirai_flood_01", "Flood", "Mirai-flood", 0 }, { "botnet_mirai_mirai-flood_02", "botnet_mirai_flood_03", "Flood", "Mirai-flood", 0 },
+		{ "botnet_mirai_mirai-flood_03", "botnet_mirai_flood_04", "Flood", "Mirai-flood", 0 }, { "botnet_mirai_mirai-flood_04", "botnet_mirai_flood_05", "Flood", "Mirai-flood", 0 },
+		{ "botnet_mirai_mirai-flood_05", "botnet_mirai_flood_05", "Flood", "Mirai-flood", 1 }, { "botnet_mirai_mirai-flood_06", "botnet_mirai_flood_01", "Flood", "Mirai-flood", 1 },
+		{ "botnet_mirai_mirai-wordlist_01", "botnet_mirai_mirai-strings_01", "Mirai-Strings", "Mirai-wordlist", 0 },
+		{ "botnet_mirai_mirai-ops-str_01", "botnet_mirai_mirai-strings_02", "Mirai-Strings", "Mirai-Ops-Str", 0 },
+	};
+	unsigned si;
+
+	for (si = 0; si < sizeof src / sizeof src[0]; si++)
+		if (!strcmp(stem, src[si].row)) {
+			char *t;
+
+			snprintf(from, sizeof from, "bases/diagnoses/%s.c", src[si].real);
+			t = slurp_path(from, &n);
+			CK(t != NULL);
+			if (t) {
+				char *q = strstr(t, src[si].real), *w;
+				const size_t rl = strlen(src[si].real), sl = strlen(stem);
+				char *o = malloc(n + sl + 1u);
+
+				if (q && o) {
+					size_t pre = (size_t)(q - t), len = n - rl + sl;
+					char needle[96], *tg;
+
+					memcpy(o, t, pre);
+					memcpy(o + pre, stem, sl);
+					memcpy(o + pre + sl, q + rl, n - pre - rl);
+					o[len] = 0;
+					if (src[si].tweak) {
+						char *e = strstr(o, "u);\nKOF_DIAG_SIMILAR");
+
+						if (e)
+							e[-1] = e[-1] == 'f' ? 'e' : (char)(e[-1] + 1);
+					}
+					snprintf(needle, sizeof needle, "KOF_DIAG_TAG(\"%s\");", src[si].real_tag);
+					tg = strstr(o, needle);
+					w = NULL;
+					snprintf(to, sizeof to, "%s/%s.c", dir, stem);
+					f = fopen(to, "wb");
+					if (f && tg) {
+						const size_t head = (size_t)(tg - o), nl = strlen(needle);
+						char tagline[96];
+
+						snprintf(tagline, sizeof tagline, "KOF_DIAG_TAG(\"%s\");", src[si].row_tag);
+						fwrite(o, 1, head, f);
+						fwrite(tagline, 1, strlen(tagline), f);
+						fwrite(o + head + nl, 1, len - head - nl, f);
+					} else if (f) {
+						CK(0);
+					}
+					if (f)
+						fclose(f);
+				} else {
+					CK(0);
+				}
+				free(o);
+				free(t);
+			}
+			return;
+		}
 	snprintf(from, sizeof from, "bases/diagnoses/%s.c", stem);
 	snprintf(to, sizeof to, "%s/%s.c", dir, stem);
 	b = slurp_path(from, &n);
@@ -253,6 +323,7 @@ static void new_draft(void)
 
 	for (i = 0; i < E.dr.n_decl; i++)
 		free(E.dr.decl[i].bytes);
+	free(E.dr.decl);
 	free(E.dr.blk);
 	memset(&E.dr, 0, sizeof E.dr);
 	E.dr.blk = calloc(64, sizeof *E.dr.blk);
@@ -1221,7 +1292,7 @@ static void conditions(void)
 
 	clean();
 	new_draft();
-	d = &E.dr.decl[E.dr.n_decl++];
+	d = decl_push(&E);
 	memset(d, 0, sizeof *d);
 	d->bytes = malloc(8);
 	memcpy(d->bytes, "alpha-ma", 8);

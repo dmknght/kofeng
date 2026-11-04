@@ -17,7 +17,7 @@
  * Rows a list may hold. The longest lists come from the two catalogs the panel
  * reads: the variants of a family (KV_FAM_MAX_VARIANT = 256, the Pathogens
  * table the viewer allocates; a family may own all of them) and the tags
- * (KV_TAG_MAX = 64); CH_MARKER's is MAX_DECL + 2. kv_chooser.c asserts the
+ * (KV_TAG_MAX = 64); CH_MARKER's is the number of markers (the draft table grows). kv_chooser.c asserts the
  * number against those, so a catalog that grows cannot cut a list silently.
  * What is still too long is counted in `more` and said on the last row.
  */

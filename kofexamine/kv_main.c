@@ -51,7 +51,7 @@ static void file_close(struct view *v);
 struct kv_session {
 	struct kof_range *ext, *ext2, *probe;
 	struct mtn_block *plg;
-	uint32_t          n_plg, cap;
+	uint32_t          n_plg, cap_plg, cap;
 	struct kv_fam_ui *fam;      /* the Pathogens catalog is the session's: it outlives the file */
 	struct kv_tag_ui *tag;      /* and so is the Syndromes catalog */
 	int               heur_off; /* kept ACROSS files: how the reader asked to be shown a document */
@@ -74,6 +74,7 @@ static void session_take(struct view *v, struct kv_session *k)
 	k->probe = v->probe;
 	k->plg   = v->ed.dr.blk;
 	k->n_plg = 0;
+	k->cap_plg = v->ed.dr.cap_blk;
 	k->cap   = v->ed.dr.decl_cap;
 	k->fam   = v->fam;
 	k->tag   = v->tag;
@@ -103,6 +104,7 @@ static void session_put(struct view *v, const struct kv_session *k)
 	v->probe = k->probe;
 	v->ed.dr.blk   = k->plg;
 	v->ed.dr.n_blk = k->n_plg;
+	v->ed.dr.cap_blk = k->cap_plg;
 	v->ed.dr.decl_cap = k->cap;
 	editor_attach(v);       /* the clear zeroed what it borrows */
 	snprintf(v->basedir, sizeof v->basedir, "%s", k->basedir);
@@ -388,6 +390,7 @@ static void view_free(struct view *v)
 	free(v->ext2);
 	free(v->probe);
 	free(v->ed.dr.blk);
+	draft_release(v);
 	fam_free(v);
 	tags_free(v);
 	cfgd_free(v);
@@ -754,8 +757,7 @@ int main(int argc, char **argv)
 	v->ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->ext);
 	v->ext2 = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->ext2);
 	v->probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->probe);
-	v->ed.dr.blk = calloc(MTN_MAX_BLOCK, sizeof *v->ed.dr.blk);
-	if (!v->ext || !v->ext2 || !v->probe || !v->ed.dr.blk) {
+	if (!v->ext || !v->ext2 || !v->probe) {
 		fprintf(stderr, "kofviewer: out of memory\n");
 		return 1;
 	}

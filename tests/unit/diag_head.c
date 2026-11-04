@@ -237,7 +237,7 @@ static void the_draft(void)
 	snprintf(E.dr.family, sizeof E.dr.family, "Mirai");
 	snprintf(E.dr.variant, sizeof E.dr.variant, "Mirai_A");
 	E.dr.fmt_mask = 1u << KOF_FMT_ELF;
-	d = &E.dr.decl[E.dr.n_decl++];
+	d = decl_push(&E);
 	memset(d, 0, sizeof *d);
 	d->bytes = malloc(12);
 	memcpy(d->bytes, "alpha-marker", 12);
@@ -261,6 +261,7 @@ static void drop_draft(void)
 
 	for (i = 0; i < E.dr.n_decl; i++)
 		free(E.dr.decl[i].bytes);
+	free(E.dr.decl);
 	free(E.dr.blk);
 	memset(&E.dr, 0, sizeof E.dr);
 }

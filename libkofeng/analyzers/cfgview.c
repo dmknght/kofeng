@@ -18,6 +18,7 @@
 #include "cfgview.h"
 #include "genome_obj.h"
 #include "parsers/binaries/funcs.h"
+#include <kofmod/kofmutation.h>
 
 #define NAMED_CALLS KOF_CFGVIEW_XLINES
 
@@ -36,40 +37,14 @@ static void fail(struct kof_cfgview *out, enum kgenome_status st, const char *wh
 	}
 }
 
-static const struct kgenome_func *func_at(const struct kgenome_func_set *fs, uint64_t off, uint64_t len)
-{
-	uint32_t lo = 0, hi = fs ? fs->n : 0;
-
-	while (lo < hi) {
-		const uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (fs->v[mid].off < off)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	for (; fs && lo < fs->n && fs->v[lo].off == off; lo++)
-		if (fs->v[lo].len == len)
-			return &fs->v[lo];
-	return NULL;
-}
-
 /* The name of the function that starts at file offset `off`: kof_func_name when the table has an entry there (its symbol, or `fcn_<offset>`), else the made-up
  * name of the address alone. */
 static void func_name(const struct kof_cfgview_req *rq, uint64_t off, char *out, size_t cap)
 {
-	uint32_t lo = 0, hi = rq->funcs ? rq->funcs->n : 0;
+	const uint32_t i = kgenome_funcs_start(rq->funcs, off);
 
-	while (lo < hi) {                       /* the first entry at `off`, whatever its length */
-		const uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (rq->funcs->v[mid].off < off)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	if (rq->funcs && lo < rq->funcs->n && rq->funcs->v[lo].off == off)
-		(void)kof_func_name(&rq->funcs->v[lo], rq->sym, rq->sym_n, out, cap);
+	if (i != KGENOME_FUNCS_NONE)
+		(void)kof_func_name(&rq->funcs->v[i], rq->sym, rq->sym_n, out, cap);
 	else
 		kof_fcn_name(off, out, cap);
 }
@@ -193,9 +168,9 @@ static int text_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out)
 
 		if (out->n_skip)
 			snprintf(sk, sizeof sk, "  skipped-bytes=%llu", (unsigned long long)out->n_skip);
-		snprintf(t1, sizeof t1, "extent  0x%llx +%llu bytes  %s %s  instructions=%u  calls=%u%s", (unsigned long long)out->func_off,
+		snprintf(t1, sizeof t1, "extent  0x%llx +%llu bytes  %s %s  instructions=%u%s%s", (unsigned long long)out->func_off,
 			 (unsigned long long)out->func_len, kgenome_arch_title(out->arch) ? kgenome_arch_title(out->arch) : "?",
-			 out->be ? "big-endian" : "little-endian", out->n_insn, out->n_call, sk);
+			 out->be ? "big-endian" : "little-endian", out->n_insn, out->n_call ? "" : "  calls=0", sk);
 	}
 	/* the extra lines of the boxes: the first KGENOME_GV_BOX_X calls of a block, the first KOF_CFGVIEW_XLINES of them in all; the rest is the box's `+N more` */
 	for (i = 0; i < out->n_call && nx < KOF_CFGVIEW_XLINES; i++) {
@@ -214,6 +189,12 @@ static int text_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out)
 	gq.n_note = held;
 	gq.n_xline = nx;
 	(void)kgenome_cfg_gv_make(&gq, &out->gv);
+	/* THE UNIT ID: the id the Blocks table shows for this function row (kof_mutation_fold of the signature's keys), a line of its own between the CFG line and the keys. Only a signed function has one. */
+	if (out->anchor_pass && out->view.n_key && out->gv.n_head >= 3u && out->gv.n_head < KGENOME_GV_HEAD_MAX) {
+		memmove(out->gv.head[4], out->gv.head[3], (size_t)(out->gv.n_head - 3u) * sizeof out->gv.head[0]);
+		snprintf(out->gv.head[3], sizeof out->gv.head[3], "unit   %08x", kof_mutation_fold(out->view.key, out->view.n_key));
+		out->gv.n_head++;
+	}
 	out->status = kgenome_status_merge(out->status, out->gv.status);
 	for (i = 0; i < held && out->gv.note; i++) {
 		const struct kof_cfgview_call *c = &out->call[i];
@@ -242,7 +223,7 @@ static int text_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out)
 			k++;
 		}
 	}
-	/* THE FACTS: the head (the function, the extent, the counts, the hashes, the anchor), the calls, the unreachable blocks. */
+	/* THE FACTS: the head (the function, the extent, the counts, the unit id, the keys), the calls, the unreachable blocks. */
 	memset(&f, 0, sizeof f);
 	for (i = 0; i < out->gv.n_head; i++)
 		fact(&f, out->gv.head[i]);
@@ -314,9 +295,13 @@ int kof_cfgview_build(const struct kof_cfgview_req *rq, struct kof_cfgview *out)
 		fail(out, KGENOME_BAD_INPUT, "the extent is not inside the object");
 		return 0;
 	}
-	if (rq->funcs && !func_at(rq->funcs, rq->func_off, rq->func_len)) {
-		fail(out, KGENOME_BAD_INPUT, "the extent is not a function of this object");
-		return 0;
+	if (rq->funcs) {
+		const uint32_t fi = kgenome_funcs_start(rq->funcs, rq->func_off);
+
+		if (fi == KGENOME_FUNCS_NONE || rq->funcs->v[fi].len != rq->func_len) {
+			fail(out, KGENOME_BAD_INPUT, "the extent is not a function of this object");
+			return 0;
+		}
 	}
 	func_name(rq, rq->func_off, out->name, sizeof out->name);
 	kof_genome_obj(rq->ctx, &gobj);

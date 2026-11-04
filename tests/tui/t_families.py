@@ -295,7 +295,8 @@ def add_family_ticks_types_and_creates_the_lettered_first_variant():
         v.type('Mirai')
         check(v.has('Variant Mirai_A'), 'the first variant\'s name does not follow the typing')
         rows = [y for y in range(3, v.rows) if 'Name    [' in v.row(y)]
-        check(rows and 'Variant' in v.row(rows[0] + 1) and 'Virus' not in v.row(rows[0] + 1), 'line 2 is not the variant name line')
+        check(rows and 'Note    [' in v.row(rows[0] + 1), 'the family\'s own Note row does not sit directly under Name')
+        check(rows and 'Variant' in v.row(rows[0] + 2) and 'Virus' not in v.row(rows[0] + 2), 'line 3 is not the variant name line')
         press(v, '[ OK ]')
         check(v.has('[ OK ]') and v.has('Select at least one Malware type'), 'no type ticked must be refused, dialog open')
         tick(v, 'Trojan')
@@ -458,7 +459,9 @@ def comment_field_sits_under_the_variant_row_and_above_the_types_title():
         press(v, '[ Add family ]', dx=2)
         ys = {k: next((y for y in range(1, v.rows + 1) if k in v.row(y)), None) for k in ('Name    [', 'Variant', 'Comment [', 'Malware types')}
         check(all(ys.values()), 'a row is missing: %r' % ys)
-        eq((ys['Variant'], ys['Comment ['], ys['Malware types']), (ys['Name    [' ] + 1, ys['Name    ['] + 2, ys['Name    ['] + 3), 'row order: %r' % ys)
+        # the family's own Note row sits directly under Name (see family_has_its_own_note_field_under_the_name_in_add_and_edit);
+        # the variant's own rows follow it, shifted down by one
+        eq((ys['Variant'], ys['Comment ['], ys['Malware types']), (ys['Name    [' ] + 2, ys['Name    ['] + 3, ys['Name    ['] + 4), 'row order: %r' % ys)
         v.type('Mirai')
         click_field(v, 'Comment')
         v.type('first seen 2016')
@@ -489,6 +492,54 @@ def comment_longer_than_120_is_refused_and_the_dialog_stays():
         tick(v, 'Botnet')
         press(v, '[ OK ]')
         check(v.has('[ OK ]') and v.has('comment is over 120'), 'a 121-character comment must be refused: %r' % v.snapshot()[8:22])
+
+
+@case(A)
+def family_has_its_own_note_field_under_the_name_in_add_and_edit():
+    """The family's own comment ('Note'), kept apart from a variant's ('Comment'): directly under the Name field in both Add
+    family and Edit family, pre-filled on reopen, never shown in the main table (owner: the comment is per family, not per row)."""
+    with opened() as v:
+        press(v, '[ Add family ]', dx=2)
+        y = next((y for y in range(1, v.rows + 1) if 'Name    [' in v.row(y)), None)
+        check(y and 'Note    [' in v.row(y + 1), 'the Note row is not directly under the Name field: %r' % (v.row(y + 1) if y else None))
+        v.type('Mirai')
+        click_field(v, 'Note')
+        v.type('a known family')
+        click_field(v, 'Comment')
+        v.type('first variant')
+        tick(v, 'Botnet')
+        press(v, '[ OK ]')
+        check(not v.has('a known family'), 'the family note must not show in the main table: %r' % body(v))
+        check('first variant' in norm(body(v))[1], 'the first variant kept its own comment: %r' % body(v))
+        # Edit family shows the Note row too, pre-filled, and none of the variant part
+        v.click(v.find('Mirai')[0], v.find('Mirai')[1])
+        v.pump_quiet()
+        check(v.has('Edit family') and v.has('Note    [a known family'), 'the family note did not pre-fill on Edit: %r' % v.snapshot()[8:24])
+        check(not v.has('Comment [') and not v.has('Malware types'), 'Edit family must not show the variant part')
+        v.esc()
+        # a freshly added family with no note: Edit shows the row empty, and typing there stores it
+        add_family(v, 'Gafgyt', 'Virus')
+        v.click(v.find('Gafgyt')[0], v.find('Gafgyt')[1])
+        v.pump_quiet()
+        check(v.has('Note    [') and not v.has('Note    [Gafgyt'), 'a family with no note must show the row empty: %r' % v.snapshot()[8:24])
+        click_field(v, 'Note')
+        v.type('added later')
+        press(v, '[ OK ]')
+        v.click(v.find('Gafgyt')[0], v.find('Gafgyt')[1])
+        v.pump_quiet()
+        check(v.has('Note    [added later'), 'Edit family did not store the note: %r' % v.snapshot()[8:24])
+
+
+@case(A)
+def family_note_longer_than_120_is_refused_and_the_dialog_stays():
+    with opened() as v:
+        press(v, '[ Add family ]', dx=2)
+        v.type('Mirai')
+        click_field(v, 'Note')
+        v.type('c' * 121)
+        tick(v, 'Botnet')
+        press(v, '[ OK ]')
+        check(v.has('[ OK ]') and v.has('comment is over 120'), 'a 121-character family note must be refused: %r' % v.snapshot()[8:22])
 
 
 @case(A)
@@ -766,7 +817,7 @@ def edit_variant_changes_types_and_comment_together_and_a_refusal_changes_nothin
 
 
 @case(A)
-def edit_family_has_only_the_name_row_renames_and_its_variants_follow():
+def edit_family_has_only_the_name_and_note_rows_renames_and_its_variants_follow():
     with opened() as v:
         add_family(v, 'Mirai', 'Botnet')
         add_family(v, 'Gafgyt', 'Virus')
@@ -774,7 +825,7 @@ def edit_family_has_only_the_name_row_renames_and_its_variants_follow():
         v.click(v.find('Mirai')[0], y)
         v.pump_quiet()
         check(v.has('Edit family') and v.has('Name    [Mirai') and v.has('[ Delete ]') and v.has('[ OK ]') and v.has('[ Cancel ]'), 'no Edit family: %r' % v.snapshot()[8:24])
-        check(not v.has('Comment [') and not v.has('Malware types') and not any('Variant' in r and 'Mirai_A' in r for r in v.lines), 'Edit family has more than the name row')
+        check(v.has('Note    [') and not v.has('Comment [') and not v.has('Malware types') and not any('Variant' in r and 'Mirai_A' in r for r in v.lines), 'Edit family must have only the name and its own Note row')
         v.key('bs', n=5)
         v.type('Zed')
         press(v, '[ Cancel ]')
@@ -962,7 +1013,7 @@ def with_no_deleted_name_nothing_is_offered_and_a_reopened_dialog_forgets_the_pi
 
 
 @case(A)
-def add_family_and_add_variant_draw_the_same_rows_except_the_first():
+def add_family_and_add_variant_draw_the_same_rows_except_the_family_only_fields():
     with opened() as v:
         press(v, '[ Add family ]', dx=2)
         fam = [r.rstrip() for r in body(v)]
@@ -971,6 +1022,8 @@ def add_family_and_add_variant_draw_the_same_rows_except_the_first():
         press(v, '[ Add variant ]')
         var = [r.rstrip() for r in body(v)]
         var = [r for r in var if 'Reuse a deleted name' not in r]     # Add variant's one extra tick row (under the Variant row)
+        # Add family has two rows Add variant does not: Name and the family's own Note (distinct from the variant's Comment)
+        check(any('Note    [' in r for r in fam) and not any('Note    [' in r for r in var), 'the family-only Note row is not where expected: %r / %r' % (fam, var))
         i = next(k for k, r in enumerate(fam) if 'Comment' in r)
         j = next(k for k, r in enumerate(var) if 'Comment' in r)
         eq(fam[i:], var[j:], 'the rows from the Comment row down differ')

@@ -234,7 +234,16 @@ enum kof_sym_origin {
 	 * the engine's decrypt step. Said apart from PE_DIR because a reader who takes
 	 * "directory" literally is told something false about those records.
 	 */
-	KOF_SYM_ORIGIN_PE_RESOLVED = 4
+	KOF_SYM_ORIGIN_PE_RESOLVED = 4,
+	/*
+	 * The directories (if the file has any) PLUS the file's own COFF local
+	 * symbol table - the table a toolchain that keeps local symbols (GNU ld:
+	 * MinGW, Cygwin) leaves in the image, PointerToSymbolTable/NumberOfSymbols
+	 * in the file header. Said apart from PE_DIR for the same reason
+	 * PE_RESOLVED is: "imports+exports" would be false of a block that is
+	 * mostly the file's own function names.
+	 */
+	KOF_SYM_ORIGIN_PE_COFF = 5
 };
 
 /*

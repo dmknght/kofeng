@@ -24,6 +24,7 @@
  */
 
 #include "diag_scan_private.h"
+#include "frame.h"
 #include "diag_lineage.h"
 
 /*
@@ -402,6 +403,9 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	s->relocs = in ? in->relocs : NULL;
 	s->funcs = in ? in->funcs : NULL;
 	s->walk = in ? in->walk : NULL;
+	s->frames = in ? in->frames : NULL;
+	s->funcs_fn = in ? in->funcs_fn : NULL;
+	s->funcs_user = in ? in->funcs_user : NULL;
 	kgenome_diag_walk_bind(s->walk, &s->led);
 	s->apihash = in ? in->apihash : NULL;
 	s->imports = in ? in->imports : NULL;
@@ -479,57 +483,11 @@ const struct kgenome_diag_apihash_set *kgenome_diag_apihash(struct kgenome_diag_
  * shapes the relocation table has, and for the same reason: a route must not
  * care who produced what it reads, and nobody lists them twice.
  */
-/*
- * THE FUNCTIONS OF AN OBJECT: its symbols' extents, and - only when it has none -
- * the ones its code enters, found by the wrapper analysis's own walk. One call
- * for the scanner, the diagnose routes and the viewer, so the answer cannot
- * differ between them.
- */
-/* CONSOLIDATION FUNC-4 (2026-10-30, M): KEEP (will be THE function-extent routine, one list for the scanner, the routes and the viewers; 3 direct
- * callers + 4 through kgenome_diag_funcs_of). MERGE-FROM -> kgenome_elf_funcs_from_entries, diag_lineage.c fns_build (PE/gap completion, code-extent
- * bound), fnprint_walk.c body_ends/skip_pad (end of body). Add evidence: FDE, .ARM.exidx, .dynsym. Entry-only reaches 64% x86-64, 72% ARM, 0.5% MIPS of
- * symtab starts; with FDE 97.4%/72%/15.7%. Prove with: evmix.c union columns E+C+F+D per arch; ELF only today (PE:
- * lineage only). */
-void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *data,
-			      uint64_t data_n, struct kgenome_diag_walk *walk,
-			      int want_trace, struct kgenome_func_set *out)
-{
-	struct kgenome_diag_walk *own = NULL;
-	const uint64_t *ent;
-	uint32_t n;
-
-	if (!out)
-		return;
-	if (!obj) {
-		memset(out, 0, sizeof *out);
-		out->status = KGENOME_BAD_INPUT;
-		return;
-	}
-	/* KNOWN DEFECT CN-4 (2026-10-30, M) [sev M]: function extents never read .eh_frame, .ARM.exidx or .dynsym (grep: no reader; kgenome_elf_funcs_build takes .symtab only), so a stripped file falls to the entry walk.
-	 * Trigger: any stripped ELF. Effect: x86-64 start recall 64.3% entry walk vs 88.7% FDE vs 97.4% union; stripped .so 15 of 1197 exports by entry walk, all by FDE; FDE lengths equal symtab's in 99.9% (18936/18957).
-	 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (measured by fix_consol on 96 static ELF and 80 stripped .so).
-	 * Fix: read FDE, .ARM.exidx and .dynsym as extent evidence in the one routine, order symtab, FDE, exidx, pdata, call target + thunk (see FUNC-4). */
-	kgenome_funcs_build(obj->format, data, data_n, obj->file_header, out);
-	if (out->n || out->status != KGENOME_OK || obj->format != KGENOME_FMT_ELF || !obj->file_header)
-		return;
-	if (!walk)
-		walk = own = kgenome_diag_walk_new();
-	if (kgenome_diag_walk_ensure(walk, obj, data, data_n, want_trace)) {
-		ent = kgenome_diag_walk_entries(walk, &n);
-		if (n)
-			kgenome_elf_funcs_from_entries(kof_buf_make(data, data_n),
-						   obj->file_header, obj->entry_off,
-						   ent, n, out);
-	} else {
-		out->status = KGENOME_NOMEM;    /* the walk could not be held: a table that is short, said */
-	}
-	kgenome_diag_walk_free(own);
-}
-
+/* THE FUNCTIONS OF AN OBJECT: kgenome_diag_funcs_with_walk, fntab_build.c (the function table, built once, case by case). */
 void kgenome_diag_funcs_of(const struct kgenome_obj *obj, const uint8_t *data,
 		       uint64_t data_n, struct kgenome_func_set *out)
 {
-	kgenome_diag_funcs_with_walk(obj, data, data_n, NULL, 0, out);
+	kgenome_diag_funcs_with_walk(obj, data, data_n, NULL, out);
 }
 
 /*
@@ -560,11 +518,13 @@ void kgenome_diag_funcs_of_view(const struct kgenome_obj *parent_obj, kof_buf pa
 const struct kgenome_func_set *kgenome_diag_funcs(struct kgenome_diag_scan *s,
 					  const struct kgenome_obj *obj)
 {
+	if (!s->funcs && s->funcs_fn)
+		s->funcs = s->funcs_fn(s->funcs_user);        /* the caller's own table, made now that someone reads it */
 	if (!s->funcs) {
 		if (obj && obj->file_header) {
 			s->own |= KGENOME_DIAG_OWN_FUNCS;
 			kgenome_diag_funcs_with_walk(obj, s->base, s->size,
-						 kgenome_diag_scan_walk(s), 0,
+						 kgenome_diag_scan_walk(s),
 						 &s->own_funcs);
 			/* The set is built by the part that knows the object, so it is
 			 * charged when it is done: past the allowance the scan says
@@ -578,6 +538,42 @@ const struct kgenome_func_set *kgenome_diag_funcs(struct kgenome_diag_scan *s,
 		s->funcs = &s->own_funcs;
 	}
 	return s->funcs;
+}
+
+/* The allocator of the frames a scan makes for itself: every byte is charged to the scan's ledger, refused (NULL) when it does not fit - the function then has no frame, said. */
+static void *frame_alloc(void *user, size_t n)
+{
+	struct kgenome_diag_scan *s = user;
+	void *p;
+
+	if (!kgenome_ledger_charge(&s->led, n))
+		return NULL;
+	p = malloc(n);
+	if (!p)
+		kgenome_ledger_release(&s->led, n);
+	return p;
+}
+
+static void frame_release(void *user, void *p, size_t n)
+{
+	struct kgenome_diag_scan *s = user;
+
+	if (p) {
+		kgenome_ledger_release(&s->led, n);
+		free(p);
+	}
+}
+
+struct kgenome_frame_cache *kgenome_diag_frames(struct kgenome_diag_scan *s)
+{
+	if (!s->frames) {
+		if (!s->own_frames)
+			s->own_frames = kgenome_frame_cache_new(&(const struct kgenome_cfg_mem){ frame_alloc, frame_release, s },
+								kgenome_ledger_room(&s->led) / 4u);
+		s->frames = s->own_frames;
+		s->own |= KGENOME_DIAG_OWN_FRAMES;
+	}
+	return s->frames;
 }
 
 const struct kgenome_elf_relocs *kgenome_diag_relocs(struct kgenome_diag_scan *s,
@@ -765,6 +761,7 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	kgenome_elf_reloc_table_free(&s->own_relocs);
 	kgenome_funcs_free(&s->own_funcs);
 	kgenome_diag_walk_free(s->own_walk);
+	kgenome_frame_cache_free(s->own_frames);
 	kgenome_elf_reloc_table_free(&s->data_relocs);
 	free(s->rcall);
 	free(s->oblig);

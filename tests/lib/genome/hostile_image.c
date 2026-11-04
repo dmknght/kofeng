@@ -31,6 +31,7 @@
  */
 
 #include <kgenome.h>
+#include <genotype/image/fntab.h>
 
 #include "hk.h"
 #include "../../unit/known_miss.h"
@@ -225,10 +226,16 @@ static void walk_elf(const uint8_t *p, size_t n, const struct kgenome_elf_info *
 	kgenome_funcs_free(&fv);
 	kgenome_funcs_free(&fs);
 	{
-		uint64_t ent[3] = { 0, 0x40, UINT64_MAX };
-		kgenome_elf_funcs_from_entries(f, e, 0x40, ent, 3, &fs);
-		funcs_check(&fs, n, "from_entries extent beyond the object");
-		kgenome_funcs_free(&fs);
+		/* the unwind strategy on the same hostile bytes: every entry it keeps lies inside the file */
+		struct kgenome_fntab_list fl;
+		uint32_t q;
+
+		memset(&fl, 0, sizeof fl);
+		kgenome_fntab_fde(f, e, &fl);
+		for (q = 0; q < fl.n; q++)
+			if (fl.v[q].off > n || fl.v[q].len > n - fl.v[q].off)
+				bad("fde extent beyond the object", n);
+		kgenome_fntab_list_free(&fl);
 	}
 
 	{

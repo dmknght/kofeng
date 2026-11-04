@@ -141,6 +141,12 @@ UNIT_LIBS_parse_once := -Wl,--wrap=kgenome_elf_image_parse -Wl,--wrap=kgenome_pe
 # diag_graph_bin counts work and NULL arguments at link time, with no counter or hook in the production code:
 # how many times the wrapper fixpoint asked whether a function could come out differently (C1), and every
 # mem*/qsort call that was handed a NULL pointer, whatever the length (U1: memcmp(NULL, NULL, 0)).
+UNIT_LIBS_codemap_decode_once := -Wl,--wrap=kgenome_cell_decode
+UNIT_LIBS_fntab_cov   := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
+UNIT_LIBS_fntab_pe_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
+UNIT_LIBS_lineage_frame := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=kgenome_cell_decode
+UNIT_LIBS_diag_pe := -Wl,--wrap=kgenome_cell_decode
+UNIT_LIBS_cfgsign_wk  := -Wl,--wrap=kgenome_cell_decode
 UNIT_LIBS_diag_graph_bin := -Wl,--wrap=kgenome_diag_wrapper_tseen_retry -Wl,--wrap=memcmp -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memset -Wl,--wrap=qsort -Wl,--wrap=kgenome_cell_next -Wl,--wrap=kgenome_diag_funcs
 # The normalise-defect tests count work and inject faults at link time, with no counter or hook in the
 # production code: norm_defect_image counts the bytes any compare is asked for (N2), norm_defect_plan the bytes
@@ -162,8 +168,6 @@ UNIT_LIBS_api_tables_hostile := $(OOM_WRAP)
 UNIT_LIBS_api_kix_hostile := $(OOM_WRAP)
 # diag_bin_oom does the same for the BINARY route (the sweep, symbol, emulate, API-hash and lineage routes, the function table, the code map): every allocation refused in turn,
 # free wrapped as well so that an allocation left behind after a refused call is counted without a sanitiser.
-# fnprint_bsketch_oom refuses each allocation of the sketch builder in turn (WP9-F14).
-UNIT_LIBS_fnprint_bsketch_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 UNIT_LIBS_diag_bin_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free -rdynamic
 # diag_text_ops refuses every allocation of a scan over the list, cast and operator shapes in turn (the evaluator's lists: a refusal must be said, never a shorter set of constants with a clean
 # status): malloc, calloc and realloc wrapped, armed only around the scan. text_scan_once counts, at the one call every stage makes, how many times the TEXT route scans a script through the
@@ -455,6 +459,17 @@ UT_LIB_diag_form_generate := yes
 UT_DEP_diag_form_generate := $(SDK_HDR)
 
 # A function row ticked into a draft: Generate, the builder, the verdict and Save (the draft model is compiled in, like diag_save).
+UT_SRC_blk_table_grow := $(EDITOR_SRC)
+UT_INC_blk_table_grow := -I$(SDK)/include
+UT_LIB_blk_table_grow := yes
+UT_DEP_blk_table_grow := $(SDK_HDR)
+UT_LDX_blk_table_grow := $(OOM_WRAP)
+UT_SRC_decl_table_grow := $(EDITOR_SRC)
+UT_INC_decl_table_grow := -I$(SDK)/include
+UT_LIB_decl_table_grow := yes
+UT_DEP_decl_table_grow := $(SDK_HDR)
+UT_LDX_decl_table_grow := $(OOM_WRAP)
+
 UT_SRC_cfg_sig_gen := $(EDITOR_SRC)
 UT_INC_cfg_sig_gen := -I$(SDK)/include
 UT_LIB_cfg_sig_gen := yes
@@ -515,7 +530,7 @@ UT_DEP_api_engine_modhelpers := $(SDK_HDR)
 UT_SRC_grille_host := $(GRILLE_HOST_SRC)
 UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 
-UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr diag_write diag_save diag_form_generate diag_head cfg_sig_gen pattern_audit \
+UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr diag_write diag_save diag_form_generate diag_head cfg_sig_gen blk_table_grow decl_table_grow pattern_audit \
               out_clip fidset fridge proc_rule \
               chan_ring report_model grille_host api_engine_modhelpers code_notes callnames
 UNIT_EXTRA += $(ORBIT_TESTS) $(KX_TESTS)

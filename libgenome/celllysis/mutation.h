@@ -154,17 +154,15 @@ void kgenome_mutation_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t
  *
  * `ext` are the extents of ONE region, resolved by the caller. A region that is
  * offered a function at a time (kgenome_mutation_by_function) yields the functions of
- * `funcs` that lie in it - grouped when small, dropped when they are stubs or
- * the library's - and, from the bytes alone, the clusters of
+ * `funcs` that lie in it, one unit each (no minimum, no grouping), except the library's - and, from the bytes alone, the clusters of
  * strings that such a region holds when .rodata shares its segment (by_bytes in
  * libgenome/celllysis/mutation_units.c). With `funcs` empty only the clusters remain. Any other region is cut by kgenome_mutation_cut at the fixed target
  * KGENOME_MUTATION_SEG_AVG, split where it crosses a library boundary so that no unit
  * spans one. `lib` may be NULL.
  *
  * `fn` gets each unit's file offset, length and side, in order, and stops the
- * walk by returning non-zero. A unit that is functions also gets the largest of
- * them - the one the unit is mostly made of, for a tool that names it; a piece of
- * bytes gets NULL.
+ * walk by returning non-zero. A unit that is a function also gets that function
+ * (for a tool that names it and for its signing); a piece of bytes gets NULL.
  */
 #define KGENOME_MUTATION_SEG_AVG 8192u        /* the mean carved piece, a power of two */
 
@@ -211,6 +209,18 @@ uint32_t kgenome_mutation_block_min(uint32_t scan_mask);
  * what is known about the object's functions and its library, and where the
  * units go.
  */
+/*
+ * WHAT A FUNCTION REGION'S CUT LEFT OUT, counted (kgenome_mutation_req.tally; added to by every function region the request cuts, never read, the caller zeroes it): a function of the table is offered as a unit unless it lies outside the region's
+ * extents (`outside`: not wholly inside one extent of the region) or the library's span touches it (`lib`: its bytes are the library's, evidence the object carries and not the author's).
+ * Both were dropped with no word (FP-18); a caller that wants to say so reads these. They do not change which units are offered.
+ */
+struct kgenome_mutation_tally {
+	uint32_t funcs;                 /* functions of the table the region was asked about */
+	uint32_t units;                 /* ... offered as units */
+	uint32_t outside;               /* ... not offered: not wholly inside one extent of the region */
+	uint32_t lib;                   /* ... not offered: the library's span touches them */
+};
+
 struct kgenome_mutation_req {
 	/* the object */
 	const uint8_t                 *p;
@@ -233,6 +243,8 @@ struct kgenome_mutation_req {
 	/* the sink */
 	kgenome_mutation_unit_fn       fn;
 	void                          *user;
+	/* what the cut left out of a function region (struct kgenome_mutation_tally): NULL is the ordinary answer for a caller that does not say; APPENDED */
+	struct kgenome_mutation_tally *tally;
 };
 
 void kgenome_mutation_units(const struct kgenome_mutation_req *rq);

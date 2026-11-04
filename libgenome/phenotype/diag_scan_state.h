@@ -69,10 +69,15 @@ struct kgenome_diag_scan {
 	 */
 	const struct kgenome_func_set   *funcs;
 	struct kgenome_func_set          own_funcs;
+	const struct kgenome_func_set *(*funcs_fn)(void *user);     /* the caller's table, made when the first reader asks (kgenome_diag_inputs.funcs_fn) */
+	void                            *funcs_user;
 	/* THE WALK, one per object - see struct kgenome_diag_walk. Borrowed from the
 	 * scanner's latch when it passed one, owned here otherwise. */
 	struct kgenome_diag_walk        *walk;
 	struct kgenome_diag_walk        *own_walk;
+	/* THE FRAMES OF THE FUNCTIONS (phenotype/frame.h), one cache per object: borrowed from the scanner's when it passed one, owned here otherwise (kgenome_diag_frames). */
+	struct kgenome_frame_cache      *frames;
+	struct kgenome_frame_cache      *own_frames;
 	/* KGENOME_DIAG_OWN_*: what this scan had to build itself because the caller
 	 * did not hand it over - see kgenome_diag_scan_own. */
 	unsigned                     own;

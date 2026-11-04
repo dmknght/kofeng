@@ -7,8 +7,8 @@
  * shift or ctrl wheel sideways (kv_main_key, with a body of rows in place of a table: kv_main_body) - with THREE TABS in the top rule:
  *   Overview  the engine's facts about the function and its calls as a table (kv_cfgbody.c)
  *   Disasm    the disassembly panel's own rows of the function (kv_disasm.c, dis_func_rows: the same formatter, labels, comments and colours, the function as its data)
- *   Graph     the engine's graph (kof_cfgview_build) drawn by kv_graph.c, as it was
- * It decides nothing: the rows are kv_cfgbody.c's and kv_disasm.c's, the nodes, the edges, the words and the facts are the engine's, the places are kv_graph.c's; what is here is
+ *   Graph     the engine's graph (kof_cfgview_build) drawn by kv_graph*.c, as it was
+ * It decides nothing: the rows are kv_cfgbody.c's and kv_disasm.c's, the nodes, the edges, the words and the facts are the engine's, the places are kv_graph*.c's; what is here is
  * the placement of the frame, the routing of a press and which tab is shown.
  *
  * DECODES. Opening the dialog decodes the function once (kof_cfgview_build, for the Overview and the Graph). The Disasm tab decodes it a second time, for the text, the first

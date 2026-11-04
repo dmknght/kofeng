@@ -392,6 +392,7 @@ struct kgenome_diag_scan;
 #define KGENOME_DIAG_OWN_WALK     (1u << 2)
 #define KGENOME_DIAG_OWN_IMPORTS  (1u << 3)
 #define KGENOME_DIAG_OWN_APIHASH  (1u << 4)
+#define KGENOME_DIAG_OWN_FRAMES   (1u << 5)
 unsigned kgenome_diag_scan_own(const struct kgenome_diag_scan *s);
 /* A head, and the two calls it is made of - see KOF_DIAG_DECLARE_SEQUENCE. */
 struct kgenome_diag_seq {
@@ -399,6 +400,7 @@ struct kgenome_diag_seq {
 	uint16_t first;
 	uint16_t then;
 };
+struct kgenome_frame_cache;
 struct kgenome_diag_inputs {
 	const struct kgenome_elf_relocs *relocs;
 	const struct kgenome_diag_apihash_set    *apihash;
@@ -442,6 +444,16 @@ struct kgenome_diag_inputs {
 	 * on or off names it here. APPENDED to the struct: a caller built before it left it zero.
 	 */
 	unsigned                     lineage_stages;
+	/* The object's frames (phenotype/frame.h): the cache the signing of a function reads too, so the graph of a function is built once for both. NULL: the scan owns one. APPENDED. */
+	struct kgenome_frame_cache  *frames;
+	/*
+	 * THE OBJECT'S FUNCTION TABLE, ASKED FOR ONLY IF SOMETHING READS IT. `funcs` above is a table the caller already holds; this is the caller's way to make it when the first
+	 * reader asks (`funcs_fn(funcs_user)`: the engine's own product, one table for the object). A scan that never reads the table - the lineage returns before it for an object of
+	 * another architecture or with no node on a call - then makes none: handing the table over eagerly was measured to cost the decode of every such object's code (+12% of
+	 * the 300-file corpus, agent-reported). Used only when `funcs` is NULL. APPENDED.
+	 */
+	const struct kgenome_func_set *(*funcs_fn)(void *user);
+	void                         *funcs_user;
 };
 /*
  * THE SAME SCAN OF A SCRIPT: its nodes are the calls whose names its language's table (nucleo_names_<lang>.c) has, its links are
@@ -621,12 +633,11 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *);
 
 void kgenome_diag_funcs_of(const struct kgenome_obj *obj, const uint8_t *data,
 		       uint64_t data_n, struct kgenome_func_set *out);
-/* The same, reading the entries from `walk` (filled here when it is empty;
- * `want_trace` when the caller will read the code again - see
- * kgenome_diag_walk_ensure). */
+/* The same, reading the entries from `walk` (filled here when it is empty, and always WITH the trace: the table is the first reader of the one decode and
+ * the readers after it - the signing of a function, the codemap - read the trace, kgenome_diag_walk_ensure). */
 void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *data,
 			      uint64_t data_n, struct kgenome_diag_walk *walk,
-			      int want_trace, struct kgenome_func_set *out);
+			      struct kgenome_func_set *out);
 void kgenome_diag_funcs_of_view(const struct kgenome_obj *parent_obj, kof_buf parent,
 			    const struct kgenome_func_set *parent_funcs, kof_buf view,
 			    struct kgenome_func_set *out);

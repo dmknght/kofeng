@@ -89,42 +89,16 @@ static void note_add(struct nb *b, uint64_t at, unsigned kind, const char *fmt, 
 	o->pool_n += (uint32_t)w + 1u;
 }
 
-/* The function that starts exactly at `off`, as the caller's table has it: its index, or -1. The table is ordered by offset. */
-static int func_at(const struct kgenome_func_set *fs, uint64_t off)
-{
-	uint32_t lo = 0, hi = fs->n;
-
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (fs->v[mid].off < off)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	return lo < fs->n && fs->v[lo].off == off ? (int)lo : -1;
-}
-
-/* The symbol's name for a function that starts at `off`; empty when its symbol has none (a section symbol is not a function). */
-static void func_name(const struct nb *b, uint64_t off, char *out, size_t cap)
-{
-	int i = func_at(b->funcs, off);
-
-	out[0] = 0;
-	if (i >= 0)
-		kof_sym_name_at(b->sym, b->sym_n, b->funcs->v[i].value, (int)b->funcs->v[i].shndx, out, cap);
-}
-
 /* What a place is called: a function of the table by kof_func_name (its symbol, else `fcn_<offset>`: the ONE spelling, the CFG dialog's too); an entry the
  * code calls that the table lacks by kof_fcn_name; else the jump label `.L-<offset>`, which is not a function and is spelled here. */
 static void place_name(const struct nb *b, uint64_t off, int entry, char *out, size_t cap)
 {
-	int i;
+	uint32_t i;
 
 	if (b->names && kof_callnames_name(b->names, b->data, KOF_CALLNAME_VIA_TARGET, off, out, cap))
 		return;
-	i = func_at(b->funcs, off);
-	if (i >= 0)
+	i = kgenome_funcs_start(b->funcs, off);
+	if (i != KGENOME_FUNCS_NONE)
 		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, out, cap);
 	else if (entry)
 		kof_fcn_name(off, out, cap);
@@ -168,11 +142,12 @@ static int reloc_name(const struct kgenome_elf_relocs *t, kof_buf d, const struc
 	return k != 0;
 }
 
-/* The label rows: every function the table names, every entry the code calls, and every place a jump lands. */
-/* CONSOLIDATION FUNC-12 (2026-10-30, R): DROP the own entry rule (`entry |= kind == CALL`: a call target is a function, shown as fcn_<off>) -> read the
- * function set of kgenome_diag_funcs_with_walk; a viewer decides nothing (rule 11). Better logic here that the keeper lacks: none verified; labels for
- * jump landings (.L-<off>) are not function extents and stay a viewer-side naming of codemap places. Prove with: a stripped ELF: fcn_ rows vs the set
- * entries; any call target that is not a set start is a disagreement. */
+/*
+ * The label rows: every function the table names (FUNC), and every other place something branches to (LABEL). A FUNC is what the function table says is one: a call target
+ * the table does not hold is not a function here (the table is the one answer to "where are the functions"; it was `entry |= kind == CALL`, which listed an entry the table had
+ * merged away inside a body as a second function). Such a place is a LABEL, spelled as the call that reaches it spells it (`fcn_<offset>`, place_name), so the label and
+ * the call site read alike. Labels for jump landings (.L-<offset>) are not function extents and stay a naming of codemap places.
+ */
 static void add_places(struct nb *b)
 {
 	const struct kgenome_codemap *m = b->cm;
@@ -180,9 +155,7 @@ static void add_places(struct nb *b)
 	char nm[160], xr[200];
 
 	for (i = 0; i < b->funcs->n; i++) {
-		func_name(b, b->funcs->v[i].off, nm, sizeof nm);
-		if (!nm[0])
-			continue;
+		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, nm, sizeof nm);     /* its symbol, else `fcn_<offset>` */
 		xref_text(b, b->funcs->v[i].off, xr, sizeof xr);
 		note_add(b, b->funcs->v[i].off, KOF_NOTE_FUNC, "%s:%s", nm, xr);
 	}
@@ -190,25 +163,22 @@ static void add_places(struct nb *b)
 	for (k = 0; k < m->n_to; k++) {
 		const struct kgenome_codemap_ref *r = &m->v[m->by_to[k]];
 		uint32_t first, cnt;
-		int entry = 0, named;
+		int called = 0;
 		uint32_t j;
 
 		if (k && m->v[m->by_to[k - 1u]].to == r->to)
 			continue;
+		if (kgenome_funcs_start(b->funcs, r->to) != KGENOME_FUNCS_NONE)
+			continue;                       /* a function of the table: its FUNC note was written above */
 		cnt = kgenome_codemap_to(m, r->to, &first);
 		for (j = 0; j < cnt; j++)
-			entry |= m->v[m->by_to[first + j]].kind == KGENOME_CM_CALL;
-		entry |= func_at(b->funcs, r->to) >= 0;     /* a table entry is a function whoever refers to it (add_branch says the same) */
-		func_name(b, r->to, nm, sizeof nm);
-		named = nm[0] != 0;
-		if (named)
-			continue;                       /* its FUNC note was written above */
+			called |= m->v[m->by_to[first + j]].kind == KGENOME_CM_CALL;
 		xref_text(b, r->to, xr, sizeof xr);
-		if (entry) {
-			place_name(b, r->to, 1, nm, sizeof nm);
+		/* an import stub the object's call-name table names (`rand@plt`) is a function though the table has no entry for it */
+		if (b->names && kof_callnames_name(b->names, b->data, KOF_CALLNAME_VIA_TARGET, r->to, nm, sizeof nm)) {
 			note_add(b, r->to, KOF_NOTE_FUNC, "%s:%s", nm, xr);
 		} else {
-			place_name(b, r->to, 0, nm, sizeof nm);
+			place_name(b, r->to, called, nm, sizeof nm);
 			note_add(b, r->to, KOF_NOTE_LABEL, "%s:%s", nm, xr);
 		}
 	}
@@ -262,7 +232,7 @@ static void add_branch(struct nb *b, const struct kgenome_codemap_ref *r, const 
 		 kof_callnames_name(b->names, b->data, KOF_CALLNAME_VIA_SITE, r->at, nm, sizeof nm))
 		note_add(b, r->at, KOF_NOTE_COMMENT, "-> %s", nm);
 	else if (r->to != KGENOME_BROKEN) {
-		place_name(b, r->to, r->kind == KGENOME_CM_CALL || func_at(b->funcs, r->to) >= 0, nm, sizeof nm);
+		place_name(b, r->to, r->kind == KGENOME_CM_CALL || kgenome_funcs_start(b->funcs, r->to) != KGENOME_FUNCS_NONE, nm, sizeof nm);
 		note_add(b, r->at, KOF_NOTE_COMMENT, "-> %s%s", nm, loop);
 	}
 }
@@ -276,14 +246,25 @@ static int note_cmp(const void *a, const void *c)
 	return (int)x->kind - (int)y->kind;
 }
 
+/* THE ADAPTER KEPT FOR kofexamine (parked, its caller still has this shape): the same, with no walk and no relocation table of the caller's. Delete it when the examiner moves to the request. */
 int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struct kgenome_func_set *funcs,
 			const uint8_t *sym, uint32_t sym_n, unsigned bits, const struct kgenome_callnames *names,
 			struct kof_codenotes *out)
 {
+	const struct kof_codenotes_req rq = { .ctx = ctx, .data = data, .funcs = funcs, .sym = sym, .sym_n = sym_n, .bits = bits, .names = names };
+
+	return kof_codenotes_make(&rq, out);
+}
+
+int kof_codenotes_make(const struct kof_codenotes_req *rq, struct kof_codenotes *out)
+{
+	const struct kof_obj_ctx *ctx = rq->ctx;
+	const kof_buf data = rq->data;
+	const unsigned bits = rq->bits;
 	struct kgenome_obj gobj;
 	struct kgenome_codemap cm;
 	struct kgenome_elf_relocs rel;
-	const struct kgenome_elf_relocs *rp = NULL;
+	const struct kgenome_elf_relocs *rp = rq->relocs;
 	struct nb b;
 	uint32_t i;
 	int have_rel = 0;
@@ -293,20 +274,16 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 	kof_genome_obj(ctx, &gobj);
 	if (bits && gobj.arch != KGENOME_ARCH_X86 && gobj.arch != KGENOME_ARCH_X86_64 && gobj.format == KGENOME_FMT_NONE)
 		gobj.arch = bits == 32u ? KGENOME_ARCH_X86 : KGENOME_ARCH_X86_64;
-	if (gobj.format == KGENOME_FMT_ELF && kgenome_obj_elf(&gobj) && kgenome_obj_elf(&gobj)->valid) {
+	if (!rp && gobj.format == KGENOME_FMT_ELF && kgenome_obj_elf(&gobj) && kgenome_obj_elf(&gobj)->valid) {
 		(void)kgenome_elf_reloc_table(data, kgenome_obj_elf(&gobj), KGENOME_ELF_RELOC_CODE, &rel);
 		have_rel = 1;
 		rp = rel.n ? &rel : NULL;
 	}
-	/* CONSOLIDATION DEC-3 (2026-10-30, M): DROP the own codemap and relocation table -> adopt the engine's product (same as D18b below). Measured decode
-	 * calls per distinct offset on 19 static x86-64 ELF: codemap_build alone 2.02, walk + codemap 3.02, full diag scan RUN_ALL 4.00 (target ~1.0,
-	 * CLAUDE.md). Better logic here that the keeper lacks: the relocation table (KGENOME_CMF_RELOC) is passed in; the lineage build passes NULL. Prove
-	 * with: deccnt.c harness (fix_consol/h), -Wl,--wrap=kgenome_cell_decode counting calls per distinct address. */
-	/* KNOWN DEFECT D18b (2026-10-24, R) [sev L]: kof_codenotes_build builds its own codemap (and relocation table) of the
-	 * object; the lineage stage builds another (diag_lineage.c), so a decode sweep runs twice. Trigger: the examiner's
-	 * disasm panel on an object a scan already analysed. Effect: work done twice, and two tables of one fact.
-	 * Reproducer: none (read, STATUS D12/D18). Fix: the engine publishes its codemap as a product and this adopts it. */
-	if (!kgenome_codemap_build(&gobj, data.p, data.n, rp, &cm)) {
+	/* The codemap is one linear read of the code: given the object's walk (`wk`) it READS the walk's trace and decodes nothing; with none it decodes (the adapter above). */
+	/* KNOWN DEFECT D18b (2026-10-24, R) [sev L]: through kof_codenotes_build (kofexamine, parked) the codemap and the relocation table are made again, a scan's lineage builds another.
+	 * Trigger: the examiner's disasm panel on an object a scan already analysed. Effect: work done twice, and two tables of one fact; narrowed 2026-11-03: kof_codenotes_make takes the walk.
+	 * Reproducer: none (read, STATUS D12/D18). Fix: the examiner calls kof_codenotes_make with the object's walk and relocations; then delete the adapter. */
+	if (!kgenome_codemap_build(&gobj, data.p, data.n, rp, rq->wk, &cm)) {
 		out->status = cm.status;
 		if (have_rel)
 			kgenome_elf_reloc_table_free(&rel);
@@ -315,11 +292,11 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 	memset(&b, 0, sizeof b);
 	b.out = out;
 	b.cm = &cm;
-	b.funcs = funcs;
-	b.sym = sym;
-	b.sym_n = sym_n;
+	b.funcs = rq->funcs;
+	b.sym = rq->sym;
+	b.sym_n = rq->sym_n;
 	b.data = data;
-	b.names = names;
+	b.names = rq->names;
 	b.arch = gobj.arch;
 	b.format = (int)gobj.format;
 	add_places(&b);

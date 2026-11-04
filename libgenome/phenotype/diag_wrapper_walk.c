@@ -5,6 +5,7 @@
  * files share.
  */
 #include "diag_wrapper_private.h"
+#include <celllysis/cfg_private.h>      /* kgenome_cfg_isa_of: delay slots */
 
 /* ---- pass A: call targets and syscall sites -------------------------------- */
 
@@ -87,7 +88,7 @@ int kgenome_diag_wrapper_is_kernel_entry(const struct kgenome_diag_wrapper_ctx *
  */
 #define W_TRACE_BYTES  (32u << 20)
 #define W_TRACE_EVERY  16u
-#define W_REC_MAX      80u
+#define W_REC_MAX      128u    /* 7 + at 4 + delta 8 + target 4 + two varints 10 + three operands of 7 + two varints 20 = 124 */
 
 static uint8_t *put_vz(uint8_t *p, int64_t v)
 {
@@ -132,8 +133,9 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 
 	if (g->given_up)
 		return;
-	/* The record could not say what was decoded: it is not made, and the segment's trace ends here. */
-	if ((w->wmask >> 16) || w->n_op > 3u || w->cond > 15u || w->flags > 15u) {
+	/* The record could not say what was decoded: it is not made, and the segment's trace ends here. (A wider mask, a target_va and the second field of an operand have a place in it:
+	 * the record is the whole instruction of any architecture, kgenome_diag_wrapper_trace_get_cell.) */
+	if (w->n_op > 3u || w->cond > 15u || w->flags > 15u) {
 		trace_give_up(g);
 		return;
 	}
@@ -160,17 +162,31 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 		memcpy(p, &(uint32_t){ (uint32_t)w->target }, 4);
 		p += 4;
 	}
+	if (w->wmask >> 16) {
+		ctl |= KGENOME_DIAG_WRAPPER_TRACE_HAS_WHI;
+		p = put_vz(p, (int64_t)(w->wmask >> 16));
+	}
+	if (w->target_va != KGENOME_BROKEN) {           /* relative to the instruction: the bytes decode the same under any load address */
+		ctl |= KGENOME_DIAG_WRAPPER_TRACE_HAS_TVA;
+		p = put_vz(p, (int64_t)(w->target_va - w->at_va));
+	}
 	ctl |= (unsigned)w->n_op << KGENOME_DIAG_WRAPPER_TRACE_NOP_SHIFT;
 	for (i = 0; i < w->n_op; i++) {
 		const struct kgenome_cell_operand *o = &w->o[i];
+		const int64_t canon_d = o->kind == KGENOME_CELL_O_MEM ? o->disp : 0;
+		const uint64_t canon_i = o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL ? o->imm : 0;
+		const int both = o->disp != canon_d || o->imm != canon_i;       /* a field the kind does not name is not zero: both are written */
 
-		/* What a consumer of the walk reads of an operand: the value is the displacement of a
-		 * memory operand, the immediate of an immediate or a relative offset, nothing of a register. */
-		p[0] = o->kind; p[1] = o->reg; p[2] = o->index; p[3] = o->scale;
+		p[0] = (uint8_t)(o->kind | (both ? KGENOME_DIAG_WRAPPER_TRACE_OP_BOTH : 0u));
+		p[1] = o->reg; p[2] = o->index; p[3] = o->scale;
 		p[4] = o->size; p[5] = o->flags; p[6] = o->seg;
-		p = put_vz(p + 7, o->kind == KGENOME_CELL_O_MEM ? o->disp
-				: o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL
-				  ? (int64_t)o->imm : 0);
+		p += 7;
+		if (both) {
+			p = put_vz(p, o->disp);
+			p = put_vz(p, (int64_t)o->imm);
+		} else {
+			p = put_vz(p, o->kind == KGENOME_CELL_O_MEM ? o->disp : (int64_t)canon_i);
+		}
 	}
 	rec[0] = (uint8_t)(p - rec);
 	rec[1] = (uint8_t)ctl;
@@ -261,16 +277,13 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
  * position is decoded afresh. Rule 4: a bound on memory, never on what the
  * sweep sees.
  *
- * WHAT A TRACE RECORD LEAVES OUT of a kgenome_cell_insn is put back by
- * kgenome_diag_wrapper_cinsn (private header): `target_va` is the one decode_x86.c
- * computes (the relative operand added to the end of the instruction - the trace is
- * x86's, and only x86's), and operands beyond the three a kgenome_cell_insn holds do not
- * exist. The sweep's cursor is answered by the same function (diag_wrapper_trace.c).
+ * WHAT A TRACE RECORD HOLDS: the whole instruction of ANY architecture (kgenome_diag_wrapper_trace_get_cell; the record's layout is in the private header), so
+ * this reader hands over what kgenome_cell_decode writes, field for field, `target` aside: a branch's address is `target_va` (a file offset is the cursor's). The
+ * sweep's cursor is answered by the same function (diag_wrapper_trace.c).
  */
 /* CONSOLIDATION DEC-1 (2026-10-30, M): KEEP (will be the single reader of instructions in address order, serving the trace where held; 5 callers:
- * codemap, diag_elfimp, objctx xref feed, lineage, callnames). Gap: the trace is x86 only, so every other
- * arch decodes each reader again. Better logic here than the others: one bounded run with stats (from_trace/decoded/skipped). Prove with: deccnt.c:
- * x86-64 trace on vs off; ARM/MIPS have no trace (R). */
+ * codemap, diag_elfimp, objctx xref feed, lineage, callnames, the PE route, the signing of a function). The trace holds every architecture (tests/lib/genome/trace_arch.c).
+ * Better logic here than the others: one bounded run with stats (from_trace/decoded/skipped). Prove with: trace_arch.c (trace vs decoder, field for field). */
 void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 {
 	struct kgenome_diag_walk *wk = rq->wk;
@@ -281,7 +294,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 	void *user = rq->user;
 	struct kgenome_diag_code_run_stats *st = rq->st;
 	struct kgenome_cell_insn ci;
-	struct kgenome_diag_wrapper_insn pk;                /* the next record the trace holds */
+	struct kgenome_cell_insn pk;                        /* the next record the trace holds */
 	struct kgenome_diag_wrapper_reader nx;
 	const uint8_t *rend = NULL;
 	uint64_t at = off, end;
@@ -299,7 +312,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 	delta = (int64_t)(va - off);
 	if (wk && wk->built && wk->has_trace && wk->tr && wk->base == base &&
 	    wk->size == size) {
-		for (i = 0; i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+		for (i = 0; i < KGENOME_DIAG_WALK_SEGS; i++) {
 			const struct kgenome_diag_wrapper_seg *g = &wk->tseg[i];
 
 			/* A run that begins before the walk did (the headers, the
@@ -308,28 +321,29 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 			if (g->end > g->pos && off < g->hi && end > g->lo &&
 			    kgenome_diag_wrapper_trace_lower(wk, g, off, &nx)) {
 				rend = wk->tr + g->end;
-				kgenome_diag_wrapper_trace_get(&nx, &pk);
+				kgenome_diag_wrapper_trace_get_cell(&nx, &pk);
 				pk_ok = 1;
 				break;
 			}
 		}
 	}
-	/* KNOWN DEFECT CN-6 (2026-10-30, M) [sev M]: the same bytes are decoded again by every reader that holds no trace: on 19 x86-64 ELF decodes per offset are 2.02 (codemap alone), 3.02 (walk + codemap), 4.00 (full scan); target 1.0; the fourth reader is unidentified.
-	 * Trigger: any ELF scanned with all routes. Effect: work done twice or more (CLAUDE.md work-once), no wrong result.
-	 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (fix_consol, decode count per offset).
-	 * Fix: as DEC-1 (this routine is the single reader; codemap and the second pass adopt it or its product); find the fourth reader first. */
+	/* KNOWN DEFECT CN-6 (2026-11-03, M) [sev M]: a reader that holds no trace still decodes the bytes again. Codemap is ONE read now (2.05 -> 1.01 per offset on Mirai.b, 2.00 -> 1.01 on ARM) and reads the walk's trace when it is given the walk (engine-like run on Mirai.b: 2.01 -> 1.01); what is left is below.
+	 * Trigger: (1) a scan with no trace: the syscall sweep runs before the walk exists and a lib-level RUN_ALL decodes 3.19 per offset; (2) kof_codenotes_build builds a codemap of its own (D18b).
+	 * Effect: work done twice or more (CLAUDE.md work-once), no wrong result.
+	 * Reproducer: tests/unit/codemap_decode_once.c (codemap), /mnt/games/normtest/fix_decode1/h/deccnt2.c rows P3 and P4 (the rest).
+	 * Fix: build the walk's trace before the syscall sweep; codenotes adopts the engine's codemap. */
 	while (at < end) {
 		/* `nx` reads on from the record `pk` was taken from. */
 		while (pk_ok && pk.at < at) {           /* catch up with the run */
 			if (nx.p < rend)
-				kgenome_diag_wrapper_trace_get(&nx, &pk);
+				kgenome_diag_wrapper_trace_get_cell(&nx, &pk);
 			else
 				pk_ok = 0;
 		}
 		if (pk_ok && pk.at == at && at + pk.len <= end &&
 		    pk.at_va == at + (uint64_t)delta) {
-			kgenome_diag_wrapper_cinsn(&ci, &pk);
-			fn(user, &ci);
+			pk.target = KGENOME_BROKEN;     /* the one contract of this reader, as on the decode path below: a branch's address is `target_va` (its file offset is the cursor's) */
+			fn(user, &pk);
 			at += pk.len;
 			if (st)
 				st->from_trace++;
@@ -352,6 +366,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 
 			if (len) {
 				ci.at = at;
+				ci.target = KGENOME_BROKEN;
 				fn(user, &ci);
 				at += len;
 				if (st)
@@ -389,6 +404,194 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
  * fact about alignment and alignment is a decode. Hence one decode of the image,
  * kept (see THE DECODE, ONCE) and read from there.
  */
+static int stub_cmp(const void *a, const void *b)
+{
+	const uint64_t x = ((const struct kgenome_diag_stub *)a)->at, y = ((const struct kgenome_diag_stub *)b)->at;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* `lea r,[r+0]` (8d 76 00, 8d b6 00 00 00 00, 8d 74 26 00, 8d b4 26 00 00 00 00, cs-prefixed or not: the assembler's multi-byte pad, which an x86 decoder reports as a LEA and no
+ * nop) changes nothing and is padding like a nop (D2: a function's end was left beyond the padding that follows it). A LEA of anything else is a computation. */
+static int x86_self_lea(const struct kgenome_cell_insn *in)
+{
+	return in->op == KGENOME_CELL_LEA && in->n_op == 2u && in->o[0].kind == KGENOME_CELL_O_REG && in->o[1].kind == KGENOME_CELL_O_MEM &&
+	       in->o[1].reg == in->o[0].reg && in->o[1].index == KGENOME_CELL_REG_NONE && in->o[1].disp == 0;
+}
+
+/* The signal-return trampolines the C library keeps (__restore_rt, __restore): a few bytes that nothing calls - the kernel returns into them - and that follow the function before them
+ * with no padding, so the entry walk saw no start there and the stub was merged into the previous function (D3: 602 bytes on a measured file). The ABI fixes the bytes:
+ *   x86-64  mov rax,15 ; syscall                     48 c7 c0 0f 00 00 00 0f 05
+ *   i386    pop eax ; mov eax,119 ; int 0x80         58 b8 77 00 00 00 cd 80      (sigreturn)
+ *           mov eax,173 ; int 0x80                   b8 ad 00 00 00 cd 80         (rt_sigreturn) */
+static int x86_sigreturn_stub(const uint8_t *p, uint64_t left, unsigned arch)
+{
+	static const uint8_t k64[] = { 0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05 };
+	static const uint8_t k32a[] = { 0x58, 0xb8, 0x77, 0x00, 0x00, 0x00, 0xcd, 0x80 };
+	static const uint8_t k32b[] = { 0xb8, 0xad, 0x00, 0x00, 0x00, 0xcd, 0x80 };
+
+	if (arch == KGENOME_ARCH_X86_64)
+		return left >= sizeof k64 && !memcmp(p, k64, sizeof k64);
+	return (left >= sizeof k32a && !memcmp(p, k32a, sizeof k32a)) || (left >= sizeof k32b && !memcmp(p, k32b, sizeof k32b));
+}
+
+static int pad_cmp(const void *a, const void *b)
+{
+	const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* Ends the padding run in progress at `at`: [from, at) is recorded when it holds a byte. */
+static int pad_close(struct kgenome_diag_wrapper_ctx *c, uint64_t *from, uint64_t at)
+{
+	const uint64_t f = *from;
+
+	*from = UINT64_MAX;
+	if (f == UINT64_MAX || at <= f)
+		return 1;
+	return kgenome_diag_wrapper_push_u64(&c->wk->pad, &c->wk->n_pad, &c->wk->cap_pad, f) &&
+	       kgenome_diag_wrapper_push_u64(&c->wk->pad, &c->wk->n_pad, &c->wk->cap_pad, at);
+}
+
+/* MIPS o32 PIC registers pass_a reads by number (celllysis/decode_mips.c names none of them: it
+ * reports a plain register index like every other decoder). $t9 carries every PIC call's callee
+ * (CN-5's Fix); $gp is the base the loader fixes it relative to. */
+#define MIPS_REG_T9 25u
+#define MIPS_REG_GP 28u
+
+/*
+ * CN-5's Fix, part 1: MIPS o32 PIC fixes $gp as a LINK-TIME CONSTANT relative to the GOT -
+ * `.got`'s address + 0x7ff0, which centres $gp in the 16-bit signed offset range (the SVR4 MIPS
+ * ABI convention, read by the linker and by every PIC-call site alike; it holds for a dynamically
+ * linked object and for a purely static one the same way, so no DT_MIPS_* / .dynamic reader is
+ * needed - this tree has none today and this does not add one). Read like kgenome_fntab_eh_section
+ * reads ".eh_frame": by section name, kept sections only. A sstripped object (no section table) or
+ * one with no `.got` answers unknown (0): pass_a then leaves `jalr $t9` exactly as before - rule 4,
+ * no guess.
+ */
+static int mips_gp_of(const struct kgenome_obj *obj, uint64_t *gp)
+{
+	const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
+	uint32_t i;
+
+	if (!e || !e->valid)
+		return 0;
+	for (i = 1; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+		const struct kgenome_elf_sec *s = &e->sec[i];
+
+		if ((s->flags & KGENOME_ELF_SHF_ALLOC) && s->file_size && !strcmp(s->name, ".got")) {
+			*gp = s->mem_addr + 0x7ff0u;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * CN-5's Fix, part 2: the callee of a `jalr $t9` whose $t9 came from `lw $t9, t9_off($gp)` (the
+ * caller tracked `t9_off` across the straight-line run since that load - see pass_a). The slot at
+ * $gp+t9_off is a LOCAL GOT entry: the static linker fills it with the real callee address whether
+ * or not the object is dynamically linked at all (no runtime fixup is needed for a local symbol),
+ * so the file already holds the answer and reading it is not a relocation walk.
+ *
+ * Refuses (0) rather than ever reporting a wrong target: the slot must be a whole, in-bounds read
+ * of THIS object's own bytes, and the value it holds must land inside one of the object's own
+ * EXECUTABLE segments. A global/PLT-style GOT entry - filled only by the dynamic loader at runtime -
+ * reads back as zero or an unrelated link-time placeholder here and is correctly turned away by
+ * that same check, never guessed at.
+ *
+ * `gp` is the caller's: part 1's walk-wide one (the object's `.got` + 0x7ff0) for most functions,
+ * or part 3's per-function one (the `lui`/`addiu`/`addu` prologue, below) for a function that
+ * recomputes its own - the slot read and the two checks are identical either way, so one function
+ * serves both rather than each resolving its slot and re-deriving this one's safety check.
+ */
+static int mips_got_target(const struct kgenome_diag_wrapper_ctx *c, uint64_t gp, uint64_t t9_off, uint64_t *out)
+{
+	const struct kgenome_elf_info *e = kgenome_obj_elf(c->obj);
+	uint64_t got_va, slot_off, raw, callee_off;
+	uint32_t i;
+
+	if (!e || !c->sp.off_of_va)
+		return 0;
+	got_va = gp + t9_off;
+	slot_off = c->sp.off_of_va(c->sp.priv, got_va);
+	if (slot_off == KGENOME_BROKEN || slot_off + 4u > c->size)
+		return 0;
+	raw = c->sp.be ? ((uint64_t)c->base[slot_off] << 24 | (uint64_t)c->base[slot_off + 1u] << 16 |
+			  (uint64_t)c->base[slot_off + 2u] << 8 | (uint64_t)c->base[slot_off + 3u])
+		       : ((uint64_t)c->base[slot_off + 3u] << 24 | (uint64_t)c->base[slot_off + 2u] << 16 |
+			  (uint64_t)c->base[slot_off + 1u] << 8 | (uint64_t)c->base[slot_off]);
+	if (!raw)
+		return 0;
+	callee_off = c->sp.off_of_va(c->sp.priv, raw);
+	if (callee_off == KGENOME_BROKEN || callee_off >= c->size)
+		return 0;
+	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++)
+		if (kgenome_elf_seg_is_code(&e->seg[i]) && raw >= e->seg[i].mem_addr &&
+		    raw - e->seg[i].mem_addr < e->seg[i].mem_size) {
+			*out = callee_off;
+			return 1;
+		}
+	return 0;
+}
+
+/*
+ * CN-5's Fix, part 3: MIPS o32 PIC's OTHER convention - merge 135 measured a real Mirai MIPS sample
+ * using it ALONGSIDE part 1's walk-wide $gp, in the same binary. A function using it recomputes its
+ * OWN $gp from $t9 at entry:
+ *
+ *     lui   $gp, hi      addiu $gp, $gp, lo      addu  $gp, $gp, $t9
+ *
+ * This reads the SAME ABI fact part 1's GOT read does, from its other side: the calling convention
+ * guarantees $t9 holds the CALLEE's own address at entry (the caller's `jalr $t9` put it there) -
+ * so at the exact point this sequence executes, and ONLY there, $t9 equals the function's own start
+ * address. Nothing is tracked to know it: pass_a already knows where `lui` sits, so the function's
+ * start stands in for $t9 with no register value followed at all. `mips_is_lui_gp` below being true
+ * at a function's own (delay-slot-adjusted) start - `mips_fn_bnd` in pass_a - is what makes that
+ * substitution sound, not a guess at what $t9 holds generally.
+ *
+ * ONE AMBIGUITY INHERITED FROM THE DECODER, read and accepted rather than guessed around:
+ * decode_mips.c's generic I-type form reports `lui $gp,X` and a LOAD into $gp (`lw`/`lh`/`lb
+ * $gp,X(rs)`) as the identical shape - class MOV, three REG/REG/IMM operands - because the decoder
+ * does not keep which of MIPS's several I-type opcodes produced one (celllysis's contract: it names
+ * what a sweep asks about, not every opcode). `o[1].reg == 0` (a real `lui`'s rs field, which the
+ * assembler always sets to the zero register) is the one signal left, and it is not proof by itself
+ * - a `lw $gp,X($zero)` would read the same. What keeps a false match harmless rather than wrong: it
+ * must ALSO sit at a function's own start (a reload instruction - the real case this could be
+ * confused with, `lw $gp,off($sp)` restoring a caller's $gp after a call - runs mid-function, never
+ * there), AND it must ALSO be followed, verbatim and straight-line, by a real `addiu $gp,$gp,lo` and
+ * a real `addu $gp,$gp,$t9` for anything to be set at all - a combination no load-then-arithmetic
+ * sequence in real code produces by coincidence - and even then mips_got_target's own bounds and
+ * code-segment check is what actually gates a resolved call, exactly as it does for part 1's $gp.
+ */
+static int mips_is_lui_gp(const struct kgenome_cell_insn *in)
+{
+	return in->op == KGENOME_CELL_MOV && in->n_op == 3u &&
+	       in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == MIPS_REG_GP &&
+	       in->o[1].kind == KGENOME_CELL_O_REG && in->o[1].reg == 0u &&
+	       in->o[2].kind == KGENOME_CELL_O_IMM;
+}
+
+static int mips_is_addiu_gp_gp(const struct kgenome_cell_insn *in)
+{
+	return in->op == KGENOME_CELL_ADD && in->n_op == 3u &&
+	       in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == MIPS_REG_GP &&
+	       in->o[1].kind == KGENOME_CELL_O_REG && in->o[1].reg == MIPS_REG_GP &&
+	       in->o[2].kind == KGENOME_CELL_O_IMM;
+}
+
+/* Either operand order: `addu` is a plain sum of two registers and the GNU toolchain's own order
+ * (`addu $gp,$gp,$t9`) is not a fact a module should have to match exactly to get the same number. */
+static int mips_is_addu_gp_t9(const struct kgenome_cell_insn *in)
+{
+	return in->op == KGENOME_CELL_ADD && in->n_op == 3u &&
+	       in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == MIPS_REG_GP &&
+	       in->o[1].kind == KGENOME_CELL_O_REG && in->o[2].kind == KGENOME_CELL_O_REG &&
+	       ((in->o[1].reg == MIPS_REG_GP && in->o[2].reg == MIPS_REG_T9) ||
+		(in->o[1].reg == MIPS_REG_T9 && in->o[2].reg == MIPS_REG_GP));
+}
+
 /* CONSOLIDATION FUNC-5 (2026-10-30, R): KEEP (the entry evidence: direct call targets and the `jmp X` thunk at a function start, from the walk's one
  * decode; 1 caller walk_ensure, which has 3). Better logic than byte search and than codemap: thunk targets (the comment above measured 20166 thunks a
  * byte search misses) and a trace shared by later readers. Lacks: indirect calls through a register (cell_step has no register model), lea/adrp address-
@@ -402,8 +605,54 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 
 	/* Whether the instruction before ended a function's straight line. */
 	int boundary = 1;
+	int sgboundary = 1;             /* x86: the instruction before ended a function or was padding of any kind (a stub of the C library may start here, D3) */
+	/* THE PADDING RUN in progress (the function table cuts it off the end of the function before it): where it began, or UINT64_MAX. A delay
+	 * slot belongs to the branch before it, so on an architecture that has one the run begins after it. */
+	uint64_t pad_from = UINT64_MAX;
+	int prev_cti = 0, prev_call = 0;
+	struct kgenome_diag_wrapper_pe pe;      /* the PE rules of this decode (diag_wrapper_pe.c); `pe.pe` is NULL for every other format */
+	const struct kgenome_cfg_isa *isa = kgenome_cfg_isa_of(c->wk->arch);
+	const int slots = isa && isa->delay_slots;
+	const int x86 = c->wk->arch == KGENOME_ARCH_X86 || c->wk->arch == KGENOME_ARCH_X86_64;
+	/* The all-zero word is padding where it is a nop or the linker's fill: MIPS (`sll $0,$0,0`, the canonical nop, which the decoder reports as OTHER: it names what the
+	 * sweep asks about) and ARM (`andeq r0,r0,r0`, the fill GNU ld puts between objects: 391 of 1876 alignment gaps of at most 15 bytes in the 260 ARM files of the
+	 * oracle corpus, agent-reported; the others are `mov r0,r0` and the Thumb nop 0xbf00, which is read as ARM here, CN-5). */
+	const int zeronop = c->wk->arch == KGENOME_ARCH_MIPS || c->wk->arch == KGENOME_ARCH_MIPS64 || c->wk->arch == KGENOME_ARCH_ARM;
+	/* CN-5's Fix: MIPS32 only (MIPS64's n32/n64 GOT and $gp convention differ and are not read
+	 * here - rule 4, stay unresolved rather than guess at a layout this file does not know).
+	 * `t9_known` is a single straight-line fact, the same shape as `prev_cti`/`pad_from` above:
+	 * set by the one recognised `lw $t9, t9_off($gp)` shape, cleared by anything that could make
+	 * it stale before a `jalr $t9` reads it - a control-transfer instruction (mips_got_target is
+	 * asked before this read, below) or any other instruction that writes $t9. */
+	const int mips = c->wk->arch == KGENOME_ARCH_MIPS;
+	uint64_t t9_off = 0;
+	int t9_known = 0;
+	/*
+	 * CN-5's Fix, part 3 (mips_is_lui_gp/_addiu_gp_gp/_addu_gp_t9 above): the pending match of the
+	 * `lui`/`addiu`/`addu` sequence (pgp_state: 0 none, 1 saw `lui`, 2 saw `lui`+`addiu`), what it
+	 * has accumulated, and the per-function $gp it establishes once complete - the same
+	 * one-slot-of-straight-line-fact shape as `t9_known` above, not a second $t9/$gp tracker.
+	 */
+	uint64_t pgp_hi = 0, pgp_lo = 0;        /* hi<<16 (already shifted by the decoder) and the sign-extended lo, from the `lui`/`addiu` steps */
+	uint64_t pgp_entry_va = 0;              /* the `lui`'s own address: $t9's value there, by the ABI, iff pgp_entry_valid */
+	int pgp_entry_valid = 0;
+	unsigned pgp_state = 0;
+	uint64_t pgp = 0;
+	int pgp_known = 0;
+	/*
+	 * `boundary` above, delay-slot adjusted for MIPS: the instruction right after an unconditional
+	 * transfer (`jr`/`j`) is that transfer's OWN delay slot, not the next function - so part 3's
+	 * `lui` must not be judged against `boundary` itself, which would read the slot as the start. A
+	 * `nop`'s boundary needs no such delay (it is not a transfer), and this affects part 3's reading
+	 * of pgp_entry_valid only: `boundary` itself (the thunk-entry and padding logic above) is
+	 * unchanged. mips_bnd_delay marks that the instruction just read WAS such a slot, so the one
+	 * after it is the true boundary.
+	 */
+	int mips_bnd = 1;
+	int mips_bnd_delay = 0;
 
 	memset(&k, 0, sizeof k);
+	kgenome_diag_wrapper_pe_start(&pe, c->obj);
 	g->lo = off;
 	g->hi = off + n;
 	g->pos = c->wk->n_tr;
@@ -411,24 +660,111 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 	g->ix = c->wk->n_ix;
 	g->complete = c->wk->tr_on != 0;
 	g->given_up = !c->wk->tr_on;
-	if (!kgenome_cell_seek(&k, off, 0))
-		return 1;
+	(void)kgenome_cell_seek(&k, off, 0);            /* (answers 0 only for no cursor) */
 	while (k.at < off + n) {
 		if (!kgenome_cell_step(&k, &c->sp, &in)) {
+			if (!pad_close(c, &pad_from, k.at))
+				return 0;
 			k.at++;                 /* data in the code: step over it */
+			prev_cti = 0;
+			prev_call = 0;
+			sgboundary = 0;
+			t9_known = 0;           /* a decode gap breaks the straight line: do not carry $t9 across it */
+			pgp_state = 0;
+			pgp_known = 0;          /* likewise for the per-function $gp (part 3) */
+			if (pe.pe)
+				kgenome_diag_wrapper_pe_data(&pe, c, k.at - 1u);        /* (a lone zero byte, the odd one of a zero tail, does not end the zero run) */
 			continue;
 		}
 		trace_put(c, seg, &in);
-		/* KNOWN DEFECT CN-5 (2026-10-30, M) [sev M]: pass_a makes an entry only of a DIRECT call target or a `jmp X` thunk, so what is called through a register is never an entry; the ARM mode is seeked as 0 (Thumb read as ARM, Inference).
-		 * Trigger: MIPS PIC (15350 indirect `jalr $t9` calls on 11 files), Thumb code. Effect: the walk is nearly blind on MIPS (15.7% of symtab starts with FDE, 0.5% by the walk); ARM precision 80.5%.
-		 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (fix_consol, entry walk vs symtab).
-		 * Fix: take the callee of `jalr $t9` from the GOT/relocation (static or loaded value) and track the Thumb bit; the stronger evidence is CN-4's. */
+		/* the padding runs: nop of any width, int3 (the byte 0xcc decodes as INT) */
+		if (in.op == KGENOME_CELL_NOP || (x86 && in.op == KGENOME_CELL_INT && in.at < c->size && c->base[in.at] == 0xccu) || (x86 && x86_self_lea(&in)) ||
+		    (zeronop && in.len == 4u && in.at + 4u <= c->size && !(c->base[in.at] | c->base[in.at + 1u] | c->base[in.at + 2u] | c->base[in.at + 3u]))) {
+			if (pad_from == UINT64_MAX) {
+				pad_from = in.at + (slots && prev_cti ? in.len : 0u);
+				if (pe.pe)
+					pad_from = kgenome_diag_wrapper_pe_pad_from(&in, prev_call, pad_from);
+			}
+		} else if (!pad_close(c, &pad_from, in.at)) {
+			return 0;
+		}
+		if (pe.pe)
+			kgenome_diag_wrapper_pe_zero(&pe, c, &in);
+		prev_cti = in.op == KGENOME_CELL_JMP || in.op == KGENOME_CELL_JCC || in.op == KGENOME_CELL_RET ||
+			   in.op == KGENOME_CELL_CALL || in.op == KGENOME_CELL_LOOP;
+		prev_call = in.op == KGENOME_CELL_CALL;
+		/* $t9 tracking for CN-5's Fix (MIPS only; see mips_got_target above). The one recognised
+		 * shape sets it; anything else that writes $t9 (another load, an ALU move into it) makes
+		 * it unknown rather than stale - a write this is not the lw-pattern case below is never
+		 * also the pattern, so testing it here cannot see this same instruction's own effect. */
+		if (mips && in.op == KGENOME_CELL_MOV && in.n_op == 3u &&
+		    in.o[0].kind == KGENOME_CELL_O_REG && in.o[0].reg == MIPS_REG_T9 &&
+		    in.o[1].kind == KGENOME_CELL_O_REG && in.o[1].reg == MIPS_REG_GP &&
+		    in.o[2].kind == KGENOME_CELL_O_IMM) {
+			t9_off = in.o[2].imm;
+			t9_known = 1;
+		} else if (mips && (in.wmask & (1ull << MIPS_REG_T9)) != 0u) {
+			t9_known = 0;
+		}
+		/*
+		 * CN-5's Fix, part 3: the per-function $gp prologue. `consumed` says this instruction's
+		 * effect on the pending match was already decided by one of the three steps; anything
+		 * else either breaks a pending match (pgp_state) or, if it writes $gp some other way,
+		 * empties what was already established (pgp_known) - mirroring $t9's own tracking above.
+		 */
+		if (mips) {
+			int consumed = 0;
+
+			if (mips_is_lui_gp(&in)) {
+				pgp_hi = in.o[2].imm;
+				pgp_entry_va = in.at_va;
+				pgp_entry_valid = mips_bnd;
+				pgp_state = 1;
+				pgp_known = 0;          /* `lui` just wrote $gp: whatever pgp held before does not hold now */
+				consumed = 1;
+			} else if (pgp_state == 1 && mips_is_addiu_gp_gp(&in)) {
+				pgp_lo = in.o[2].imm;
+				pgp_state = 2;
+				consumed = 1;
+			} else if (pgp_state == 2 && mips_is_addu_gp_t9(&in)) {
+				if (pgp_entry_valid) {
+					pgp = (uint64_t)(uint32_t)((uint32_t)pgp_hi + (uint32_t)pgp_lo + (uint32_t)pgp_entry_va);
+					pgp_known = 1;
+				}
+				pgp_state = 0;
+				consumed = 1;
+			}
+			if (!consumed) {
+				pgp_state = 0;          /* not the expected next step: any pending match is abandoned */
+				if ((in.wmask & (1ull << MIPS_REG_GP)) != 0u)
+					pgp_known = 0;  /* $gp written some other way than the sequence above */
+			}
+		}
+		/* KNOWN DEFECT CN-5 (2026-11-05, M) [sev M]: PARTIAL - fixed for MIPS32's two PIC call conventions (`jalr $t9` preceded, straight-line, by `lw $t9, off($gp)`, with $gp either the walk-wide one fixed from the object's own `.got` section - mips_got_target - or a per-function one recomputed by the `lui`/`addiu`/`addu` prologue - mips_is_lui_gp and the pgp_* tracking above); MIPS64 (a different GOT/$gp convention, n32/n64, not read here) and ARM's Thumb mode (read as ARM, Inference) are still unresolved.
+		 * Trigger: a MIPS64 object, a sstripped MIPS32 object with neither a `.got` section nor the recompute prologue in scope, or $t9 set any other way (a true function-pointer call). Effect: every one of these still takes no entry; Thumb code is unaffected by this fix.
+		 * Reproducer: /mnt/games/normtest/fix_consol/matrix.md (fix_consol, entry walk vs symtab); tests/lib/genome/fntab.c t_walk_mips_indirect_jalr_got, t_walk_mips_indirect_jalr_prologue_gp (both green - the two conventions) and t_walk_mips_indirect_jalr / _no_lw / _prologue_gp_broken (the fallback cases, still pinned).
+		 * Fix: a MIPS64 $gp/GOT reader of the n32/n64 convention; the stronger general evidence is still the unwind table (fntab_fde.c), which the function table reads. */
+		if (mips && in.op == KGENOME_CELL_CALL && (in.flags & KGENOME_CELL_F_INDIRECT) &&
+		    in.n_op && in.o[0].kind == KGENOME_CELL_O_REG && in.o[0].reg == MIPS_REG_T9 &&
+		    t9_known && (pgp_known || c->wk->mips_gp_known)) {
+			const uint64_t gp = pgp_known ? pgp : c->wk->mips_gp;  /* this function's own $gp (part 3) wins over the walk-wide one (part 1) when both apply */
+			uint64_t mips_tgt;
+
+			if (mips_got_target(c, gp, t9_off, &mips_tgt) &&
+			    !kgenome_diag_wrapper_push_u64(&c->wk->tgt, &c->wk->n_tgt, &c->wk->cap_tgt, mips_tgt))
+				return 0;
+		}
+		if (pe.pe && !kgenome_diag_wrapper_pe_stub(&pe, c, &in))
+			return 0;
+		if (x86 && sgboundary && !pe.pe && in.at < c->size && x86_sigreturn_stub(c->base + in.at, c->size - in.at, c->wk->arch) &&
+		    !kgenome_diag_wrapper_push_u64(&c->wk->tgt, &c->wk->n_tgt, &c->wk->cap_tgt, in.at))
+			return 0;
 		if (in.op == KGENOME_CELL_CALL && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
 		    in.target != KGENOME_BROKEN) {
 			if (!kgenome_diag_wrapper_push_u64(&c->wk->tgt, &c->wk->n_tgt, &c->wk->cap_tgt, in.target))
 				return 0;
 		} else if (in.op == KGENOME_CELL_JMP && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
-			   in.target != KGENOME_BROKEN && boundary) {
+			   in.target != KGENOME_BROKEN && boundary && !pe.pe) {
 			/*
 			 * A THUNK: `jmp X` as the first instruction of a function
 			 * makes X an entry, though nothing CALLS it. musl keeps its
@@ -447,10 +783,37 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 			if (!kgenome_diag_wrapper_push_u64(&c->wk->site, &c->wk->n_site, &c->wk->cap_site, in.at))
 				return 0;
 		}
+		if (mips && prev_cti) {
+			t9_known = 0;    /* this instruction crossed control flow: whatever filled $t9 before it may not reach past here */
+			pgp_known = 0;   /* likewise for the per-function $gp (part 3): a call may let its callee clobber $gp with nothing here to say it was restored */
+		}
+		if (mips) {
+			/*
+			 * mips_bnd is `boundary` delay-slot adjusted: MIPS always runs one more instruction
+			 * (the delay slot) after `jr`/`j` before the transfer happens, so the position right
+			 * after one is still that instruction's own slot, not a new function - mips_bnd says
+			 * so one instruction later than `boundary` itself would. A `nop` has no delay slot
+			 * (it is not a transfer), so it sets the true boundary immediately, like `boundary`.
+			 */
+			if (mips_bnd_delay) {
+				mips_bnd = 1;
+				mips_bnd_delay = 0;
+			} else if (in.op == KGENOME_CELL_RET || in.op == KGENOME_CELL_JMP) {
+				mips_bnd = 0;
+				mips_bnd_delay = 1;
+			} else {
+				mips_bnd = in.op == KGENOME_CELL_NOP;
+			}
+		}
 		boundary = in.op == KGENOME_CELL_RET || in.op == KGENOME_CELL_JMP ||
 			   in.op == KGENOME_CELL_NOP;
+		sgboundary = boundary || (x86 && (x86_self_lea(&in) || (in.op == KGENOME_CELL_INT && in.at < c->size && c->base[in.at] == 0xccu)));
+		if (pe.pe)
+			kgenome_diag_wrapper_pe_boundary(&pe, c, &in, boundary);
 	}
-	return 1;
+	if (!pad_close(c, &pad_from, k.at))
+		return 0;
+	return !pe.pe || kgenome_diag_wrapper_pe_close(&pe, c, k.at, off + n);
 }
 
 /*
@@ -499,6 +862,8 @@ static void walk_reset(struct kgenome_diag_walk *wk)
 	kgenome_diag_wrapper_walk_drop_trace(wk);
 	free(wk->tgt);
 	free(wk->site);
+	free(wk->pad);
+	free(wk->thk);
 	memset(wk, 0, sizeof *wk);
 	wk->lg = lg;                    /* who holds the walk is not part of what it holds */
 	wk->runs = runs;                /* nor how many times it has been made */
@@ -563,13 +928,26 @@ uint32_t kgenome_diag_walk_runs(const struct kgenome_diag_walk *wk)
 int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size, int want_trace)
 {
-	const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
 	struct kgenome_diag_wrapper_ctx c;
 	uint32_t i;
 	int x86 = obj->arch == KGENOME_ARCH_X86 || obj->arch == KGENOME_ARCH_X86_64;
 
-	if (!wk || !e || !e->valid || obj->format != KGENOME_FMT_ELF)
+	if (!wk || !obj)
 		return 0;
+	if (obj->format == KGENOME_FMT_ELF) {
+		const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
+
+		if (!e || !e->valid)
+			return 0;
+	} else if (obj->format == KGENOME_FMT_PE) {
+		/* A PE is walked as x86 / x64 only (the one decoder with a trace); its kernel-entry sites are an ELF's question. */
+		const struct kgenome_pe_info *p = kgenome_obj_pe(obj);
+
+		if (!p || !p->valid || !x86)
+			return 0;
+	} else {
+		return 0;
+	}
 	if (wk->built && wk->base == base && wk->size == size &&
 	    (wk->has_trace || !want_trace))
 		return 1;
@@ -579,6 +957,7 @@ int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_
 	c.obj = obj;
 	c.base = base;
 	kgenome_cell_space_init(&c.sp, obj, base, size);
+	c.sp.raw = 1;                   /* the trace holds what the decoder writes */
 	c.size = size;
 	c.wide = obj->arch == KGENOME_ARCH_X86_64;
 	c.w = c.wide ? 8 : 4;
@@ -586,8 +965,10 @@ int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_
 	wk->base = base;
 	wk->size = size;
 	wk->arch = obj->arch;
-	wk->sites = x86;
-	wk->has_trace = want_trace && x86;
+	wk->sites = x86 && obj->format == KGENOME_FMT_ELF;
+	wk->mips_gp_known = (uint8_t)(wk->arch == KGENOME_ARCH_MIPS && obj->format == KGENOME_FMT_ELF &&
+				      mips_gp_of(obj, &wk->mips_gp));
+	wk->has_trace = want_trace;
 	wk->tr_on = wk->has_trace && size <= 0xffffffffu;
 	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
 		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
@@ -598,6 +979,10 @@ int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_
 		}
 	}
 	kgenome_diag_wrapper_tgt_unique(&c);
+	if (wk->n_pad)
+		qsort(wk->pad, wk->n_pad / 2u, 2u * sizeof *wk->pad, pad_cmp);
+	if (wk->n_thk)
+		qsort(wk->thk, wk->n_thk, sizeof *wk->thk, stub_cmp);
 	wk->built = 1;
 	return 1;
 }
@@ -606,6 +991,36 @@ const uint64_t *kgenome_diag_walk_entries(const struct kgenome_diag_walk *wk, ui
 {
 	*n = wk->n_tgt;
 	return wk->tgt;
+}
+
+/* The runs of padding instructions the one decode saw: `*n` runs of [from, to), sorted by `from` (the runs are disjoint, so `to` is
+ * sorted too). Two u64 a run. */
+const uint64_t *kgenome_diag_walk_pads(const struct kgenome_diag_walk *wk, uint32_t *n)
+{
+	*n = wk->n_pad / 2u;
+	return wk->pad;
+}
+
+/* The import stubs the one decode met (PE): `*n` stubs, sorted by offset (the extents of a PE need not be in the order of the file). */
+const struct kgenome_diag_stub *kgenome_diag_walk_thunks(const struct kgenome_diag_walk *wk, uint32_t *n)
+{
+	*n = wk->n_thk;
+	return wk->thk;
+}
+
+uint64_t kgenome_diag_walk_thunk_slot(const struct kgenome_diag_walk *wk, uint64_t at)
+{
+	uint32_t lo = 0, hi = wk ? wk->n_thk : 0;
+
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (wk->thk[mid].at < at)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return wk && lo < wk->n_thk && wk->thk[lo].at == at ? wk->thk[lo].slot : KGENOME_BROKEN;
 }
 
 /* The scan's walk: the one it was given, else one of its own. */

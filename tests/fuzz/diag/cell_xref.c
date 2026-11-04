@@ -130,7 +130,7 @@ static void run_codemap(struct fz_ctx *c, const struct kgenome_obj *obj, const u
 	int ordered = 1;
 
 	memset(&m, 0, sizeof m);
-	if (!kgenome_codemap_build(obj, in, n, NULL, &m)) {
+	if (!kgenome_codemap_build(obj, in, n, NULL, NULL, &m)) {
 		fz_digest(c, 0xc0de);
 		kgenome_codemap_free(&m);
 		return;

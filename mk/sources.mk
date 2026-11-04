@@ -82,7 +82,9 @@ KOFREPORT_SRC := libkoforbit/report/kofreport.c \
 # new piece is picked up by the wildcard.
 KOFINSPECT_SRC := kofexamine/kofinspect.c $(sort $(wildcard kofexamine/kofinspect_*.c))
 KOFEXAMINER_SRC := kofexamine/kofexaminer.c $(sort $(wildcard kofexamine/kofexaminer_*.c))
-EXAMINE_SRC := $(KOFEXAMINER_SRC) $(KOFINSPECT_SRC) kofexamine/kofeditor.c \
+# kofeditor.c is a family of units (kofeditor_<part>.c, one private header): a new piece is picked up by the wildcard.
+KOFEDITOR_SRC := kofexamine/kofeditor.c $(sort $(wildcard kofexamine/kofeditor_*.c))
+EXAMINE_SRC := $(KOFEXAMINER_SRC) $(KOFINSPECT_SRC) $(KOFEDITOR_SRC) \
                kofexamine/kofscfind.c
 
 # The signature builder: one file per mode and responsibility (ksb.h), a new
@@ -100,10 +102,10 @@ KSB_SRC := $(sort $(wildcard ksigbuilder/ksb_*.c))
 CHAN_TEST_SRC := libkoforbit/chan/chan_posix.c $(KOFEVT_SRC)
 
 # The editor's sources: the signature draft is what the viewer edits, not what the
-# engine scans with, so kofeditor.c lives beside the tools rather than inside
+# engine scans with, so kofeditor*.c live beside the tools rather than inside
 # libkofeng, and a test over it compiles that source. kofinspect describes events
 # as well as objects, so whatever links it needs the event record with it.
-EDITOR_SRC := kofexamine/kofeditor.c $(KOFINSPECT_SRC) $(KOFEVT_SRC)
+EDITOR_SRC := $(KOFEDITOR_SRC) $(KOFINSPECT_SRC) $(KOFEVT_SRC)
 
 # THE ETW-FREE HALF OF libkofgrille, TESTED ON WHATEVER HOST IS RUNNING. Not
 # linked against $(LIB): libkofgrille is a SIBLING of libkofeng and nothing in

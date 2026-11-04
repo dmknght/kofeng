@@ -347,7 +347,8 @@ static int fam_cell_entries(void *arg)
  * says so by returning 0 - it does not guess a length", decode.h), whatever the number. */
 static int unknown_arch(void *arg)
 {
-	static const unsigned arches[] = { KGENOME_ARCH_ANY, KGENOME_ARCH_RISCV64, KGENOME_ARCH_PPC64,
+	/* (PPC64 was in this list while the front end had no PowerPC decoder; it has one now - decode.c dispatches KGENOME_ARCH_PPC and PPC64 - and answers for it: the row was stale, not the engine) */
+	static const unsigned arches[] = { KGENOME_ARCH_ANY, KGENOME_ARCH_RISCV64,
 		KGENOME_ARCH_SH, KGENOME_ARCH_SPARC, KGENOME_ARCH_OR1K, 0xffffu, ~0u };
 	struct kgenome_cell_insn in;
 	unsigned i;
@@ -524,7 +525,7 @@ int main(int argc, char **argv)
 		int sig = 0;
 		enum hk_result r = hk_isolated(unknown_arch, NULL, 10, &sig);
 
-		CK(r == HK_OK);   /* kgenome_cell_decode decodes the bytes of an architecture it has no decoder for as x86-32 */
+		CK(r == HK_OK);   /* kgenome_cell_decode answers 0 for an architecture it has no decoder for: never another ISA's reading (decode.c) */
 	}
 	gb_free(&G);
 	gb_free(&T);

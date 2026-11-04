@@ -189,3 +189,37 @@ int oc_diag32(const struct kof_obj_ctx *ctx, uint32_t id)
 {
 	return diag_q(ctx, id, 1);
 }
+
+/* The allocator the frames of the object's functions (and the CFG signature of a unit) run under: every byte is charged to the scanner's ledger as any other allocation is, and
+ * refused (NULL: the function has no frame, the unit is unsigned with the reason NOMEM, said) when the object's share has no room. */
+void *oc_cfg_alloc(void *user, size_t n)
+{
+	struct kof_scanner *sc = user;
+	void *p;
+
+	if (n > oc_scan_room(sc))
+		return NULL;
+	p = malloc(n);
+	if (p)
+		scan_charge(sc, n);
+	return p;
+}
+
+void oc_cfg_release(void *user, void *p, size_t n)
+{
+	if (!p)
+		return;
+	oc_scan_release(user, n);
+	free(p);
+}
+
+/* THE OBJECT'S FRAMES: one cache per object, made on the first ask. The table it is made for is the object's (oc_funcs), the decode the object's walk. */
+struct kgenome_frame_cache *oc_frames(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc->obj.diag.frames)
+		sc->obj.diag.frames = kgenome_frame_cache_new(&(const struct kgenome_cfg_mem){ oc_cfg_alloc, oc_cfg_release, sc },
+								      oc_scan_room(sc) / 4u);       /* what it keeps: a quarter of the object's room (frame.h) */
+	return sc->obj.diag.frames;
+}

@@ -327,6 +327,7 @@ enum kof_stage {
 	KOF_STAGE_UNPACK,
 	KOF_STAGE_DECRYPT,
 	KOF_STAGE_CARVE,
+	KOF_STAGE_EMBED,        /* the objects the host holds in its variables - the host's own, no module */
 	KOF_STAGE_NORMZ,        /* the object said plainly - the host's own      */
 	KOF_STAGE_SIMILAR,      /* similarity detectors, on the object that is left */
 	KOF_STAGE_SCRIPT,       /* the second form of a script                    */

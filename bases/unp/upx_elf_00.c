@@ -249,6 +249,8 @@ KOF_UPX_DEFINE_METHOD_OF()
 #define UPX_UF_E8   1u
 #define UPX_UF_E9   2u
 #define UPX_UF_JCC  4u
+#define UPX_UF_ARM  8u      /* word filters: not a byte scan, see upx_unfilter_words */
+#define UPX_UF_PPC  16u
 
 /* Which branches this id transformed, or 0 for one this module does not do. */
 static unsigned upx_filter_ops(unsigned id)
@@ -260,6 +262,8 @@ static unsigned upx_filter_ops(unsigned id)
 	case 0x36:
 	case 0x46: return UPX_UF_E8 | UPX_UF_E9;
 	case 0x49: return UPX_UF_E8 | UPX_UF_E9 | UPX_UF_JCC;
+	case 0x50: return UPX_UF_ARM;
+	case 0xd0: return UPX_UF_PPC;
 	default:   return 0u;
 	}
 }
@@ -275,12 +279,96 @@ static unsigned upx_filter_ops(unsigned id)
  */
 #define UPX_UF_WIN 4096u
 
+/*
+ * THE WORD FILTERS (owner, 2026-11-03: "thu nghiem fix"). Two more ids, each one a
+ * rule over ALIGNED 32-bit words of the block; the reference output of `upx -d`
+ * 4.2.4 on one ARM and one PowerPC sample is the oracle and both come back byte
+ * for byte (cmp 0; the measurement is in the hand-over, no sample is in the tree).
+ *
+ *   0x50  ARM, little-endian words. Every word whose bits 27..24 are 1011 (a BL
+ *         under ANY condition, and 0xfb too: the filter does not look at the
+ *         condition, so data that looks like one was changed and is changed
+ *         back) holds, in imm24, the displacement PLUS the word's index in the
+ *         block. Inverse: imm24 = (imm24 - pos/4) mod 2^24. No range test: a
+ *         range test on this id leaves 72 bytes wrong on the sample.
+ *   0xd0  PowerPC, big-endian words. A word with opcode 18 and AA = 0 (`b` and
+ *         `bl`: mask 0xfc000002 == 0x48000000) holds the displacement PLUS the
+ *         word's byte offset in the block, and ONLY when that sum is an offset
+ *         inside the block (a target before the block or past it was left as it
+ *         was). Inverse: when li < the block length, li = (li - pos) mod 2^26.
+ *         "Below the length" is what the sample shows (a word with li 0x442200 in
+ *         a 118064 byte block is untouched); that the bound is exclusive is not
+ *         proven by a sample with li == length.
+ * pos is measured from the START OF THE BLOCK, so the walk is aligned to the block
+ * and not to the file, and a window of 4096 keeps it. cto is 0 in both samples and
+ * is not used.
+ */
+static void upx_unfilter_words(const struct kof_obj_ctx *ctx, uint64_t base,
+			       uint32_t len, unsigned ops)
+{
+	uint8_t w[UPX_UF_WIN];
+	uint32_t pos = 0;
+
+	(void)ctx;
+	while (pos + 4u <= len) {
+		uint32_t want = len - pos;
+		uint32_t have, i, changed = 0;
+
+		if (want > UPX_UF_WIN)
+			want = UPX_UF_WIN;
+		have = kunp_rcstruct_read(base + pos, w, want) & ~3u;
+		if (have == 0)
+			break;
+		for (i = 0; i < have; i += 4) {
+			if (ops & UPX_UF_ARM) {
+				uint32_t v = ((uint32_t)w[i + 3] << 24) |
+					     ((uint32_t)w[i + 2] << 16) |
+					     ((uint32_t)w[i + 1] << 8) | w[i];
+
+				if (((v >> 24) & 0xfu) != 0xbu)
+					continue;
+				v = (v & 0xff000000u) |
+				    (((v & 0xffffffu) - ((pos + i) >> 2)) &
+				     0xffffffu);
+				w[i]     = (uint8_t)v;
+				w[i + 1] = (uint8_t)(v >> 8);
+				w[i + 2] = (uint8_t)(v >> 16);
+				w[i + 3] = (uint8_t)(v >> 24);
+			} else {
+				uint32_t v = ((uint32_t)w[i] << 24) |
+					     ((uint32_t)w[i + 1] << 16) |
+					     ((uint32_t)w[i + 2] << 8) |
+					     w[i + 3];
+				uint32_t li = v & 0x03fffffcu;
+
+				if ((v & 0xfc000002u) != 0x48000000u ||
+				    li >= len)
+					continue;
+				v = (v & 0xfc000003u) |
+				    ((li - (pos + i)) & 0x03fffffcu);
+				w[i]     = (uint8_t)(v >> 24);
+				w[i + 1] = (uint8_t)(v >> 16);
+				w[i + 2] = (uint8_t)(v >> 8);
+				w[i + 3] = (uint8_t)v;
+			}
+			changed = 1;
+		}
+		if (changed && !kunp_rcstruct_poke(base + pos, w, have))
+			return;
+		pos += have;
+	}
+}
+
 static void upx_unfilter(const struct kof_obj_ctx *ctx, uint64_t base,
 			 uint32_t len, unsigned ops, unsigned cto)
 {
 	uint8_t w[UPX_UF_WIN];
 	uint32_t pos = 0;
 
+	if (ops & (UPX_UF_ARM | UPX_UF_PPC)) {
+		upx_unfilter_words(ctx, base, len, ops);
+		return;
+	}
 	while (pos + 6u <= len) {
 		uint32_t want = len - pos;
 		uint32_t have, i = 0, changed = 0;
@@ -1402,3 +1490,27 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * far more often than a layout nobody has met. */
 		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 }
+
+/*
+ * IMPROVE upx-code-1 (owner, 2026-11-01; ONE file, POSSIBLE FALSE POSITIVE: not proven that this module is the cause) - Sink: kof_unpack.
+ * HEUR-Backdoor.Linux.Mirai.mr-2c1f3e99 (ELF ARM 32-bit static, stripped, packed with UPX 4.00; debug: UPX.ELF.version 14, method 14 x3, blocks 3,
+ * shortfall 740, which this module says is NOT a verdict). The unpacked object //0 has, at file offset 0x57e04 (VA 0x5fe04), a function entry
+ * (the target of a real `bl` at VA 0x3420c inside a real function) whose bytes are a table/text, not code (words 0x75f9 0x8c3e 0x6ef0 0x2000 0x1856
+ * 0xff28 0x8ef4d7a3 0x65733a33), right after what looks like an unresolved PLT cell (`ldr ip,[pc]; ldr pc,[pc]; 0; 0`).
+ * The suspicion: the code structure of the unpacked image is not fully restored (a stub/cell the packed program fixes up at run time is left as it was
+ * packed, or part of the layout is not put back), so the engine sees data where the real program has code. It shows most on STRIPPED targets: with no
+ * symbols the function table comes from call targets (kgenome_diag_funcs_with_walk), so a call into a cell that was not restored becomes a "function".
+ * To check next: compare the bytes of //0 at VA 0x5fe04 with the image the emulator unpacker produces (Dump > Emu unpacker), and the PLT/GOT area around it.
+ * ACCURACY OF THE RESTORED FILE (owner, 2026-11-01): compare the output of this module with the REFERENCE unpacker the owner consulted, on the same sample, byte for byte
+ * and by structure (segments, entry, the code/data split, the function starts of the two images), to measure how exact the restored file is; the first check is the
+ * sample above (//0, 390484 bytes from this module, against the reference's output).
+ * REVIEW RESULT (owner order 2026-11-01; measured, reference = `upx -d` 4.2.4 run on the host on read-only copies in /mnt/games/normtest/inv_upx/; nothing in the module changed):
+ *   - Mirai.mr (ARM): `upx -d` refuses it (`NotPackedException: not packed by UPX`: the packed file is altered), so there is NO reference output for the sample of the 0x57e04 case.
+ *   - Mirai.r (PowerPC BE) and Mirai.gen (ARM LE): the reference output has the SAME SIZE as this module's (120396 and 180806 bytes) and differs in 8646 and 3722 bytes (2734 and 1617 runs of 1-7 bytes),
+ *     every one inside the R-X PT_LOAD and ALL IN THE DISPLACEMENT FIELD OF A BRANCH WITH LINK (ARM: word 0xeb000000|imm24 at 4-aligned offsets; PowerPC: `48 01 8c c9` vs `48 01 8c d5`): the code, the data
+ *     and the layout are identical. On ARM the difference of the imm24 fields is (offset/4 - 53) at all five places checked (0x1c0 -> 59, 0x1e0 -> 67, 0x1f4 -> 72, 0x210 -> 79, 0x224 -> 84): this module's output still
+ *     holds the FILTERED (absolute) call targets that the reference turns back into displacements.
+ *   - The cause is in this file: upx_filter_ops knows only the x86 filter ids (0x24 0x25 0x26 0x36 0x46 0x49); every other id returns 0 and the block is left filtered (the comment above it chooses 'leave it
+ *     filtered rather than write plausible rubbish'). ARM and PowerPC calls therefore point to wrong places in the unpacked image: the call-target walk then starts functions where no function is and reads data as code
+ *     (the 0x57e04 table of Mirai.mr is the target of a `bl`: probably such a call; not verified, no reference). Not measured: which filter ids the three samples use; the other architectures (MIPS, AArch64); whether
+ *     this module says (debug/report) that the block is still filtered: UPX.ELF.* shows no filter id. The fix is a filter per architecture, checked against the reference output byte for byte (that comparison is the test). */

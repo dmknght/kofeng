@@ -131,6 +131,40 @@ uint32_t kgenome_pe_imp_name(kof_buf f, const struct kgenome_pe_imp *e, char *ds
 			 uint32_t dstn);
 
 /*
+ * THE FILE'S OWN COFF LOCAL SYMBOL TABLE - see pe_coff_sym.c for the record
+ * layout, the END rule and the hostile-input discipline. `fn` is called once
+ * per PRIMARY record (auxiliary records are skipped, folded into their
+ * owner's NumberOfAuxSymbols) that is a FUNCTION symbol (Type 0x20, storage
+ * class EXTERNAL(2) or STATIC(3)) whose section is inside the table, is
+ * code, and whose Value lies inside it; anything else that table holds is
+ * counted in `*n_bad` (may be NULL) and not reported. `fn` returns 0 to
+ * stop the walk, matching kgenome_pe_export_fn.
+ *
+ * `name`/`name_len` point INTO `file` and are NOT NUL-terminated - the
+ * inline 8-byte form cannot promise one - and are valid only for the call;
+ * a copy, if the caller wants one, is the caller's (pe_sym.c also sanitises
+ * control bytes out of it, which is a policy this walk does not know about).
+ *
+ * The one walk of this table: the function-boundary strategy
+ * (kgenome_fntab_pe_coff, fntab_pe_coff.c) and the engine's KSYM builder
+ * (kof_pe_syms_with, pe_sym.c) both call it, so the record layout and its
+ * bounds are not re-derived twice.
+ */
+struct kgenome_pe_coff_sym {
+	uint64_t off;           /* the symbol's file offset: section's file offset + Value */
+	uint32_t value;         /* COFF Value: offset within the section */
+	uint16_t shndx;         /* the 1-based SectionNumber */
+	uint8_t  cls;           /* StorageClass: 2 EXTERNAL, 3 STATIC */
+	uint8_t  has_size;      /* an aux format-1 record gave a non-zero TotalSize */
+	uint64_t size;          /* that TotalSize; 0 when has_size is 0 */
+	const char *name;       /* NUL not guaranteed; NULL when name_len is 0 */
+	uint32_t name_len;
+};
+typedef int (*kgenome_pe_coff_sym_fn)(void *user, const struct kgenome_pe_coff_sym *s);
+void kgenome_pe_coff_syms(kof_buf file, const struct kgenome_pe_info *p,
+			 kgenome_pe_coff_sym_fn fn, void *user, uint32_t *n_bad);
+
+/*
  * Does this object look like PE at all?
  *
  * MZ plus a PE signature where e_lfanew points, because MZ alone is a DOS

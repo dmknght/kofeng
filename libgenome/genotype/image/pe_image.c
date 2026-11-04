@@ -112,6 +112,11 @@ uint32_t kgenome_pe_sec_perm(uint32_t ch)
  * The other direction is real - 219 sections in 115 files are executable
  * without CNT_CODE (UPX1) - and stays code.
  */
+/* KNOWN DEFECT PE-RSRC-EXEC-CODE (2026-11-04, M) [sev M]: reads only the EXECUTE bit, never
+ * whether the range is .rsrc/Security (a directory, not code). Trigger: EXECUTE set on a
+ * resource or certificate section. Effect: icon/version/signature bytes enter CODE and are
+ * hashed as a mutation gene. Reproducer: none yet, not measured on a real sample.
+ * Fix: exclude the resource/security directory ranges, as the .NET heap already is. */
 int kgenome_pe_sec_is_code(const struct kgenome_pe_sec *s)
 {
 	return (s->perm & KGENOME_PE_PERM_X) != 0;
@@ -964,6 +969,18 @@ static int imp_name_at(kof_buf f, uint64_t at, char *dst, uint32_t dstn, int *cu
 	return q != 0;
 }
 
+/* IMPROVE import-predict-1 (owner, 2026-11-03; idea, not built, not measured): while a PE or an ELF is
+ * analysed, the imported function names (this walk, and the dynamic symbols of an ELF) are known for the
+ * price of a table walk and no decode. Consider an algorithm that PREDICTS the family (or which diagnoses
+ * are worth asking) from the import set, as a cheap filter ahead of the dearer routes.
+ * Limits to state before building it: the import set is a NECESSARY condition only. An import-all file makes
+ * it a superset (the filter never closes: cost lost, nothing wrong); a static or stripped file has no honest
+ * import view (the capability then comes from the syscall sites after decode); direct syscalls and API
+ * resolved by hash or dlsym leave no import at all. So the filter may close a route only when the view is
+ * complete, says why in the diagnose trace (gate=closed:<signs>), and never drops a function or a
+ * mutation unit (rule 4). Measure first: share of objects with an honest import table and a closable
+ * diagnose, and the time saved (warm cache, A/B). */
+
 /* How long a library or import name is read whole. A name past it is cut AND reported
  * (KGENOME_TRUNCATED from kgenome_pe_imports): it was 63 bytes and said nothing. */
 #define IMP_NAME_MAX 4096u
@@ -1117,6 +1134,11 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
  */
 #define EXP_NAMES_MAX 4096u
 
+/* KNOWN DEFECT PE-EXPFWD-INEXEC (2026-11-05, M) [sev L]: unlike its sibling kgenome_fntab_pe_export, this walk never checks a forwarder's RVA against the directory's own [rva, rva+size) range.
+ * Trigger: a named export read for the KSYM symbol block (kof_pe_syms); a forwarder or a pure-data export. Effect: export_put (pe_sym.c) gets the forwarder STRING's RVA (not a function address)
+ * or a non-code address, and flags KOF_SYM_F_IN_EXEC from `frva != 0` alone - no boundary-analysis effect (kgenome_fntab_pe_export already excludes the same range there), display/value only.
+ * Reproducer: tests/unit/pe_export_sym_flags.c:t_export_forwarder_and_data_sym. Fix: skip (or flag) an RVA inside [rva,rva+size) here as kgenome_fntab_pe_export does; have export_put resolve
+ * frva through the section table for IN_EXEC, as elf_sym.c does, instead of testing it against zero. */
 uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 			kgenome_pe_export_fn fn, void *user,
 			enum kgenome_status *status)

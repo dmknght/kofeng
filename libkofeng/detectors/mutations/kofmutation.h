@@ -170,6 +170,9 @@ void kof_mutation_set_info(const struct kof_mutation_set *set, struct kof_mutati
  * from a function scores 0 on this object because nothing was fed for it, not because the object differs. Not a lower bound of
  * anything else; not an error. */
 #define KOF_MTN_S_FUNC_UNSIGNED  0x20u
+/* A function of the object's table was NOT offered as a unit: it lies outside the code region (`funcs_out`) or the library's span touches it (`funcs_lib`: the object carries code
+ * that is the library's, evidence a reader may want). Which units are signed does not change; the count is the word (FP-18, it was silent). Not an error, not a bound. */
+#define KOF_MTN_S_FUNC_DROPPED   0x40u
 struct kof_mutation_stat {
 	uint32_t status;
 	uint32_t n_chunks, touched;
@@ -181,6 +184,8 @@ struct kof_mutation_stat {
 	uint64_t life_io_bytes;        /* over every object this scanner has seen, this one excluded */
 	uint32_t life_io_objects;      /* objects that ended with IO_BUDGET, IO_ERROR or SLICE_CRC */
 	uint32_t life_unsigned_objects; /* objects that ended with FUNC_UNSIGNED */
+	uint32_t funcs_lib, funcs_out;  /* this object: functions not offered as units, the library's / outside the code region (FUNC_DROPPED) */
+	uint32_t life_dropped_objects;  /* objects that ended with FUNC_DROPPED, this one excluded */
 };
 struct kof_mutation_ctx;
 void kof_mutation_stat(const struct kof_mutation_ctx *c, struct kof_mutation_stat *out);
@@ -264,6 +269,7 @@ struct kof_mutation_ctx {
 	uint32_t  status;               /* KOF_MTN_S_* for this object */
 	uint32_t  trunc_walks, walks, n_chunks;
 	uint32_t  life_unsigned_objects;  /* objects with KOF_MTN_S_FUNC_UNSIGNED, this one excluded */
+	uint32_t  funcs_lib, funcs_out, life_dropped_objects;   /* FUNC_DROPPED: this object's counts, and the objects that ended with it */
 	uint64_t  visits, trunc_pairs, probes;
 	uint64_t  life_visits;          /* over every object this scanner has seen */
 	uint32_t  life_trunc_objects, life_io_objects;
@@ -281,6 +287,16 @@ static inline void kof_mutation_note_unsigned(struct kof_mutation_ctx *c)
 {
 	if (c)
 		c->status |= KOF_MTN_S_FUNC_UNSIGNED;
+}
+
+/* The feed's cut left functions out (kgenome_mutation_tally): say so on this object (KOF_MTN_S_FUNC_DROPPED). */
+static inline void kof_mutation_note_dropped(struct kof_mutation_ctx *c, uint32_t lib, uint32_t out)
+{
+	if (c && (lib || out)) {
+		c->status |= KOF_MTN_S_FUNC_DROPPED;
+		c->funcs_lib += lib;
+		c->funcs_out += out;
+	}
 }
 
 /*

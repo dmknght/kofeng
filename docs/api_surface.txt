@@ -3,7 +3,7 @@
 # and tools/merge_gate.sh fails on any name added or removed that the patch manifest does not allow.
 # Flags: exports_kept = named in docs/exports_kept.txt (the reason is there); no_public_header = no header declares it.
 
-== libkofeng.a (1951)
+== libkofeng.a (1969)
 kdb_diag_collisions  [exports_kept]
 kdb_diag_full  [exports_kept]
 kdb_diag_packs_refused  [exports_kept]
@@ -93,6 +93,7 @@ kgenome_cell_decode
 kgenome_cell_decode_arm32
 kgenome_cell_decode_arm64
 kgenome_cell_decode_mips
+kgenome_cell_decode_ppc
 kgenome_cell_decode_thumb
 kgenome_cell_decode_x86
 kgenome_cell_next
@@ -179,6 +180,7 @@ kgenome_diag_emu_stop_status
 kgenome_diag_emu_worth_remembering
 kgenome_diag_extent
 kgenome_diag_extent_count
+kgenome_diag_frames
 kgenome_diag_funcs
 kgenome_diag_funcs_of
 kgenome_diag_funcs_of_view
@@ -261,8 +263,11 @@ kgenome_diag_walk_free
 kgenome_diag_walk_held_count  [exports_kept]
 kgenome_diag_walk_hold
 kgenome_diag_walk_new
+kgenome_diag_walk_pads
 kgenome_diag_walk_runs
 kgenome_diag_walk_set_cap
+kgenome_diag_walk_thunk_slot
+kgenome_diag_walk_thunks
 kgenome_diag_walk_trim
 kgenome_diag_wrap_settle
 kgenome_diag_wrapper_charge
@@ -278,6 +283,13 @@ kgenome_diag_wrapper_isrc_scan
 kgenome_diag_wrapper_isrc_seek
 kgenome_diag_wrapper_isrc_walk
 kgenome_diag_wrapper_pass_b
+kgenome_diag_wrapper_pe_boundary
+kgenome_diag_wrapper_pe_close
+kgenome_diag_wrapper_pe_data
+kgenome_diag_wrapper_pe_pad_from
+kgenome_diag_wrapper_pe_start
+kgenome_diag_wrapper_pe_stub
+kgenome_diag_wrapper_pe_zero
 kgenome_diag_wrapper_push_u64
 kgenome_diag_wrapper_site_made
 kgenome_diag_wrapper_site_open
@@ -293,6 +305,7 @@ kgenome_diag_wrapper_supersede
 kgenome_diag_wrapper_tgt_index
 kgenome_diag_wrapper_tgt_unique
 kgenome_diag_wrapper_trace_get
+kgenome_diag_wrapper_trace_get_cell
 kgenome_diag_wrapper_trace_lower
 kgenome_diag_wrapper_tseen_retry
 kgenome_diag_wrapper_walk_drop_trace
@@ -443,13 +456,16 @@ kgenome_dtx_walk
 kgenome_dtx_walk_range
 kgenome_dtx_word_in
 kgenome_elf_entry_sec
-kgenome_elf_funcs_from_entries
+kgenome_elf_extent
+kgenome_elf_hdr_valid
 kgenome_elf_hdr_write  [exports_kept]
+kgenome_elf_ident_valid
 kgenome_elf_image_parse
 kgenome_elf_imports
 kgenome_elf_info_offsets
 kgenome_elf_info_remap
 kgenome_elf_load_at_off
+kgenome_elf_magic  [no_public_header]
 kgenome_elf_rebuild
 kgenome_elf_relcalls
 kgenome_elf_reloc_in
@@ -653,88 +669,60 @@ kgenome_endian_plan_free
 kgenome_endian_range
 kgenome_endian_wanted
 kgenome_endian_wide
-kgenome_fnprint_acc_bad
-kgenome_fnprint_acc_good
-kgenome_fnprint_acc_init
-kgenome_fnprint_advise
-kgenome_fnprint_bsketch_build  [exports_kept]
-kgenome_fnprint_bsketch_find  [exports_kept]
-kgenome_fnprint_bsketch_free  [exports_kept]
-kgenome_fnprint_bsketch_main  [exports_kept]
-kgenome_fnprint_bstat  [exports_kept]
-kgenome_fnprint_bstat_is_data  [exports_kept]
-kgenome_fnprint_collect  [exports_kept]
-kgenome_fnprint_decide
-kgenome_fnprint_dx_attach  [exports_kept]
-kgenome_fnprint_dx_begin
-kgenome_fnprint_dx_cluster  [exports_kept]
-kgenome_fnprint_dx_credit
-kgenome_fnprint_dx_detach
-kgenome_fnprint_dx_full  [exports_kept]
-kgenome_fnprint_dx_open  [exports_kept]
-kgenome_fnprint_dx_remain  [exports_kept]
-kgenome_fnprint_dx_state  [exports_kept]
-kgenome_fnprint_dxdb_build  [exports_kept]
-kgenome_fnprint_dxdb_free  [exports_kept]
-kgenome_fnprint_equal  [exports_kept]
-kgenome_fnprint_has_node
-kgenome_fnprint_is_landing_pad
-kgenome_fnprint_libtab_add  [exports_kept]
-kgenome_fnprint_libtab_free  [exports_kept]
-kgenome_fnprint_libtab_has  [exports_kept]
-kgenome_fnprint_libtab_init  [exports_kept]
-kgenome_fnprint_libtab_put  [exports_kept]
-kgenome_fnprint_libtab_sampled  [exports_kept]
-kgenome_fnprint_libvote  [exports_kept]
-kgenome_fnprint_local_target
-kgenome_fnprint_match_any_pm  [exports_kept]
-kgenome_fnprint_match_done  [exports_kept]
-kgenome_fnprint_match_feed  [exports_kept]
-kgenome_fnprint_match_init  [exports_kept]
-kgenome_fnprint_match_strong_pm  [exports_kept]
-kgenome_fnprint_match_visit  [exports_kept]
-kgenome_fnprint_opts_resolve
-kgenome_fnprint_pos_adj
-kgenome_fnprint_pos_fold
-kgenome_fnprint_pos_free
-kgenome_fnprint_pos_pad
-kgenome_fnprint_pos_reset
-kgenome_fnprint_pos_target
-kgenome_fnprint_reach_edge
-kgenome_fnprint_reach_free
-kgenome_fnprint_reach_hold
-kgenome_fnprint_reach_reset
-kgenome_fnprint_reach_resolve
-kgenome_fnprint_ref_build  [exports_kept]
-kgenome_fnprint_ref_free  [exports_kept]
-kgenome_fnprint_relmask  [exports_kept]
-kgenome_fnprint_runs  [exports_kept]
-kgenome_fnprint_sel_plan  [exports_kept]
-kgenome_fnprint_set_free  [exports_kept]
-kgenome_fnprint_sorted  [exports_kept]
-kgenome_fnprint_tokens
-kgenome_fnprint_walk  [exports_kept]
-kgenome_fnprint_wctx_begin  [exports_kept]
-kgenome_fnprint_wctx_count  [exports_kept]
-kgenome_fnprint_wctx_credit  [exports_kept]
-kgenome_fnprint_wctx_done  [exports_kept]
-kgenome_fnprint_wctx_init  [exports_kept]
-kgenome_fnprint_wctx_kill_block
-kgenome_fnprint_wctx_retire  [exports_kept]
-kgenome_fnprint_wdb_build  [exports_kept]
-kgenome_fnprint_wdb_free  [exports_kept]
-kgenome_fnprint_weight
-kgenome_fnprint_wpass  [exports_kept]
-kgenome_fnprint_wsketch  [exports_kept]
+kgenome_fntab_bound
+kgenome_fntab_collect_elf
+kgenome_fntab_collect_pe
+kgenome_fntab_eh_section
+kgenome_fntab_eh_segment
+kgenome_fntab_ends
+kgenome_fntab_fde
+kgenome_fntab_in_stub_section
+kgenome_fntab_list_add
+kgenome_fntab_list_free
+kgenome_fntab_merge
+kgenome_fntab_pad_at
+kgenome_fntab_pad_before
+kgenome_fntab_pdata
+kgenome_fntab_pdata_arm
+kgenome_fntab_pe_cfg
+kgenome_fntab_pe_code_rva
+kgenome_fntab_pe_coff
+kgenome_fntab_pe_export
+kgenome_fntab_pe_thunk
+kgenome_fntab_pe_tls
+kgenome_fntab_probe
+kgenome_fntab_reach
+kgenome_fntab_run_walk
+kgenome_fntab_select
+kgenome_fntab_symtab
+kgenome_fntab_walk
+kgenome_frame_cache_built
+kgenome_frame_cache_bytes
+kgenome_frame_cache_free
+kgenome_frame_cache_hits
+kgenome_frame_cache_new
+kgenome_frame_cache_refused
+kgenome_frame_facts
+kgenome_frame_facts_of
+kgenome_frame_get
+kgenome_frame_make
+kgenome_frame_of_extent
+kgenome_frame_release
+kgenome_frame_state_name
+kgenome_funcs_at
 kgenome_funcs_build
 kgenome_funcs_free
 kgenome_funcs_remap
 kgenome_funcs_remap_endian
+kgenome_funcs_start
 kgenome_gv_alloc
 kgenome_gv_box_line
 kgenome_gv_free
 kgenome_gv_loops
 kgenome_image_addr_to_off
+kgenome_image_embed_extent
+kgenome_image_embed_spans
+kgenome_image_embed_starts
 kgenome_image_off_to_addr
 kgenome_image_seg_at
 kgenome_infect_regions
@@ -750,14 +738,17 @@ kgenome_lineage_chain_next
 kgenome_lineage_charge
 kgenome_lineage_codemap
 kgenome_lineage_decode
-kgenome_lineage_fn_at
-kgenome_lineage_fn_of_va
+kgenome_lineage_fn_get
+kgenome_lineage_fn_of_insn
+kgenome_lineage_frame_src
 kgenome_lineage_hands_on
 kgenome_lineage_has_store
 kgenome_lineage_jmp_is_tail
 kgenome_lineage_mark_unreached
+kgenome_lineage_noret
 kgenome_lineage_obligations
 kgenome_lineage_preds
+kgenome_lineage_refs
 kgenome_lineage_run_summ
 kgenome_lineage_seed
 kgenome_lineage_seed_block
@@ -832,6 +823,7 @@ kgenome_oatab_rehash
 kgenome_oatab_seed
 kgenome_oatab_want
 kgenome_offmap_at
+kgenome_pe_coff_syms
 kgenome_pe_exports
 kgenome_pe_funcs_build  [exports_kept]
 kgenome_pe_image_parse
@@ -844,14 +836,24 @@ kgenome_pe_imptab_is_of
 kgenome_pe_info_offsets
 kgenome_pe_info_remap
 kgenome_pe_layout_of
+kgenome_pe_probe
 kgenome_pe_sec_at_off
 kgenome_pe_sec_extent
 kgenome_pe_sec_is_code
 kgenome_pe_sec_perm
+kgenome_pe_select
 kgenome_pe_sniff
 kgenome_pe_unmap
 kgenome_pe_write_hdr
 kgenome_pe_write_imports
+kgenome_ppc_attr  [no_public_header]
+kgenome_ppc_branch_off  [exports_kept]
+kgenome_ppc_branch_target
+kgenome_ppc_decode
+kgenome_ppc_name  [exports_kept]
+kgenome_ppc_names  [no_public_header]
+kgenome_ppc_prim
+kgenome_ppc_x31  [no_public_header]
 kgenome_range_facts
 kgenome_range_xref_build
 kgenome_ruby_code_nested
@@ -1143,6 +1145,7 @@ kof_chm_sniff
 kof_codenotes_at
 kof_codenotes_build
 kof_codenotes_free
+kof_codenotes_make
 kof_crc32_fast_cont
 kof_db_arena_open
 kof_db_cat_name
@@ -1248,6 +1251,8 @@ kof_exe_pass_b64
 kof_exe_pass_esc
 kof_exe_pass_hex
 kof_exe_pass_pct
+kof_exe_strtab
+kof_exe_strtab_would_change
 kof_exe_unb64  [exports_kept]
 kof_exe_unesc  [exports_kept]
 kof_exe_unhex  [exports_kept]
@@ -1262,6 +1267,7 @@ kof_famcat_delete_family
 kof_famcat_delete_variant
 kof_famcat_dirty
 kof_famcat_fam_id_at
+kof_famcat_family_comment
 kof_famcat_family_id
 kof_famcat_family_max
 kof_famcat_family_text
@@ -1284,6 +1290,8 @@ kof_famcat_rename_family
 kof_famcat_restore
 kof_famcat_save
 kof_famcat_set_comment
+kof_famcat_set_family
+kof_famcat_set_family_comment
 kof_famcat_set_idhash  [exports_kept]
 kof_famcat_set_types
 kof_famcat_set_variant
@@ -1324,6 +1332,7 @@ kof_func_name
 kof_genome_obj
 kof_genome_obj_store
 kof_gzip_anomaly_name
+kof_gzip_embedded
 kof_gzip_header
 kof_gzip_parse
 kof_gzip_region_bits  [no_public_header]
@@ -1423,11 +1432,13 @@ kof_mutation_unit
 kof_obj_regionless
 kof_object_label
 kof_objtree_declared
+kof_objtree_embedded
 kof_objtree_may_open
 kof_pack_build
 kof_pack_build_opt  [exports_kept]
 kof_parser_cut_bits
 kof_parser_damage_bits
+kof_parser_embedded
 kof_parser_keep_of
 kof_parser_list
 kof_parser_of
@@ -1468,6 +1479,7 @@ kof_prod_sync_walk
 kof_prod_unadopt
 kof_prod_unref
 kof_rar_anomaly_name
+kof_rar_embedded
 kof_rar_mem
 kof_rar_parse
 kof_rar_region_bits  [no_public_header]
@@ -1529,6 +1541,7 @@ kof_scan_walk_mt
 kof_script_anomaly_name
 kof_script_apply
 kof_script_apply_room
+kof_script_embedded
 kof_script_is_block
 kof_script_is_code_at
 kof_script_parse
@@ -1659,11 +1672,13 @@ kof_verdict_name
 kof_view_ops_of
 kof_vmatch
 kof_xz_anomaly_name
+kof_xz_embedded
 kof_xz_parse
 kof_xz_region_bits  [no_public_header]
 kof_xz_region_name
 kof_xz_sniff
 kof_zip_anomaly_name
+kof_zip_embedded
 kof_zip_kind_name
 kof_zip_mem
 kof_zip_parse
@@ -1758,6 +1773,8 @@ oc_broken_of_status
 oc_buffered_method
 oc_can_produce
 oc_capsid_apply
+oc_cfg_alloc
+oc_cfg_release
 oc_child
 oc_child_dir
 oc_child_entry
@@ -1824,6 +1841,7 @@ oc_entry_join
 oc_expand_sink_fn
 oc_explain_parts
 oc_find_str_mask
+oc_frames
 oc_funcs
 oc_gather
 oc_graph
@@ -1956,7 +1974,7 @@ sx_verdict_make
 sx_views_release
 sx_walk_check
 
-== libkgenome.a (1004)
+== libkgenome.a (1006)
 kentropy_eighths
 kentropy_hist
 kentropy_hist_centi
@@ -1999,6 +2017,7 @@ kgenome_cell_decode
 kgenome_cell_decode_arm32
 kgenome_cell_decode_arm64
 kgenome_cell_decode_mips
+kgenome_cell_decode_ppc
 kgenome_cell_decode_thumb
 kgenome_cell_decode_x86
 kgenome_cell_next
@@ -2085,6 +2104,7 @@ kgenome_diag_emu_stop_status
 kgenome_diag_emu_worth_remembering
 kgenome_diag_extent
 kgenome_diag_extent_count
+kgenome_diag_frames
 kgenome_diag_funcs
 kgenome_diag_funcs_of
 kgenome_diag_funcs_of_view
@@ -2167,8 +2187,11 @@ kgenome_diag_walk_free
 kgenome_diag_walk_held_count  [exports_kept]
 kgenome_diag_walk_hold
 kgenome_diag_walk_new
+kgenome_diag_walk_pads
 kgenome_diag_walk_runs
 kgenome_diag_walk_set_cap
+kgenome_diag_walk_thunk_slot
+kgenome_diag_walk_thunks
 kgenome_diag_walk_trim
 kgenome_diag_wrap_settle
 kgenome_diag_wrapper_charge
@@ -2184,6 +2207,13 @@ kgenome_diag_wrapper_isrc_scan
 kgenome_diag_wrapper_isrc_seek
 kgenome_diag_wrapper_isrc_walk
 kgenome_diag_wrapper_pass_b
+kgenome_diag_wrapper_pe_boundary
+kgenome_diag_wrapper_pe_close
+kgenome_diag_wrapper_pe_data
+kgenome_diag_wrapper_pe_pad_from
+kgenome_diag_wrapper_pe_start
+kgenome_diag_wrapper_pe_stub
+kgenome_diag_wrapper_pe_zero
 kgenome_diag_wrapper_push_u64
 kgenome_diag_wrapper_site_made
 kgenome_diag_wrapper_site_open
@@ -2199,6 +2229,7 @@ kgenome_diag_wrapper_supersede
 kgenome_diag_wrapper_tgt_index
 kgenome_diag_wrapper_tgt_unique
 kgenome_diag_wrapper_trace_get
+kgenome_diag_wrapper_trace_get_cell
 kgenome_diag_wrapper_trace_lower
 kgenome_diag_wrapper_tseen_retry
 kgenome_diag_wrapper_walk_drop_trace
@@ -2349,13 +2380,16 @@ kgenome_dtx_walk
 kgenome_dtx_walk_range
 kgenome_dtx_word_in
 kgenome_elf_entry_sec
-kgenome_elf_funcs_from_entries
+kgenome_elf_extent
+kgenome_elf_hdr_valid
 kgenome_elf_hdr_write  [exports_kept]
+kgenome_elf_ident_valid
 kgenome_elf_image_parse
 kgenome_elf_imports
 kgenome_elf_info_offsets
 kgenome_elf_info_remap
 kgenome_elf_load_at_off
+kgenome_elf_magic  [no_public_header]
 kgenome_elf_rebuild
 kgenome_elf_relcalls
 kgenome_elf_reloc_in
@@ -2559,88 +2593,60 @@ kgenome_endian_plan_free
 kgenome_endian_range
 kgenome_endian_wanted
 kgenome_endian_wide
-kgenome_fnprint_acc_bad
-kgenome_fnprint_acc_good
-kgenome_fnprint_acc_init
-kgenome_fnprint_advise
-kgenome_fnprint_bsketch_build  [exports_kept]
-kgenome_fnprint_bsketch_find  [exports_kept]
-kgenome_fnprint_bsketch_free  [exports_kept]
-kgenome_fnprint_bsketch_main  [exports_kept]
-kgenome_fnprint_bstat  [exports_kept]
-kgenome_fnprint_bstat_is_data  [exports_kept]
-kgenome_fnprint_collect  [exports_kept]
-kgenome_fnprint_decide
-kgenome_fnprint_dx_attach  [exports_kept]
-kgenome_fnprint_dx_begin
-kgenome_fnprint_dx_cluster  [exports_kept]
-kgenome_fnprint_dx_credit
-kgenome_fnprint_dx_detach
-kgenome_fnprint_dx_full  [exports_kept]
-kgenome_fnprint_dx_open  [exports_kept]
-kgenome_fnprint_dx_remain  [exports_kept]
-kgenome_fnprint_dx_state  [exports_kept]
-kgenome_fnprint_dxdb_build  [exports_kept]
-kgenome_fnprint_dxdb_free  [exports_kept]
-kgenome_fnprint_equal  [exports_kept]
-kgenome_fnprint_has_node
-kgenome_fnprint_is_landing_pad
-kgenome_fnprint_libtab_add  [exports_kept]
-kgenome_fnprint_libtab_free  [exports_kept]
-kgenome_fnprint_libtab_has  [exports_kept]
-kgenome_fnprint_libtab_init  [exports_kept]
-kgenome_fnprint_libtab_put  [exports_kept]
-kgenome_fnprint_libtab_sampled  [exports_kept]
-kgenome_fnprint_libvote  [exports_kept]
-kgenome_fnprint_local_target
-kgenome_fnprint_match_any_pm  [exports_kept]
-kgenome_fnprint_match_done  [exports_kept]
-kgenome_fnprint_match_feed  [exports_kept]
-kgenome_fnprint_match_init  [exports_kept]
-kgenome_fnprint_match_strong_pm  [exports_kept]
-kgenome_fnprint_match_visit  [exports_kept]
-kgenome_fnprint_opts_resolve
-kgenome_fnprint_pos_adj
-kgenome_fnprint_pos_fold
-kgenome_fnprint_pos_free
-kgenome_fnprint_pos_pad
-kgenome_fnprint_pos_reset
-kgenome_fnprint_pos_target
-kgenome_fnprint_reach_edge
-kgenome_fnprint_reach_free
-kgenome_fnprint_reach_hold
-kgenome_fnprint_reach_reset
-kgenome_fnprint_reach_resolve
-kgenome_fnprint_ref_build  [exports_kept]
-kgenome_fnprint_ref_free  [exports_kept]
-kgenome_fnprint_relmask  [exports_kept]
-kgenome_fnprint_runs  [exports_kept]
-kgenome_fnprint_sel_plan  [exports_kept]
-kgenome_fnprint_set_free  [exports_kept]
-kgenome_fnprint_sorted  [exports_kept]
-kgenome_fnprint_tokens
-kgenome_fnprint_walk  [exports_kept]
-kgenome_fnprint_wctx_begin  [exports_kept]
-kgenome_fnprint_wctx_count  [exports_kept]
-kgenome_fnprint_wctx_credit  [exports_kept]
-kgenome_fnprint_wctx_done  [exports_kept]
-kgenome_fnprint_wctx_init  [exports_kept]
-kgenome_fnprint_wctx_kill_block
-kgenome_fnprint_wctx_retire  [exports_kept]
-kgenome_fnprint_wdb_build  [exports_kept]
-kgenome_fnprint_wdb_free  [exports_kept]
-kgenome_fnprint_weight
-kgenome_fnprint_wpass  [exports_kept]
-kgenome_fnprint_wsketch  [exports_kept]
+kgenome_fntab_bound
+kgenome_fntab_collect_elf
+kgenome_fntab_collect_pe
+kgenome_fntab_eh_section
+kgenome_fntab_eh_segment
+kgenome_fntab_ends
+kgenome_fntab_fde
+kgenome_fntab_in_stub_section
+kgenome_fntab_list_add
+kgenome_fntab_list_free
+kgenome_fntab_merge
+kgenome_fntab_pad_at
+kgenome_fntab_pad_before
+kgenome_fntab_pdata
+kgenome_fntab_pdata_arm
+kgenome_fntab_pe_cfg
+kgenome_fntab_pe_code_rva
+kgenome_fntab_pe_coff
+kgenome_fntab_pe_export
+kgenome_fntab_pe_thunk
+kgenome_fntab_pe_tls
+kgenome_fntab_probe
+kgenome_fntab_reach
+kgenome_fntab_run_walk
+kgenome_fntab_select
+kgenome_fntab_symtab
+kgenome_fntab_walk
+kgenome_frame_cache_built
+kgenome_frame_cache_bytes
+kgenome_frame_cache_free
+kgenome_frame_cache_hits
+kgenome_frame_cache_new
+kgenome_frame_cache_refused
+kgenome_frame_facts
+kgenome_frame_facts_of
+kgenome_frame_get
+kgenome_frame_make
+kgenome_frame_of_extent
+kgenome_frame_release
+kgenome_frame_state_name
+kgenome_funcs_at
 kgenome_funcs_build
 kgenome_funcs_free
 kgenome_funcs_remap
 kgenome_funcs_remap_endian
+kgenome_funcs_start
 kgenome_gv_alloc
 kgenome_gv_box_line
 kgenome_gv_free
 kgenome_gv_loops
 kgenome_image_addr_to_off
+kgenome_image_embed_extent
+kgenome_image_embed_spans
+kgenome_image_embed_starts
 kgenome_image_off_to_addr
 kgenome_image_seg_at
 kgenome_infect_regions
@@ -2656,14 +2662,17 @@ kgenome_lineage_chain_next
 kgenome_lineage_charge
 kgenome_lineage_codemap
 kgenome_lineage_decode
-kgenome_lineage_fn_at
-kgenome_lineage_fn_of_va
+kgenome_lineage_fn_get
+kgenome_lineage_fn_of_insn
+kgenome_lineage_frame_src
 kgenome_lineage_hands_on
 kgenome_lineage_has_store
 kgenome_lineage_jmp_is_tail
 kgenome_lineage_mark_unreached
+kgenome_lineage_noret
 kgenome_lineage_obligations
 kgenome_lineage_preds
+kgenome_lineage_refs
 kgenome_lineage_run_summ
 kgenome_lineage_seed
 kgenome_lineage_seed_block
@@ -2738,6 +2747,7 @@ kgenome_oatab_rehash
 kgenome_oatab_seed
 kgenome_oatab_want
 kgenome_offmap_at
+kgenome_pe_coff_syms
 kgenome_pe_exports
 kgenome_pe_funcs_build  [exports_kept]
 kgenome_pe_image_parse
@@ -2750,14 +2760,24 @@ kgenome_pe_imptab_is_of
 kgenome_pe_info_offsets
 kgenome_pe_info_remap
 kgenome_pe_layout_of
+kgenome_pe_probe
 kgenome_pe_sec_at_off
 kgenome_pe_sec_extent
 kgenome_pe_sec_is_code
 kgenome_pe_sec_perm
+kgenome_pe_select
 kgenome_pe_sniff
 kgenome_pe_unmap
 kgenome_pe_write_hdr
 kgenome_pe_write_imports
+kgenome_ppc_attr  [no_public_header]
+kgenome_ppc_branch_off  [exports_kept]
+kgenome_ppc_branch_target
+kgenome_ppc_decode
+kgenome_ppc_name  [exports_kept]
+kgenome_ppc_names  [no_public_header]
+kgenome_ppc_prim
+kgenome_ppc_x31  [no_public_header]
 kgenome_range_facts
 kgenome_range_xref_build
 kgenome_ruby_code_nested
@@ -3001,7 +3021,7 @@ kuncoat_status_name  [exports_kept]
 kuncoat_strfn
 kuncoat_transform
 
-== header-func (2330)
+== header-func (2365)
 KOF_HEAPSORT
 X
 _Static_assert
@@ -3158,6 +3178,7 @@ kgenome_cell_decode
 kgenome_cell_decode_arm32
 kgenome_cell_decode_arm64
 kgenome_cell_decode_mips
+kgenome_cell_decode_ppc
 kgenome_cell_decode_thumb
 kgenome_cell_decode_x86
 kgenome_cell_next
@@ -3177,6 +3198,7 @@ kgenome_cell_state_track
 kgenome_cell_step
 kgenome_cfg_alloc
 kgenome_cfg_anchor
+kgenome_cfg_avalanche
 kgenome_cfg_build
 kgenome_cfg_free
 kgenome_cfg_gv_make
@@ -3248,6 +3270,7 @@ kgenome_diag_emu_worth_remembering
 kgenome_diag_extent
 kgenome_diag_extent_count
 kgenome_diag_fixed_arch
+kgenome_diag_frames
 kgenome_diag_funcs
 kgenome_diag_funcs_of
 kgenome_diag_funcs_of_view
@@ -3331,12 +3354,14 @@ kgenome_diag_walk_free
 kgenome_diag_walk_held_count
 kgenome_diag_walk_hold
 kgenome_diag_walk_new
+kgenome_diag_walk_pads
 kgenome_diag_walk_runs
 kgenome_diag_walk_set_cap
+kgenome_diag_walk_thunk_slot
+kgenome_diag_walk_thunks
 kgenome_diag_walk_trim
 kgenome_diag_wrap_settle
 kgenome_diag_wrapper_charge
-kgenome_diag_wrapper_cinsn
 kgenome_diag_wrapper_decode
 kgenome_diag_wrapper_entry_of
 kgenome_diag_wrapper_entry_test
@@ -3351,6 +3376,13 @@ kgenome_diag_wrapper_isrc_scan
 kgenome_diag_wrapper_isrc_seek
 kgenome_diag_wrapper_isrc_walk
 kgenome_diag_wrapper_pass_b
+kgenome_diag_wrapper_pe_boundary
+kgenome_diag_wrapper_pe_close
+kgenome_diag_wrapper_pe_data
+kgenome_diag_wrapper_pe_pad_from
+kgenome_diag_wrapper_pe_start
+kgenome_diag_wrapper_pe_stub
+kgenome_diag_wrapper_pe_zero
 kgenome_diag_wrapper_push_u64
 kgenome_diag_wrapper_site_made
 kgenome_diag_wrapper_site_open
@@ -3366,6 +3398,7 @@ kgenome_diag_wrapper_supersede
 kgenome_diag_wrapper_tgt_index
 kgenome_diag_wrapper_tgt_unique
 kgenome_diag_wrapper_trace_get
+kgenome_diag_wrapper_trace_get_cell
 kgenome_diag_wrapper_trace_lower
 kgenome_diag_wrapper_tseen_retry
 kgenome_diag_wrapper_walk_drop_trace
@@ -3509,8 +3542,10 @@ kgenome_dtx_walk
 kgenome_dtx_walk_range
 kgenome_dtx_word_in
 kgenome_elf_entry_sec
-kgenome_elf_funcs_from_entries
+kgenome_elf_extent
+kgenome_elf_hdr_valid
 kgenome_elf_hdr_write
+kgenome_elf_ident_valid
 kgenome_elf_image_parse
 kgenome_elf_imports
 kgenome_elf_info_offsets
@@ -3724,83 +3759,53 @@ kgenome_endian_plan_free
 kgenome_endian_range
 kgenome_endian_wanted
 kgenome_endian_wide
-kgenome_fnprint_acc_bad
-kgenome_fnprint_acc_good
-kgenome_fnprint_acc_init
-kgenome_fnprint_advise
-kgenome_fnprint_bsketch_build
-kgenome_fnprint_bsketch_find
-kgenome_fnprint_bsketch_free
-kgenome_fnprint_bsketch_main
-kgenome_fnprint_bstat
-kgenome_fnprint_bstat_is_data
-kgenome_fnprint_collect
-kgenome_fnprint_decide
-kgenome_fnprint_dx_attach
-kgenome_fnprint_dx_begin
-kgenome_fnprint_dx_cluster
-kgenome_fnprint_dx_credit
-kgenome_fnprint_dx_detach
-kgenome_fnprint_dx_full
-kgenome_fnprint_dx_open
-kgenome_fnprint_dx_remain
-kgenome_fnprint_dx_state
-kgenome_fnprint_dxdb_build
-kgenome_fnprint_dxdb_free
-kgenome_fnprint_equal
-kgenome_fnprint_has_node
-kgenome_fnprint_is_landing_pad
-kgenome_fnprint_libtab_add
-kgenome_fnprint_libtab_free
-kgenome_fnprint_libtab_has
-kgenome_fnprint_libtab_init
-kgenome_fnprint_libtab_put
-kgenome_fnprint_libtab_sampled
-kgenome_fnprint_libvote
-kgenome_fnprint_local_target
-kgenome_fnprint_match_any_pm
-kgenome_fnprint_match_done
-kgenome_fnprint_match_feed
-kgenome_fnprint_match_init
-kgenome_fnprint_match_strong_pm
-kgenome_fnprint_match_visit
-kgenome_fnprint_opts_resolve
-kgenome_fnprint_pos_adj
-kgenome_fnprint_pos_fold
-kgenome_fnprint_pos_free
-kgenome_fnprint_pos_pad
-kgenome_fnprint_pos_reset
-kgenome_fnprint_pos_target
-kgenome_fnprint_reach_edge
-kgenome_fnprint_reach_free
-kgenome_fnprint_reach_hold
-kgenome_fnprint_reach_reset
-kgenome_fnprint_reach_resolve
-kgenome_fnprint_ref_build
-kgenome_fnprint_ref_free
-kgenome_fnprint_relmask
-kgenome_fnprint_runs
-kgenome_fnprint_sel_plan
-kgenome_fnprint_set_free
-kgenome_fnprint_sorted
-kgenome_fnprint_tokens
-kgenome_fnprint_walk
-kgenome_fnprint_wctx_begin
-kgenome_fnprint_wctx_count
-kgenome_fnprint_wctx_credit
-kgenome_fnprint_wctx_done
-kgenome_fnprint_wctx_init
-kgenome_fnprint_wctx_kill_block
-kgenome_fnprint_wctx_retire
-kgenome_fnprint_wdb_build
-kgenome_fnprint_wdb_free
-kgenome_fnprint_weight
-kgenome_fnprint_wpass
-kgenome_fnprint_wsketch
+kgenome_fntab_bound
+kgenome_fntab_collect_elf
+kgenome_fntab_collect_pe
+kgenome_fntab_eh_section
+kgenome_fntab_eh_segment
+kgenome_fntab_ends
+kgenome_fntab_exact
+kgenome_fntab_fde
+kgenome_fntab_in_stub_section
+kgenome_fntab_list_add
+kgenome_fntab_list_free
+kgenome_fntab_merge
+kgenome_fntab_pad_at
+kgenome_fntab_pad_before
+kgenome_fntab_pdata
+kgenome_fntab_pdata_arm
+kgenome_fntab_pe_cfg
+kgenome_fntab_pe_code_rva
+kgenome_fntab_pe_coff
+kgenome_fntab_pe_export
+kgenome_fntab_pe_thunk
+kgenome_fntab_pe_tls
+kgenome_fntab_probe
+kgenome_fntab_reach
+kgenome_fntab_run_walk
+kgenome_fntab_select
+kgenome_fntab_symtab
+kgenome_fntab_walk
+kgenome_frame_cache_built
+kgenome_frame_cache_bytes
+kgenome_frame_cache_free
+kgenome_frame_cache_hits
+kgenome_frame_cache_new
+kgenome_frame_cache_refused
+kgenome_frame_facts
+kgenome_frame_facts_of
+kgenome_frame_get
+kgenome_frame_make
+kgenome_frame_of_extent
+kgenome_frame_release
+kgenome_frame_state_name
+kgenome_funcs_at
 kgenome_funcs_build
 kgenome_funcs_free
 kgenome_funcs_remap
 kgenome_funcs_remap_endian
+kgenome_funcs_start
 kgenome_grow_cap
 kgenome_gt_fmt_done
 kgenome_gt_fmt_init
@@ -3812,6 +3817,9 @@ kgenome_gv_box_line
 kgenome_gv_free
 kgenome_gv_loops
 kgenome_image_addr_to_off
+kgenome_image_embed_extent
+kgenome_image_embed_spans
+kgenome_image_embed_starts
 kgenome_image_off_to_addr
 kgenome_image_seg_at
 kgenome_infect_regions
@@ -3836,14 +3844,17 @@ kgenome_lineage_chain_next
 kgenome_lineage_charge
 kgenome_lineage_codemap
 kgenome_lineage_decode
-kgenome_lineage_fn_at
-kgenome_lineage_fn_of_va
+kgenome_lineage_fn_get
+kgenome_lineage_fn_of_insn
+kgenome_lineage_frame_src
 kgenome_lineage_hands_on
 kgenome_lineage_has_store
 kgenome_lineage_jmp_is_tail
 kgenome_lineage_mark_unreached
+kgenome_lineage_noret
 kgenome_lineage_obligations
 kgenome_lineage_preds
+kgenome_lineage_refs
 kgenome_lineage_run_summ
 kgenome_lineage_seed
 kgenome_lineage_seed_block
@@ -3916,6 +3927,7 @@ kgenome_obj_code_little_endian
 kgenome_obj_elf
 kgenome_obj_pe
 kgenome_offmap_at
+kgenome_pe_coff_syms
 kgenome_pe_dirs_in_header
 kgenome_pe_exports
 kgenome_pe_funcs_build
@@ -3930,15 +3942,41 @@ kgenome_pe_info_offsets
 kgenome_pe_info_remap
 kgenome_pe_is_mapped
 kgenome_pe_layout_of
+kgenome_pe_probe
 kgenome_pe_rva_to_off
 kgenome_pe_sec_at_off
 kgenome_pe_sec_extent
 kgenome_pe_sec_is_code
 kgenome_pe_sec_perm
+kgenome_pe_select
 kgenome_pe_sniff
 kgenome_pe_unmap
 kgenome_pe_write_hdr
 kgenome_pe_write_imports
+kgenome_ppc_aa
+kgenome_ppc_bf
+kgenome_ppc_bi
+kgenome_ppc_bits
+kgenome_ppc_bo
+kgenome_ppc_branch_off
+kgenome_ppc_branch_target
+kgenome_ppc_cmp_l
+kgenome_ppc_decode
+kgenome_ppc_ds
+kgenome_ppc_lk
+kgenome_ppc_mb
+kgenome_ppc_me
+kgenome_ppc_name
+kgenome_ppc_oe
+kgenome_ppc_ra
+kgenome_ppc_rb
+kgenome_ppc_rc
+kgenome_ppc_rs
+kgenome_ppc_rt
+kgenome_ppc_sh
+kgenome_ppc_simm
+kgenome_ppc_spr
+kgenome_ppc_uimm
 kgenome_range_facts
 kgenome_range_xref_build
 kgenome_ruby_code_nested
@@ -4295,6 +4333,7 @@ kof_cname_traversal
 kof_codenotes_at
 kof_codenotes_build
 kof_codenotes_free
+kof_codenotes_make
 kof_codenotes_text
 kof_comment_char
 kof_crc32
@@ -4419,6 +4458,8 @@ kof_exe_pass_b64
 kof_exe_pass_esc
 kof_exe_pass_hex
 kof_exe_pass_pct
+kof_exe_strtab
+kof_exe_strtab_would_change
 kof_exe_unb64
 kof_exe_unesc
 kof_exe_unhex
@@ -4435,6 +4476,7 @@ kof_famcat_delete_family
 kof_famcat_delete_variant
 kof_famcat_dirty
 kof_famcat_fam_id_at
+kof_famcat_family_comment
 kof_famcat_family_id
 kof_famcat_family_max
 kof_famcat_family_text
@@ -4457,6 +4499,8 @@ kof_famcat_rename_family
 kof_famcat_restore
 kof_famcat_save
 kof_famcat_set_comment
+kof_famcat_set_family
+kof_famcat_set_family_comment
 kof_famcat_set_idhash
 kof_famcat_set_types
 kof_famcat_set_variant
@@ -4516,6 +4560,7 @@ kof_gr_u16
 kof_gr_u64
 kof_gzip
 kof_gzip_anomaly_name
+kof_gzip_embedded
 kof_gzip_header
 kof_gzip_parse
 kof_gzip_region_name
@@ -4654,6 +4699,7 @@ kof_mutation_fold
 kof_mutation_held
 kof_mutation_limit
 kof_mutation_matched
+kof_mutation_note_dropped
 kof_mutation_note_unsigned
 kof_mutation_pct
 kof_mutation_probe
@@ -4671,12 +4717,14 @@ kof_name_ok
 kof_obj_regionless
 kof_object_label
 kof_objtree_declared
+kof_objtree_embedded
 kof_objtree_may_open
 kof_pack_build
 kof_pack_build_opt
 kof_page_size
 kof_parser_cut_bits
 kof_parser_damage_bits
+kof_parser_embedded
 kof_parser_keep_of
 kof_parser_list
 kof_parser_of
@@ -4732,6 +4780,7 @@ kof_prod_unref
 kof_range_in_obj
 kof_rar
 kof_rar_anomaly_name
+kof_rar_embedded
 kof_rar_mem
 kof_rar_next
 kof_rar_parse
@@ -4817,6 +4866,7 @@ kof_script
 kof_script_anomaly_name
 kof_script_apply
 kof_script_apply_room
+kof_script_embedded
 kof_script_fam_mask
 kof_script_fam_name
 kof_script_is_block
@@ -5007,11 +5057,13 @@ kof_write_file_atomic
 kof_xz
 kof_xz_anomaly_name
 kof_xz_check_len
+kof_xz_embedded
 kof_xz_parse
 kof_xz_region_name
 kof_xz_sniff
 kof_zip
 kof_zip_anomaly_name
+kof_zip_embedded
 kof_zip_kind_name
 kof_zip_mem
 kof_zip_next
@@ -5117,6 +5169,8 @@ oc_broken_of_status
 oc_buffered_method
 oc_can_produce
 oc_capsid_apply
+oc_cfg_alloc
+oc_cfg_release
 oc_child
 oc_child_dir
 oc_child_entry
@@ -5183,6 +5237,7 @@ oc_entry_join
 oc_expand_sink_fn
 oc_explain_parts
 oc_find_str_mask
+oc_frames
 oc_funcs
 oc_gather
 oc_graph
@@ -5333,7 +5388,7 @@ wide_run
 zero_run
 zlib_hdr_len
 
-== header-type (808)
+== header-type (793)
 anon:KDET_KIND_FORM
 anon:KDET_M_FIND
 anon:KDET_M_NO
@@ -5365,7 +5420,6 @@ anon:KGENOME_EMU_FP_ADD
 anon:KGENOME_EMU_RAX
 anon:KGENOME_EMU_RUN_OK
 anon:KGENOME_EMU_WIN_GetModuleHandleA
-anon:KGENOME_FNP_HIT_NONE
 anon:KGENOME_GK_X86_PP
 anon:KGENOME_LINEAGE_A_NONE
 anon:KGENOME_NUCLEO_REFINE_NONE
@@ -5477,6 +5531,7 @@ kgenome_cfg_mem
 kgenome_cfg_req
 kgenome_cfg_sign
 kgenome_cfg_sign_req
+kgenome_cfg_switch_src
 kgenome_cfg_term
 kgenome_cfg_view
 kgenome_cfg_view_block
@@ -5519,6 +5574,7 @@ kgenome_diag_role
 kgenome_diag_scan
 kgenome_diag_seq
 kgenome_diag_str
+kgenome_diag_stub
 kgenome_diag_text_req
 kgenome_diag_text_work
 kgenome_diag_walk
@@ -5530,6 +5586,7 @@ kgenome_diag_wrapper_index
 kgenome_diag_wrapper_insn
 kgenome_diag_wrapper_isrc
 kgenome_diag_wrapper_op
+kgenome_diag_wrapper_pe
 kgenome_diag_wrapper_pending
 kgenome_diag_wrapper_reader
 kgenome_diag_wrapper_seg
@@ -5578,6 +5635,9 @@ kgenome_elf_symbol
 kgenome_elf_symtab
 kgenome_elf_symtab_want
 kgenome_elf_type
+kgenome_embed_req
+kgenome_embed_res
+kgenome_embed_span
 kgenome_emu
 kgenome_emu_cfg
 kgenome_emu_decl
@@ -5602,49 +5662,20 @@ kgenome_endian_layout
 kgenome_endian_plan
 kgenome_endian_span
 kgenome_fmt
-kgenome_fnprint_acc
-kgenome_fnprint_bsketch
-kgenome_fnprint_bstat
-kgenome_fnprint_cl
-kgenome_fnprint_class
-kgenome_fnprint_dstate
-kgenome_fnprint_dx
-kgenome_fnprint_dxdb
-kgenome_fnprint_dxdesc
-kgenome_fnprint_ext_fn
-kgenome_fnprint_extents
-kgenome_fnprint_fn
-kgenome_fnprint_hints
-kgenome_fnprint_kc
-kgenome_fnprint_libtab
-kgenome_fnprint_libvote
-kgenome_fnprint_link
-kgenome_fnprint_match
-kgenome_fnprint_name_fn
-kgenome_fnprint_opts
-kgenome_fnprint_pick
-kgenome_fnprint_pos
-kgenome_fnprint_reach
-kgenome_fnprint_ref
-kgenome_fnprint_ref_ent
-kgenome_fnprint_req
-kgenome_fnprint_retire_policy
-kgenome_fnprint_rfn
-kgenome_fnprint_run_fn
-kgenome_fnprint_sel_req
-kgenome_fnprint_sel_stat
-kgenome_fnprint_set
-kgenome_fnprint_stat
-kgenome_fnprint_state
-kgenome_fnprint_tok
-kgenome_fnprint_units
-kgenome_fnprint_visit_fn
-kgenome_fnprint_wblock
-kgenome_fnprint_wctx
-kgenome_fnprint_wdb
-kgenome_fnprint_wdb_opts
-kgenome_fnprint_wpass_req
-kgenome_fnprint_wpass_stat
+kgenome_fn_end
+kgenome_fn_isa
+kgenome_fn_kind
+kgenome_fntab_case
+kgenome_fntab_extent
+kgenome_fntab_list
+kgenome_fntab_meta
+kgenome_fntab_plan
+kgenome_fntab_run
+kgenome_fntab_state
+kgenome_frame
+kgenome_frame_insns
+kgenome_frame_src
+kgenome_frame_state
 kgenome_func
 kgenome_func_set
 kgenome_gt_arch
@@ -5674,7 +5705,6 @@ kgenome_lineage_agg
 kgenome_lineage_aggtab
 kgenome_lineage_cfg
 kgenome_lineage_fn
-kgenome_lineage_fnva
 kgenome_lineage_out
 kgenome_lineage_sink
 kgenome_lineage_slot
@@ -5685,6 +5715,7 @@ kgenome_mutation_cut_fn
 kgenome_mutation_req
 kgenome_mutation_side
 kgenome_mutation_sig
+kgenome_mutation_tally
 kgenome_mutation_unit_fn
 kgenome_nucleo_abi
 kgenome_nucleo_arch
@@ -5697,6 +5728,8 @@ kgenome_oatab_hash_fn
 kgenome_obj
 kgenome_off_fn
 kgenome_offmap
+kgenome_pe_coff_sym
+kgenome_pe_coff_sym_fn
 kgenome_pe_dir
 kgenome_pe_export_fn
 kgenome_pe_image
@@ -5708,6 +5741,11 @@ kgenome_pe_layout
 kgenome_pe_origin
 kgenome_pe_sec
 kgenome_pe_unmap_info
+kgenome_ppc_id
+kgenome_ppc_insn
+kgenome_ppc_pk
+kgenome_ppc_prim
+kgenome_ppc_row
 kgenome_range_facts
 kgenome_range_req
 kgenome_range_shape
@@ -5831,6 +5869,7 @@ kof_cfgview_req
 kof_chm_info
 kof_claim
 kof_codenotes
+kof_codenotes_req
 kof_content
 kof_db_load_opt
 kof_db_pack
@@ -5873,6 +5912,7 @@ kof_exe_norm_req
 kof_exe_norm_res
 kof_exe_norm_span
 kof_exe_span
+kof_exe_strtab_res
 kof_ext_buf
 kof_famcat
 kof_famcat_fam
@@ -6143,7 +6183,7 @@ sink_carry
 sx_endian
 walk
 
-== header-member (4998)
+== header-member (4830)
 dec_out.cap
 dec_out.limit
 dec_out.n
@@ -6319,6 +6359,7 @@ kgenome_cell_space.held
 kgenome_cell_space.held_priv
 kgenome_cell_space.off_of_va
 kgenome_cell_space.priv
+kgenome_cell_space.raw
 kgenome_cell_space.seg_at
 kgenome_cell_space.size
 kgenome_cell_state.call_keeps
@@ -6336,21 +6377,28 @@ kgenome_cfg.n_blk
 kgenome_cfg.n_call
 kgenome_cfg.n_edge
 kgenome_cfg.n_site
+kgenome_cfg.n_switch_tgt
 kgenome_cfg.n_sys
 kgenome_cfg.status
+kgenome_cfg.switch_cap_
+kgenome_cfg.switch_tgt
 kgenome_cfg_anchor_req.min_blk
 kgenome_cfg_anchor_req.n_need
 kgenome_cfg_anchor_req.need
 kgenome_cfg_anchor_req.or_flags
+kgenome_cfg_block.at
 kgenome_cfg_block.call_first
 kgenome_cfg_block.call_kinds
 kgenome_cfg_block.first
 kgenome_cfg_block.in_deg
 kgenome_cfg_block.n_call
 kgenome_cfg_block.n_insn
+kgenome_cfg_block.n_switch
 kgenome_cfg_block.out_deg
 kgenome_cfg_block.reach
 kgenome_cfg_block.succ
+kgenome_cfg_block.switch_capped
+kgenome_cfg_block.switch_first
 kgenome_cfg_block.term
 kgenome_cfg_call.id
 kgenome_cfg_call.insn
@@ -6373,7 +6421,6 @@ kgenome_cfg_isa.int_syscall
 kgenome_cfg_isa.jcc_always_hi
 kgenome_cfg_isa.jcc_always_lo
 kgenome_cfg_isa.predicated
-kgenome_cfg_isa.read_word
 kgenome_cfg_mem.alloc
 kgenome_cfg_mem.release
 kgenome_cfg_mem.user
@@ -6389,6 +6436,7 @@ kgenome_cfg_req.in
 kgenome_cfg_req.mem
 kgenome_cfg_req.n_in
 kgenome_cfg_req.site
+kgenome_cfg_req.switch_src
 kgenome_cfg_req.va_hi
 kgenome_cfg_req.va_lo
 kgenome_cfg_sign.canon
@@ -6406,6 +6454,8 @@ kgenome_cfg_sign_req.label
 kgenome_cfg_sign_req.mem
 kgenome_cfg_sign_req.policy
 kgenome_cfg_sign_req.rounds
+kgenome_cfg_switch_src.read_at
+kgenome_cfg_switch_src.user
 kgenome_cfg_view.blk
 kgenome_cfg_view.bytes_
 kgenome_cfg_view.canon
@@ -6563,7 +6613,10 @@ kgenome_diag_in.kind
 kgenome_diag_in.role
 kgenome_diag_inputs.apihash
 kgenome_diag_inputs.budget
+kgenome_diag_inputs.frames
 kgenome_diag_inputs.funcs
+kgenome_diag_inputs.funcs_fn
+kgenome_diag_inputs.funcs_user
 kgenome_diag_inputs.imports
 kgenome_diag_inputs.lineage_stages
 kgenome_diag_inputs.n_seq
@@ -6633,7 +6686,10 @@ kgenome_diag_scan.data_ready
 kgenome_diag_scan.data_relocs
 kgenome_diag_scan.emu_charged
 kgenome_diag_scan.eval_cut
+kgenome_diag_scan.frames
 kgenome_diag_scan.funcs
+kgenome_diag_scan.funcs_fn
+kgenome_diag_scan.funcs_user
 kgenome_diag_scan.halt
 kgenome_diag_scan.hit
 kgenome_diag_scan.imports
@@ -6655,6 +6711,7 @@ kgenome_diag_scan.noret_at
 kgenome_diag_scan.oblig
 kgenome_diag_scan.own
 kgenome_diag_scan.own_apihash
+kgenome_diag_scan.own_frames
 kgenome_diag_scan.own_funcs
 kgenome_diag_scan.own_imports
 kgenome_diag_scan.own_relocs
@@ -6681,6 +6738,11 @@ kgenome_diag_str.cap
 kgenome_diag_str.hash
 kgenome_diag_str.node
 kgenome_diag_str.s
+kgenome_diag_stub.at
+kgenome_diag_stub.iat
+kgenome_diag_stub.len
+kgenome_diag_stub.slot
+kgenome_diag_stub.start
 kgenome_diag_text_req.apply
 kgenome_diag_text_req.apply_user
 kgenome_diag_text_req.base
@@ -6703,8 +6765,10 @@ kgenome_diag_walk.base
 kgenome_diag_walk.built
 kgenome_diag_walk.cap_bytes
 kgenome_diag_walk.cap_ix
+kgenome_diag_walk.cap_pad
 kgenome_diag_walk.cap_site
 kgenome_diag_walk.cap_tgt
+kgenome_diag_walk.cap_thk
 kgenome_diag_walk.cap_tr
 kgenome_diag_walk.capped
 kgenome_diag_walk.h_asked
@@ -6717,10 +6781,15 @@ kgenome_diag_walk.has_trace
 kgenome_diag_walk.ix
 kgenome_diag_walk.lg
 kgenome_diag_walk.lg_charged
+kgenome_diag_walk.mips_gp
+kgenome_diag_walk.mips_gp_known
 kgenome_diag_walk.n_ix
+kgenome_diag_walk.n_pad
 kgenome_diag_walk.n_site
 kgenome_diag_walk.n_tgt
+kgenome_diag_walk.n_thk
 kgenome_diag_walk.n_tr
+kgenome_diag_walk.pad
 kgenome_diag_walk.pk_delta
 kgenome_diag_walk.pk_end
 kgenome_diag_walk.runs
@@ -6728,6 +6797,7 @@ kgenome_diag_walk.site
 kgenome_diag_walk.sites
 kgenome_diag_walk.size
 kgenome_diag_walk.tgt
+kgenome_diag_walk.thk
 kgenome_diag_walk.tr
 kgenome_diag_walk.tr_on
 kgenome_diag_walk.tseg
@@ -6806,6 +6876,9 @@ kgenome_diag_wrapper_op.scale
 kgenome_diag_wrapper_op.seg
 kgenome_diag_wrapper_op.size
 kgenome_diag_wrapper_op.v
+kgenome_diag_wrapper_pe.pe
+kgenome_diag_wrapper_pe.tboundary
+kgenome_diag_wrapper_pe.zero_from
 kgenome_diag_wrapper_pending.at
 kgenome_diag_wrapper_pending.f
 kgenome_diag_wrapper_pending.n
@@ -7255,6 +7328,17 @@ kgenome_elf_symtab.origin
 kgenome_elf_symtab.recsize
 kgenome_elf_symtab.str
 kgenome_elf_symtab.strn
+kgenome_embed_req.data
+kgenome_embed_req.emit
+kgenome_embed_req.file
+kgenome_embed_req.flags
+kgenome_embed_req.n_data
+kgenome_embed_req.obj
+kgenome_embed_req.user
+kgenome_embed_res.n
+kgenome_embed_res.status
+kgenome_embed_span.len
+kgenome_embed_span.off
 kgenome_emu.account
 kgenome_emu.account_user
 kgenome_emu.acct
@@ -7571,363 +7655,94 @@ kgenome_endian_plan.v
 kgenome_endian_span.lay
 kgenome_endian_span.len
 kgenome_endian_span.off
-kgenome_fnprint_acc.fp
-kgenome_fnprint_acc.fw
-kgenome_fnprint_acc.last_op
-kgenome_fnprint_acc.n_bad
-kgenome_fnprint_acc.n_branch
-kgenome_fnprint_acc.n_call
-kgenome_fnprint_acc.n_insn
-kgenome_fnprint_acc.n_syscall
-kgenome_fnprint_acc.n_zero
-kgenome_fnprint_acc.pend_bad
-kgenome_fnprint_bsketch.bytes
-kgenome_fnprint_bsketch.from
-kgenome_fnprint_bsketch.led
-kgenome_fnprint_bsketch.n_edge
-kgenome_fnprint_bsketch.n_reached
-kgenome_fnprint_bsketch.n_start
-kgenome_fnprint_bsketch.reached
-kgenome_fnprint_bsketch.scanned
-kgenome_fnprint_bsketch.start
-kgenome_fnprint_bsketch.status
-kgenome_fnprint_bsketch.to
-kgenome_fnprint_bstat.ascii
-kgenome_fnprint_bstat.hi
-kgenome_fnprint_bstat.n
-kgenome_fnprint_bstat.zero
-kgenome_fnprint_cl.first
-kgenome_fnprint_cl.k
-kgenome_fnprint_cl.n
-kgenome_fnprint_dx.first
-kgenome_fnprint_dx.n
-kgenome_fnprint_dx.need
-kgenome_fnprint_dx.pct
-kgenome_fnprint_dxdb.bytes
-kgenome_fnprint_dxdb.db
-kgenome_fnprint_dxdb.desc
-kgenome_fnprint_dxdb.dup
-kgenome_fnprint_dxdb.dxc_cl
-kgenome_fnprint_dxdb.dxc_first
-kgenome_fnprint_dxdb.led
-kgenome_fnprint_dxdb.need_min
-kgenome_fnprint_dxdb.own_cl
-kgenome_fnprint_dxdb.own_mem
-kgenome_fnprint_dxdb.rv_dx
-kgenome_fnprint_dxdb.rv_first
-kgenome_fnprint_dxdb.status
-kgenome_fnprint_dxdb.trigger
-kgenome_fnprint_dxdesc.cl
-kgenome_fnprint_dxdesc.dx
-kgenome_fnprint_dxdesc.mem
-kgenome_fnprint_dxdesc.n_cl
-kgenome_fnprint_dxdesc.n_dx
-kgenome_fnprint_dxdesc.n_mem
-kgenome_fnprint_dxdesc.n_ref
-kgenome_fnprint_dxdesc.ref
-kgenome_fnprint_fn.advice
-kgenome_fnprint_fn.body_len
-kgenome_fnprint_fn.cls
-kgenome_fnprint_fn.fp
-kgenome_fnprint_fn.fw
-kgenome_fnprint_fn.index
-kgenome_fnprint_fn.last_op
-kgenome_fnprint_fn.len
-kgenome_fnprint_fn.n_bad
-kgenome_fnprint_fn.n_branch
-kgenome_fnprint_fn.n_call
-kgenome_fnprint_fn.n_insn
-kgenome_fnprint_fn.n_syscall
-kgenome_fnprint_fn.n_win
-kgenome_fnprint_fn.n_win_lib
-kgenome_fnprint_fn.n_zero
-kgenome_fnprint_fn.off
-kgenome_fnprint_fn.reason
-kgenome_fnprint_fn.weight
-kgenome_fnprint_hints.ext
-kgenome_fnprint_hints.ext_user
-kgenome_fnprint_hints.lib_fp
-kgenome_fnprint_hints.libtab
-kgenome_fnprint_hints.n_lib_fp
-kgenome_fnprint_hints.n_node
-kgenome_fnprint_hints.name
-kgenome_fnprint_hints.name_user
-kgenome_fnprint_hints.node_at
-kgenome_fnprint_kc.key
-kgenome_fnprint_kc.tag
-kgenome_fnprint_libtab.bytes
-kgenome_fnprint_libtab.cap
-kgenome_fnprint_libtab.led
-kgenome_fnprint_libtab.n
-kgenome_fnprint_libtab.n_refused
-kgenome_fnprint_libtab.n_seen
-kgenome_fnprint_libtab.sel_bits
-kgenome_fnprint_libtab.slot
-kgenome_fnprint_libtab.status
-kgenome_fnprint_libvote.n_hit
-kgenome_fnprint_libvote.n_sampled
-kgenome_fnprint_libvote.n_win
-kgenome_fnprint_match.hit
-kgenome_fnprint_match.led
-kgenome_fnprint_match.n_capped
-kgenome_fnprint_match.n_collision
-kgenome_fnprint_match.n_strong
-kgenome_fnprint_match.n_weak
-kgenome_fnprint_match.ref
-kgenome_fnprint_match.status
-kgenome_fnprint_match.strong_w
-kgenome_fnprint_match.verify_obj
-kgenome_fnprint_match.verify_ref
-kgenome_fnprint_match.weak_w
-kgenome_fnprint_opts.flags
-kgenome_fnprint_opts.huge_len
-kgenome_fnprint_opts.libwin_min
-kgenome_fnprint_opts.libwin_pct
-kgenome_fnprint_opts.off
-kgenome_fnprint_opts.region_max
-kgenome_fnprint_opts.seeds_latch
-kgenome_fnprint_opts.thunk_insn
-kgenome_fnprint_opts.tiny_insn
-kgenome_fnprint_opts.w_advised
-kgenome_fnprint_opts.w_author
-kgenome_fnprint_opts.w_lib
-kgenome_fnprint_opts.w_unknown
-kgenome_fnprint_opts.wcap
-kgenome_fnprint_opts.wrapper_insn
-kgenome_fnprint_pos.cap_pad
-kgenome_fnprint_pos.cap_tgt
-kgenome_fnprint_pos.charged
-kgenome_fnprint_pos.failed
-kgenome_fnprint_pos.n_pad
-kgenome_fnprint_pos.n_tgt
-kgenome_fnprint_pos.pad_at
-kgenome_fnprint_pos.pad_cum
-kgenome_fnprint_pos.tgt
-kgenome_fnprint_reach.cap
-kgenome_fnprint_reach.charged
-kgenome_fnprint_reach.e
-kgenome_fnprint_reach.ecap
-kgenome_fnprint_reach.failed
-kgenome_fnprint_reach.have_root
-kgenome_fnprint_reach.max
-kgenome_fnprint_reach.n
-kgenome_fnprint_reach.ne
-kgenome_fnprint_reach.root_e0
-kgenome_fnprint_reach.root_ne
-kgenome_fnprint_reach.v
-kgenome_fnprint_ref.by_weak
-kgenome_fnprint_ref.e
-kgenome_fnprint_ref.n
-kgenome_fnprint_ref.status
-kgenome_fnprint_ref.total_w
-kgenome_fnprint_ref_ent.fp
-kgenome_fnprint_ref_ent.fw
-kgenome_fnprint_ref_ent.len
-kgenome_fnprint_ref_ent.mult
-kgenome_fnprint_ref_ent.off
-kgenome_fnprint_ref_ent.weight
-kgenome_fnprint_req.arch
-kgenome_fnprint_req.be
-kgenome_fnprint_req.budget
-kgenome_fnprint_req.code_end
-kgenome_fnprint_req.entry_off
-kgenome_fnprint_req.extents
-kgenome_fnprint_req.funcs
-kgenome_fnprint_req.hint
-kgenome_fnprint_req.led
-kgenome_fnprint_req.link
-kgenome_fnprint_req.n
-kgenome_fnprint_req.opt
-kgenome_fnprint_req.p
-kgenome_fnprint_req.space
-kgenome_fnprint_req.stat
-kgenome_fnprint_req.units
-kgenome_fnprint_req.user
-kgenome_fnprint_req.visit
-kgenome_fnprint_rfn.e0
-kgenome_fnprint_rfn.f
-kgenome_fnprint_rfn.ne
-kgenome_fnprint_rfn.reached
-kgenome_fnprint_sel_req.db
-kgenome_fnprint_sel_req.fn
-kgenome_fnprint_sel_req.led
-kgenome_fnprint_sel_req.lib
-kgenome_fnprint_sel_req.lib_min
-kgenome_fnprint_sel_req.lib_pct
-kgenome_fnprint_sel_req.n
-kgenome_fnprint_sel_req.n_fn
-kgenome_fnprint_sel_req.out
-kgenome_fnprint_sel_req.out_fn
-kgenome_fnprint_sel_req.p
-kgenome_fnprint_sel_req.policy
-kgenome_fnprint_sel_req.sample_k
-kgenome_fnprint_sel_req.stat
-kgenome_fnprint_sel_req.tiny
-kgenome_fnprint_sel_stat.bytes_compared
-kgenome_fnprint_sel_stat.bytes_hashed
-kgenome_fnprint_sel_stat.n_bad
-kgenome_fnprint_sel_stat.n_dup
-kgenome_fnprint_sel_stat.n_dup_cap
-kgenome_fnprint_sel_stat.n_flat
-kgenome_fnprint_sel_stat.n_hit
-kgenome_fnprint_sel_stat.n_in
-kgenome_fnprint_sel_stat.n_lib
-kgenome_fnprint_sel_stat.n_out
-kgenome_fnprint_sel_stat.n_probe
-kgenome_fnprint_sel_stat.n_sample
-kgenome_fnprint_sel_stat.n_tiny
-kgenome_fnprint_sel_stat.status
-kgenome_fnprint_sel_stat.win_in
-kgenome_fnprint_sel_stat.win_out
-kgenome_fnprint_set.bytes
-kgenome_fnprint_set.fn
-kgenome_fnprint_set.n
-kgenome_fnprint_set.stat
-kgenome_fnprint_stat.frontier_off
-kgenome_fnprint_stat.main_off
-kgenome_fnprint_stat.n_advised
-kgenome_fnprint_stat.n_author
-kgenome_fnprint_stat.n_bad
-kgenome_fnprint_stat.n_funcs
-kgenome_fnprint_stat.n_huge
-kgenome_fnprint_stat.n_insn
-kgenome_fnprint_stat.n_island
-kgenome_fnprint_stat.n_lib
-kgenome_fnprint_stat.n_overlap
-kgenome_fnprint_stat.n_reached
-kgenome_fnprint_stat.n_region
-kgenome_fnprint_stat.n_region_over
-kgenome_fnprint_stat.n_skipped
-kgenome_fnprint_stat.n_split
-kgenome_fnprint_stat.n_unit_funcs
-kgenome_fnprint_stat.n_units
-kgenome_fnprint_stat.n_unknown
-kgenome_fnprint_stat.n_unsorted
-kgenome_fnprint_stat.n_visited
-kgenome_fnprint_stat.region_peak
-kgenome_fnprint_stat.status
-kgenome_fnprint_stat.unit_bytes
-kgenome_fnprint_state.entry_off
-kgenome_fnprint_state.frontier
-kgenome_fnprint_state.have_prev
-kgenome_fnprint_state.latched
-kgenome_fnprint_state.lib0
-kgenome_fnprint_state.main_off
-kgenome_fnprint_state.pos
-kgenome_fnprint_state.prev_end
-kgenome_fnprint_state.prev_off
-kgenome_fnprint_state.rc
-kgenome_fnprint_state.region
-kgenome_fnprint_state.run_hi
-kgenome_fnprint_state.run_lo
-kgenome_fnprint_state.run_open
-kgenome_fnprint_state.run_side
-kgenome_fnprint_state.seeds
-kgenome_fnprint_state.steps
-kgenome_fnprint_state.stop
-kgenome_fnprint_tok.ns
-kgenome_fnprint_tok.s
-kgenome_fnprint_tok.w
-kgenome_fnprint_units.fn
-kgenome_fnprint_units.gap
-kgenome_fnprint_units.hi
-kgenome_fnprint_units.lo
-kgenome_fnprint_units.pick
-kgenome_fnprint_units.user
-kgenome_fnprint_wblock.first
-kgenome_fnprint_wblock.n
-kgenome_fnprint_wblock.side
-kgenome_fnprint_wblock.tag
-kgenome_fnprint_wctx.bdead
-kgenome_fnprint_wctx.bytes
-kgenome_fnprint_wctx.count
-kgenome_fnprint_wctx.db
-kgenome_fnprint_wctx.dead
-kgenome_fnprint_wctx.decide_pct
-kgenome_fnprint_wctx.decided
-kgenome_fnprint_wctx.dx_need_min
-kgenome_fnprint_wctx.dxr
-kgenome_fnprint_wctx.gen
-kgenome_fnprint_wctx.hstamp
-kgenome_fnprint_wctx.kc
-kgenome_fnprint_wctx.led
-kgenome_fnprint_wctx.mask
-kgenome_fnprint_wctx.n_bdead
-kgenome_fnprint_wctx.n_credit
-kgenome_fnprint_wctx.n_dead
-kgenome_fnprint_wctx.n_dead_pairs
-kgenome_fnprint_wctx.n_decided
-kgenome_fnprint_wctx.n_hot_repeat
-kgenome_fnprint_wctx.n_lookup
-kgenome_fnprint_wctx.n_rebuild
-kgenome_fnprint_wctx.n_search
-kgenome_fnprint_wctx.n_skip_dead
-kgenome_fnprint_wctx.n_tag_used
-kgenome_fnprint_wctx.policy
-kgenome_fnprint_wctx.rebuild_pct
-kgenome_fnprint_wctx.rebuilt_at
-kgenome_fnprint_wctx.rem
-kgenome_fnprint_wctx.rfilter
-kgenome_fnprint_wctx.rfilter_mask
-kgenome_fnprint_wctx.rtop
-kgenome_fnprint_wctx.stamp
-kgenome_fnprint_wctx.status
-kgenome_fnprint_wctx.stop
-kgenome_fnprint_wdb.blk
-kgenome_fnprint_wdb.bucket
-kgenome_fnprint_wdb.bucket_bits
-kgenome_fnprint_wdb.bytes
-kgenome_fnprint_wdb.filter
-kgenome_fnprint_wdb.filter_bpk
-kgenome_fnprint_wdb.filter_mask
-kgenome_fnprint_wdb.hot_first
-kgenome_fnprint_wdb.key
-kgenome_fnprint_wdb.led
-kgenome_fnprint_wdb.max_run
-kgenome_fnprint_wdb.n_blk
-kgenome_fnprint_wdb.n_hot
-kgenome_fnprint_wdb.n_key
-kgenome_fnprint_wdb.n_pair
-kgenome_fnprint_wdb.n_tag
-kgenome_fnprint_wdb.pool
-kgenome_fnprint_wdb.ref
-kgenome_fnprint_wdb.shift
-kgenome_fnprint_wdb.status
-kgenome_fnprint_wdb.tag_pairs
-kgenome_fnprint_wdb.top
-kgenome_fnprint_wdb.words
-kgenome_fnprint_wdb_opts.bucket_bits
-kgenome_fnprint_wdb_opts.filter_bits_per_hash
-kgenome_fnprint_wdb_opts.led
-kgenome_fnprint_wdb_opts.n_tag
-kgenome_fnprint_wpass_req.c
-kgenome_fnprint_wpass_req.decide_pct
-kgenome_fnprint_wpass_req.ext
-kgenome_fnprint_wpass_req.flags
-kgenome_fnprint_wpass_req.lib
-kgenome_fnprint_wpass_req.n
-kgenome_fnprint_wpass_req.n_ext
-kgenome_fnprint_wpass_req.p
-kgenome_fnprint_wpass_req.policy
-kgenome_fnprint_wpass_req.stat
-kgenome_fnprint_wpass_stat.n_bad_ext
-kgenome_fnprint_wpass_stat.n_cand
-kgenome_fnprint_wpass_stat.n_decided
-kgenome_fnprint_wpass_stat.n_flat
-kgenome_fnprint_wpass_stat.n_lib
-kgenome_fnprint_wpass_stat.n_skip_chunks
-kgenome_fnprint_wpass_stat.n_stop_bytes
-kgenome_fnprint_wpass_stat.n_win
-kgenome_fnprint_wpass_stat.n_win_rolled
-kgenome_fnprint_wpass_stat.n_win_unvisited
-kgenome_fnprint_wpass_stat.skip_bytes
-kgenome_fnprint_wpass_stat.status
-kgenome_fnprint_wpass_stat.stopped
+kgenome_fntab_extent.at
+kgenome_fntab_extent.len
+kgenome_fntab_list.cap
+kgenome_fntab_list.n
+kgenome_fntab_list.n_bad
+kgenome_fntab_list.partial
+kgenome_fntab_list.status
+kgenome_fntab_list.v
+kgenome_fntab_meta.coff_empty
+kgenome_fntab_meta.dynsym_empty
+kgenome_fntab_meta.elf_rel
+kgenome_fntab_meta.format
+kgenome_fntab_meta.has_dynsym
+kgenome_fntab_meta.has_symtab
+kgenome_fntab_meta.has_unwind
+kgenome_fntab_meta.pdata_empty
+kgenome_fntab_meta.pe_arm
+kgenome_fntab_meta.pe_clr
+kgenome_fntab_meta.pe_coff
+kgenome_fntab_meta.pe_nocode
+kgenome_fntab_meta.pe_x64_pdata
+kgenome_fntab_meta.pe_x86
+kgenome_fntab_meta.symtab_empty
+kgenome_fntab_plan.ccase
+kgenome_fntab_plan.check_only
+kgenome_fntab_plan.run
+kgenome_fntab_run.add_partial
+kgenome_fntab_run.data
+kgenome_fntab_run.data_n
+kgenome_fntab_run.file
+kgenome_fntab_run.l
+kgenome_fntab_run.meta
+kgenome_fntab_run.n_pad
+kgenome_fntab_run.obj
+kgenome_fntab_run.own
+kgenome_fntab_run.pad
+kgenome_fntab_run.plan
+kgenome_fntab_run.walk
+kgenome_fntab_run.walked
+kgenome_frame.be
+kgenome_frame.bits
+kgenome_frame.bits_bytes_
+kgenome_frame.cfg
+kgenome_frame.cut
+kgenome_frame.fn
+kgenome_frame.framed
+kgenome_frame.in
+kgenome_frame.in_bytes_
+kgenome_frame.len
+kgenome_frame.mapped
+kgenome_frame.mem_
+kgenome_frame.n_insn
+kgenome_frame.n_skip
+kgenome_frame.off
+kgenome_frame.self_bytes_
+kgenome_frame.state
+kgenome_frame.status
+kgenome_frame.va
+kgenome_frame_insns.len
+kgenome_frame_insns.n
+kgenome_frame_insns.off
+kgenome_frame_insns.skipped
+kgenome_frame_insns.v
+kgenome_frame_src.base
+kgenome_frame_src.facts
+kgenome_frame_src.fs
+kgenome_frame_src.max_bytes
+kgenome_frame_src.mem
+kgenome_frame_src.obj
+kgenome_frame_src.pre
+kgenome_frame_src.size
+kgenome_frame_src.switch_src
+kgenome_frame_src.wk
+kgenome_func.end_source
+kgenome_func.flags
+kgenome_func.isa_mode
+kgenome_func.kind
 kgenome_func.len
 kgenome_func.off
 kgenome_func.shndx
+kgenome_func.source
 kgenome_func.value
+kgenome_func_set.ccase
 kgenome_func_set.n
+kgenome_func_set.n_disagree
+kgenome_func_set.n_extra
+kgenome_func_set.partial
+kgenome_func_set.state
 kgenome_func_set.status
 kgenome_func_set.v
 kgenome_gt_fmt.bad
@@ -8023,6 +7838,9 @@ kgenome_lineage.act
 kgenome_lineage.ag
 kgenome_lineage.argc
 kgenome_lineage.base
+kgenome_lineage.by_va
+kgenome_lineage.by_va.fn
+kgenome_lineage.by_va.va
 kgenome_lineage.callers
 kgenome_lineage.can_defer
 kgenome_lineage.cap_in
@@ -8032,19 +7850,22 @@ kgenome_lineage.cm_done
 kgenome_lineage.cur_fn
 kgenome_lineage.deferred
 kgenome_lineage.dry
-kgenome_lineage.fn
-kgenome_lineage.fn_by_va
 kgenome_lineage.fn_run
 kgenome_lineage.fn_store
+kgenome_lineage.frames
+kgenome_lineage.fs
+kgenome_lineage.fsrc
 kgenome_lineage.glob
 kgenome_lineage.halt
 kgenome_lineage.has_site
 kgenome_lineage.in
 kgenome_lineage.loc
+kgenome_lineage.n_by_va
 kgenome_lineage.n_fn
 kgenome_lineage.n_in
 kgenome_lineage.n_need
 kgenome_lineage.n_site
+kgenome_lineage.n_skip
 kgenome_lineage.n_slot_pop
 kgenome_lineage.need
 kgenome_lineage.no_defer
@@ -8054,13 +7875,18 @@ kgenome_lineage.nseeded
 kgenome_lineage.obj
 kgenome_lineage.out
 kgenome_lineage.over_steps
+kgenome_lineage.own
+kgenome_lineage.own_charged
 kgenome_lineage.pend
 kgenome_lineage.plan
 kgenome_lineage.pop
+kgenome_lineage.ref_from
+kgenome_lineage.ref_to
 kgenome_lineage.rel
 kgenome_lineage.run
 kgenome_lineage.s
 kgenome_lineage.site_at
+kgenome_lineage.site_fn
 kgenome_lineage.site_node
 kgenome_lineage.size
 kgenome_lineage.skipped
@@ -8095,6 +7921,7 @@ kgenome_lineage_cfg.bpred
 kgenome_lineage_cfg.bs
 kgenome_lineage_cfg.cfg
 kgenome_lineage_cfg.cut
+kgenome_lineage_cfg.fr
 kgenome_lineage_cfg.head
 kgenome_lineage_cfg.inq
 kgenome_lineage_cfg.left
@@ -8104,8 +7931,6 @@ kgenome_lineage_cfg.wl
 kgenome_lineage_fn.len
 kgenome_lineage_fn.off
 kgenome_lineage_fn.va
-kgenome_lineage_fnva.fn
-kgenome_lineage_fnva.va
 kgenome_lineage_out.cap_sink
 kgenome_lineage_out.n_sink
 kgenome_lineage_out.ret
@@ -8148,7 +7973,12 @@ kgenome_mutation_req.n_ext
 kgenome_mutation_req.n_fixed
 kgenome_mutation_req.n_obj
 kgenome_mutation_req.p
+kgenome_mutation_req.tally
 kgenome_mutation_req.user
+kgenome_mutation_tally.funcs
+kgenome_mutation_tally.lib
+kgenome_mutation_tally.outside
+kgenome_mutation_tally.units
 kgenome_nucleo_abi.arg0
 kgenome_nucleo_abi.n_arg
 kgenome_nucleo_abi.n_tab
@@ -8181,6 +8011,14 @@ kgenome_offmap.from_end
 kgenome_offmap.n
 kgenome_offmap.to
 kgenome_offmap.to_end
+kgenome_pe_coff_sym.cls
+kgenome_pe_coff_sym.has_size
+kgenome_pe_coff_sym.name
+kgenome_pe_coff_sym.name_len
+kgenome_pe_coff_sym.off
+kgenome_pe_coff_sym.shndx
+kgenome_pe_coff_sym.size
+kgenome_pe_coff_sym.value
 kgenome_pe_dir.rva
 kgenome_pe_dir.size
 kgenome_pe_imp.dll
@@ -8270,6 +8108,14 @@ kgenome_pe_unmap_info.relocs_undone
 kgenome_pe_unmap_info.reserved
 kgenome_pe_unmap_info.sections
 kgenome_pe_unmap_info.sections_short
+kgenome_ppc_insn.id
+kgenome_ppc_insn.word
+kgenome_ppc_prim.id
+kgenome_ppc_prim.kind
+kgenome_ppc_prim.rows
+kgenome_ppc_row.id
+kgenome_ppc_row.mask
+kgenome_ppc_row.val
 kgenome_range_facts.analysed
 kgenome_range_facts.decode_pct
 kgenome_range_facts.decodes
@@ -8912,10 +8758,13 @@ kof_cfgsign_host.mem
 kof_cfgsign_req.ctx
 kof_cfgsign_req.data
 kof_cfgsign_req.floor
+kof_cfgsign_req.frames
+kof_cfgsign_req.fs
 kof_cfgsign_req.host
 kof_cfgsign_req.keep
 kof_cfgsign_req.len
 kof_cfgsign_req.off
+kof_cfgsign_req.wk
 kof_cfgview.anchor_min
 kof_cfgview.anchor_pass
 kof_cfgview.arch
@@ -9003,6 +8852,15 @@ kof_codenotes.pool
 kof_codenotes.pool_n
 kof_codenotes.status
 kof_codenotes.v
+kof_codenotes_req.bits
+kof_codenotes_req.ctx
+kof_codenotes_req.data
+kof_codenotes_req.funcs
+kof_codenotes_req.names
+kof_codenotes_req.relocs
+kof_codenotes_req.sym
+kof_codenotes_req.sym_n
+kof_codenotes_req.wk
 kof_content.api_resolved
 kof_content.as_format
 kof_content.at
@@ -9395,6 +9253,10 @@ kof_exe_norm_span.src_len
 kof_exe_norm_span.src_off
 kof_exe_span.len
 kof_exe_span.off
+kof_exe_strtab_res.chars
+kof_exe_strtab_res.keys
+kof_exe_strtab_res.records
+kof_exe_strtab_res.stretches
 kof_ext_buf.cap
 kof_ext_buf.charged
 kof_ext_buf.fixed
@@ -9410,6 +9272,7 @@ kof_famcat.n_fam
 kof_famcat.n_var
 kof_famcat.rev
 kof_famcat.var
+kof_famcat_fam.comment
 kof_famcat_fam.name
 kof_famcat_fam.next
 kof_famcat_item.family
@@ -9823,11 +9686,14 @@ kof_mutation_ctx.bs
 kof_mutation_ctx.cap
 kof_mutation_ctx.chunk_max
 kof_mutation_ctx.fed
+kof_mutation_ctx.funcs_lib
+kof_mutation_ctx.funcs_out
 kof_mutation_ctx.gen
 kof_mutation_ctx.held
 kof_mutation_ctx.io
 kof_mutation_ctx.io_budget
 kof_mutation_ctx.ledgered
+kof_mutation_ctx.life_dropped_objects
 kof_mutation_ctx.life_io_bytes
 kof_mutation_ctx.life_io_objects
 kof_mutation_ctx.life_trunc_objects
@@ -9865,8 +9731,11 @@ kof_mutation_src.n_pool
 kof_mutation_src.pool
 kof_mutation_src.xf
 kof_mutation_src.xf_crc
+kof_mutation_stat.funcs_lib
+kof_mutation_stat.funcs_out
 kof_mutation_stat.io_bytes
 kof_mutation_stat.io_reads
+kof_mutation_stat.life_dropped_objects
 kof_mutation_stat.life_io_bytes
 kof_mutation_stat.life_io_objects
 kof_mutation_stat.life_trunc_objects
@@ -9967,6 +9836,7 @@ kof_pack_str.off
 kof_pack_str.uid
 kof_parser.anomalies
 kof_parser.anomaly_name
+kof_parser.embed
 kof_parser.format
 kof_parser.n_regions
 kof_parser.parse
@@ -10352,6 +10222,7 @@ kof_scan_obj_diag.all
 kof_scan_obj_diag.apihash
 kof_scan_obj_diag.ask
 kof_scan_obj_diag.charged
+kof_scan_obj_diag.frames
 kof_scan_obj_diag.gr_n
 kof_scan_obj_diag.graph
 kof_scan_obj_diag.pe_imp
@@ -10612,6 +10483,7 @@ kof_stats.multi_bytes
 kof_stats.multi_degraded
 kof_stats.multi_passes
 kof_stats.multi_reads
+kof_stats.mutation_dropped_objects
 kof_stats.mutation_io_bytes
 kof_stats.mutation_io_objects
 kof_stats.mutation_trunc_objects

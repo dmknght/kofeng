@@ -14,6 +14,8 @@
  *   arm32/  32-bit ARM: ARM state and Thumb state; hand-written rows with the
  *           bit pattern beside each, and an index the code derives from them.
  *   arm64/  AArch64; a decode tree held as data, with a derived first-level index.
+ *   ppc/    PowerPC, 32-bit and 64-bit, either byte order; a table on the primary opcode, rows only
+ *           where the extended opcode is not a plain index, and the 64-bit mode as a flag of the call.
  *
  * An architecture is added by adding a directory. Nothing outside it changes,
  * which is the test of whether the split is real.

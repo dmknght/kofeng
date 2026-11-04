@@ -1132,7 +1132,7 @@ static void payload_tag(struct view *v, uint32_t at)
 		 * same symbol. The address is kofscfind's and the block is
 		 * the engine's.
 		 */
-		kof_sym_name_at(par->sym, par->sym_n, par->payload_at, -1,
+		kof_sym_name_at(par->sym, par->sym_n, &par->payload_at, -1,
 			    o->payload_sym, sizeof o->payload_sym);
 		return;
 	}

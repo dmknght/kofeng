@@ -30,6 +30,7 @@
 #include "../../../kofcore/rangelist.h"
 
 #include <string.h>
+#include <decompressors/inflate.h>
 
 #define GZIP_FIXED_HDR 10u   /* ID1 ID2 CM FLG MTIME XFL OS */
 #define GZIP_TRAILER   8u    /* CRC32 ISIZE */
@@ -42,6 +43,60 @@ int kof_gzip_sniff(kof_buf file)
 	    !kof_rd_u8(file, 2, &cm))
 		return 0;
 	return id1 == 0x1f && id2 == 0x8b && cm == KOF_GZIP_DEFLATE;
+}
+
+/*
+ * A GZIP THAT IS A VARIABLE'S DATA (embed-sniff-1: of 30 offsets the sniff accepted in the data of 5855
+ * hosts 9 were real; reserved flags and the first deflate block removed the rest). The reserved
+ * flag bits must be zero and the stream must inflate: the decode runs until the end of the stream or
+ * until KOF_GZIP_EMBED_PROBE bytes of output, which bounds the cost of the question and not what the
+ * object is. A stream that ends inside the probe must also agree with its trailer's size, and then
+ * the extent is exact; one that does not end inside it has no known extent (0).
+ */
+#define KOF_GZIP_EMBED_PROBE (64u << 10)
+
+struct gz_probe {
+	uint64_t out;
+};
+
+static int gz_probe_sink(void *user, const uint8_t *p, uint32_t n)
+{
+	struct gz_probe *g = user;
+
+	(void)p;
+	g->out += n;
+	return g->out < KOF_GZIP_EMBED_PROBE;
+}
+
+int kof_gzip_embedded(kof_buf f, uint64_t *extent, uint64_t *work)
+{
+	struct kof_gzip_info g;
+	struct kuncoat_inflate st;
+	struct kuncoat_io io;
+	struct gz_probe pr = { 0 };
+	enum kuncoat_status s;
+	uint64_t cost;
+
+	*extent = 0;
+	if (!kof_gzip_sniff(f) || !kof_gzip_header(f, &g) || (g.flags & 0xe0u) || g.data_off >= f.n)
+		return 0;
+	memset(&io, 0, sizeof io);
+	io.in.p = f.p + g.data_off;
+	io.in.n = f.n - g.data_off;
+	io.sink = gz_probe_sink;
+	io.user = &pr;
+	s = kuncoat_inflate(&st, &io);
+	cost = io.consumed + io.produced + 1u;
+	*work = *work > cost ? *work - cost : 0;
+	if (s == KUNCOAT_OK) {
+		uint64_t t = g.data_off + io.consumed;
+
+		if (kof_rd32_or0(f, t + 4u) != (uint32_t)pr.out || t + GZIP_TRAILER > f.n)
+			return 0;
+		*extent = t + GZIP_TRAILER;
+		return 1;
+	}
+	return (s == KUNCOAT_STOPPED || s == KUNCOAT_TRUNCATED) && pr.out > 0;
 }
 
 /*

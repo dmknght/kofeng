@@ -1,5 +1,5 @@
 /*
- * kx_viewpure - the viewer's pure helpers of kofexamine/kofview.c that tests/unit/out_clip.c and the TUI tests do not reach by
+ * kx_viewpure - the viewer's pure helpers of kofexamine/kofview.c, kv_scrollbar.c and kv_popup.c that tests/unit/out_clip.c and the TUI tests do not reach by
  * name: the scrollbar geometry (kv_bar_thumb, kv_bar_at, kv_scrollbar, kv_scrollbar_h), the dropdown model (kv_menu_popup
  * and kv_popup_row_of / kv_popup_first / kv_popup_step over it: rows, the item at a row, the row of an item, the first and the next choosable) and what a format can be asked (kv_cap).
  *
@@ -62,7 +62,7 @@ static void thumb_suite(void)
 			prev = t0;
 		}
 	}
-	/* EX-10 (2026-10-27, R->M) [sev L]: rows * shown is computed in 64 bits (kofview.c: kv_bar_thumb, bar_halves), so for shown >=
+	/* EX-10 (2026-10-27, R->M) [sev L]: rows * shown is computed in 64 bits (kv_scrollbar.c: kv_bar_thumb, bar_halves), so for shown >=
 	 * 2^64/rows it wraps and the thumb is the wrong size. Trigger: an object of 2^58 bytes or more (no file the engine reads).
 	 * Latent; the row below holds the right answer and is red-in-waiting. */
 	{

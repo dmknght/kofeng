@@ -738,6 +738,8 @@ void kof_mutation_begin(struct kof_mutation_ctx *c)
 	    (KOF_MTN_S_IO_BUDGET | KOF_MTN_S_IO_ERROR | KOF_MTN_S_SLICE_CRC))
 		c->life_io_objects++;
 	c->life_unsigned_objects += (c->status & KOF_MTN_S_FUNC_UNSIGNED) != 0;
+	c->life_dropped_objects += (c->status & KOF_MTN_S_FUNC_DROPPED) != 0;
+	c->funcs_lib = c->funcs_out = 0;
 	/* The tables follow what an object touches, so a big one is let go when the last
 	 * object needed an eighth of it. */
 	if (c->bcap > 4096u && (uint64_t)c->bn * 8u < c->bcap) {
@@ -803,6 +805,9 @@ void kof_mutation_stat(const struct kof_mutation_ctx *c, struct kof_mutation_sta
 	o->life_visits = c->life_visits;
 	o->life_trunc_objects = c->life_trunc_objects + ((c->status & KOF_MTN_S_WALK_TRUNCATED) != 0);
 	o->life_unsigned_objects = c->life_unsigned_objects + ((c->status & KOF_MTN_S_FUNC_UNSIGNED) != 0);
+	o->funcs_lib = c->funcs_lib;
+	o->funcs_out = c->funcs_out;
+	o->life_dropped_objects = c->life_dropped_objects + ((c->status & KOF_MTN_S_FUNC_DROPPED) != 0);
 	o->life_io_objects = c->life_io_objects +
 		((o->status & (KOF_MTN_S_IO_BUDGET | KOF_MTN_S_IO_ERROR | KOF_MTN_S_SLICE_CRC)) != 0);
 }

@@ -157,7 +157,7 @@ void decl_add_text(struct view *v, const char *text, size_t n,
 {
 	struct decl *d;
 
-	if (!text || !n || v->ed.dr.n_decl >= MAX_DECL)
+	if (!text || !n || !decl_reserve(&v->ed, v->ed.dr.n_decl + 1u))
 		return;
 	d = &v->ed.dr.decl[v->ed.dr.n_decl];
 	memset(d, 0, sizeof *d);
@@ -254,7 +254,7 @@ void decl_add(struct view *v, int hex)
 	uint64_t lo, hi, k;
 	uint32_t i = 0, g;
 
-	if (v->sel_a == KGENOME_BROKEN || v->ed.dr.n_decl >= MAX_DECL)
+	if (v->sel_a == KGENOME_BROKEN || !decl_reserve(&v->ed, v->ed.dr.n_decl + 1u))
 		return;
 
 	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;

@@ -1,6 +1,6 @@
 /*
  * kv_cfgbody.h - the BODY of the CFG dialog (kv_cfgbody.c): the engine's answer for one function (kof_cfgview), as the rows of two of its three tabs - the Overview (the
- * engine's facts and the calls as a table) and the Graph (the engine's graph laid out and drawn by kv_graph.c). The third tab, Disasm, is the panel's own rows of the
+ * engine's facts - the CFG hash among them, called Scaffold in the docs - and the calls as a table) and the Graph (the engine's graph laid out and drawn by kv_graph*.c). The third tab, Disasm, is the panel's own rows of the
  * function (kv_disasm.c, dis_func_rows) and needs a view, so the dialog (kv_cfgdlg.c) holds it. No screen, no view, no global: the dialog asks for rows, and so do the tests.
  */
 #ifndef KV_CFGBODY_H
@@ -44,6 +44,13 @@ const char *kv_cfgbody_edge_attr(unsigned cond, unsigned loop);
 const char *kv_cfgbody_mark_attr(unsigned mark);
 /* The style the Graph tab draws with: the glyph set of kv_graph_style_default and the attributes above. */
 struct kv_graph_style kv_cfgbody_style(void);
+
+/*
+ * THE COLOURS OF THE OVERVIEW: the attribute of the character `at` of one Overview row (the engine's plain line, as the viewer knows its label), or NULL for the terminal's own.
+ * A label is dim (A_DIM); a value takes the colour its kind has in the Properties dialog and the Blocks table: a name and the unit id and the keys A_ID, an offset or an
+ * address A_LOC, a status that is not ok A_WARN; a number is plain. Nothing is derived: the class is the word's spelling and its row's first word.
+ */
+const char *kv_cfgbody_text_attr(const char *row, size_t at);
 
 /* Ask the engine for the function in `rq` and make the rows. Always safe to free; a function the engine could not make a graph of has its sentence as the facts. */
 void kv_cfgbody_make(struct kv_cfg_body *b, const struct kof_cfgview_req *rq);

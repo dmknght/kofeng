@@ -405,15 +405,43 @@ are the remaining exposure (see `dbloader_packs.c`).
 **A function unit is signed by the SHAPE of its function (CFG step 2c, 2026-10-31).** A unit of a region that is cut a function at a time
 (`kgenome_mutation_by_function`, `first` not NULL in the unit callback) has no window sketch (measured ineffective: x86-64 5/60 pairs, 0 on every
 other architecture, `exp_cfg/report.md`); `kgenome_mutation_signature` is the one switch and answers `KGENOME_MUTATION_SIG_CFG`. The engine's ONE signing
-function is `kof_cfgsign_function` (`analyzers/cfgsign.c`: decode once, `kgenome_cfg_build`, `kgenome_cfg_sign`, the lib's floor `kgenome_cfg_anchor` = 12
-reachable blocks); the scanner's feed (`scan_feed.c`), the report that locates a block (`scan_explain.c`), `kofexaminer --blocks`, the viewer's table
+function is `kof_cfgsign_function` (`analyzers/cfgsign.c`: decode once, `kgenome_cfg_build`, `kgenome_cfg_sign`, the lib's floor `kgenome_cfg_anchor` = 1
+reachable block, `KGENOME_CFG_ANCHOR_MIN`; given the object's walk it READS the walk's trace and decodes nothing again); the scanner's feed (`scan_feed.c`), the report that locates a block (`scan_explain.c`), `kofexaminer --blocks`, the viewer's table
 (`mtn_mark`) and the CFG dialog (`kof_cfgview_build`) all call it. A unit below the floor, undecodable, or over the lib's allowance for one call stays
 listed and unsigned with the reason (`kof_cfgsign_state_name`), and the object says so (`KOF_MTN_S_FUNC_UNSIGNED`, `kof_stats.mutation_unsigned_objects`).
 The keys are domain-separated from window hashes (`KGENOME_CFG_KEY_SEED`); a CFG block in a pack is the existing record (region CODE, norm RAW, 12..32
 u32, `kgenome_mutation_block_min`), so no layout or version moved. The matcher has ONE index and TWO scoring kinds (`kof_mutation_cfg_unit`,
 `kofmutation.c`): a window block is held by containment over the whole object, a CFG block by the Jaccard estimate of ONE function's sketch
 (`kgenome_cfg_overlap`), the best unit counting, and `kof_mutation_counts` reads back whichever is higher, so the diagnose, the part's pct and need, and the verdict
-path are unchanged. A unit that groups small functions is signed by its largest function (the cut's own `first`). Data units keep their windows.
+path are unchanged. A function unit is ONE function of the object's function table: no minimum length, no grouping of neighbours, no cap on the number of units (the grouping was removed 2026-11-03: it cost start recall).
+Data units keep their windows.
+
+**The function table is ONE product per object, built once, case by case (2026-11-03, phase A1: ELF).** `struct kgenome_func_set` (`genotype/image/funcs.h`, `fntab.h`):
+entries (off, len, kind, source, end_source, isa_mode, flags) sorted by offset, and the state of the answer as a value (COMPLETE, PARTIAL with what is missing, OVER_BUDGET: never a silent
+none). `kgenome_diag_funcs_with_walk` (`phenotype/fntab_build.c`) is the one routine every consumer asks. The CASES are decided one by one, not branches of one function: a cheap PROBE of the
+object's metadata fills a plain struct, the SELECTOR (`kgenome_fntab_select`, a pure function; its decision table is the header of `fntab_select.c`) answers the case and which strategies run, each
+STRATEGY is a function of its own with its own END rule and tests - the symbol table (exact: `kgenome_fntab_symtab`, .symtab or .dynsym), the unwind table (`kgenome_fntab_fde`: start and length
+of every validated FDE of .eh_frame, found through the section or PT_GNU_EH_FRAME), .pdata (`kgenome_fntab_pdata`), the entry walk (`kgenome_fntab_walk`: direct call targets and the entry point) -
+and a strategy never calls another. Two sources meet in ONE place, `kgenome_fntab_merge` (rank SYMTAB > PDATA > DYNSYM > FDE > walk; a start inside an exact body is dropped; a disagreement is
+recorded in `n_disagree` and flag DISAGREE, never hidden; a source marked check-only is counted in `n_extra` and not kept). `kgenome_fntab_ends` closes what no source closed: the next start or the
+end of the CODE EXTENT (`kgenome_diag_extent`: the executable segment cut at the end of its last executable section when the section table is honest), less the run of padding instructions
+(nop, int3; a delay slot is not padding) the walk's one decode saw there. The walk is asked WITH its trace: the signing of a function reads it (`kof_cfgsign_req.wk`) and decodes nothing again
+(every architecture the engine decodes: the trace record is the whole instruction, `trace_arch.c`; the PE route reads it too). Open, each with its limit and next algorithm: an object with no symbols and no unwind data has call targets only (a function nothing calls
+directly is inside the body before it: `.ARM.exidx` starts, init/fini arrays, pointer tables into code, a prologue fact); the end of such an entry is the next start less padding (END_OPEN), the
+reachable-blocks rule is not built; the wrapper analysis (its entries are the walk's call targets and its span a floor of 256 bytes: measured, changing it changes
+nodes), the view's remap by bytes (A3b) and kofexamine's own lookup (parked) still keep their own. **The lookup in the table is ONE**: `kgenome_funcs_at` (the function that holds an offset) and
+`kgenome_funcs_start` (the one that starts there), O(log n), `genotype/image/funcs.h`; the lineage, the sweep, the code notes and the CFG view ask them.
+
+**The FRAME of a function is ONE product, built once and read by everyone after (2026-11-03, phase A3a).** `struct kgenome_frame` (`phenotype/frame.h`): the CFG of the function (blocks with their
+first instruction index AND byte start `at`, terminator, successor block indices, `reach`, the calls and system calls of the reachable ones), built with the object's real byte order and no SPLIT_EXITS (the
+signature's rule: a pack's hashes fix it; the lineage was measured to give identical links on it), the facts of the instructions that need no other input (per block: a memory cell beyond the frame, a store
+through one, a push, a call, a jump; `framed`: the frame pointer decision they were read with), a MEMO filled by the first `kgenome_frame_facts` (the lineage asks; the signing never does: measured 17% of the frame's cost), the count of instructions and of bytes that decoded as nothing, and a state (OK / UNDECODABLE / UNSUPPORTED /
+OVER_BUDGET / NOMEM). One decode (the walk's trace, every architecture, `kgenome_diag_code_run`) and one graph per function, made on the first ask by `kgenome_frame_make` and kept by the object's cache
+(`oc_frames`, `sc->obj.diag.frames`, charged to the scanner's ledger, freed with the object): the signing of a function (`kof_cfgsign_function`) and the lineage read the same frame. What the lineage
+adds on top (links, shared values, summaries, value flow) is its own and is not stored in the frame: it needs the node table, the other functions and the state the solve builds. A frame is made from
+instructions the caller already decoded (`kgenome_frame_src.pre`) when it has them, so an object whose walk has no trace (PE) is not decoded twice for one function. A function that is not an entry of the
+table (an extent the stage clamps to the object) has its frame made for the solve and given back.
+**The PE cases (phase A2)** are rows of the same selector and strategies of their own, none calling another: a managed image is empty and PARTIAL (`P_MANAGED`); x64 with an exception table runs `kgenome_fntab_pdata` (RUNTIME_FUNCTION validated: version, flags, bounds; a chained entry is a FRAGMENT that masks the walk and is not kept; the table is exact for non-leaf functions), the export address table (`fntab_pe_export.c`), the TLS callbacks (`fntab_pe_tls.c`), the COFF symbols when the file keeps them (`fntab_pe_coff.c`: start from the symbol, length from the aux record when the toolchain wrote one), the walk and the import stubs (`phenotype/fntab_pe_thunk.c`: kind THUNK, the body is the one `jmp [iat]` instruction), then the GAPS step (`fntab_gaps.c`, after the merge: the first non-padding byte of a gap between exact bodies is a leaf function's start, flag GAP, end open); x86 and a COFF-less x64 run the same strategies without the exception table. The walk decodes PE x86/x64 (one decode, the trace shared with the signing) and records, in that decode, the import stubs and the zero fill at a section's tail; a `jmp X` after a ret is not a thunk in a PE. What is below the oracle, with the limit and the next algorithm, is at the head of `fntab_build.c`.
 
 **The block (similarity) index and the pattern table are the model of it: their memory does not follow
 the database.** A pack's tail is one container (`databases/pack/dbkix.h`): a chain of parts that each end

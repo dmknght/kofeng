@@ -851,6 +851,12 @@ struct kof_stats {
 	 * counted, not lost. Zero means the objects had no function unit or no pack had a block. Not an error.
 	 */
 	uint64_t mutation_unsigned_objects;
+	/*
+	 * APPENDED (phase A3a, FP-18): the objects on which the cut of a function region did not offer a function of the table as a unit - it lies outside the code region, or the
+	 * library's span touches it (KOF_MTN_S_FUNC_DROPPED). The units that are signed do not change; this says that some function was not looked at, and the object carries
+	 * the library's code. Zero: every function of the table was offered (or the object had no function region).
+	 */
+	uint64_t mutation_dropped_objects;
 };
 
 #endif /* KOFRESULT_H */

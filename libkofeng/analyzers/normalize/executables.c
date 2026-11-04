@@ -9,6 +9,21 @@
  * stops being true, and a reader should not have to work out which wins.
  */
 
+/*
+ * str-decode-1 (owner, 2026-11-01; DONE 2026-11-03 for the one-byte string table: executables_strtab.c, called by
+ * norm_decode in scanners/scan_norm.c; SCAN PATH). Sample: HEUR-Backdoor.Linux.Mirai.r-be0826d7 (ELF PowerPC 32-bit big-endian, UPX 3.94; unpacked //0 120396
+ * bytes). Its string table is `text xor 0x22` with the NUL coded too: 95 records in .rodata, 68 new strings of 6 or more characters in the view (2372 characters).
+ * The key is NOT tried: it is the last byte of each record (the coded NUL), believed only when a run of 16 records next to each other carries it (see
+ * executables_strtab.c for the basis and the clean-corpus measurement). The decode is in place, 1:1, in the object's own offsets, so the offset map needs no entry and
+ * a derived view inherits it. Decided once, in normalise; the matcher decodes nothing.
+ * NOT DONE, and why: (a) a code-xref basis (the length and the pointer at the call site of the table's add-entry routine) needs a decoder of the architecture: this
+ * sample is PowerPC and libgenome has no PowerPC decoder; (b) the owner's note on the run `/x38/xFJ/x93/xID/x9A` (1020 bytes, that unit 51 times, in .rodata after the
+ * string `stun`): it is plain text as written, and `FJ`, `ID` are not hex digits, so executables_esc.c reads nothing of it (a run needs eight whole escapes under one
+ * separator); MEASURED 2026-11-03 (gdb on the unpacked child): it is NOT an encoding. The only reference is the pointer `hexPayload` (.data, one code xref in attack_method_stdhex), which does strlen and send() of the 1020 bytes as written; no routine reads `/xNN`; so there is no rule to decode and decoding would create a string that never exists at run time; OWNER 2026-11-03: in principle such protocol text would be decoded; in this context (a payload the sample sends, no value as data) it is skipped, on purpose; (c) second sample HEUR-Backdoor.Linux.Mirai.gen-e5922121 (ARM little-endian): its
+ * .rodata is plain text (no record decodes under any key), and its "encoders" are code (attack_method_xortcp, attack_method_stdhex, attack_method_udphex, a 16-byte
+ * hex table `hex_chars`) that BUILD flood payloads at run time: nothing static for the normaliser to undo. Both measured by reading the unpacked object.
+ */
+
 #include <stdlib.h>
 #include <string.h>
 #include <kofcore.h>

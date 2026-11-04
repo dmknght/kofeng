@@ -1,9 +1,8 @@
 /*
  * kv_consts.h - limits, widths and edit codes that more than one unit uses.
  *
- * The draft panel's own (NOTE_W, GEN_BTN_W, ED_GRP_PCT, ED_STR, ED_AT_OFF, MAX_PROW)
- * are kept in their original order because struct view
- * sizes an array from MAX_PROW; they are listed in prototypes.txt.
+ * The draft panel's own (NOTE_W, GEN_BTN_W, ED_GRP_PCT, ED_STR, ED_AT_OFF)
+ * are kept in their original order; they are listed in prototypes.txt.
  * A part of kv.h.
  */
 #ifndef KV_CONSTS_H
@@ -71,7 +70,7 @@
 /* One edit target per block row, so the caret knows which threshold it is in.
  * Above ED_STR's range, which is per declared string. */
 #define ED_GRP_PCT 700
-#define ED_STR    600
+#define ED_STR    1000000     /* one code per declared string, and the table has no capacity: the band is far above every other code */
 /* One per matcher, for the step of an AT place - see grp_of. Above ED_GRP_PCT
  * and tested as a band, like every other one. */
 #define ED_AT_OFF 800
@@ -83,21 +82,8 @@
  */
 #define ED_SYMFILT 900
 
-/* Every row the draft panel can ever hold, spelled from the limits rather than
- * counted once: the panel grew three kinds of row after this array was sized,
- * and a table that silently stops short is a panel whose bottom cannot be
- * scrolled to. */
-/* The condition rows are the last term, and a condition became THREE rows -
- * matchers, verdict, variant - plus its JOIN and its ADD. Spelled from the
- * limits for the reason the note above gives: a table that silently stops short
- * is a panel whose bottom cannot be scrolled to. */
-/* THE TABLES, which were not counted at all: the block table (a block per row,
- * and a function is a block now - MTN_MAX_BLOCK) and the diagnose table. The array stopped at a hundred rows, so a file with more
- * functions than that showed the first hundred and its panel could not be
- * scrolled to the rest - which is exactly the failure the note above is about. */
-#define MAX_PROW  (OPT_COUNT + 1 + 2 + MAX_DECL + 2 + 2 * MAX_GROUP + 2 + \
-		   6 * MAX_GROUP + 2 + MTN_MAX_BLOCK + 2 + \
-		   KOF_DB_MAX_DIAG + 2)
+/* The draft panel's rows are a COUNT (n_prow) and nothing is sized from it: the sum of limits that stood here (MAX_PROW) stopped the count short
+ * when a table outgrew it, which is a panel whose bottom cannot be scrolled to. The block table's rows drawn are its window (blk_win, kv_field.c). */
 
 /*
  * How much encoded text the decoder will hold.
@@ -124,6 +110,7 @@
 #define ED_FAM_NAME 560
 #define ED_FAM_COMMENT 561
 #define ED_FAM_CELL 562         /* the comment of a variant, edited in its table cell */
+#define ED_FAM_FCOMMENT 565     /* the family's OWN comment (the Note row), Add family and Edit family only */
 /* Manage > Syndromes: the name and comment fields of its small dialog. */
 #define ED_TAG_NAME 563
 #define ED_TAG_COMMENT 564

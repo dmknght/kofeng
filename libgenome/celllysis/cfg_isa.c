@@ -12,14 +12,16 @@
  *                   `ldr pc` that is conditional is a CONDITIONAL exit: the fall-through stays an edge. The
  *                   decoder writes the condition code (14 = always) into `cond` for every ARM instruction.
  *                   1914 conditional returns in the survey set (Mirai ARM).
+ *   (PowerPC uses `predicated` with always_cond 0: see its row.)
  *   jcc_always      AArch64 `b.cond` with condition 14 (al) or 15 (nv) is an unconditional jump. The decoder
  *                   puts the condition code of `b.cond` into `cond` and bit 24 (0/1) for cbz/tbz, so 14 and 15
  *                   can only be a `b.cond`.
- *   read_word       MIPS: the decoder (decode_mips.c) records a branch's target and nothing else: no registers,
- *                   no condition (DEFECT CS-4). `b` is `beq r,r` and `bgez $0` is a jump; `bltzal`/`bgezal` (REGIMM
- *                   with rt bit 4) are calls that write ra, not branches. The table reads the instruction word
- *                   from the object bytes (`in->at` is an offset into them) and says so by `degraded` when it
- *                   was not given them. When the decoder is changed to carry the registers, this goes.
+ *   (MIPS/MIPS64 used to read the instruction word back out of the object bytes here, because the decoder gave a
+ *   branch no registers and no condition (CS-4, fixed 2026-11-05): decode_mips.c now fills `cond` (MIPS_COND_*,
+ *   decode_mips.c - ten values, kept to 4 bits so the walk's packed trace still holds a MIPS branch, trace_arch.c)
+ *   and the compared registers for every MIPS branch, so mips_branch_class() below reads the decoded instruction -
+ *   `b` is `beq(l) r,r`, `bgez $0` is a jump, `bltzal`/`bgezal`/their likely forms are calls that write ra, not
+ *   branches - and never touches `bytes`/`be`/`n`/`degraded`, which no row still needs.)
  *   int_syscall     x86: `int 0x80` is the i386 system call.
  *
  * THE EXIT RULES, the same for every row (the survey's terminator classes, cfg_decision.md):
@@ -32,9 +34,10 @@
  *   JMP out of the extent         exit (a tail call)
  *   CALL, rep, cmov, setcc, int   no rule
  * NOT HANDLED, said here so nobody reads silence as coverage: Thumb (the architecture value has no Thumb, the
- * caller decodes it), noreturn calls (a block goes on after `call exit`), MIPS branch-likely and coprocessor
- * branches (the decoder does not classify them as branches), a switch's indirect jump (an exit: the code reached
- * only through its table is unreachable and is not part of the signature).
+ * caller decodes it), noreturn calls (a block goes on after `call exit`), a switch's indirect jump (an exit: the
+ * code reached only through its table is unreachable and is not part of the signature), the FP condition-code
+ * NUMBER a COP1 BC branch tests (cc, decode_mips.c: this engine does not track FP flag values to resolve it,
+ * only that a BC branch exists and whether it is a likely form).
  */
 #include <stddef.h>
 
@@ -47,8 +50,13 @@ static const struct kgenome_cfg_isa g_isa[] = {
 	{ .arch = KGENOME_ARCH_X86_64, .jcc_always_lo = NA, .jcc_always_hi = NA },
 	{ .arch = KGENOME_ARCH_ARM,    .jcc_always_lo = NA, .jcc_always_hi = NA, .predicated = 1, .always_cond = 14 },
 	{ .arch = KGENOME_ARCH_ARM64,  .jcc_always_lo = 14, .jcc_always_hi = 15 },
-	{ .arch = KGENOME_ARCH_MIPS,   .jcc_always_lo = NA, .jcc_always_hi = NA, .delay_slots = 1, .read_word = 1 },
-	{ .arch = KGENOME_ARCH_MIPS64, .jcc_always_lo = NA, .jcc_always_hi = NA, .delay_slots = 1, .read_word = 1 },
+	/* PowerPC: no delay slot. `cond` is 0 for a branch whose BO says "always" and 1 for any condition, so a conditional
+	 * blr / bctr (the only conditional indirect exits) is a conditional exit, as a predicated ARM return is. A `bc` that is
+	 * "always" is already classed JMP by the decoder, so jcc_always is unused. */
+	{ .arch = KGENOME_ARCH_PPC,    .jcc_always_lo = NA, .jcc_always_hi = NA, .predicated = 1, .always_cond = 0 },
+	{ .arch = KGENOME_ARCH_PPC64,  .jcc_always_lo = NA, .jcc_always_hi = NA, .predicated = 1, .always_cond = 0 },
+	{ .arch = KGENOME_ARCH_MIPS,   .jcc_always_lo = NA, .jcc_always_hi = NA, .delay_slots = 1 },
+	{ .arch = KGENOME_ARCH_MIPS64, .jcc_always_lo = NA, .jcc_always_hi = NA, .delay_slots = 1 },
 };
 
 const struct kgenome_cfg_isa *kgenome_cfg_isa_of(unsigned arch)
@@ -61,40 +69,26 @@ const struct kgenome_cfg_isa *kgenome_cfg_isa_of(unsigned arch)
 	return NULL;
 }
 
-/* MIPS branch word at the instruction's offset; 0 when the bytes are not there. */
-static int mips_word(const struct kgenome_cell_insn *in, int be, const uint8_t *bytes, uint64_t n, uint32_t *w)
+/*
+ * CS-4 (fixed): a MIPS branch's `cond` (decode_mips.c's MIPS_COND_*) names exactly which comparison this is -
+ * 0 bltz, 1 bgez, 2 bltzal, 3 bgezal, 4 beq, 5 bne, 6 blez, 7 bgtz, 8 bc1f, 9 bc1t - ten values kept to 4 bits
+ * (the walk's packed trace record gives up the day `cond` needs more, trace_arch.c, measured) by leaving the
+ * "likely" bit out of it: it is CL-3's KGENOME_CELL_F_ANNUL, which this switch does not need to read at all
+ * (whether a branch is local and resolved, a call, or carries its own "always" shape is the same question for
+ * the plain and the likely form of it).
+ */
+static enum kgenome_cfg_x mips_branch_class(const struct kgenome_cell_insn *in)
 {
-	const uint8_t *p;
-
-	if (!bytes || in->len != 4u || in->at > n || n - in->at < 4u)
-		return 0;
-	p = bytes + in->at;
-	*w = be ? ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3])
-		: ((uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]);
-	return 1;
-}
-
-static enum kgenome_cfg_x mips_branch(const struct kgenome_cell_insn *in, int be, const uint8_t *bytes, uint64_t n,
-				      int *degraded)
-{
-	uint32_t w, opc, rs, rt;
-
-	if (!mips_word(in, be, bytes, n, &w)) {
-		*degraded = 1;          /* cannot tell `b` from a conditional: conditional, and say so */
+	switch (in->cond) {
+	case 2: case 3:                                        /* bltzal/bgezal(l): a call that writes ra */
+		return KGENOME_CFG_X_NONE;
+	case 1:                                                 /* bgez $0: always */
+		return in->o[1].reg == 0u ? KGENOME_CFG_X_BR_JUMP : KGENOME_CFG_X_BR_COND;
+	case 4:                                                 /* beq(l) r,r: `b` */
+		return in->o[1].reg == in->o[2].reg ? KGENOME_CFG_X_BR_JUMP : KGENOME_CFG_X_BR_COND;
+	default:                                                /* 0 bltz, 5-7 bne/blez/bgtz, 8-9 bc1f/bc1t */
 		return KGENOME_CFG_X_BR_COND;
 	}
-	opc = w >> 26;
-	rs = (w >> 21) & 31u;
-	rt = (w >> 16) & 31u;
-	if (opc == 1u) {
-		if (rt & 0x10u)         /* bltzal, bgezal and the likely forms: a call that writes ra */
-			return KGENOME_CFG_X_NONE;
-		if (rt == 1u && rs == 0u)       /* bgez $0: always */
-			return KGENOME_CFG_X_BR_JUMP;
-	} else if (opc == 4u && rs == rt) {     /* beq r,r: `b` */
-		return KGENOME_CFG_X_BR_JUMP;
-	}
-	return KGENOME_CFG_X_BR_COND;
 }
 
 static int is_predicated(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in)
@@ -105,10 +99,20 @@ static int is_predicated(const struct kgenome_cfg_isa *isa, const struct kgenome
 enum kgenome_cfg_x kgenome_cfg_isa_class(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, int be,
 					 const uint8_t *bytes, uint64_t n, int *degraded)
 {
+	/*
+	 * CS-4 (fixed): no row still needs the object bytes to classify a branch - MIPS was the only one
+	 * that did (mips_branch_class() above reads the decoded `cond`/operands instead). Kept as parameters
+	 * so this signature does not change for every caller and test the day another architecture needs
+	 * them; cfg_build.c's own `degraded`/`slot_missing` TRUNCATED reporting is unaffected either way.
+	 */
+	(void)be;
+	(void)bytes;
+	(void)n;
+	(void)degraded;
 	switch (in->op) {
 	case KGENOME_CELL_JCC:
-		if (isa->read_word)
-			return mips_branch(in, be, bytes, n, degraded);
+		if (isa->arch == KGENOME_ARCH_MIPS || isa->arch == KGENOME_ARCH_MIPS64)
+			return mips_branch_class(in);
 		if (in->cond >= isa->jcc_always_lo && in->cond <= isa->jcc_always_hi && isa->jcc_always_lo != NA)
 			return KGENOME_CFG_X_BR_JUMP;
 		return KGENOME_CFG_X_BR_COND;

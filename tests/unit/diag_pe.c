@@ -29,6 +29,22 @@
 
 static int fails;
 
+/* kgenome_cell_decode is wrapped at link time (UNIT_LIBS_diag_pe in mk/tests.mk): how many times each offset of the image is decoded. */
+uint32_t __real_kgenome_cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n, uint64_t va, struct kgenome_cell_insn *out);
+uint32_t __wrap_kgenome_cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n, uint64_t va, struct kgenome_cell_insn *out);
+static const uint8_t *seen_base;
+static uint64_t seen_n;
+static uint16_t seen_at[0x1000];
+
+uint32_t __wrap_kgenome_cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n, uint64_t va, struct kgenome_cell_insn *out)
+{
+	const uint32_t len = __real_kgenome_cell_decode(arch, be, p, n, va, out);
+
+	if (len && seen_base && p >= seen_base && (uint64_t)(p - seen_base) < seen_n)
+		seen_at[p - seen_base]++;
+	return len;
+}
+
 #define CK(cond) do { \
 	if (!(cond)) { \
 		printf("  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
@@ -294,6 +310,75 @@ int main(void)
 	CK(s && !kgenome_diag_site_noreturn(s, 0x420u));
 	kgenome_diag_scan_free(s);
 	g_import = "VirtualAlloc";
+
+	/*
+	 * 6. THE CODE IS DECODED ONCE. The PE route read every executable section through a cursor of its own while the object's walk had decoded the same bytes and kept them: each instruction of a
+	 *    PE with a diagnose that asks the import route was decoded twice (measured over 112 PE: 1.95 decodes an offset). It reads the walk's trace now. The image of row 2 (calls to a stub) and of
+	 *    row 1 (data in the code) are scanned with the decode counted; no offset may be decoded twice. Old tests missed it: (c) the rows checked the nodes, not how often the bytes were read.
+	 */
+	{
+		unsigned row;
+
+		for (row = 0; row < 2u; row++) {
+			unsigned max = 0, decoded = 0, k;
+
+			memset(code, 0x90, sizeof code);
+			if (row) {
+				code[0] = 0xe8; put32(code, 1, 0x20u - 5u);
+				code[5] = 0xe8; put32(code, 6, 0x20u - 10u);
+				code[10] = 0xc3;
+				code[0x20] = 0xff; code[0x21] = 0x25;
+				put32(code, 0x22, 0x400000u + TEXT_RVA + IDATA_OFF + 0x60u);
+			} else {
+				code[0] = 0x06; code[1] = 0x06; code[2] = 0x06; code[3] = 0x06;
+				code[4] = 0xff; code[5] = 0x15;
+				put32(code, 6, (uint32_t)((TEXT_RVA + IDATA_OFF + 0x60) - (TEXT_RVA + 4u + 6u)));
+				code[10] = 0xc3;
+			}
+			n = pe_with_import(b, sizeof b, !row, code, 0x100, 1);
+			memset(seen_at, 0, sizeof seen_at);
+			seen_base = b;
+			seen_n = n < sizeof seen_at / sizeof seen_at[0] ? n : sizeof seen_at / sizeof seen_at[0];
+			/* the engine's order: the object's walk is made first (the function table and the signing ask for it) and the diagnose scan is handed it */
+			{
+				struct kgenome_diag_inputs in;
+				struct kgenome_diag_walk *wk = kgenome_diag_walk_new();
+				const struct kof_parser *pl;
+				uint32_t np, pi;
+				kof_buf buf = { b, n };
+
+				s = NULL;
+				memset(&ctx, 0, sizeof ctx);
+				memset(view, 0, sizeof view);
+				pl = kof_parser_list(&np);
+				for (pi = 0; pi < np; pi++)
+					if (pl[pi].sniff && pl[pi].sniff(buf) && pl[pi].parse && pl[pi].parse(buf, view, &ctx)) {
+						struct kgenome_obj gobj;
+
+						kof_genome_obj(&ctx, &gobj);
+						memset(&in, 0, sizeof in);
+						in.walk = wk;
+						CK(kgenome_diag_walk_ensure(wk, &gobj, b, n, 1));
+						s = kgenome_diag_scan_with_inputs(&gobj, b, n, KGENOME_DIAG_RUN_SYMBOL, &in);
+						break;
+					}
+				CK(s != NULL);
+				kgenome_diag_scan_free(s);
+				s = NULL;
+				kgenome_diag_walk_free(wk);
+			}
+			seen_base = NULL;
+			for (k = 0; k < seen_n; k++) {
+				decoded += seen_at[k] != 0;
+				max = seen_at[k] > max ? seen_at[k] : max;
+			}
+			if (max > 1u)
+				printf("  row %u: an offset decoded %u times\n", row, max);
+			CK(decoded > 8u);
+			CK(max <= 1u);
+			kgenome_diag_scan_free(s);
+		}
+	}
 
 	printf("diag pe: import calls, data in the code, the x86 stub, a call that is not an import, a call that never returns%s\n",
 	       fails ? " - FAILED" : " - ok");

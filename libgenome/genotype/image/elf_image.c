@@ -577,6 +577,13 @@ static uint64_t front_end(const struct kgenome_elf_info *e)
 }
 
 
+/*
+ * IMPROVE embed-excess-1 (owner, 2026-11-01; NOTE ONLY, nothing built): the analysis of the file must compute the part of the file that is left over compared with what the headers point to
+ * (the size): logical end = the greatest end of {ELF header, program header table, every PT_LOAD file extent, section header table, every non-NOBITS section}, each counted only when whole inside
+ * the file; excess = EOF - logical end (the UNCLAIMED region computed below is NOT that: it is any gap anywhere). Measured (MalwareLab header scan): 214 files have a validated ELF header in
+ * the excess, 200 of them the dataset-packed-elf `ward` stub + payload: the embedded ELF starts EXACTLY at the host's logical end (0xdb828 in the samples run) and the carve module cuts exactly the
+ * size its header declares; the rule is trustworthy only when the tables are not flagged (SHSTRNDX_BAD, SEC/SHOFF/SEG/PHOFF_PAST_EOF, SECTAB_MISSING): on Ark the declared table lies and the tail is
+ * the file's own .strtab. See IMPROVE appended-carve-1 (bases/decomp/appended_00.c) for the corpus numbers. */
 int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 		  struct kgenome_obj *obj)
 {
@@ -606,7 +613,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 
 	/* Magic is the only thing that decides "is this ELF". */
 	if (!kof_in_range(file, EI_MAG0, 4) ||
-	    memcmp(file.p + EI_MAG0, "\177ELF", 4) != 0) {
+	    memcmp(file.p + EI_MAG0, kgenome_elf_magic, 4) != 0) {
 		info->anomalies = KGENOME_ELF_ANOM_BAD_MAGIC;
 		return 0;
 	}
@@ -848,9 +855,10 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 }
 
 
+const uint8_t kgenome_elf_magic[4] = { 0x7f, 'E', 'L', 'F' };   /* the one spelling: sniff, parse, xor-coded probe */
 int kgenome_elf_sniff(kof_buf file)
 {
-	return file.n >= 4 && memcmp(file.p, "\177ELF", 4) == 0;
+	return file.n >= 4 && memcmp(file.p, kgenome_elf_magic, 4) == 0;
 }
 
 /*

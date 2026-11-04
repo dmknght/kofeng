@@ -102,7 +102,7 @@ static void library(void)
 			char letter[2] = { 0, 0 };
 
 			kof_famcat_init(&c, fam, 4, var, 16);
-			CK(kof_famcat_load_family(&c, "Mirai", &f) == KOF_FAMCAT_OK);
+			CK(kof_famcat_load_family(&c, "Mirai", NULL, &f) == KOF_FAMCAT_OK);
 			for (k = 0; k + 1u < next; k++)
 				if ((mask >> k) & 1u)
 					CK(kof_famcat_load_variant(&c, f, k + 1u, NULL, 1u << KOF_MALTYPE_BOTNET, &v) == KOF_FAMCAT_OK);

@@ -195,7 +195,7 @@ enum kgenome_status kgenome_range_xref_build(const struct kgenome_obj *obj, kof_
 static int arch_decodes(unsigned arch)
 {
 	return arch_is_x86(arch) || arch == KGENOME_ARCH_ARM || arch == KGENOME_ARCH_ARM64 || arch == KGENOME_ARCH_MIPS ||
-	       arch == KGENOME_ARCH_MIPS64;
+	       arch == KGENOME_ARCH_MIPS64 || arch == KGENOME_ARCH_PPC || arch == KGENOME_ARCH_PPC64;
 }
 
 /* A kind of instruction ordinary code almost never uses: see JUNK_PCT. */
@@ -309,10 +309,11 @@ static int byte_stats(const uint8_t *p, uint64_t n, struct kgenome_range_facts *
 	return same && n;
 }
 
-/* ARM, AArch64 and MIPS: see FIXED-WIDTH ISAs above. */
+/* ARM, AArch64, MIPS and PowerPC: see FIXED-WIDTH ISAs above. */
 static int fixed_width_isa(unsigned arch)
 {
-	return arch == KGENOME_ARCH_ARM || arch == KGENOME_ARCH_ARM64 || arch == KGENOME_ARCH_MIPS || arch == KGENOME_ARCH_MIPS64;
+	return arch == KGENOME_ARCH_ARM || arch == KGENOME_ARCH_ARM64 || arch == KGENOME_ARCH_MIPS || arch == KGENOME_ARCH_MIPS64 ||
+	       arch == KGENOME_ARCH_PPC || arch == KGENOME_ARCH_PPC64;
 }
 
 static uint32_t decide_shape(const struct kgenome_obj *obj, const uint8_t *p, uint64_t n, int same,

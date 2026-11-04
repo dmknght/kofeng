@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include <kofeng.h>
+#include <kgenome.h>
 #include "../../libkofeng/analyzers/codenotes.h"
 #include "../../libkofeng/analyzers/parsers/binaries/funcs.h"
 
@@ -69,8 +70,9 @@ static void t_blob(void)
 	CK(note(&n, 7, KOF_NOTE_FUNC) == NULL);                 /* a jump's landing is a label and never a function */
 	CK(is(note(&n, 9, KOF_NOTE_COMMENT), "-> .L-7 (backward)"));
 	CK(is(note(&n, 11, KOF_NOTE_COMMENT), "-> fcn_00000010"));
-	CK(is(note(&n, 16, KOF_NOTE_FUNC), "fcn_00000010:  ; xrefs: b call"));
-	CK(note(&n, 16, KOF_NOTE_LABEL) == NULL);
+	/* a call target the (empty) function table does not hold is not a function: a LABEL, spelled as the call that reaches it spells it (FUNC-12: the table is the one answer) */
+	CK(is(note(&n, 16, KOF_NOTE_LABEL), "fcn_00000010:  ; xrefs: b call"));
+	CK(note(&n, 16, KOF_NOTE_FUNC) == NULL);
 	CK(is(note(&n, 24, KOF_NOTE_COMMENT), "linux: execve (11)"));  /* a blob: whose table is said */
 	CK(note(&n, 26, KOF_NOTE_COMMENT) == NULL);             /* ret says nothing */
 	CK(note(&n, 8, KOF_NOTE_COMMENT) == NULL && note(&n, 8, KOF_NOTE_LABEL) == NULL);   /* a plain instruction has no note */
@@ -159,8 +161,10 @@ static void t_one_spelling(void)
 			{
 				const char *fn = note(&n, t, KOF_NOTE_FUNC);
 
-				CK(fn && !strncmp(fn, text, strlen(text)));
-				CK(note(&n, t, KOF_NOTE_LABEL) == NULL);
+				const char *lb = note(&n, t, KOF_NOTE_LABEL);
+
+				/* a function of the table is a FUNC; a call target the table lacks is the same text as a LABEL */
+				CK(with_table ? (fn && !strncmp(fn, text, strlen(text)) && lb == NULL) : (lb && !strncmp(lb, text, strlen(text)) && fn == NULL));
 				CK(fn == NULL || strstr(fn, "sub_") == NULL);
 			}
 			kof_codenotes_free(&n);
@@ -193,9 +197,47 @@ static void t_one_spelling(void)
 	}
 }
 
+/* The request: the same notes as the positional adapter; a function of the table nothing refers to still has its FUNC row (the table is where functions come from); a call target the table
+ * lacks is a LABEL and a table entry that is also a call target is the FUNC; a walk handed in (empty here: nothing to read from it, so the decode stands in) changes nothing. */
+static void t_request(void)
+{
+	struct kof_obj_ctx ctx;
+	struct kof_codenotes a, b, c;
+	struct kgenome_func f[2];
+	struct kgenome_func_set fs;
+	struct kgenome_diag_walk *wk = kgenome_diag_walk_new();
+	uint32_t i;
+
+	memset(&ctx, 0, sizeof ctx);
+	memset(f, 0, sizeof f);
+	f[0].off = 16;          /* the call target of the blob */
+	f[0].len = 11;
+	f[1].off = 26;          /* the `ret`: nothing refers to it */
+	f[1].len = 1;
+	memset(&fs, 0, sizeof fs);
+	fs.v = f;
+	fs.n = 2;
+	ctx.obj_size = sizeof blob;
+	CK(kof_codenotes_build(&ctx, kof_buf_make(blob, sizeof blob), &fs, NULL, 0, 32, NULL, &a) == 1);
+	CK(kof_codenotes_make(&(const struct kof_codenotes_req){ .ctx = &ctx, .data = kof_buf_make(blob, sizeof blob), .funcs = &fs, .bits = 32 }, &b) == 1);
+	CK(kof_codenotes_make(&(const struct kof_codenotes_req){ .ctx = &ctx, .data = kof_buf_make(blob, sizeof blob), .funcs = &fs, .bits = 32, .wk = wk }, &c) == 1);
+	CK(a.n == b.n && a.n == c.n && a.pool_n == b.pool_n && a.pool_n == c.pool_n);
+	for (i = 0; i < a.n && i < b.n && i < c.n; i++)
+		CK(a.v[i].at == b.v[i].at && a.v[i].kind == b.v[i].kind && !strcmp(kof_codenotes_text(&a, &a.v[i]), kof_codenotes_text(&b, &b.v[i])) &&
+		   a.v[i].at == c.v[i].at && !strcmp(kof_codenotes_text(&a, &a.v[i]), kof_codenotes_text(&c, &c.v[i])));
+	CK(is(note(&a, 16, KOF_NOTE_FUNC), "fcn_00000010:  ; xrefs: b call"));      /* the table entry that a call reaches: a function */
+	CK(note(&a, 16, KOF_NOTE_LABEL) == NULL);
+	CK(note(&a, 26, KOF_NOTE_FUNC) != NULL);                                     /* a table function nothing refers to: still a function */
+	kof_codenotes_free(&a);
+	kof_codenotes_free(&b);
+	kof_codenotes_free(&c);
+	kgenome_diag_walk_free(wk);
+}
+
 int main(void)
 {
 	t_blob();
+	t_request();
 	t_one_spelling();
 	t_other_reads();
 	if (fails) {

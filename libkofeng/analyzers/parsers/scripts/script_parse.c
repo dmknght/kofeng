@@ -877,6 +877,32 @@ int kof_script_sniff_keep(kof_buf file, void *keep)
 	return f->tag != (uint64_t)-1 && looks_like_text(file, f->tag + f->tl);
 }
 
+/*
+ * A SCRIPT THAT IS A VARIABLE'S DATA: only a shebang that NAMES a language (embed-sniff-1: 138398 offsets
+ * accepted in data, 21 real, and those 21 are exactly the ones whose first line names an
+ * interpreter; "#!" with no interpreter we know accepted 6 of 15226 binaries). The cheap two bytes are
+ * tested before the row's sniff, which costs 0.5 us at 256 bytes. The extent is the C string it sits
+ * in - up to the first NUL - when one comes within the allowance; otherwise 0.
+ */
+int kof_script_embedded(kof_buf f, uint64_t *extent, uint64_t *work)
+{
+	struct kof_script_found found;
+	const uint8_t *z;
+	uint64_t look;
+
+	*extent = 0;
+	if (f.n < 3u || f.p[0] != '#' || f.p[1] != '!')
+		return 0;
+	if (!kof_script_sniff_keep(f, &found) || !found.sheb || found.sheb_kind == KOF_SCRIPT_ANY)
+		return 0;
+	look = f.n < *work ? f.n : *work;
+	*work -= look < *work ? look : *work;
+	z = memchr(f.p, 0, (size_t)look);
+	if (z)
+		*extent = (uint64_t)(z - f.p);
+	return 1;
+}
+
 int kof_script_sniff(kof_buf file)
 {
 	struct kof_script_found f;

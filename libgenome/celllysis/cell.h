@@ -136,6 +136,14 @@ enum kgenome_cell_op_class {
 #define KGENOME_CELL_F_INDIRECT (1u << 1)
 /* A repeated string operation. */
 #define KGENOME_CELL_F_REP      (1u << 2)
+/*
+ * CL-3 (fixed): the branch NULLIFIES its delay slot when it is NOT taken, instead of
+ * always running it - MIPS's "branch likely" forms (BEQL, BNEL, BLEZL, BGTZL, BLTZL,
+ * BGEZL, BLTZALL, BGEZALL) and the COP1 BC1*L forms. A consumer of the delay slot (today
+ * only cfg_build.c, which gives the slot its own block reached solely on the taken edge -
+ * see its F_ANNUL_SLOT) must not treat it as running on the not-taken path.
+ */
+#define KGENOME_CELL_F_ANNUL    (1u << 3)
 
 /* `kgenome_cell_operand.flags` */
 #define KGENOME_CELL_OF_WRITE   (1u << 0)

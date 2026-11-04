@@ -161,16 +161,6 @@ void prop_off(char *out, size_t cap, uint64_t v)
 }
 
 
-/* The per-file verdict (kv_collect.c, kverdict_filemap) is not linked here: the test sets what the engine's roll-up would answer. */
-const char *g_file_verdict;
-const char *file_verdict_of(const struct view *v, const struct object *ob)
-{
-	(void)v;
-	(void)ob;
-	return g_file_verdict;
-}
-
-
 /* The drag start (kv_dialogs.c) is not linked here: the test only needs to see which box the click took hold of. */
 void dlg_hold(struct view *v, struct dlg_off *off)
 {

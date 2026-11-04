@@ -602,7 +602,7 @@ void dis_sync_bytes(struct view *v)
 static void dis_func_name(const struct dis_src *s, const struct kgenome_func *f,
 			  char *out, size_t cap);
 
-/* CONSOLIDATION FUNC-15 (2026-10-30, R): DROP -> engine_fn_at (kgenome_funcs_at). A viewer-side lookup in the engine's set with a naming filter (a
+/* CONSOLIDATION FUNC-15 (2026-10-30, R): DROP -> kgenome_funcs_at (genotype/image/funcs.h). A viewer-side lookup in the engine's set with a naming filter (a
  * nameless symbol is "not a function"); the filter is the viewer's display rule and stays. Better logic here that the keeper lacks: none verified. Prove
  * with: a section symbol inside the extent of a function (nameless): the viewer must not report it as the function. */
 static const struct kgenome_func *dis_func_at(const struct dis_src *s, uint64_t off,
@@ -640,7 +640,7 @@ static void dis_func_name(const struct dis_src *s, const struct kgenome_func *f,
 {
 	const struct object *o = s->ob;
 
-	kof_sym_name_at(o->sym, o->sym_n, f->value, (int)f->shndx, out, cap);
+	kof_sym_name_at(o->sym, o->sym_n, &f->value, (int)f->shndx, out, cap);
 }
 
 /*

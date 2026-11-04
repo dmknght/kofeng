@@ -402,6 +402,40 @@ static void t_chain(void)
 			}
 		}
 
+		/* 8d. THE RULE FOR A FUNCTION OF NO CALL, decided from the bytes (diag_lineage_summ.c, kgenome_lineage_noret): `stop()` of `ud2` alone does not return (a trap), one of nothing but
+		 * a local loop never leaves, one that runs out of its extent after a `nop` runs into the next function, and one that ends in a call is a call that does not come back. The
+		 * program is socket(); stop(); connect(it): the connect is reached only when stop() returns. RED on the earlier rule (a reachable call or system call was required): the first row
+		 * called a function of `ud2` alone one that returns and the connect had its link. */
+		{
+			static const struct { int halts; const char *name; unsigned links; } row[] = {
+				{ 1, "stop() is ud2 alone: does not return", 0 },
+				{ 0, "stop() is empty: returns", 1 },
+			};
+			unsigned r;
+
+			for (r = 0; r < sizeof row / sizeof row[0]; r++) {
+				lg_h_new(&p, 2, 0);
+				p.fn[1].halts = row[r].halts;
+				st(p.fn[0].body, LG_S_ASSIGN, 0, api(LG_SOCKET, -1, -1), 0, 0);
+				st(p.fn[0].body, LG_S_EVAL, 0, ex(LG_E_CALL, 1, -1, -1, 0), 0, 0);
+				st(p.fn[0].body, LG_S_EVAL, 0, api(LG_CONNECT, ex(LG_E_VAR, 0, -1, -1, 0), -1), 0, 0);
+				{
+					static struct lg_links got;
+					struct lg_scan sc;
+
+					if (lg_h_scan(&sc, &g, &c, &p, target, KGENOME_LINEAGE_S_ALL)) {
+						lg_actual(&got, &sc);
+						if (got.n != (int)row[r].links)
+							printf("  %s %s: %d link(s), wanted %u\n", lg_target_name(target), row[r].name, got.n, row[r].links);
+						CK(got.n == (int)row[r].links);
+						kgenome_diag_scan_free(sc.s);
+					} else {
+						CK(0);
+					}
+				}
+			}
+		}
+
 		/* 9. two producers on two paths: both known, so nothing is unresolved and the links are MAY */
 		lg_h_new(&p, 1, 0);
 		{

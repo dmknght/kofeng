@@ -180,6 +180,9 @@ uint32_t sim_pct_default(uint32_t what);
 /* What a measure is called on the panel and in a menu. */
 void blk_set_picked(struct kof_editor *e, uint32_t i, int on);
 int blk_clears(const struct kof_editor *e, uint32_t i);
+int blk_reserve(struct kof_editor *e, uint32_t want);
+int decl_reserve(struct kof_editor *e, uint32_t want);
+struct decl *decl_push(struct kof_editor *e);
 void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
 void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
 

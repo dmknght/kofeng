@@ -379,6 +379,65 @@ int kof_zip_sniff(kof_buf file)
 	return zip_tail_probe(file);
 }
 
+/*
+ * A ZIP THAT IS A VARIABLE'S DATA, found from its own structure and never by a search (embed-sniff-1:
+ * the tail probe accepts every offset before an appended end record, 22498 hits, and a local header
+ * alone is the first member of any real zip or a constant). From the first local header the
+ * headers are walked by their stored sizes, then the central directory, and the end record must
+ * stand exactly where the directory ends and name the directory's own offset and size: that
+ * agreement is the check, and the extent is the end of the record and its comment.
+ *
+ * WHAT IT DOES NOT READ, and says so: a member whose sizes live in a trailing data descriptor
+ * (bit 3: a streamed zip), a zip64 size, an archive with something between its members. Those are
+ * not found in a variable; the next algorithm for them is a forward search for the end record
+ * bounded by the next candidate. `work` is the caller's allowance of header steps, spent here.
+ */
+int kof_zip_embedded(kof_buf f, uint64_t *extent, uint64_t *work)
+{
+	uint64_t at = 0, cd;
+
+	*extent = 0;
+	while (kof_rd32_or0(f, at) == SIG_LOCAL) {
+		uint64_t next;
+
+		if (!*work)
+			return 0;
+		--*work;
+		if ((kof_rd16_or0(f, at + 6u) & 8u) || kof_rd32_or0(f, at + 18u) == U32_MAX_FIELD ||
+		    kof_rd32_or0(f, at + 22u) == U32_MAX_FIELD)
+			return 0;
+		next = at + LOCAL_LEN + kof_rd16_or0(f, at + 26u) + kof_rd16_or0(f, at + 28u) +
+		       kof_rd32_or0(f, at + 18u);
+		if (next <= at || next > f.n)
+			return 0;
+		at = next;
+	}
+	if (!at)
+		return 0;
+	cd = at;
+	while (kof_rd32_or0(f, at) == SIG_CENTRAL) {
+		uint64_t next;
+
+		if (!*work)
+			return 0;
+		--*work;
+		next = at + 46u + kof_rd16_or0(f, at + 28u) + kof_rd16_or0(f, at + 30u) +
+		       kof_rd16_or0(f, at + 32u);
+		if (next <= at || next > f.n)
+			return 0;
+		at = next;
+	}
+	if (at == cd || kof_rd32_or0(f, at) != SIG_EOCD)
+		return 0;
+	if (kof_rd32_or0(f, at + E_CD_OFF) != cd || kof_rd32_or0(f, at + E_CD_SIZE) != at - cd)
+		return 0;
+	at += EOCD_LEN + kof_rd16_or0(f, at + E_CMT_LEN);
+	if (at > f.n)
+		return 0;
+	*extent = at;
+	return 1;
+}
+
 void kof_zip_release(struct kof_zip_info *z)
 {
 	kof_tab_free((void **)&z->run);

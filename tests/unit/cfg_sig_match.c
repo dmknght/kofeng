@@ -38,6 +38,7 @@
 #include "../../libkofeng/verdictor/tagcat.h"
 #include "../../libkofeng/analyzers/cfgsign.h"
 #include "../../libkofeng/scanners/scan.h"
+#include "../../libgenome/celllysis/mutation.h"
 #include "../../libkofeng/detectors/mutations/kofmutation.h"
 #include <celllysis/mutation.h>
 #include <celllysis/cfg.h>
@@ -59,6 +60,15 @@ static uint64_t omix(uint64_t h, uint64_t v)
 	h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
 	h *= 0xff51afd7ed558ccdull;
 	return h ^ (h >> 33);
+}
+
+/* the run is avalanched before it is mixed in (S1, 2026-11-03: the keys of one label's occurrences must be independent; see tests/lib/genome/cfg_estimator.c) */
+static uint64_t oav(uint64_t x)
+{
+	x += 0x9e3779b97f4a7c15ull;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+	return x ^ (x >> 31);
 }
 
 struct ora {
@@ -135,7 +145,7 @@ static void ora_sign(const struct cs_spec *g, struct ora *o)
 
 		for (k = 0; k < b; k++)
 			run += lab[k] == lab[b];
-		el[b] = (uint32_t)(omix(omix(KGENOME_CFG_KEY_SEED, lab[b]), run) >> 32);
+		el[b] = (uint32_t)(omix(omix(KGENOME_CFG_KEY_SEED, lab[b]), oav(run)) >> 32);
 	}
 	qsort(el, nr, sizeof *el, ocmp);
 	for (i = 0; i < nr && m < 32u; i++)
@@ -355,6 +365,96 @@ static enum kof_cfgsign_state sign_fn(const struct cs_obj *o, uint32_t k, struct
 	rq.off = o->f_off[k];
 	rq.len = o->f_len[k];
 	return kof_cfgsign_function(&rq, cs);
+}
+
+/* One unit per function, and the signing decides after the decode. */
+struct units_seen {
+	uint32_t n;
+	uint64_t off[8], len[8];
+	enum kof_cfgsign_state st[8];
+	uint32_t n_blk[8], n_insn[8];
+	const struct cs_obj *o;
+};
+
+static int units_cb(void *user, uint64_t off, uint64_t len, uint32_t side, const struct kgenome_func *first)
+{
+	struct units_seen *u = user;
+	struct kgenome_elf_info ei;
+	struct kof_obj_ctx c = ctx_of(&ei, u->o);
+	struct kof_cfgsign_req rq;
+	struct kof_cfgsign cs;
+
+	(void)side;
+	if (!first || u->n >= 8u)
+		return 0;
+	memset(&rq, 0, sizeof rq);
+	rq.ctx = &c;
+	rq.data.p = u->o->b;
+	rq.data.n = u->o->n;
+	rq.off = first->off;
+	rq.len = first->len;
+	u->st[u->n] = kof_cfgsign_function(&rq, &cs);
+	u->n_blk[u->n] = cs.sign.n_blk;
+	u->n_insn[u->n] = cs.n_insn;
+	u->off[u->n] = off;
+	u->len[u->n] = len;
+	u->n++;
+	return 0;
+}
+
+static void units_of(const struct cs_obj *o, struct units_seen *u)
+{
+	struct kgenome_func v[8];
+	struct kgenome_func_set fs;
+	struct kof_range ext;
+	uint32_t k;
+
+	memset(v, 0, sizeof v);
+	for (k = 0; k < o->n_fn; k++) {
+		v[k].off = o->f_off[k];
+		v[k].len = o->f_len[k];
+	}
+	memset(&fs, 0, sizeof fs);
+	fs.v = v;
+	fs.n = o->n_fn;
+	ext.off = 0;
+	ext.len = o->n;
+	memset(u, 0, sizeof *u);
+	u->o = o;
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){ .p = o->b, .n_obj = o->n, .format = KOF_FMT_ELF, .mask = KGENOME_SCAN_ELF_CODE,
+		.ext = &ext, .n_ext = 1, .funcs = &fs, .fn = units_cb, .user = u });
+}
+
+static void units_per_function(void)
+{
+	struct cs_spec g[3];
+	struct units_seen u;
+	const uint32_t nb[3] = { 1, 3, 12 };
+	uint32_t k;
+
+	for (k = 0; k < 3u; k++)
+		chain(&g[k], nb[k]);
+	OKF(cs_build_gap(&O1, g, 3, 0, 0), "build the three back to back");
+	OKF(O1.f_off[1] - (O1.f_off[0] + O1.f_len[0]) < 32u && O1.f_off[2] - (O1.f_off[1] + O1.f_len[1]) < 32u, "the fixture: under 32 bytes between the functions");
+	units_of(&O1, &u);
+	OKF(u.n == 3u, "functions of 1, 3 and 12 blocks less than 32 bytes apart are three units (%u)", u.n);
+	for (k = 0; k < u.n && k < 3u; k++) {
+		OKF(u.off[k] == O1.f_off[k] && u.len[k] == O1.f_len[k], "unit %u is the function's own extent", k);
+		OKF(u.st[k] == KOF_CFGSIGN_SIGNED && u.n_blk[k] == nb[k], "unit %u (%u blocks) is signed, with %u blocks (state %d)", k, nb[k], u.n_blk[k], (int)u.st[k]);
+	}
+
+	/* the entry does not decode (0x06 is no instruction in 64-bit mode) and the bytes after it do: the precondition says UNDECODABLE after the decode and
+	 * before the build, so the instructions are counted and no graph is signed (the old order signed the rest as if it were the function) */
+	{
+		struct kof_cfgsign cs;
+
+		OKF(cs_build(&O2, &g[1], 1, 0), "build the one function");
+		OKF(O2.b[O2.f_off[0]] == 0x90, "the fixture's entry is a nop");
+		OKF(sign_fn(&O2, 0, &cs) == KOF_CFGSIGN_SIGNED && cs.sign.n_blk == 3u, "intact, the function is signed with 3 blocks");
+		O2.b[O2.f_off[0]] = 0x06;
+		OKF(sign_fn(&O2, 0, &cs) == KOF_CFGSIGN_UNDECODABLE, "a function whose entry does not decode is listed unsigned, UNDECODABLE (state %d)", (int)sign_fn(&O2, 0, &cs));
+		OKF(cs.n_insn > 0 && cs.sign.n_blk == 0, "its later instructions were decoded (%u) and no graph was signed (%u blocks)", cs.n_insn, cs.sign.n_blk);
+	}
 }
 
 static void signature_vs_oracle(void)
@@ -598,18 +698,16 @@ static void verdict_path(void)
 		OKF(s.n_fired == N_THRESH, "moved into a trio the diagnoses all fire (%u of %u)", s.n_fired, N_THRESH);
 	}
 
-	/* GROUPED (pins the wrong behaviour of CS2-1 while it exists, comment at by_function): the reference and a larger function less than 32 bytes apart are ONE unit, signed by the
-	 * larger one, so the object that holds the reference does not fire the diagnoses of the reference: only those the larger function reaches. */
+	/* NOT GROUPED (the grouping defect is fixed, owner 2026-11-03: no fixed size for a function): the reference and a larger function less than 32 bytes apart are TWO units, so the
+	 * object that holds the reference fires every diagnose (the old cut signed the pair by the larger one: RED there). */
 	{
 		struct cs_spec pair[2];
 
 		pair[0] = ref;
 		chain(&pair[1], 33);
 		OKF(cs_build_gap(&O2, pair, 2, 0, 0), "build the pair");
-		ora_sign(&pair[1], &ov);
 		scan(scn, O2.b, O2.n, "", &s);
-		check_set("grouped small functions (CS2-1: the unit is signed by its largest function)", &s, ora_pct(&oref, &ov));
-		OKF(s.n_fired < N_THRESH, "CS2-1 is fixed: the reference, which is in the object, fires every diagnose: flip this row");
+		OKF(s.n_fired == N_THRESH, "two functions less than 32 bytes apart are two units: the reference fires every diagnose (%u of %u)", s.n_fired, N_THRESH);
 	}
 
 	/* CLEAN: another shape fires what the oracle says; an object with no function fires nothing */
@@ -763,6 +861,7 @@ int main(void)
 		return 2;
 	}
 	signature_vs_oracle();
+	units_per_function();
 	memory();
 	memory_set();
 	verdict_path();

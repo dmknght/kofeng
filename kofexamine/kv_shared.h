@@ -106,6 +106,8 @@ int text_pane(struct view *v);
 void draw_hex(struct out *o, struct view *v);
 int cmatch_ok(struct view *v, uint32_t c, uint32_t m);
 void prow_build(struct view *v);
+uint32_t decl_cap_rows(const struct view *v);
+int blk_win_rows(const struct view *v, int *top, int *bot, int *full);
 void sec_bar(struct out *o, struct view *v, int row, const char *text);
 int fsel_range(const struct view *v, uint32_t *lo, uint32_t *hi);
 void fsel_clear(struct view *v);

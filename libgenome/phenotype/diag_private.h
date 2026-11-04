@@ -259,6 +259,8 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 const uint8_t *base, uint64_t size);
 /* The object's relocation table of one kind (KOF_ELF_RELOC_*): for CODE the
  * borrowed one, else built on first use; DATA is built on first use. */
+/* The object's frames: the cache the caller passed, else the scan's own (made on the first ask). */
+struct kgenome_frame_cache *kgenome_diag_frames(struct kgenome_diag_scan *s);
 const struct kgenome_func_set *kgenome_diag_funcs(struct kgenome_diag_scan *s,
 					  const struct kgenome_obj *obj);
 const struct kgenome_elf_relocs *kgenome_diag_relocs(struct kgenome_diag_scan *s,
@@ -297,6 +299,18 @@ struct kgenome_diag_walk *kgenome_diag_scan_walk(struct kgenome_diag_scan *s);
  * (NULL) - see diag_wrapper_walk.c. */
 void kgenome_diag_walk_bind(struct kgenome_diag_walk *wk, struct kgenome_ledger *lg);
 const uint64_t *kgenome_diag_walk_entries(const struct kgenome_diag_walk *wk, uint32_t *n);
+const uint64_t *kgenome_diag_walk_pads(const struct kgenome_diag_walk *wk, uint32_t *n);
+/* One `jmp [slot]` of a PE through a fixed slot (the decode's own operand, kgenome_cell_slot_of): an import stub when the slot is an import. `start` says it stands where a function
+ * starts (after a ret, a jump, padding), `iat` that the slot is an entry of the IAT the image declares (or it declares none): the function table kinds only the stubs that are both a THUNK;
+ * the lineage asks the slot of any jump a function of the table opens with, and the import table decides which slot is an import. */
+struct kgenome_diag_stub { uint64_t at, len, slot; uint8_t iat, start; };
+/* The import stubs of a PE the one decode met: `*n` stubs, sorted by offset. */
+const struct kgenome_diag_stub *kgenome_diag_walk_thunks(const struct kgenome_diag_walk *wk, uint32_t *n);
+/* The slot the stub at offset `at` goes through, or KGENOME_BROKEN when no stub starts there. */
+uint64_t kgenome_diag_walk_thunk_slot(const struct kgenome_diag_walk *wk, uint64_t at);
+struct kgenome_fntab_list;
+void kgenome_fntab_walk(const struct kgenome_obj *obj, const struct kgenome_diag_walk *walk, struct kgenome_fntab_list *out);
+void kgenome_fntab_pe_thunk(const struct kgenome_diag_walk *walk, struct kgenome_fntab_list *out);   /* fntab_pe_thunk.c */
 void kgenome_diag_wrap_settle(struct kgenome_diag_scan *s);   /* the socketcall site list: once each, plus a sorted copy */
 void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s, const struct kgenome_obj *obj,
 			   const uint8_t *base, uint64_t size);

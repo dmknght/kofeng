@@ -11,6 +11,8 @@
 
 /* the draft panel, its declarations and its pick-lists */
 void draft_wipe(struct view *v);
+void draft_release(struct view *v);
+void decl_cols_free(struct view *v);
 void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
 void ch_follow(struct chooser *c);
 void ch_take(struct view *v);

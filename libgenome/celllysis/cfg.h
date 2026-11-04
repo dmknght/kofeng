@@ -36,6 +36,16 @@
  * "no blocks" (rule 4). Time is linear in the instructions (and n log n nowhere): there is no cap on blocks.
  *
  * THREADS. No writable global state; a call touches only what it is handed.
+ *
+ * REACH_INDIRECT (owner work package, 2026-11-04, cfg_build.c): an indirect `jmp` - through a register or a
+ * `[base+index*scale+disp]` memory operand - is resolved against a switch/jump table when the caller supplies
+ * `req->switch_src` (cfg_build.c's own comment has the five-step algorithm and its named limits). Resolved, it is
+ * KGENOME_CFG_T_SWITCH with its N targets in the auxiliary array `switch_tgt[]` (kgenome_cfg_block.switch_first/n_switch),
+ * read like `call[]` and NEVER folded into `succ[2]`/`reach`/`n_blk`/`n_edge`: this keeps the WHAT IS IN THE GRAPH
+ * paragraph above (and cfg_sign.c's measured WL signature) completely unchanged for every existing caller, because
+ * `switch_src` is NULL for all of them today - the feature is strictly additive and opt-in, never a default. The one
+ * caller `switch_src` exists for is fntab_reach.c's REACH_INDIRECT gap (its own header comment): a lower-bound reach
+ * walk that wants the table's real edges to size a function's extent, NOT the similarity signature.
  */
 #ifndef KGENOME_CFG_H
 #define KGENOME_CFG_H
@@ -49,6 +59,8 @@
 
 #define KGENOME_CFG_NONE   0xffffffffu  /* no successor / no block */
 #define KGENOME_CFG_KEYS   32u          /* elements of a sketch: the bottom 32 */
+/* the build's first work area, per input instruction: two u32 (jump target, block of an instruction) and one class byte; refused as OVER_BUDGET before anything is allocated */
+#define KGENOME_CFG_BUILD_BYTES_PER_INSN (2u * sizeof(uint32_t) + 1u)
 #define KGENOME_CFG_ANCHOR_MIN 1u       /* reachable blocks a function needs to be hashed: one (a function with none has nothing to sign) */
 #define KGENOME_CFG_ROUNDS_MAX 8u
 /*
@@ -69,13 +81,36 @@
  */
 #define KGENOME_CFG_KEY_SEED   0x43464753454b4559ull
 
+/*
+ * REACH_INDIRECT (owner work package, 2026-11-04): the cost cap on how many jump-table entries ONE switch site reads when no
+ * `cmp`/`sub` against an immediate bounds the index (step 3 of kgenome_cfg_switch_resolve, cfg_build.c). This is a cap on
+ * COST, never a claimed true table size (rule 4): a site that reads exactly this many valid entries sets
+ * kgenome_cfg_block.switch_capped, which says "more cases may exist, unread" rather than silently treating the cap as the
+ * table's end. A found `cmp`/`sub` bound (the common case: the compiler's own bounds check) is used exactly and is not
+ * clamped by this number when it is smaller; a bound LARGER than this cap is itself clamped here (named limit: a hostile
+ * or obfuscated bounds check cannot make one call read without end).
+ */
+#define KGENOME_CFG_SWITCH_MAX_CASES 4096u
+
 /* How a block ends. EXIT: ret, iret, a trap, an indirect or far jump, a jump out of the extent. A conditional exit
- * (an ARM conditional return, a conditional jump out of the extent) keeps its fall-through and is FALL. */
+ * (an ARM conditional return, a conditional jump out of the extent) keeps its fall-through and is FALL.
+ * SWITCH (REACH_INDIRECT): an indirect jmp that kgenome_cfg_build resolved against a caller-supplied `switch_src` (cfg_req.switch_src)
+ * into one or more real targets - the auxiliary array `kgenome_cfg.switch_tgt[block.switch_first .. +block.n_switch)`, instruction
+ * INDICES exactly like `kgenome_cfg_call.insn` (never block indices: resolution runs before blocks are finalised, mirroring how
+ * `call[]` is a fact beside the block and not inside `succ[2]`, cfg_build.c). It is NEVER produced when `switch_src` is NULL (every
+ * existing caller: lineage, codenotes, cfgview, kofexaminer --blocks): an indirect jmp that cannot or was not asked to be resolved
+ * stays EXIT exactly as before - this is the one and only behaviour change gate, and it is additive. `succ[0]`/`succ[1]` of a SWITCH
+ * block stay KGENOME_CFG_NONE and `out_deg` 0: switch edges are NOT folded into `reach`/`n_blk`/`n_edge`/`in_deg` or the WL signature's
+ * message passing (cfg_sign.c is unchanged and untouched by this work package) - the measured decision that code reached only through
+ * a jump table is not part of a function's structural shape (ARM Gafgyt .35 -> .71, above) stays exactly as it was; `switch_tgt[]` is
+ * a plain ADDITIONAL FACT for a consumer that wants it (fntab_reach.c's REACH_INDIRECT gap, see fntab_reach.c's own header comment),
+ * read like `call[]`, never walked by the graph's own reachability pass. */
 enum kgenome_cfg_term {
 	KGENOME_CFG_T_FALL = 0,         /* falls into the next block (or off the end of the array: no successor) */
 	KGENOME_CFG_T_COND,             /* a local conditional branch: succ[0] the target, succ[1] the fall-through */
 	KGENOME_CFG_T_JUMP,             /* a local unconditional jump: succ[0] the target */
-	KGENOME_CFG_T_EXIT              /* no successor */
+	KGENOME_CFG_T_EXIT,             /* no successor */
+	KGENOME_CFG_T_SWITCH            /* an indirect jmp resolved to N targets in kgenome_cfg.switch_tgt[]; see above */
 };
 
 /*
@@ -108,10 +143,25 @@ struct kgenome_cfg_block {
 	uint32_t in_deg;                /* edges into it FROM REACHABLE BLOCKS (edges, not distinct predecessors) */
 	uint32_t call_first;            /* its calls and system calls are kgenome_cfg.call[call_first .. call_first + n_call) (reachable blocks only) */
 	uint32_t n_call;                /* how many: no cap */
-	uint8_t  out_deg;               /* 0..2 */
+	/*
+	 * REACH_INDIRECT: valid only when `term == KGENOME_CFG_T_SWITCH` (always 0/0 otherwise, including every build where `switch_src` was NULL).
+	 * Its resolved targets are kgenome_cfg.switch_tgt[switch_first .. switch_first + n_switch), INSTRUCTION indices (as kgenome_cfg_call.insn is),
+	 * not block indices - resolution runs before blocks exist. `switch_capped` says resolution stopped because it reached
+	 * KGENOME_CFG_SWITCH_MAX_CASES (or a found cmp/sub bound larger than it) while every entry read so far was valid: more cases may be unread
+	 * (rule 4, report a cap, never claim "this is all of them"). It is 0 when resolution stopped on the first invalid entry (a callback refusal, an
+	 * entry outside [va_lo, va_hi), or an entry that does not land on a decoded instruction) - the ordinary, expected end of a real table.
+	 */
+	uint32_t switch_first;
+	uint32_t n_switch;
+	/* WHERE THE BLOCK IS, in bytes: the address of its first instruction less the request's `va_lo` (the function's start). Blocks are in layout order and contiguous
+	 * over the decoded instructions, so a block's byte length is the next block's `at` less its own (the last one: the extent's length less its `at`) - nothing is stored
+	 * twice. A consumer that wants the bytes of a block (to decode it again, to show it) needs no instruction array. Saturates at UINT32_MAX (a function of 4 GiB). */
+	uint32_t at;
+	uint8_t  out_deg;               /* 0..2; 0 for a SWITCH block (its edges are the auxiliary array, not succ[]; see enum kgenome_cfg_term) */
 	uint8_t  term;                  /* enum kgenome_cfg_term */
 	uint8_t  reach;                 /* 1: reachable from block 0 */
 	uint8_t  call_kinds;            /* bit (1 << kind) for every kind among its calls */
+	uint8_t  switch_capped;         /* REACH_INDIRECT: 1 = resolution stopped at the cost cap, not at an invalid entry (see above) */
 };
 
 /* The caller's allocator. NULL `alloc` = malloc and NULL `release` = free. `release` is told the size it was asked for. */
@@ -121,6 +171,11 @@ struct kgenome_cfg_mem {
 	void  *user;
 };
 
+/* ONE allocation through the caller's allocator (NULL callbacks: malloc / free); NULL when refused. `release` is told the size asked for. The one implementation:
+ * the graph, its view, the frame (phenotype/frame.h) and the signing (analyzers/cfgsign.c) all allocate through it. */
+void *kgenome_cfg_alloc(const struct kgenome_cfg_mem *mem, size_t n);
+void kgenome_cfg_release(const struct kgenome_cfg_mem *mem, void *p, size_t n);
+
 /*
  * Request flags. SPLIT_EXITS: a conditional branch whose target is not in the function STILL ends its block (the exit is dropped, the
  * fall-through stays the only edge). The signature does not set it (a conditional tail call is not a block end there: measured, the
@@ -128,11 +183,31 @@ struct kgenome_cfg_mem {
  * the ones it always had.
  */
 #define KGENOME_CFG_F_SPLIT_EXITS 1u
+/* x86: an `int3` or `hlt` right after a call ends the path, as a `ud2` does. It is the compiler's mark that the call does not return (MSVC puts one after every call it knows is
+ * noreturn: the exit of the function is the call), so the code after it is not the next instruction of this path. Whether it applies is the CALLER's knowledge of the toolchain
+ * (the frame sets it for a PE); the table of the architecture does not say it, because the same bytes are padding in a function that goes on. */
+#define KGENOME_CFG_F_TRAP_EXITS  2u
 
 /* The caller's knowledge of a callee, asked once per call or syscall instruction of a reachable block. Returns the identity (0: unresolved)
  * and may set *kind to an enum kgenome_cfg_call_kind; left 0 the lib's own reading stands (indirect, syscall, otherwise DIRECT). */
 struct kgenome_cfg_callee_src {
 	uint64_t (*id_of)(void *user, uint32_t insn, const struct kgenome_cell_insn *in, uint8_t *kind);
+	void *user;
+};
+
+/*
+ * REACH_INDIRECT: the caller's access to the object's bytes AT AN ARBITRARY VA (cfg_build.c sees only `req->bytes`/`bytes_len`, which the
+ * caller already gives it for a DIFFERENT reason (MIPS branch classification) and which is not necessarily VA-addressable - a PE's RVA is not
+ * a file offset - so a switch table, which usually sits in a different section from the code, needs the caller's own image/VA map. Mirrors
+ * `kgenome_cfg_callee_src` exactly: one callback, NULL = the feature is off (cfg_build.c then never attempts switch resolution at all, so a
+ * caller that does not fill this pays nothing and sees nothing different - see enum kgenome_cfg_term, KGENOME_CFG_T_SWITCH).
+ *
+ * `read_at`: fill `out` with `len` bytes read at address `va`, judged by the CALLER to be inside bytes it considers part of the object (its
+ * image, not necessarily "executable" - a jump table lives in rodata). Returns 1 on a full, trusted read; 0 otherwise (unmapped, short, or the
+ * caller does not want to vouch for it) - kgenome_cfg_build treats 0 exactly like an out-of-range table entry (rule 4: stop, record why).
+ */
+struct kgenome_cfg_switch_src {
+	int (*read_at)(void *user, uint64_t va, void *out, uint32_t len);
 	void *user;
 };
 
@@ -143,9 +218,11 @@ struct kgenome_cfg_req {
 	int      be;                            /* big-endian code */
 	uint64_t va_lo, va_hi;                  /* the function's extent: a target outside it leaves the function */
 	/*
-	 * THE OBJECT BYTES `in[i].at` INDEXES, needed only where the decoder leaves out what the table needs
-	 * (MIPS: a branch carries no registers, so `b` = `beq r,r` cannot be told from `beq r,s`; defect CS-4).
-	 * NULL with such an architecture: every branch is taken for conditional and the status is TRUNCATED.
+	 * THE OBJECT BYTES `in[i].at` INDEXES - today only KGENOME_CFG_F_TRAP_EXITS reads them (the literal
+	 * 0xcc/0xf4 of a one-byte int3/hlt right after a CALL). MIPS used to need them too, to tell `b` (beq
+	 * r,r) from a genuine conditional branch, because the decoder gave a branch no registers (CS-4, fixed);
+	 * the decoder now does, so NULL costs a MIPS caller nothing. NULL with TRAP_EXITS set simply never
+	 * finds the mark; nothing is TRUNCATED on that account alone.
 	 */
 	const uint8_t *bytes;
 	uint64_t       bytes_len;
@@ -153,6 +230,7 @@ struct kgenome_cfg_req {
 	int      cut;                           /* the caller's decode stopped before the extent's end: status TRUNCATED */
 	unsigned flags;                         /* KGENOME_CFG_F_* */
 	struct kgenome_cfg_callee_src callee;   /* optional: identities of callees; NULL id_of = every call unresolved */
+	struct kgenome_cfg_switch_src switch_src; /* optional (REACH_INDIRECT): NULL read_at = no switch resolution attempted, ever (additive, see above) */
 	struct kgenome_budget *budget;          /* optional; max_bytes bounds this call */
 	struct kgenome_cfg_mem mem;
 };
@@ -167,6 +245,12 @@ struct kgenome_cfg {
 	struct kgenome_cfg_call *call;          /* the calls and syscalls of reachable blocks, in instruction order (NULL when there are none) */
 	uint32_t n_call;                        /* entries in `call` */
 	uint32_t call_cap_;                     /* private: entries allocated */
+	/* REACH_INDIRECT: resolved switch targets, instruction indices, in the order found (table order), sliced per block by
+	 * kgenome_cfg_block.switch_first/n_switch exactly as `call` is by call_first/n_call. NULL when `req->switch_src.read_at` was NULL or no
+	 * switch resolved: a caller that did not ask pays nothing and sees nothing (see enum kgenome_cfg_term, KGENOME_CFG_T_SWITCH). */
+	uint32_t *switch_tgt;
+	uint32_t n_switch_tgt;                  /* entries in `switch_tgt` */
+	uint32_t switch_cap_;                   /* private: entries allocated */
 	enum kgenome_status status;
 };
 

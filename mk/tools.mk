@@ -130,20 +130,35 @@ VIEWER_PROC_INC += -Ilibkoforbit/walk -Ilibkoforbit/proc \
 # The viewer is one program in several translation units: kofexamine/kv.h is the
 # one interface between them (the view, the object model, and the prototypes the
 # units share).
+# The viewer's drawing layer: the terminal and the output buffer, the scrollbar, the pop-up list.
+KOFVIEW_SRC := kofexamine/kofview.c kofexamine/kv_scrollbar.c kofexamine/kv_popup.c
+
 VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_bar.c \
+                kofexamine/kv_bar_items.c \
+                kofexamine/kv_bar_rules.c \
                 kofexamine/kv_chooser.c \
+                kofexamine/kv_chooser_items.c \
                 kofexamine/kv_click.c \
                 kofexamine/kv_clip.c \
                 kofexamine/kv_collect.c \
                 kofexamine/kv_dashdata.c \
                 kofexamine/kv_decl.c \
+                kofexamine/kv_decl_blocks.c \
+                kofexamine/kv_decl_conds.c \
+                kofexamine/kv_decl_head.c \
+                kofexamine/kv_decl_match.c \
+                kofexamine/kv_decl_opts.c \
+                kofexamine/kv_decl_strings.c \
                 kofexamine/kv_declact.c \
                 kofexamine/kv_dialogs.c \
                 kofexamine/kv_disasm.c \
                 kofexamine/kv_draft.c \
                 kofexamine/kv_events.c \
                 kofexamine/kv_evt.c \
+                kofexamine/kv_evt_box.c \
+                kofexamine/kv_evt_load.c \
+                kofexamine/kv_evt_rows.c \
                 kofexamine/kv_field.c \
                 kofexamine/kv_find.c \
                 kofexamine/kv_help.c \
@@ -168,6 +183,9 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_cfgdlg.c \
                 kofexamine/kv_dash_dialog.c \
                 kofexamine/kv_graph.c \
+                kofexamine/kv_graph_paint.c \
+                kofexamine/kv_graph_rank.c \
+                kofexamine/kv_graph_route.c \
                 kofexamine/kv_famdata.c \
                 kofexamine/kv_ftext.c \
                 kofexamine/kv_ftext_view.c \
@@ -180,9 +198,11 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_table.c \
                 kofexamine/kv_text.c \
                 kofexamine/kv_tree.c \
+                kofexamine/kv_tree_label.c \
+                kofexamine/kv_tree_log.c \
                 kofexamine/kv_tree_draw.c \
                 kofexamine/kv_view.c
-VIEWER_SRC := $(VIEWER_UNITS) kofexamine/kofview.c $(KOFINSPECT_SRC) kofexamine/kofeditor.c \
+VIEWER_SRC := $(VIEWER_UNITS) $(KOFVIEW_SRC) $(KOFINSPECT_SRC) $(KOFEDITOR_SRC) \
               kofexamine/kofscfind.c kofexamine/codec_ui.c $(VIEWER_PROC)
 
 # EMU_INC because the viewer disassembles: the decoder is already inside $(LIB),
@@ -192,7 +212,7 @@ VIEWER_SRC := $(VIEWER_UNITS) kofexamine/kofview.c $(KOFINSPECT_SRC) kofexamine/
 # header, counts the records, and asks where each one is so a hex pane can be
 # pointed at it. The engine cannot answer any of that - a log is not a scanned
 # object - which is why the format lives beside the engine and not inside it.
-$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) kofexamine/kv.h $(wildcard kofexamine/kv_*.h) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
+$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) kofexamine/kv.h $(wildcard kofexamine/kv_*.h kofexamine/kv_*.inc) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/evt $(EMU_INC) \

@@ -141,6 +141,32 @@ static uint64_t kgenome_diag_walk_range(const struct kgenome_obj *obj,
 	/* The entry, when the table has no start here - or starts after it. */
 	if (eo >= seg && eo - seg < have && (first == UINT64_MAX || eo < first))
 		from = eo;
+	/*
+	 * WHERE THE CODE ENDS. A static binary without -z separate-code keeps .rodata, .eh_frame and .gcc_except_table in the same R-X
+	 * PT_LOAD behind .text (CODE = 118064 bytes on a Mirai child, 16 KB of it .rodata): the segment's end is the loader's, not the code's, and the last
+	 * function would run into them. The section table says where the executable sections end, so the extent ends there - the ONE statement of
+	 * the code extent, read by the walk, the codemap, the sweeps and the function table's ends. A table that lies (the entry point or a section's
+	 * start outside every executable section it declares: a packer hiding code behind the table) is not trusted, and the segment's end stands.
+	 */
+	if (first != UINT64_MAX) {
+		uint64_t last = 0;
+		int hidden = 0;
+
+		for (k = 0; k < e->sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++) {
+			uint64_t sat, shave;
+
+			if (!kgenome_elf_sec_is_code(&e->sec[k]))
+				continue;
+			shave = kgenome_elf_sec_extent(&e->sec[k], size, &sat);
+			if (shave && sat >= seg && sat - seg < have && sat - seg + shave <= have && sat + shave > last)
+				last = sat + shave;
+		}
+		/* the entry point beyond the last executable section, inside this segment: the table hides it */
+		if (eo >= seg && eo - seg < have && eo >= last)
+			hidden = 1;
+		if (!hidden && last > from && last - seg < have)
+			have = last - seg;
+	}
 	have -= from - seg;
 	*at = from;
 	return have;
@@ -187,8 +213,16 @@ uint64_t kgenome_diag_extent(const struct kgenome_obj *obj, uint32_t i, uint64_t
 		return kgenome_diag_walk_range(obj, kgenome_obj_elf(obj), i, size, at);
 	if (obj->format == KGENOME_FMT_PE) {
 		const struct kgenome_pe_sec *sc = &kgenome_obj_pe(obj)->sec[i];
+		uint64_t have;
 
-		return kgenome_pe_sec_is_code(sc) ? kgenome_pe_sec_extent(sc, size, at) : 0;
+		if (!kgenome_pe_sec_is_code(sc))
+			return 0;
+		have = kgenome_pe_sec_extent(sc, size, at);
+		/* The loader maps min(raw size, VirtualSize) bytes of a section: the raw bytes past VirtualSize are the file's alignment, not code. A section that declares no
+		 * VirtualSize is mapped by its raw size. The extent of a PE is this one statement, read by the walk, the function table's ends and every sweep. */
+		if (sc->mem_size && sc->mem_size < have)
+			have = sc->mem_size;
+		return have;
 	}
 	return 0;
 }
@@ -200,7 +234,8 @@ uint64_t kgenome_diag_extent(const struct kgenome_obj *obj, uint32_t i, uint64_t
  * anything else - a payload lifted out of a variable has no header and is all
  * code. Never zero for a non-empty object.
  */
-#define DIAG_UNION_MAX 256u
+/* The most extents an object has: a program header table or a section table, each bounded by its parser. */
+#define DIAG_UNION_MAX (KGENOME_ELF_MAX_SEGMENTS > KGENOME_PE_MAX_SECTIONS ? KGENOME_ELF_MAX_SEGMENTS : KGENOME_PE_MAX_SECTIONS)
 
 uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 {
@@ -223,14 +258,13 @@ uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 		return size;
 	}
 	/* The UNION of the extents: segments that overlap (a hostile header can put three over the same
-	 * kilobyte) count a byte once, so the bound a budget scales from never exceeds the object. Past
-	 * DIAG_UNION_MAX extents the rest are summed and the total is capped at the object's size. */
+	 * kilobyte) count a byte once, so the bound a budget scales from never exceeds the object: every extent lies inside the object (kgenome_diag_extent clips to `size`), and so does their union. */
 	for (i = 0, n = valid ? kgenome_diag_extent_count(obj) : 0; i < n; i++) {
 		uint64_t at, len = kgenome_diag_extent(obj, i, size, &at);
 
 		if (!len)
 			continue;
-		if (m < DIAG_UNION_MAX) {
+		{
 			uint32_t j = m++;
 
 			while (j && ext[j - 1u].at > at) {     /* insertion sort by start */
@@ -239,8 +273,6 @@ uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 			}
 			ext[j].at = at;
 			ext[j].len = len;
-		} else {
-			total += len;
 		}
 	}
 	for (i = 0; i < m; i++) {
@@ -253,7 +285,5 @@ uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 		}
 		total += hi - lo;
 	}
-	if (total > size)
-		total = size;
 	return total ? total : size;
 }

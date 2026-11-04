@@ -103,9 +103,12 @@ static void cells(void)
 	fresh();
 	CK(kof_famcat_add_family(&C, "Mirai", NULL, BOT, &f) == KOF_FAMCAT_OK);
 	CK(kof_famcat_add_variant(&C, 0, NULL, BOT | TRO, 0, NULL) == KOF_FAMCAT_OK);
+	/* the family's own comment (the Edit family dialog's Note row) is not a table cell: a family row's comment stays blank even
+	 * though the family itself now carries one (the dialog shows it, the table does not) */
+	CK(kof_famcat_set_family_comment(&C, f, "a known family") == KOF_FAMCAT_OK);
 	kv_fam_rows(&C, R, KV_FAM_MAX_ROW);
 	kv_fam_cells(&C, &R[0], nm, sizeof nm, ty, sizeof ty, cm, sizeof cm);
-	CK(!strcmp(nm, "Mirai") && ty[0] == 0);
+	CK(!strcmp(nm, "Mirai") && ty[0] == 0 && cm[0] == 0);
 	kv_fam_cells(&C, &R[1], nm, sizeof nm, ty, sizeof ty, cm, sizeof cm);
 	CK(!strcmp(nm, "  Mirai_A") && !strcmp(ty, "Botnet"));
 	kv_fam_cells(&C, &R[2], nm, sizeof nm, ty, sizeof ty, cm, sizeof cm);

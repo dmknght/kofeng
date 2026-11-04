@@ -31,7 +31,11 @@ static void collect(void *user, const struct kgenome_cell_insn *in)
 {
 	struct kgenome_lineage *L = user;
 
-	if (!in || L->halt)
+	if (!in) {
+		L->n_skip++;            /* bytes that decoded as nothing: the frame is told, so its graph is the cut one it always was */
+		return;
+	}
+	if (L->halt)
 		return;
 	if (L->n_in == L->cap_in) {
 		uint32_t nc = L->cap_in ? L->cap_in * 2u : 1024u;
@@ -52,11 +56,10 @@ static void collect(void *user, const struct kgenome_cell_insn *in)
 	L->in[L->n_in++] = *in;
 }
 
-int kgenome_lineage_decode(struct kgenome_lineage *L, uint32_t fi)
+int kgenome_lineage_decode(struct kgenome_lineage *L, const struct kgenome_lineage_fn *f)
 {
-	const struct kgenome_lineage_fn *f = &L->fn[fi];
-
 	L->n_in = 0;
+	L->n_skip = 0;
 	/* KNOWN DEFECT CS-2 (2026-10-30, M) [sev M]: kgenome_lineage_decode decodes the whole extent linearly, so literal pools, padding and jump-table data become instructions and leaders() makes blocks of them.
 	 * Trigger: a function with an inline pool or trailing data (ARM, x86-64, MIPS). Effect: blocks with no incoming edge: 13% of ARM, 10.9% of x86-64, 2.3% of MIPS; 2088 UD on ARM; every signature built on them is polluted.
 	 * Reproducer: /mnt/games/normtest/briefs/cfg_decision.md (section EVIDENCE) and /mnt/games/normtest/fix_cfg_survey/h/cfgsv.c.
@@ -302,10 +305,11 @@ static void out_ret(struct kgenome_lineage *L, const struct kgenome_lineage_val 
 }
 
 /* ---- the blocks ----
- * The blocks and their successors are celllysis/cfg.h's (kgenome_cfg_build, one builder for the lineage and the signature); what is
- * here is what the fixpoint does over them. The allocations of the graph go through the lineage's ledger. */
+ * The blocks and their successors are the function's FRAME's (phenotype/frame.h: celllysis/cfg.h's graph, built once for the lineage and the signature alike, with the real
+ * byte order); what is here is what the fixpoint does over them. The frame is read only. A function that is not an entry of the engine's table has its frame made for this solve
+ * and given back at its end, through the lineage's ledger. */
 
-static void *cfg_alloc(void *user, size_t n)
+static void *fr_alloc(void *user, size_t n)
 {
 	struct kgenome_lineage *L = user;
 	void *p;
@@ -321,10 +325,18 @@ static void *cfg_alloc(void *user, size_t n)
 	return p;
 }
 
-static void cfg_release(void *user, void *p, size_t n)
+static void fr_release(void *user, void *p, size_t n)
 {
+	if (!p)
+		return;
 	free(p);
 	kgenome_lineage_uncharge(user, n);
+}
+
+void kgenome_lineage_frame_src(struct kgenome_lineage *L, const struct kgenome_func_set *table)
+{
+	L->fsrc = (struct kgenome_frame_src){ .obj = L->obj, .base = L->base, .size = L->size, .fs = table, .wk = L->wk,
+					      .mem = { fr_alloc, fr_release, L }, .facts = 1 };
 }
 
 /* The block `succ` has a new way in: join the state, and look at it again when it changed. A walk from a
@@ -387,7 +399,7 @@ static int site_pop(struct kgenome_lineage *L, uint32_t node)
 
 /* Is this call one the program does not come back from: an import by name (the symbol route found it), or a function of the object
  * that has no way to return (diag_lineage_summ.c). */
-int kgenome_lineage_call_noreturn(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in)
+int kgenome_lineage_call_noreturn(struct kgenome_lineage *L, const struct kgenome_cell_insn *in)
 {
 	uint32_t f;
 
@@ -395,8 +407,8 @@ int kgenome_lineage_call_noreturn(const struct kgenome_lineage *L, const struct 
 		return 1;
 	if (!L->noret_fn || (in->flags & KGENOME_CELL_F_INDIRECT) || in->target_va == KGENOME_BROKEN)
 		return 0;
-	f = kgenome_lineage_fn_of_va(L, in->target_va);
-	return f != UINT32_MAX && L->noret_fn[f];
+	f = kgenome_lineage_fn_of_insn(L, in);
+	return f != UINT32_MAX && kgenome_lineage_noret(L, f);
 }
 
 /* One call, or a tail jump: `tail` leaves the function. */
@@ -444,7 +456,7 @@ static void do_call(struct kgenome_lineage *L, struct kgenome_lineage_state *w,
 		/* (a call to the next instruction is no call of a function: the get-pc idiom, and in a relocatable object the hole a
 		 * relocation fills, whose displacement is zero) */
 		if (!(in->flags & KGENOME_CELL_F_INDIRECT) && in->target_va != KGENOME_BROKEN && in->target_va != in->at_va + in->len)
-			callee = kgenome_lineage_fn_of_va(L, in->target_va);
+			callee = kgenome_lineage_fn_of_insn(L, in);
 		if (callee != UINT32_MAX && (L->plan & KGENOME_LINEAGE_S_SUMM))
 			kgenome_lineage_apply(L, w, callee, &ret, emit, (L->act & KGENOME_LINEAGE_S_SUMM) != 0);
 		else
@@ -660,7 +672,10 @@ static int run_once(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, in
 void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineage_out *out)
 {
 	struct kgenome_lineage_cfg g;
-	const struct kgenome_lineage_fn *f = &L->fn[fi];
+	struct kgenome_lineage_fn fn;
+	const struct kgenome_lineage_fn *f = &fn;
+	struct kgenome_frame own_fr;
+	const struct kgenome_frame *fr;
 	uint32_t b, nb;
 	unsigned nruns = 1, seeded = 0;
 	int ok;
@@ -668,32 +683,47 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 	L->out = out;
 	L->cur_fn = fi;
 	L->ag = &L->loc;
-	if (!kgenome_lineage_decode(L, fi) || !L->n_in)
+	if (!kgenome_lineage_fn_get(L, fi, &fn) || !kgenome_lineage_decode(L, &fn) || !L->n_in)
 		return;
+	memset(&own_fr, 0, sizeof own_fr);
 	memset(&g, 0, sizeof g);
-	{
-		/* the instructions are the ones decoded just above: the graph is built from them and nothing is decoded again */
-		const struct kgenome_cfg_req rq = {
-			.in = L->in, .n_in = L->n_in, .arch = L->obj->arch, .be = 0,
-			.va_lo = f->va, .va_hi = f->va + f->len, .bytes = L->base, .bytes_len = L->size,
-			.flags = KGENOME_CFG_F_SPLIT_EXITS,
-			.mem = { .alloc = cfg_alloc, .release = cfg_release, .user = L } };
-		const enum kgenome_status cst = kgenome_cfg_build(&rq, &g.cfg);
-
-		/* a refused charge was noted by the ledger, a failed allocation by cfg_alloc; the other statuses are the graph's own */
-		if (cst == KGENOME_BAD_INPUT || cst == KGENOME_UNSUPPORTED || cst == KGENOME_TRUNCATED)
-			kgenome_diag_note(L->s, cst);
-		if (cst != KGENOME_OK && cst != KGENOME_TRUNCATED) {
-			L->out = NULL;
-			return;
-		}
+	/* the function's instructions are read: a frame not yet made is made from them and decodes nothing */
+	L->fsrc.pre = &(const struct kgenome_frame_insns){ .v = L->in, .n = L->n_in, .skipped = L->n_skip, .off = f->off, .len = f->len };
+	fr = kgenome_frame_of_extent(L->frames, &L->fsrc, f->off, f->len, &own_fr);
+	L->fsrc.pre = NULL;
+	if (!fr) {
+		L->out = NULL;      /* a refused charge was noted by the ledger, a failed allocation by fr_alloc */
+		return;
 	}
+	if (fr->state != KGENOME_FRAME_OK || fr->n_insn != L->n_in) {
+		/* No graph (undecodable at the entry, no rules, over the allowance): nothing to solve here. A count that differs from the decode just read is a frame
+		 * that is not this function's: said, and not solved. */
+		if (fr->state == KGENOME_FRAME_OK)
+			kgenome_diag_note(L->s, KGENOME_BAD_INPUT);
+		/* (a frame is UNSUPPORTED only for an architecture with no control-flow rules, and the lineage runs on x86 alone: kgenome_diag_run_lineage returns for any other, so no frame state
+		 * of the other kinds - undecodable, over the allowance, no memory - needs a word of its own here: the frame carries its status and the scan's ledger the refusal) */
+		kgenome_frame_release(&own_fr, &L->fsrc.mem);
+		L->out = NULL;
+		return;
+	}
+	/* (a graph made from a decode that stopped short is TRUNCATED, and a function whose bytes only decode in part is the ordinary case and not a limit: nothing to say. The one other way a graph
+	 * is TRUNCATED is an architecture's delay slot or degraded class, which x86 has none of: with `cut` that is every case this stage meets, so there is no word of its own here.) */
+	/* the facts of the blocks: found once for the function, from the instructions just read (a memo of the frame, which the signing never asks for) */
+	if (!kgenome_frame_facts(fr, L->in)) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		L->halt = 1;
+		kgenome_frame_release(&own_fr, &L->fsrc.mem);
+		L->out = NULL;
+		return;
+	}
+	g.fr = fr;
+	g.cfg = fr->cfg;
 	nb = g.cfg.n_all;
 	{
 		const uint64_t gc = (uint64_t)nb * (sizeof *g.bs + sizeof *g.wl + 1u + sizeof *g.bpred + sizeof *g.bact);
 
 		if (!kgenome_lineage_charge(L, gc)) {
-			kgenome_cfg_free(&g.cfg, &(const struct kgenome_cfg_mem){ cfg_alloc, cfg_release, L });
+			kgenome_frame_release(&own_fr, &L->fsrc.mem);
 			L->out = NULL;
 			return;
 		}
@@ -750,6 +780,6 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 		free(g.bact);
 		kgenome_lineage_uncharge(L, gc);
 	}
-	kgenome_cfg_free(&g.cfg, &(const struct kgenome_cfg_mem){ cfg_alloc, cfg_release, L });
+	kgenome_frame_release(&own_fr, &L->fsrc.mem);       /* a no-op when the frame is the cache's */
 	L->out = NULL;
 }

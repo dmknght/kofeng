@@ -250,21 +250,42 @@ def only_the_name_of_a_function_row_opens_it_and_the_offset_lights():
 
 
 @case(A)
-def the_hash_line_is_the_engines_canon_and_the_anchor_is_said():
+def the_unit_line_is_the_blocks_table_id_and_no_canon_anchor_or_repeated_count_is_said():
     p = scene()
     with blocks(p) as v:
-        for name, verdict in (('cv_small', ': PASS'), ('cv_loop', ': PASS'),
-                              ('cv_switch', ': PASS'), ('cv_big', ': PASS')):
-            off = func_off(v, row_named(v, name))
+        for name in ('cv_small', 'cv_loop', 'cv_switch', 'cv_big'):
+            row = row_named(v, name)
+            off = func_off(v, row)
             n_row, n_col, want = body_rows(p, off)
-            canon = [l for l in engine_text(p, off) if l.startswith('canon  0x')]
-            check(len(canon) == 1, 'the engine has no canon line')
-            check(canon[0] in [l.strip() for l in want], '%s: the body does not hold %r' % (name, canon[0]))
+            eng = engine_text(p, off)
+            # the engine's unit line is the id the Blocks table shows in the row of this function
+            unit = [l for l in eng if l.startswith('unit   ')]
+            check(len(unit) == 1 and unit[0] == 'unit   %s' % row[2], '%s: unit line %r, table id %r' % (name, unit, row[2]))
+            check(unit[0] in [l.strip() for l in want], '%s: the body does not hold %r' % (name, unit[0]))
             # the facts are the Overview's head: read them on the screen
             lines = [l.strip() for l in inner(v)[0]]
-            check(any(l.startswith('anchor  ') and verdict in l for l in lines), '%s: anchor line missing: %r' % (name, [l for l in lines if l][-8:]))
+            check(unit[0] in lines, '%s: unit line missing: %r' % (name, [l for l in lines if l][:8]))
+            check(any(l.startswith('keys   ') for l in lines), 'no keys line')
+            check(not any(l.startswith(('canon', 'anchor')) or 'all=' in l or 'unreachable=' in l or 'status=' in l for l in lines),
+                  '%s: a retired item is on the Overview: %r' % (name, lines[:8]))
             check(not any('hashed' in l or 'shape' in l for l in lines), '%s: a sentence of explanation in the Overview' % name)
-            check(any(l.startswith('keys   ') for l in lines) and canon[0] in lines, 'no keys line or canon line')
+            # the calls count is on the extent line only when there is no table (no calls)
+            check(any('calls=0' in l for l in lines) == (name != 'cv_small'), '%s: calls=0 on the extent line iff no calls table: %r' % (name, lines[:3]))
+            if name == 'cv_loop':
+                # the colours: a label dim, the unit id and the name in the id colour, the offset in the place colour, a count plain
+                x0, y0, x1, y1, _ = box(v)
+                yy = [y for y in range(y0 + 1, y1) if v.row(y)[x0 + 1:x1 - 2].strip().startswith('unit   ')][0]
+                txt = v.row(yy)
+                c = txt.index('unit')
+                fg = lambda y, x: v.screen.buffer[y - 1][x].fg
+                eq(fg(yy, c), 'brightblack', 'the label unit is not dim')
+                eq(fg(yy, txt.index(row[2])), 'blue', 'the unit id is not in the id colour')
+                yf = [y for y in range(y0 + 1, y1) if v.row(y)[x0 + 1:x1 - 2].strip().startswith('function ')][0]
+                eq(fg(yf, v.row(yf).index(name)), 'blue', 'the function name is not in the id colour')
+                ye = [y for y in range(y0 + 1, y1) if v.row(y)[x0 + 1:x1 - 2].strip().startswith('extent ')][0]
+                eq(fg(ye, v.row(ye).index('0x')), 'cyan', 'the extent offset is not in the place colour')
+                eq(fg(ye, v.row(ye).index('instructions=')), 'brightblack', 'a key is not dim')
+                eq(fg(ye, v.row(ye).index('instructions=') + len('instructions=')), 'default', 'a count is not plain')
             close(v)
         # its calls are in the Overview's table with the names the object gives them, and each in its box of the Graph
         off = func_off(v, row_named(v, 'cv_small'))

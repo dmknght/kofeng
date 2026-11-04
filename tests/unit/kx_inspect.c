@@ -121,10 +121,11 @@ static void names_suite(void)
 		CKS(kof_sym_origin_name(NULL, 99), "none");
 		CKS(kof_sym_origin_name(blk, KOF_SYM_HDRLEN - 1u), "none");
 		for (v = 0; v < 8; v++) {
-			static const char *const w[] = { "none", ".symtab", ".dynsym", "imports+exports", "imports+exports+resolved" };
+			static const char *const w[] = { "none", ".symtab", ".dynsym", "imports+exports",
+							  "imports+exports+resolved", "imports+exports+coff" };
 
 			blk[KOF_SYM_H_ORIGIN] = (uint8_t)v;
-			CKS(kof_sym_origin_name(blk, KOF_SYM_HDRLEN), v < 5 ? w[v] : "none");
+			CKS(kof_sym_origin_name(blk, KOF_SYM_HDRLEN), v < 6 ? w[v] : "none");
 			/* a block shorter than the header never reads the origin byte whatever it holds */
 			CKS(kof_sym_origin_name(blk, KOF_SYM_H_ORIGIN), "none");
 		}

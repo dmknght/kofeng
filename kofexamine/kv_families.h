@@ -39,10 +39,10 @@ struct kv_fam_ui {
 	/* the small dialog */
 	enum kv_fam_dlg dlg;
 	uint32_t dlg_idx;               /* the family (Add variant, Edit family) or the variant (Edit variant) the dialog is about */
-	/* The three text fields, all one kv_ftext (kv_ftext.h): the form's Name and Comment rows (HELD until OK) and the comment cell
-	 * edited in the table (LIVE: Enter commits it to the catalog at once). Each is two past its limit plus the NUL, so the engine
-	 * is the one that says "too long". */
-	struct kv_ftext f_name, f_comment, f_cell;
+	/* The four text fields, all one kv_ftext (kv_ftext.h): the form's Name, the family's own Note (kof_famcat_family_comment) and the
+	 * variant's Comment rows (HELD until OK) and the comment cell edited in the table (LIVE: Enter commits it to the catalog at
+	 * once). Each is two past its limit plus the NUL, so the engine is the one that says "too long". */
+	struct kv_ftext f_name, f_family_comment, f_comment, f_cell;
 	uint32_t cell_var;              /* the variant whose comment f_cell is editing */
 	uint32_t types;
 	uint32_t letter;                /* Add variant: the deleted letter number picked in the names menu; 0 = the counter's next letter */

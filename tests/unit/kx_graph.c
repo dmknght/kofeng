@@ -1,5 +1,5 @@
 /*
- * kx_graph - the graph drawing of the viewer (kofexamine/kv_graph.c) as a PURE module: no viewer, no screen, no engine. The input is a neutral graph (nodes with text rows,
+ * kx_graph - the graph drawing of the viewer (kofexamine/kv_graph*.c) as a PURE module: no viewer, no screen, no engine. The input is a neutral graph (nodes with text rows,
  * edges with cond and loop) and the output is geometry and cells; every assertion is on those.
  *
  *   GOLDEN      the picture of ten hand-built graphs - a straight line, a diamond, a loop, a nested loop, a fan-out, a self-loop, attack_kill_all (the Mirai function
@@ -24,8 +24,18 @@
 #include <time.h>
 
 #include "../../kofexamine/kofview.h"
+/* the four parts of the drawing; tools/mutate_kv_graph.py names a mutant of one of them (the others stay) */
 #ifndef KV_GRAPH_SRC
 #define KV_GRAPH_SRC "../../kofexamine/kv_graph.c"
+#endif
+#ifndef KV_GRAPH_SRC_RANK
+#define KV_GRAPH_SRC_RANK "../../kofexamine/kv_graph_rank.c"
+#endif
+#ifndef KV_GRAPH_SRC_ROUTE
+#define KV_GRAPH_SRC_ROUTE "../../kofexamine/kv_graph_route.c"
+#endif
+#ifndef KV_GRAPH_SRC_PAINT
+#define KV_GRAPH_SRC_PAINT "../../kofexamine/kv_graph_paint.c"
 #endif
 
 /* the allocator that refuses the Nth call (--wrap in the Makefile): calls made while `armed`, and the ones not freed */
@@ -68,6 +78,9 @@ void __wrap_free(void *p)
 	__real_free(p);
 }
 
+#include KV_GRAPH_SRC_RANK
+#include KV_GRAPH_SRC_ROUTE
+#include KV_GRAPH_SRC_PAINT
 #include KV_GRAPH_SRC
 
 static int fails;

@@ -329,7 +329,7 @@ void diag_exercise_ex(struct fz_ctx *c, const struct kgenome_obj *obj, const uin
 		struct kgenome_cell_space sp;
 
 		kgenome_diag_walk_set_cap(wk, fz_below(c->rng, 2) ? 0u : 1u + fz_below(c->rng, 1u << 16));
-		kgenome_diag_funcs_with_walk(obj, in, n, wk, 1, &fs);
+		kgenome_diag_funcs_with_walk(obj, in, n, wk, &fs);
 		FZ_CHECK(c, kgenome_diag_walk_runs(wk) <= 2u, "the walk decoded the object more than twice for one reader");
 		memset(&sp, 0, sizeof sp);
 		kgenome_cell_space_init(&sp, obj, in, n);

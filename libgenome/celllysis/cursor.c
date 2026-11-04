@@ -161,7 +161,7 @@ static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 					(uint32_t)left, va, out);
 	if (!n)
 		return 0;
-	if (sp->arch == KGENOME_ARCH_ARM || sp->arch == KGENOME_ARCH_ARM64)
+	if (!sp->raw && (sp->arch == KGENOME_ARCH_ARM || sp->arch == KGENOME_ARCH_ARM64))
 		resolve_literal(k, sp, out);
 	out->at = k->at;
 	n = out->n_op;

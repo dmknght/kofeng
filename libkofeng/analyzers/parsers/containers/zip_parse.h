@@ -78,4 +78,9 @@ const char *kof_zip_kind_name(uint32_t kind);
 extern const uint32_t kof_zip_region_bits[];
 #define KOF_ZIP_REGION_COUNT 5u   /* asserted against the array in the .c */
 
+/* A zip at the start of `f` that holds together by its own headers (local headers, central directory,
+ * an end record at exactly the directory's end), with no search: for an object held in a variable.
+ * `*extent` is its length; `*work` is the allowance of header steps and is spent. */
+int kof_zip_embedded(kof_buf f, uint64_t *extent, uint64_t *work);
+
 #endif /* KOFENG_ZIP_PARSE_H */

@@ -245,27 +245,6 @@ static void join_add(const struct sweep_rgn *rg, struct kgenome_diag_orgs *w, co
 		jn->min_at = e->at;
 }
 
-/* The function a file offset is in, from the symbol table's set (sorted by offset), or NULL. */
-/* CONSOLIDATION FUNC-14 (2026-10-30, R): DROP -> engine_fn_at (kgenome_funcs_at). Last-start-below lookup: assumes the extents do not overlap. Better
- * logic here that the keeper lacks: none verified. Prove with: an off inside a function nested in another (funcs_finish keeps the longer one, so rare):
- * both lookups, same answer expected. */
-static const struct kgenome_func *func_at(const struct kgenome_func_set *fg, uint64_t off)
-{
-	uint32_t lo = 0, hi = fg->n;
-
-	while (lo < hi) {
-		const uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (fg->v[mid].off <= off)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	if (!lo || off >= fg->v[lo - 1u].off + fg->v[lo - 1u].len)
-		return NULL;
-	return &fg->v[lo - 1u];
-}
-
 /*
  * A DIRECT JMP FROM ONE NAMED FUNCTION TO ANOTHER is a tail call: the line ends as it does at a ret, and the code
  * after the jmp is the next function, which nothing here reaches. Only a function the symbol table names counts
@@ -276,16 +255,17 @@ static const struct kgenome_func *func_at(const struct kgenome_func_set *fg, uin
 static int tail_jmp(const struct sweep_rgn *rg, const struct kgenome_cell_insn *in)
 {
 	const struct kgenome_func_set *fg;
-	const struct kgenome_func *a, *b;
 
 	if (!rg->has_syms || (in->flags & KGENOME_CELL_F_INDIRECT) || in->target == KGENOME_BROKEN)
 		return 0;
 	fg = kgenome_diag_funcs(rg->s, rg->obj);
 	if (!fg || !fg->n)
 		return 0;
-	a = func_at(fg, in->at);
-	b = func_at(fg, in->target);
-	return a && b && a != b && a->shndx && b->shndx;
+	{
+		const uint32_t a = kgenome_funcs_at(fg, in->at), b = kgenome_funcs_at(fg, in->target);
+
+		return a != KGENOME_FUNCS_NONE && b != KGENOME_FUNCS_NONE && a != b && fg->v[a].shndx && fg->v[b].shndx;
+	}
 }
 
 /* ---- BACK EDGES: the second pass ----------------------------------------------------------------------- */

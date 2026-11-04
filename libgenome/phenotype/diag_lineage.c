@@ -7,8 +7,8 @@
  * its index and an index is only final then. It adds links to nodes the routes made and makes none.
  *
  * WHAT IT READS. The nodes that sit on a call or a jump (a node whose `at` is that instruction), the
- * functions of the object (the engine's set, completed where the object does not name them all - a PE
- * lists only the functions with unwind data, and an x86 PE none), and the code through the shared
+ * functions of the object (the engine's function table, read by index), each function's FRAME
+ * (phenotype/frame.h), and the code through the shared
  * reader (kgenome_diag_code_run: the walk's trace for an ELF, the decoder for a PE - one decode, whoever
  * asks). An object with no node on a call has nothing to link and costs one pass over its hits.
  *
@@ -64,7 +64,7 @@ const struct kgenome_codemap *kgenome_lineage_codemap(struct kgenome_lineage *L)
 		uint64_t bytes;
 
 		L->cm_done = 1;
-		if (!kgenome_codemap_build(L->obj, L->base, L->size, NULL, &L->cm)) {
+		if (!kgenome_codemap_build(L->obj, L->base, L->size, NULL, L->wk, &L->cm)) {
 			/* a refused build is a map that is missing, and so are the links made through it: said */
 			kgenome_diag_note(L->s, L->cm.status ? L->cm.status : KGENOME_NOMEM);
 			return NULL;
@@ -135,79 +135,12 @@ static int sites_build(struct kgenome_lineage *L)
 
 /* ---- the functions ---- */
 
-static int cmp_fn(const void *a, const void *b)
-{
-	const struct kgenome_lineage_fn *x = a, *y = b;
-
-	return x->off < y->off ? -1 : x->off > y->off;
-}
-
-static int cmp_u64(const void *a, const void *b)
-{
-	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-
-	return x < y ? -1 : x > y;
-}
-
-struct lin_ext {
-	uint64_t off, len;
-};
-
-static int cmp_ext(const void *a, const void *b)
-{
-	const struct lin_ext *x = a, *y = b;
-
-	return x->off < y->off ? -1 : x->off > y->off;
-}
-
-/* The function of the engine's set that holds `off`, or NULL. */
-/* CONSOLIDATION FUNC-13 (2026-10-30, R): KEEP (the one containing-function lookup over the set: first extent ending above `off`, safe when extents
- * overlap; will move to funcs.c as kgenome_funcs_at). 1 caller here, 2 other lookups below duplicate it: diag_sweep.c func_at, kofexamine/kv_disasm.c
- * dis_func_at (and codenotes.c func_at, exact start only). Prove with: overlapping extents (the two names of one address, funcs_finish) with an off
- * inside the shorter one. */
-static const struct kgenome_func *engine_fn_at(const struct kgenome_func_set *fs, uint64_t off)
-{
-	const uint32_t lo = kof_first_ending_above_u64(fs->v, fs->n, sizeof *fs->v, offsetof(struct kgenome_func, off),
-						       offsetof(struct kgenome_func, len), off);
-
-	return lo < fs->n && fs->v[lo].off <= off ? &fs->v[lo] : NULL;
-}
-
-static int fns_room(struct kgenome_lineage *L, uint32_t n)
-{
-	if (!kgenome_lineage_charge(L, (uint64_t)n * (sizeof *L->fn + sizeof *L->fn_by_va)))
-		return 0;
-	L->fn = malloc((size_t)(n ? n : 1u) * sizeof *L->fn);
-	L->fn_by_va = malloc((size_t)(n ? n : 1u) * sizeof *L->fn_by_va);
-	if (!L->fn || !L->fn_by_va) {
-		kgenome_diag_note(L->s, KGENOME_NOMEM);
-		return 0;
-	}
-	return 1;
-}
-
-_Static_assert(offsetof(struct kgenome_lineage_fnva, va) == 0, "kof_cmp_u64 reads the key from the start");
-
-/* The functions ordered by entry address. */
-static void order_by_va(struct kgenome_lineage *L)
-{
-	uint32_t i;
-
-	for (i = 0; i < L->n_fn; i++) {
-		L->fn_by_va[i].va = L->fn[i].va;
-		L->fn_by_va[i].fn = i;
-	}
-	qsort(L->fn_by_va, L->n_fn, sizeof *L->fn_by_va, kof_cmp_u64);
-}
-
 /*
- * THE FUNCTIONS: the engine's set where the object names them, and, where it does not name them all,
- * the call targets in the gaps. A PE lists the functions with unwind data (x64 only) and a leaf function has
- * none; an x86 PE and a stripped file of no known layout have none at all. A call target that is not inside
- * a function of the set is the entry of one that runs to the next entry or the end of its code extent: the
- * same rule the engine's own set uses for a stripped ELF, and the one the research prototype used for a
- * PE. The entry point and the first byte of each code extent are entries too.
+ * THE FUNCTIONS ARE THE ENGINE'S TABLE (kgenome_diag_funcs: one product, built once, case by case - genotype/image/fntab.h), read by index; the lineage keeps no list of
+ * its own. `fi` everywhere in this stage is an index into `L->fs`. What the lineage adds to an index is only what is a fact of the stage: the entry address (below),
+ * and the arrays that follow the index (callers, summaries).
  */
+
 /* The address of the code at a file offset. A relocatable object has none (its sections are all at 0): the offset stands for it,
  * which is what every branch of it is relative to. */
 static uint64_t fn_va(const struct kgenome_lineage *L, uint64_t off)
@@ -217,137 +150,109 @@ static uint64_t fn_va(const struct kgenome_lineage *L, uint64_t off)
 	return va == KGENOME_BROKEN && L->obj->format == KGENOME_FMT_ELF && kgenome_obj_elf(L->obj)->e_type == KGENOME_ELF_REL ? off : va;
 }
 
-/* CONSOLIDATION FUNC-7 (2026-10-30, R): DROP -> kgenome_diag_funcs_with_walk (lineage then reads one list). Better logic here that the keeper lacks:
- * completes a PE x64 .pdata set with call targets and builds the set of an x86 PE and of a relocatable object (fn_va identity); bounds extents by the
- * code extents (PE sections) and cuts at the next engine function; drops starts inside an engine function (engine_fn_at). Entry walk is ELF only. Prove
- * with: tests/lib/genome lineage PE rows; PE x64 with a leaf function (funcs_of vs lineage L->n_fn). */
+int kgenome_lineage_fn_get(const struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineage_fn *out)
+{
+	const struct kgenome_func *g = &L->fs->v[fi];
+	uint64_t va;
+
+	if (g->off >= L->size || !g->len)
+		return 0;
+	va = fn_va(L, g->off);
+	if (va == KGENOME_BROKEN)
+		return 0;
+	out->off = g->off;
+	out->len = g->off + g->len > L->size ? L->size - g->off : g->len;
+	out->va = va;
+	return 1;
+}
+
+/* The function a direct call or jump goes to: the one whose entry ADDRESS is the target's, by a search of the entry addresses (`by_va`, made once for the object: the translation of an address
+ * to an offset, a scan of the image's segments, was made again for every call of every solve). A relocatable object has no address map: its entry addresses are its offsets (fn_va). */
+uint32_t kgenome_lineage_fn_of_insn(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in)
+{
+	const uint32_t lo = kof_lower_bound_u64(L->by_va, L->n_by_va, sizeof *L->by_va, 0, in->target_va);
+
+	return lo < L->n_by_va && L->by_va[lo].va == in->target_va ? L->by_va[lo].fn : KGENOME_FUNCS_NONE;
+}
+
+_Static_assert(offsetof(struct kgenome_lineage_fnva, va) == 0, "kof_cmp_u64 reads the key from the start");
+
+static int by_va_build(struct kgenome_lineage *L)
+{
+	uint32_t i;
+
+	if (!L->n_fn)
+		return 1;
+	if (!kgenome_lineage_charge(L, (uint64_t)L->n_fn * sizeof *L->by_va))
+		return 0;
+	L->by_va = malloc((size_t)L->n_fn * sizeof *L->by_va);
+	if (!L->by_va) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		return 0;
+	}
+	for (i = 0; i < L->n_fn; i++) {
+		struct kgenome_lineage_fn fn;
+
+		if (!kgenome_lineage_fn_get(L, i, &fn))
+			continue;
+		L->by_va[L->n_by_va].va = fn.va;
+		L->by_va[L->n_by_va++].fn = i;
+	}
+	if (L->n_by_va)
+		qsort(L->by_va, L->n_by_va, sizeof *L->by_va, kof_cmp_u64);
+	return 1;
+}
+
 static int fns_build(struct kgenome_lineage *L)
 {
 	const struct kgenome_func_set *fs = kgenome_diag_funcs(L->s, L->obj);
-	const int derive = !fs->n || L->obj->format == KGENOME_FMT_PE;
-	struct lin_ext *ext = NULL;
-	uint64_t *x = NULL;
-	uint32_t n_ext = 0, nx = 0, i, k, total;
-	uint32_t ei;
 
-	if (!derive) {
-		if (!fns_room(L, fs->n))
-			return 0;
-		for (i = 0; i < fs->n; i++) {
-			uint64_t va = fn_va(L, fs->v[i].off);
+	L->fs = fs;
+	kgenome_lineage_frame_src(L, fs);
+	L->n_fn = fs->n;
+	return by_va_build(L);
+}
 
-			if (va == KGENOME_BROKEN || fs->v[i].off >= L->size || !fs->v[i].len)
-				continue;
-			L->fn[L->n_fn].off = fs->v[i].off;
-			L->fn[L->n_fn].len = fs->v[i].off + fs->v[i].len > L->size ? L->size - fs->v[i].off : fs->v[i].len;
-			L->fn[L->n_fn++].va = va;
-		}
-		order_by_va(L);
+/* THE FUNCTION OF EACH END OF EVERY CODEMAP REFERENCE, decided once (it was found again, by a binary search each, by the return counts, the call graph twice - once to count
+ * its edges and once to fill them - and the no-return pass). `ref_from` is the function that holds the instruction, `ref_to` the one that holds its target. */
+int kgenome_lineage_refs(struct kgenome_lineage *L, const struct kgenome_codemap *cm)
+{
+	uint32_t k;
+
+	if (L->ref_from || !cm->n)
 		return 1;
-	}
-	{
-		const struct kgenome_codemap *cm = kgenome_lineage_codemap(L);
-		uint32_t ne = kgenome_diag_extent_count(L->obj);
-
-		ext = malloc((size_t)(ne ? ne : 1u) * sizeof *ext);
-		x = malloc((size_t)((cm ? cm->n : 0u) + ne + 2u) * sizeof *x);
-		if (!ext || !x) {
-			kgenome_diag_note(L->s, KGENOME_NOMEM);
-			free(ext);
-			free(x);
-			return 0;
-		}
-		for (i = 0; i < ne; i++) {
-			uint64_t at, have = kgenome_diag_extent(L->obj, i, L->size, &at);
-
-			if (have) {
-				ext[n_ext].off = at;
-				ext[n_ext++].len = have;
-				x[nx++] = at;           /* the first byte of a code extent is an entry */
-			}
-		}
-		if (n_ext)
-			qsort(ext, n_ext, sizeof *ext, cmp_ext);
-		if (L->obj->entry_off < L->size)
-			x[nx++] = L->obj->entry_off;
-		for (i = 0; cm && i < cm->n; i++)
-			if (cm->v[i].kind == KGENOME_CM_CALL && !(cm->v[i].flags & KGENOME_CMF_INDIRECT) &&
-			    cm->v[i].to < L->size)
-				x[nx++] = cm->v[i].to;
-	}
-	if (nx)
-		qsort(x, nx, sizeof *x, cmp_u64);
-	/* keep what is in a code extent and not inside a function the engine named */
-	{
-		uint32_t w = 0;
-
-		for (i = 0; i < nx; i++) {
-			uint32_t lo = 0, hi = n_ext;
-
-			if (w && x[w - 1u] == x[i])
-				continue;
-			while (lo < hi) {
-				uint32_t mid = lo + (hi - lo) / 2u;
-
-				if (ext[mid].off + ext[mid].len <= x[i])
-					lo = mid + 1u;
-				else
-					hi = mid;
-			}
-			if (lo >= n_ext || ext[lo].off > x[i] || engine_fn_at(fs, x[i]))
-				continue;
-			x[w++] = x[i];
-		}
-		nx = w;
-	}
-	total = fs->n + nx;
-	if (!fns_room(L, total)) {
-		free(ext);
-		free(x);
+	if (!kgenome_lineage_charge(L, (uint64_t)cm->n * 2u * sizeof *L->ref_from))
+		return 0;
+	L->ref_from = malloc((size_t)cm->n * 2u * sizeof *L->ref_from);
+	if (!L->ref_from) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
 		return 0;
 	}
-	for (i = 0; i < fs->n; i++) {
-		uint64_t va = fn_va(L, fs->v[i].off);
-
-		if (va == KGENOME_BROKEN || fs->v[i].off >= L->size || !fs->v[i].len)
-			continue;
-		L->fn[L->n_fn].off = fs->v[i].off;
-		L->fn[L->n_fn].len = fs->v[i].off + fs->v[i].len > L->size ? L->size - fs->v[i].off : fs->v[i].len;
-		L->fn[L->n_fn++].va = va;
+	L->ref_to = L->ref_from + cm->n;
+	for (k = 0; k < cm->n; k++) {
+		L->ref_from[k] = kgenome_funcs_at(L->fs, cm->v[k].at);
+		L->ref_to[k] = cm->v[k].to == KGENOME_BROKEN ? KGENOME_FUNCS_NONE : kgenome_funcs_at(L->fs, cm->v[k].to);
 	}
-	for (k = 0, ei = 0; k < nx; k++) {
-		uint64_t va = fn_va(L, x[k]), end;
-		uint32_t lo = 0, hi = fs->n;
+	return 1;
+}
 
-		if (va == KGENOME_BROKEN)
-			continue;
-		while (ei + 1u < n_ext && ext[ei].off + ext[ei].len <= x[k])
-			ei++;
-		end = ext[ei].off + ext[ei].len;
-		if (k + 1u < nx && x[k + 1u] < end)
-			end = x[k + 1u];
-		/* ... and where the next function of the engine's set begins, if sooner */
-		while (lo < hi) {
-			uint32_t mid = lo + (hi - lo) / 2u;
+/* THE SITE OF EACH NODE'S FUNCTION, decided once here and read by the site's index (it was found again by every step that asked: the summaries, the chains, the
+ * flat run). */
+static int site_fns_build(struct kgenome_lineage *L)
+{
+	uint32_t k;
 
-			if (fs->v[mid].off <= x[k])
-				lo = mid + 1u;
-			else
-				hi = mid;
-		}
-		if (lo < fs->n && fs->v[lo].off < end)
-			end = fs->v[lo].off;
-		if (end <= x[k])
-			continue;
-		L->fn[L->n_fn].off = x[k];
-		L->fn[L->n_fn].len = end - x[k];
-		L->fn[L->n_fn++].va = va;
+	if (!L->n_site)
+		return 1;
+	if (!kgenome_lineage_charge(L, (uint64_t)L->n_site * sizeof *L->site_fn))
+		return 0;
+	L->site_fn = malloc((size_t)L->n_site * sizeof *L->site_fn);
+	if (!L->site_fn) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		return 0;
 	}
-	free(ext);
-	free(x);
-	if (L->n_fn)
-		qsort(L->fn, L->n_fn, sizeof *L->fn, cmp_fn);
-	order_by_va(L);
+	for (k = 0; k < L->n_site; k++)
+		L->site_fn[k] = kgenome_funcs_at(L->fs, L->site_at[k]);
 	return 1;
 }
 
@@ -366,26 +271,6 @@ int kgenome_lineage_slot_pop(const struct kgenome_lineage *L, uint64_t slot)
 	return lo < L->n_slot_pop && L->slot_at[lo] == slot ? L->slot_words[lo] : -1;
 }
 
-/* A function that is one `jmp [slot]` is the import it jumps to (the thunk a PE x86 calls instead of the slot). */
-static uint64_t thunk_slot(const struct kgenome_lineage *L, const struct kgenome_lineage_fn *f)
-{
-	struct kgenome_cell_insn ci;
-	uint32_t len;
-
-	if (f->off >= L->size)
-		return KGENOME_BROKEN;
-	/* the first instruction only: the last thunk of a table runs, as a "function", to the end of its section */
-	len = kgenome_cell_decode(L->obj->arch, 0, L->base + f->off,
-				  f->len < 15u && f->len < L->size - f->off ? (uint32_t)f->len
-				  : L->size - f->off < 15u ? (uint32_t)(L->size - f->off) : 15u, f->va, &ci);
-	if (!len || ci.op != KGENOME_CELL_JMP || !(ci.flags & KGENOME_CELL_F_INDIRECT) || !ci.n_op ||
-	    ci.o[0].kind != KGENOME_CELL_O_MEM || ci.o[0].reg != KGENOME_CELL_REG_NONE ||
-	    ci.o[0].index != KGENOME_CELL_REG_NONE)
-		return KGENOME_BROKEN;
-	return (uint64_t)ci.o[0].disp & 0xffffffffu;
-}
-
-
 /*
  * WHAT AN i386 STDCALL CALLEE POPS - the one thing the stack pointer of PE x86 code needs that the code does not say.
  * Per import slot: the table's argument count of the API (kgenome_emu_win_argc_of_name); per node it is asked from the
@@ -397,13 +282,14 @@ static int pops_build(struct kgenome_lineage *L)
 {
 	const struct kgenome_codemap *cm;
 	const struct kgenome_pe_imptab *t;
+	struct kgenome_diag_walk *wk;
 	uint32_t i, n = 0;
 
 	if (!L->abi.callee_pops)
 		return 1;
 	cm = kgenome_lineage_codemap(L);
 	t = kgenome_diag_imports(L->s, L->obj);
-	if (!cm || !t)
+	if (!cm || !t || !kgenome_lineage_refs(L, cm))
 		return 0;
 	if (!kgenome_lineage_charge(L, (uint64_t)L->s->n_hit * sizeof *L->argc + (uint64_t)L->n_fn * sizeof *L->pop +
 				    (uint64_t)t->n * (sizeof *L->slot_at + sizeof *L->slot_words)))
@@ -449,15 +335,19 @@ static int pops_build(struct kgenome_lineage *L)
 		}
 	}
 	L->n_slot_pop = n;
+	/* the stubs the object's walk met: a function that is one `jmp [slot]` is the import it jumps to (the thunk a PE x86 calls instead of the slot) */
+	wk = kgenome_diag_scan_walk(L->s);
+	if (!kgenome_diag_walk_ensure(wk, L->obj, L->base, L->size, 1))
+		wk = NULL;
 	for (i = 0; i < cm->n; i++) {
 		const struct kgenome_codemap_ref *r = &cm->v[i];
 		uint32_t f;
 		int16_t bytes;
 
-		if (r->kind != KGENOME_CM_RET)
-			continue;
-		f = kgenome_lineage_fn_at(L, r->at);
+		f = L->ref_from[i];
 		if (f == UINT32_MAX)
+			continue;
+		if (r->kind != KGENOME_CM_RET)
 			continue;
 		bytes = (r->flags & KGENOME_CMF_POP) && r->nr < 0x7000u ? (int16_t)r->nr : (int16_t)0;
 		/* every return of a function pops the same, or the function is not one whose count is known */
@@ -467,15 +357,13 @@ static int pops_build(struct kgenome_lineage *L)
 			L->pop[f] = -3;
 	}
 	for (i = 0; i < L->n_fn; i++) {
-		uint64_t slot;
 		int w;
 
 		if (L->pop[i] == -3)
 			L->pop[i] = -1;
 		if (L->pop[i] >= 0)
 			continue;
-		slot = thunk_slot(L, &L->fn[i]);
-		w = slot == KGENOME_BROKEN ? -1 : kgenome_lineage_slot_pop(L, slot);
+		w = kgenome_lineage_slot_pop(L, kgenome_diag_walk_thunk_slot(wk, L->fs->v[i].off));
 		if (w >= 0)
 			L->pop[i] = (int16_t)(w * L->abi.w);
 	}
@@ -541,20 +429,9 @@ static void run_flat(struct kgenome_lineage *L)
 		kgenome_diag_note(L->s, KGENOME_NOMEM);
 		return;
 	}
-	for (i = 0; i < L->n_site; i++) {
-		uint32_t a = 0, b = L->n_fn;
-
-		while (a < b) {
-			uint32_t mid = a + (b - a) / 2u;
-
-			if (L->fn[mid].off + L->fn[mid].len <= L->site_at[i])
-				a = mid + 1u;
-			else
-				b = mid;
-		}
-		if (a < L->n_fn && L->fn[a].off <= L->site_at[i])
-			has[a] = 1;
-	}
+	for (i = 0; i < L->n_site; i++)
+		if (L->site_fn[i] != KGENOME_FUNCS_NONE)
+			has[L->site_fn[i]] = 1;
 	for (i = 0; i < L->n_fn && !L->halt && !L->over_steps; i++)
 		if (has[i])
 			kgenome_lineage_solve(L, i, NULL);
@@ -579,9 +456,10 @@ void kgenome_diag_run_lineage(struct kgenome_diag_scan *s, const struct kgenome_
 	L.size = size;
 	L.plan = plan;
 	L.wk = s->walk;
+	L.frames = kgenome_diag_frames(s);
 	L.sums.s = s;
 	abi_init(&L.abi, obj);
-	if (sites_build(&L) && L.n_site && fns_build(&L) && L.n_fn && pops_build(&L)) {
+	if (sites_build(&L) && L.n_site && fns_build(&L) && L.n_fn && site_fns_build(&L) && pops_build(&L)) {
 		L.fn_run = calloc(L.n_fn, 1);       /* (without it the next-stage count says "not run") */
 		if (plan & KGENOME_LINEAGE_S_SUMM)
 			kgenome_lineage_run_summ(&L);
@@ -593,8 +471,9 @@ void kgenome_diag_run_lineage(struct kgenome_diag_scan *s, const struct kgenome_
 	}
 	free(L.site_at);
 	free(L.site_node);
-	free(L.fn);
-	free(L.fn_by_va);
+	free(L.site_fn);
+	free(L.by_va);
+	free(L.ref_from);
 	free(L.in);
 	free(L.glob.v);
 	free(L.loc.v);

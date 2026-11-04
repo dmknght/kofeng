@@ -26,9 +26,11 @@
 /* What the small dialogs are made of; fam_dlg_size derives their one size from these and the shared form (kv_form.h). */
 #define FAM_FIELD_COLS 24       /* the name field (names are 1..63 characters; the field scrolls) */
 #define FAM_COMMENT_COLS 40     /* the comment field (up to KOF_FAMCAT_COMMENT_MAX characters; the field scrolls) */
-static const char fam_label_name[] = "Name    ";       /* the three labels are one width so the fields line up */
+static const char fam_label_name[] = "Name    ";       /* the labels are one width so the fields line up */
 static const char fam_label_variant[] = "Variant ";
 static const char fam_label_comment[] = "Comment ";
+static const char fam_label_fcomment[] = "Note    ";   /* the FAMILY's own comment, directly under Name; a distinct label from
+							   * "Comment " so the two never read as the same field (Add family shows both) */
 static const char fam_label_types[] = "Malware types";
 static const char fam_label_names[] = "Reuse a deleted name";
 
@@ -62,6 +64,8 @@ static void fam_fields_init(struct kv_fam_ui *u)
 	size_t ec = sizeof u->err;
 
 	kv_ft_init(&u->f_name, ED_FAM_NAME, KOF_FAMCAT_NAME_MAX + 3, name_accept, name_check, NULL, u, KV_FT_HELD, 1, u->err, ec);
+	kv_ft_init(&u->f_family_comment, ED_FAM_FCOMMENT, KOF_FAMCAT_COMMENT_MAX + 3, kv_form_comment_accept, kv_form_comment_check, NULL, u,
+		   KV_FT_HELD, 1, u->err, ec);
 	kv_ft_init(&u->f_comment, ED_FAM_COMMENT, KOF_FAMCAT_COMMENT_MAX + 3, kv_form_comment_accept, kv_form_comment_check, NULL, u, KV_FT_HELD, 1,
 		   u->err, ec);
 	kv_ft_init(&u->f_cell, ED_FAM_CELL, KOF_FAMCAT_COMMENT_MAX + 3, kv_form_comment_accept, kv_form_comment_check, cell_commit, u, KV_FT_LIVE, 0,
@@ -166,6 +170,7 @@ static void dlg_open(struct view *v, enum kv_fam_dlg d, uint32_t index)
 	u->dlg = d;
 	u->dlg_idx = index;
 	kv_ft_set(&u->f_name, "");
+	kv_ft_set(&u->f_family_comment, "");
 	kv_ft_set(&u->f_comment, "");
 	u->types = 0;
 	u->err[0] = 0;
@@ -177,6 +182,7 @@ static void dlg_open(struct view *v, enum kv_fam_dlg d, uint32_t index)
 	v->caret = 0;
 	if (d == KV_FAM_DLG_EDIT_FAMILY) {
 		kv_ft_set(&u->f_name, u->cat.fam[index].name);
+		kv_ft_set(&u->f_family_comment, kof_famcat_family_comment(&u->cat, index));
 	} else if (d == KV_FAM_DLG_EDIT_VARIANT) {
 		kv_ft_set(&u->f_comment, kof_famcat_comment(&u->cat, index));
 		snprintf(u->vname, sizeof u->vname, "%s", u->cat.var[index].name);
@@ -196,21 +202,31 @@ static void dlg_close(struct view *v)
 	v->edit = 0;
 }
 
-/* OK: the engine validates and changes the catalog; a refusal is its status as one line and the dialog stays open. */
+/* OK: the engine validates and changes the catalog; a refusal is its status as one line and the dialog stays open.
+ *
+ * Add family creates the family and its first variant in one call (kof_famcat_add_family, whose own `comment` parameter is the
+ * FIRST VARIANT'S, unchanged); the family's OWN comment (the Note row) is a separate fact and is set right after, with
+ * kof_famcat_set_family_comment, validated FIRST so the add is all-or-nothing from here: a bad Note is said and nothing is added. */
 static void dlg_ok(struct view *v)
 {
 	struct kv_fam_ui *u = v->fam;
 	enum kof_famcat_status st;
+	uint32_t fam;
 
 	switch (u->dlg) {
 	case KV_FAM_DLG_FAMILY:
-		st = kof_famcat_add_family(&u->cat, u->f_name.buf, u->f_comment.buf, u->types, NULL);
+		st = kof_famcat_comment_check(u->f_family_comment.buf);
+		if (st == KOF_FAMCAT_OK) {
+			st = kof_famcat_add_family(&u->cat, u->f_name.buf, u->f_comment.buf, u->types, &fam);
+			if (st == KOF_FAMCAT_OK)
+				(void)kof_famcat_set_family_comment(&u->cat, fam, u->f_family_comment.buf);
+		}
 		break;
 	case KV_FAM_DLG_VARIANT:
 		st = kof_famcat_add_variant(&u->cat, u->dlg_idx, u->f_comment.buf, u->types, u->letter, NULL);
 		break;
 	case KV_FAM_DLG_EDIT_FAMILY:
-		st = kof_famcat_rename_family(&u->cat, u->dlg_idx, u->f_name.buf);
+		st = kof_famcat_set_family(&u->cat, u->dlg_idx, u->f_name.buf, u->f_family_comment.buf);
 		break;
 	default:
 		st = kof_famcat_set_variant(&u->cat, u->dlg_idx, u->f_comment.buf, u->types);
@@ -321,18 +337,22 @@ static void fam_draw_box(struct out *o, struct view *v, struct kv_fam_ui *u)
 /* ---- the small dialogs ------------------------------------------------------------------------------------ */
 
 /* THE SIZE of a small dialog: one width for every mode (the widest of label + field and the shared form's grid, button row and error
- * line, plus the frame) and the rows its mode has: the Name field (Add family, Edit family), the variant's name line (every mode but
- * Edit family; Add family's is the first variant's), the deleted-names row (Add variant), the Comment field and the "Malware types" title
- * with the grid (every mode but Edit family). dframe_begin clips it to the screen. */
+ * line, plus the frame) and the rows its mode has: the Name field (Add family, Edit family), the family's own Note field right under
+ * it (Add family, Edit family), the variant's name line (every mode but Edit family; Add family's is the first variant's), the
+ * deleted-names row (Add variant), the Comment field and the "Malware types" title with the grid (every mode but Edit family).
+ * dframe_begin clips it to the screen. */
 static void fam_dlg_size(enum kv_fam_dlg d, int *w, int *h)
 {
 	struct kv_pick tl = kv_fam_types();
-	int row_w[3], n = 0;
-	int form = (d == KV_FAM_DLG_FAMILY ? 2 : 1) + (has_variant_part(d) ? 1 : 0);
+	int row_w[4], n = 0;
+	int form = (d == KV_FAM_DLG_FAMILY ? 2 : 1) + (has_variant_part(d) ? 1 : 0) + (has_name_field(d) ? 1 : 0);
 	int rows = form + (has_variant_part(d) ? kv_form_ticks_rows(kv_fam_menu_count()) : 0) + (d == KV_FAM_DLG_VARIANT ? 1 : 0);
 
-	/* The widths of every row this mode draws that the form cannot bound itself: the Name row, the Comment row and the grid. */
+	/* The widths of every row this mode draws that the form cannot bound itself: the Name row, the family's Note row, the variant's
+	 * Comment row and the grid. */
 	row_w[n++] = kv_form_field_w(fam_label_name, FAM_FIELD_COLS);
+	if (has_name_field(d))
+		row_w[n++] = kv_form_field_w(fam_label_fcomment, FAM_COMMENT_COLS);
 	if (has_variant_part(d)) {
 		row_w[n++] = kv_form_field_w(fam_label_comment, FAM_COMMENT_COLS);
 		row_w[n++] = kv_form_grid_w(&tl);
@@ -362,10 +382,10 @@ static int fam_draw_names(struct out *o, struct kv_fam_ui *u, int row)
 	return row;
 }
 
-/* THE ONE FORM of the four small dialogs (fam_dlg_size says which rows a mode has). Add family: Name field, the first variant's
- * name as the library numbers it (follows the typing; a dim dash while there is none), Comment, tick grid. Add variant: the new
- * variant's name, Comment, tick grid. Edit family: the Name field alone. Edit variant: the variant's name, Comment, tick grid,
- * all filled from the catalog. The edit modes add [ Delete ] to the buttons. */
+/* THE ONE FORM of the four small dialogs (fam_dlg_size says which rows a mode has). Add family: Name field, the family's own Note
+ * field directly under it, the first variant's name as the library numbers it (follows the typing; a dim dash while there is none),
+ * Comment, tick grid. Add variant: the new variant's name, Comment, tick grid. Edit family: the Name field and its Note field.
+ * Edit variant: the variant's name, Comment, tick grid, all filled from the catalog. The edit modes add [ Delete ] to the buttons. */
 static void fam_draw_dlg(struct out *o, struct view *v, struct kv_fam_ui *u)
 {
 	static const char *const title[] = { "", "Add family", "Add variant", "Edit family", "Edit variant" };
@@ -377,8 +397,10 @@ static void fam_draw_dlg(struct out *o, struct view *v, struct kv_fam_ui *u)
 	fam_dlg_size(u->dlg, &w, &h);
 	if (!dframe_begin(o, &fm->f, title[u->dlg], w, h, 2))
 		return;
-	if (has_name_field(u->dlg))
+	if (has_name_field(u->dlg)) {
 		kv_form_row_field(o, v, fm, row++, &u->f_name, fam_label_name, FAM_FIELD_COLS);
+		kv_form_row_field(o, v, fm, row++, &u->f_family_comment, fam_label_fcomment, FAM_COMMENT_COLS);
+	}
 	if (u->dlg == KV_FAM_DLG_FAMILY) {
 		const char *shown = !u->f_name.buf[0] || kof_famcat_first_variant_name(&u->cat, u->f_name.buf, first, sizeof first) != KOF_FAMCAT_OK
 				    ? "" : first;
@@ -511,6 +533,10 @@ static int click_dlg(struct view *v, struct kv_fam_ui *u)
 	}
 	if (has_name_field(u->dlg) && kv_ft_hit(&u->f_name, g_my, g_mx)) {
 		kv_ftext_focus(v, &u->f_name);
+		return 1;
+	}
+	if (has_name_field(u->dlg) && kv_ft_hit(&u->f_family_comment, g_my, g_mx)) {
+		kv_ftext_focus(v, &u->f_family_comment);
 		return 1;
 	}
 	if (has_variant_part(u->dlg) && kv_ft_hit(&u->f_comment, g_my, g_mx)) {
@@ -662,9 +688,14 @@ int handle_fam_key(struct view *v, int k)
 			dlg_close(v);
 		else if (k == '\r' || k == '\n')
 			dlg_ok(v);
-		else
-			(void)kv_ftext_key(v, has_name_field(u->dlg) && (v->edit == ED_FAM_NAME || !has_variant_part(u->dlg))
-					      ? &u->f_name : &u->f_comment, k);
+		else {
+			/* Three fields may be on screen at once (Add family: Name, the family's Note, the first variant's Comment); the
+			 * focused one is whichever field's id v->edit carries, not a guess from the dialog's mode. */
+			struct kv_ftext *f = v->edit == ED_FAM_FCOMMENT ? &u->f_family_comment
+					   : v->edit == ED_FAM_COMMENT ? &u->f_comment : &u->f_name;
+
+			(void)kv_ftext_key(v, f, k);
+		}
 		return 1;
 	}
 	if (k == 27 || k == '\r' || k == '\n')

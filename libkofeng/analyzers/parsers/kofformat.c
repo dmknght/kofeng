@@ -23,6 +23,7 @@
 #include "scripts/script_parse.h"
 #include "events/amsi_parse.h"
 #include "processes/proc_parse.h"
+#include <genotype/image/image_embed.h>
 
 static uint64_t kof_parser_no_anomalies(const void *view);
 
@@ -466,23 +467,67 @@ int kof_parser_self_clears(const struct kof_parser *p)
 	}
 }
 
+
+/*
+ * THE ROWS OFFERED FOR A VARIABLE (see `embed` in struct kof_parser). Five of them are their sniff as it
+ * is: a magic of 8 bytes or a header the sniff already checks accepted nothing false in the data of
+ * 5855 hosts (7z, cab, ole, rtf, lnk). The rest have a check of their own
+ * where the format lives (zip, gzip, script) or in kgenome (the ELF header, the PE extent).
+ */
+#define EMBED_AS_SNIFFED(name, sniff)                                             \
+	static int name(kof_buf b, uint64_t *extent, uint64_t *work)             \
+	{                                                                         \
+		(void)work;                                                       \
+		*extent = 0;                                                      \
+		return sniff(b);                                                  \
+	}
+EMBED_AS_SNIFFED(embed_ole, kof_docole_sniff)
+EMBED_AS_SNIFFED(embed_7z, kof_7z_sniff)
+EMBED_AS_SNIFFED(embed_cab, kof_cab_sniff)
+EMBED_AS_SNIFFED(embed_rtf, kof_rtf_sniff)
+EMBED_AS_SNIFFED(embed_lnk, kof_lnk_sniff)
+
+static int embed_elf(kof_buf b, uint64_t *extent, uint64_t *work)
+{
+	(void)work;
+	*extent = 0;
+	if (!kgenome_elf_hdr_valid(b))
+		return 0;
+	*extent = kgenome_image_embed_extent(KGENOME_FMT_ELF, b);
+	return 1;
+}
+
+static int embed_pe(kof_buf b, uint64_t *extent, uint64_t *work)
+{
+	(void)work;
+	*extent = 0;
+	if (!kgenome_pe_sniff(b))
+		return 0;
+	*extent = kgenome_image_embed_extent(KGENOME_FMT_PE, b);
+	return 1;
+}
+
 static const struct kof_parser formats[] = {
 	{ KOF_FMT_ELF, (uint32_t)sizeof(struct kgenome_elf_info),
 	  kgenome_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
-	  kof_elf_region_name, kof_elf_anomaly_name, anom_elf },
+	  kof_elf_region_name, kof_elf_anomaly_name, anom_elf,
+	  embed_elf },
 	{ KOF_FMT_PE, (uint32_t)sizeof(struct kgenome_pe_info),
 	  kgenome_pe_sniff, pe_parse_thunk,
 	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
-	  kof_pe_region_name, kof_pe_anomaly_name, anom_pe },
+	  kof_pe_region_name, kof_pe_anomaly_name, anom_pe,
+	  embed_pe },
 	{ KOF_FMT_GZIP, (uint32_t)sizeof(struct kof_gzip_info),
 	  kof_gzip_sniff, gzip_parse_thunk,
 	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
-	  kof_gzip_region_name, kof_gzip_anomaly_name, anom_gzip },
+	  kof_gzip_region_name, kof_gzip_anomaly_name, anom_gzip,
+	  kof_gzip_embedded },
 	{ KOF_FMT_DOCOLE, (uint32_t)sizeof(struct kof_docole_info),
 	  kof_docole_sniff, docole_parse_thunk,
 	  kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
-	  kof_docole_region_name, kof_docole_anomaly_name, anom_docole },
+	  kof_docole_region_name, kof_docole_anomaly_name, anom_docole,
+	  embed_ole },
 	/*
 	 * One row, two formats. The parse decides between ZIP and DOCZIP from the
 	 * entry names and sets ctx->format itself, so the format named here is only
@@ -491,51 +536,63 @@ static const struct kof_parser formats[] = {
 	{ KOF_FMT_ZIP, (uint32_t)sizeof(struct kof_zip_info),
 	  kof_zip_sniff, zip_parse_thunk,
 	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
-	  kof_zip_region_name, kof_zip_anomaly_name, anom_zip },
+	  kof_zip_region_name, kof_zip_anomaly_name, anom_zip,
+	  kof_zip_embedded },
 	{ KOF_FMT_TAR, (uint32_t)sizeof(struct kof_tar_info),
 	  kof_tar_sniff, tar_parse_thunk,
 	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
-	  kof_tar_region_name, kof_tar_anomaly_name, anom_tar },
+	  kof_tar_region_name, kof_tar_anomaly_name, anom_tar,
+	  NULL },
 	{ KOF_FMT_7Z, (uint32_t)sizeof(struct kof_7z_info),
 	  kof_7z_sniff, sevenzip_parse_thunk,
 	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
-	  kof_7z_region_name, kof_7z_anomaly_name, anom_7z },
+	  kof_7z_region_name, kof_7z_anomaly_name, anom_7z,
+	  embed_7z },
 	{ KOF_FMT_RAR, (uint32_t)sizeof(struct kof_rar_info),
 	  kof_rar_sniff, rar_parse_thunk,
 	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
-	  kof_rar_region_name, kof_rar_anomaly_name, anom_rar },
+	  kof_rar_region_name, kof_rar_anomaly_name, anom_rar,
+	  kof_rar_embedded },
 	{ KOF_FMT_XZ, (uint32_t)sizeof(struct kof_xz_info),
 	  kof_xz_sniff, xz_parse_thunk,
 	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
-	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz },
+	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz,
+	  kof_xz_embedded },
 	{ KOF_FMT_ARJ, (uint32_t)sizeof(struct kof_arj_info),
 	  kof_arj_sniff, arj_parse_thunk,
 	  kof_arj_region_bits, KOF_ARJ_REGION_COUNT,
-	  kof_arj_region_name, kof_arj_anomaly_name, anom_arj },
+	  kof_arj_region_name, kof_arj_anomaly_name, anom_arj,
+	  NULL },
 	{ KOF_FMT_LHA, (uint32_t)sizeof(struct kof_lha_info),
 	  kof_lha_sniff, lha_parse_thunk,
 	  kof_lha_region_bits, KOF_LHA_REGION_COUNT,
-	  kof_lha_region_name, kof_lha_anomaly_name, anom_lha },
+	  kof_lha_region_name, kof_lha_anomaly_name, anom_lha,
+	  NULL },
 	{ KOF_FMT_CAB, (uint32_t)sizeof(struct kof_cab_info),
 	  kof_cab_sniff, cab_parse_thunk,
 	  kof_cab_region_bits, KOF_CAB_REGION_COUNT,
-	  kof_cab_region_name, kof_cab_anomaly_name, anom_cab },
+	  kof_cab_region_name, kof_cab_anomaly_name, anom_cab,
+	  embed_cab },
 	{ KOF_FMT_CHM, (uint32_t)sizeof(struct kof_chm_info),
 	  kof_chm_sniff, chm_parse_thunk,
 	  kof_chm_region_bits, KOF_CHM_REGION_COUNT,
-	  kof_chm_region_name, kof_chm_anomaly_name, anom_chm },
+	  kof_chm_region_name, kof_chm_anomaly_name, anom_chm,
+	  NULL },
 	{ KOF_FMT_BZIP2, (uint32_t)sizeof(struct kof_bz2_info),
 	  kof_bz2_sniff, bz2_parse_thunk,
 	  kof_bz2_region_bits, KOF_BZ2_REGION_COUNT,
-	  kof_bz2_region_name, kof_bz2_anomaly_name, anom_bz2 },
+	  kof_bz2_region_name, kof_bz2_anomaly_name, anom_bz2,
+	  NULL },
 	{ KOF_FMT_RTF, (uint32_t)sizeof(struct kof_rtf_info),
 	  kof_rtf_sniff, rtf_parse_thunk,
 	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
-	  kof_rtf_region_name, kof_rtf_anomaly_name, anom_rtf },
+	  kof_rtf_region_name, kof_rtf_anomaly_name, anom_rtf,
+	  embed_rtf },
 	{ KOF_FMT_PDF, (uint32_t)sizeof(struct kof_pdf_info),
 	  kof_pdf_sniff, pdf_parse_thunk,
 	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
-	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf },
+	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf,
+	  NULL },
 
 	/*
 	 * ABOVE THE SCRIPT ROW, because a shell link HAS a magic and the rule
@@ -546,7 +603,8 @@ static const struct kof_parser formats[] = {
 	{ KOF_FMT_LNK, (uint32_t)sizeof(struct kof_lnk_info),
 	  kof_lnk_sniff, lnk_parse_thunk,
 	  kof_lnk_region_bits, KOF_LNK_REGION_COUNT,
-	  kof_lnk_region_name, kof_lnk_anomaly_name, anom_lnk },
+	  kof_lnk_region_name, kof_lnk_anomaly_name, anom_lnk,
+	  embed_lnk },
 
 	/*
 	 * ALSO ABOVE THE SCRIPT ROW, and for a reason the script sniff makes
@@ -558,7 +616,8 @@ static const struct kof_parser formats[] = {
 	{ KOF_FMT_REG, (uint32_t)sizeof(struct kof_reg_info),
 	  kof_reg_sniff, reg_parse_thunk,
 	  kof_reg_region_bits, KOF_REG_REGION_COUNT,
-	  kof_reg_region_name, kof_reg_anomaly_name, anom_reg },
+	  kof_reg_region_name, kof_reg_anomaly_name, anom_reg,
+	  NULL },
 
 	/*
 	 * AFTER EVERY FORMAT WITH A MAGIC NUMBER, which is what makes its sniff
@@ -571,7 +630,8 @@ static const struct kof_parser formats[] = {
 	{ KOF_FMT_SCRIPT, (uint32_t)sizeof(struct kof_script_info),
 	  kof_script_sniff, script_parse_thunk,
 	  kof_script_region_bits, KOF_SCRIPT_REGION_COUNT,
-	  kof_script_region_name, kof_script_anomaly_name, anom_script },
+	  kof_script_region_name, kof_script_anomaly_name, anom_script,
+	  kof_script_embedded },
 
 	/*
 	 * LAST, AND ITS SNIFF NEVER ACCEPTS.
@@ -586,7 +646,8 @@ static const struct kof_parser formats[] = {
 	  kof_parser_never_sniffs, amsi_parse_thunk,
 	  kof_amsi_regions, 2u,
 	  kof_amsi_region_name, kof_parser_no_anomaly_name,
-	  kof_parser_no_anomalies },
+	  kof_parser_no_anomalies,
+	  NULL },
 
 	/*
 	 * A PROCESS SNAPSHOT. Like the row above it this never sniffs and is
@@ -597,7 +658,8 @@ static const struct kof_parser formats[] = {
 	  kof_parser_never_sniffs, proc_parse_thunk,
 	  kof_proc_regions, 3u,
 	  kof_proc_region_name, kof_parser_no_anomaly_name,
-	  kof_parser_no_anomalies }
+	  kof_parser_no_anomalies,
+	  NULL }
 };
 
 
@@ -637,6 +699,23 @@ const struct kof_parser *kof_parser_list(uint32_t *n)
 	if (n)
 		*n = (uint32_t)(sizeof formats / sizeof formats[0]);
 	return formats;
+}
+
+int kof_parser_embedded(kof_buf b, uint8_t *format, uint64_t *extent, uint64_t *work)
+{
+	uint32_t i;
+
+	for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
+		const struct kof_parser *p = &formats[i];
+
+		if (!p->embed || *work == 0)
+			continue;
+		if (p->embed(b, extent, work)) {
+			*format = p->format;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 const struct kof_parser *kof_parser_of(uint8_t format)

@@ -80,13 +80,6 @@ def leaf(name):
     return name.rsplit('//', 1)[-1] if '//' in name else None
 
 
-def select_row(v, label):
-    y = v.find('//' + label)
-    check(y, 'no tree row //%s:\n%s' % (label, '\n'.join(v.lines[:30])))
-    v.click(y[0], y[1])
-    v.pump_quiet()
-
-
 def overview(v):
     check(v.menu_item('Analysis', 'Dashboard'), 'no Dashboard item')
     v.pump_quiet()
@@ -97,23 +90,14 @@ def overview(v):
     return '\n'.join(v.lines)
 
 
-def detection_block(text):
-    """What the dashboard says between its Detection heading and the next heading."""
-    if 'Detection' not in text:
-        return ''
-    rest = text[text.index('Detection'):]
-    m = re.search(r'\n[ │]*(Regions|Anomalies|Object|Imports|Exports)\b', rest)
-    return rest[:m.start()] if m else rest
-
-
-def compare(db_tag, sample_name, src, expect_old=None):
+def compare(db_tag, sample_name, src):
     if not os.path.exists(src):
         raise Skip('no sample at %s' % src)
     db, bases = database(db_tag)
     path = prep_sample(src, sample_name)
     t = truth(db, bases, path)
     first = t['file_object']
-    with Viewer(path, rows=100, db=db, bases=bases) as v:     # tall enough that the Detection block (six diagnoses of three lines each) is not cut by the dialog
+    with Viewer(path, rows=100, db=db, bases=bases) as v:
         bar = v.lines[-1]
         txt = overview(v)
         v.esc()
@@ -134,43 +118,12 @@ def compare(db_tag, sample_name, src, expect_old=None):
             eq(m.group(2), leaf(first), 'the child the file row names is not the one the engine made the verdict in')
         root = t['objects'][0] if t['objects'] else None
         if root and not root['verdict'] and t['file_verdict']:
-            # The object that IS the file shows the engine's per-file verdict (kverdict_filemap): on the status bar and as the Detection block's one row.
+            # The object that IS the file shows the engine's per-file verdict (kverdict_filemap): on the status bar.
             check(t['file_verdict'] in bar, 'the status bar of the file does not carry the engine\'s file verdict %r: %r' % (t['file_verdict'], bar.rstrip()))
-            check(re.search(r'verdict\s+' + re.escape(t['file_verdict']), txt), 'the Detection block of the file does not carry the engine\'s file verdict:\n' + txt)
         elif root and not root['verdict']:
-            check('Detection' not in txt, 'a Detection block on a root the engine gave no verdict:\n' + txt)
             check('no verdict' in bar, 'the status bar of an object with no verdict does not say so: %r' % bar.rstrip())
         elif root and root['verdict']:
             check(root['verdict'] in bar, 'the status bar of the root does not carry the engine\'s verdict %r: %r' % (root['verdict'], bar.rstrip()))
-        # each object the engine gave a verdict: its own row says exactly what kdet_info / kdet_diag say
-        for o in t['objects']:
-            if not o['verdict']:
-                continue
-            lf = leaf(o['name'])
-            check(lf, 'a verdict on the root object itself is not exercised by these samples: %s' % o['name'])
-            select_row(v, lf)
-            full = overview(v)
-            v.esc()
-            v.pump_quiet()
-            d = detection_block(full)
-            check(d, 'no Detection block for %s (the engine: %s)' % (lf, o['verdict']))
-            check(o['verdict'] in d, 'the verdict shown is not the engine\'s\n  engine: %s\n  screen:\n%s' % (o['verdict'], d))
-            fam, var, tag, typ = o['diag'][0][1], o['diag'][0][2], o['diag'][0][3], o['diag'][0][4]
-            check(re.search(r'family\s+%s\b' % re.escape(fam), d), 'family %r not shown:\n%s' % (fam, d))
-            check(re.search(r'variant\s+%s\b' % re.escape(var), d), 'variant %r not shown:\n%s' % (var, d))
-            check(re.search(r'tag\s+%s\b' % re.escape(tag), d), 'tag %r not shown:\n%s' % (tag, d))
-            check(typ in d, 'type %r not shown:\n%s' % (typ, d))
-            b = o['basis']
-            check(re.search(r'basis\s+(variant|tag)\s+cover %s\s+jaccard %s\s+groups %s\s+matched %s' % (b['cover'], b['jaccard'], b['groups'], b['matched']), d),
-                  'the basis numbers are not the engine\'s (%s):\n%s' % (b, d))
-            for dg in o['diag']:
-                check(dg[0] in d, 'diagnose %s (engine) is not listed:\n%s' % (dg[0], d))
-            # nothing the engine did not list: every "<family>_<n>"-shaped diagnose name on the screen is one of the engine's
-            names = set(x[0] for x in o['diag'])
-            for shown in set(re.findall(r'\b(?:botnet|trojan)_[a-z0-9]+_[a-z0-9-]+_\d+\b', d)):
-                check(shown in names, 'the screen lists diagnose %s that the engine did not match' % shown)
-            if expect_old:
-                check(expect_old not in d, 'the old name %r is still shown for data that does not carry it:\n%s' % (expect_old, d))
 
 
 def sample(name):
@@ -190,11 +143,9 @@ def tar_with_run1():
 
 
 def make(db_tag, what):
-    old = {'release': None, 'alt_a': 'Mirai', 'alt_b': 'Mirai', 'alt_none': 'Mirai'}[db_tag]
-
     def body():
         src = tar_with_run1() if what == 'tar' else sample(what)
-        compare(db_tag, 'holds_run1.tar' if what == 'tar' else None, src, old)
+        compare(db_tag, 'holds_run1.tar' if what == 'tar' else None, src)
     body.__name__ = 'viewer_shows_what_the_engine_answers_%s_on_%s' % (db_tag, what)
     return body
 

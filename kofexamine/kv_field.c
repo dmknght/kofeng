@@ -25,8 +25,7 @@ static void cnd_seq(struct view *v)
 
 static void prow_add(struct view *v)
 {
-	if (v->n_prow < MAX_PROW)
-		v->n_prow++;
+	v->n_prow++;
 }
 
 /*
@@ -52,9 +51,20 @@ static void prow_strings(struct view *v)
 	prow_add(v);
 }
 
+/* How many rows the panel may show at most: the preference (the divider) and what the terminal has. One answer for the layout and for the table window. */
+uint32_t decl_cap_rows(const struct view *v)
+{
+	uint32_t room = g_rows > 8 ? (uint32_t)(g_rows - 8) : 1u;
+
+	return v->ed.dr.decl_cap < room ? v->ed.dr.decl_cap : room;
+}
+
 static void prow_blocks(struct view *v)
 {
-	uint32_t i;
+	uint32_t i, nshown = 0, win;
+
+	v->blk_nwin = v->blk_nshown = 0;
+	v->blk_row0 = v->n_prow;
 
 	prow_add(v);
 	/* Two rows: the heading and the column names, or the heading and the
@@ -64,7 +74,18 @@ static void prow_blocks(struct view *v)
 		return;
 	for (i = 0; i < v->ed.dr.n_blk; i++)
 		if (blk_row_shown(v, i))
-			prow_add(v);
+			nshown++;
+	/* The window is what the panel has left for the table: its visible height at this row. At least one row, or there is nothing to scroll. */
+	win = decl_cap_rows(v) > v->n_prow ? decl_cap_rows(v) - v->n_prow : 1u;
+	if (win > nshown)
+		win = nshown;
+	if (v->blk_off > nshown - win)
+		v->blk_off = nshown - win;
+	v->blk_row0 = v->n_prow;
+	v->blk_nwin = win;
+	v->blk_nshown = nshown;
+	for (i = 0; i < win; i++)
+		prow_add(v);
 }
 
 static void prow_matchers(struct view *v)

@@ -31,10 +31,12 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 uint32_t kof_syms_build_grow_script(kof_script_names_fn feed, void *feed_user, uint8_t **buf, uint32_t *cap, uint32_t *passes);
 
 /*
- * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block. `shndx` of -1 matches any section; a relocatable object's values are
- * section-relative, so there the section is part of the answer. `out` is empty when no record matches.
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block. `value` is NULL when the caller has no
+ * address to look up (not a sentinel of 0 - a real symbol can sit at value 0, e.g. -ffunction-sections or a
+ * .ko shape). `shndx` of -1 matches any section; a relocatable object's values are section-relative, so there
+ * the section is part of the answer. `out` is empty when no record matches.
  */
-void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value, int shndx, char *out, size_t cap);
+void kof_sym_name_at(const uint8_t *blk, uint32_t n, const uint64_t *value, int shndx, char *out, size_t cap);
 
 /*
  * THE NAME OF A FUNCTION, in ONE place: its symbol when the block has one, else `fcn_<offset>` - the function's own file offset as 8 hex digits

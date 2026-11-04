@@ -10,6 +10,8 @@
  *             past the list; set_types follows the same rules
  *   COMMENT   kof_comment_char on every byte, 120/121 characters, empty/NULL ok, the comment of a variant only (add_family's is the first variant's), add and
  *             set_comment share the check and refuse without changing anything
+ *   FCOMMENT  the FAMILY's own comment (kof_famcat_family_comment / set_family_comment / set_family), kept apart from a variant's:
+ *             the same kof_comment_check rule, a refusal changes nothing, set_family is rename+comment together or neither
  *   TYPES     the selectable list is the engine's minus Packer, spelled by kof_maltype_name; the all-mask
  *   LIMITS    the caller's two tables: the add past either answers KOF_FAMCAT_FULL and nothing is dropped
  *   ORDER     families in creation order, each followed by its variants in creation order, whatever order they were made in;
@@ -291,6 +293,43 @@ static void comments(void)
 	CK(kof_famcat_set_comment(&C, 99, "x") == KOF_FAMCAT_NO_FAMILY);
 }
 
+/* FCOMMENT: the family's own comment, kept apart from a variant's (COMMENT above); the same kof_comment_char / 120-character rule;
+ * set_family (rename + comment, the Edit family dialog's OK) is both or neither. */
+static void fcomment(void)
+{
+	char s[KOF_FAMCAT_COMMENT_MAX + 8];
+	uint32_t f, g;
+
+	fresh(8, 16);
+	CK(kof_famcat_add_family(&C, "Mirai", "first one", BOT, &f) == KOF_FAMCAT_OK);
+	/* a fresh family has no comment of its own, whatever the first variant's is (add_family's `comment` never touches it) */
+	CK(!kof_famcat_family_comment(&C, f)[0] && !strcmp(kof_famcat_comment(&C, 0), "first one"));
+	CK(kof_famcat_set_family_comment(&C, f, "a known family") == KOF_FAMCAT_OK &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "a known family") && !strcmp(kof_famcat_comment(&C, 0), "first one"));
+	/* the same rule as a variant's: a bad character, too long, a refusal changes nothing */
+	CK(kof_famcat_set_family_comment(&C, f, "a*b") == KOF_FAMCAT_BAD_COMMENT &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "a known family"));
+	memset(s, 'c', 121);
+	s[121] = 0;
+	CK(kof_famcat_set_family_comment(&C, f, s) == KOF_FAMCAT_COMMENT_TOO_LONG &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "a known family"));
+	CK(kof_famcat_set_family_comment(&C, f, "") == KOF_FAMCAT_OK && !kof_famcat_family_comment(&C, f)[0]);
+	CK(kof_famcat_set_family_comment(&C, f, NULL) == KOF_FAMCAT_OK);
+	CK(kof_famcat_set_family_comment(&C, 99, "x") == KOF_FAMCAT_NO_FAMILY);
+	CK(!kof_famcat_family_comment(&C, 99)[0]);
+	/* add_family's own comment parameter is still the first variant's, never the family's */
+	CK(kof_famcat_add_family(&C, "Gafgyt", "variant note", TRO, &g) == KOF_FAMCAT_OK && !kof_famcat_family_comment(&C, g)[0] &&
+	   !strcmp(kof_famcat_comment(&C, 1), "variant note"));
+	/* set_family: rename and comment together, or neither */
+	CK(kof_famcat_set_family(&C, f, "Mirai2", "renamed note") == KOF_FAMCAT_OK && !strcmp(F[f].name, "Mirai2") &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "renamed note"));
+	CK(kof_famcat_set_family(&C, f, "gafgyt", "x") == KOF_FAMCAT_DUP_FAMILY && !strcmp(F[f].name, "Mirai2") &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "renamed note"));            /* a bad NAME leaves the comment untouched too */
+	CK(kof_famcat_set_family(&C, f, "Mirai3", "a*b") == KOF_FAMCAT_BAD_COMMENT && !strcmp(F[f].name, "Mirai2") &&
+	   !strcmp(kof_famcat_family_comment(&C, f), "renamed note"));            /* a bad COMMENT leaves the name untouched too */
+	CK(kof_famcat_set_family(&C, 99, "X", "x") == KOF_FAMCAT_NO_FAMILY);
+}
+
 /* EDIT: the counter, reuse, rename, delete, set_variant. */
 static void edit(void)
 {
@@ -446,9 +485,13 @@ static void revision(void)
 	MOVED(kof_famcat_set_types(&C, v, 1u << KOF_MALTYPE_VIRUS));
 	STILL(kof_famcat_set_types(&C, v, 0u), KOF_FAMCAT_NO_TYPE);
 	MOVED(kof_famcat_set_variant(&C, v, "y", 1u << KOF_MALTYPE_ROOTKIT));
-	MOVED(kof_famcat_rename_family(&C, 0, "Gafgyt"));
+	MOVED(kof_famcat_set_family_comment(&C, 0, "fc"));
+	STILL(kof_famcat_set_family_comment(&C, 0, "a*b"), KOF_FAMCAT_BAD_COMMENT);
+	MOVED(kof_famcat_set_family(&C, 0, "Gafgyt", "fc2"));
+	STILL(kof_famcat_set_family(&C, 0, "Gafgyt", "a*b"), KOF_FAMCAT_BAD_COMMENT);
 	STILL(kof_famcat_rename_family(&C, 5, "Zed"), KOF_FAMCAT_NO_FAMILY);
 	(void)kof_famcat_comment(&C, v);
+	(void)kof_famcat_family_comment(&C, 0);
 	(void)kof_famcat_dirty(&C, &C);
 	CK(C.rev == r);
 	kof_famcat_init(&S, sf, 8, sv, 8);
@@ -470,6 +513,7 @@ int main(void)
 	types();
 	limits();
 	comments();
+	fcomment();
 	edit();
 	order();
 	revision();

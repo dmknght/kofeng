@@ -1,5 +1,5 @@
 /*
- * kx_popup - the pop-up list of the viewer (kofexamine/kv_popup.h, defined in kofview.c) on DATA: the box that kv_popup_place returns, the
+ * kx_popup - the pop-up list of the viewer (kofexamine/kv_popup.h, defined in kv_popup.c) on DATA: the box that kv_popup_place returns, the
  * text of every row, the hit test and the key step, with no terminal. What this pins is what the viewer got wrong on the screen: a pick-list
  * whose rows were one column narrower than its box and whose rule was one column wider (a ragged right edge), a submenu opened two rows under
  * its parent and one column off it, a submenu of the menu bar cut off at the right edge of a small terminal, a list that ran past the
@@ -15,6 +15,7 @@
  *              on the left when the right has no room
  *   HIT        every cell of the box answers with the row whose text is drawn there, a rule and a blank grid cell with -1, anything else -2
  *   STEP       skips rules and grey rows, stops at the ends, enters from nothing at either end, steps from an item that is gone
+ *   CAP        KV_POP_MAX rows are held and the next add answers -1 and changes nothing (n == cap, cap + 1)
  *   SCROLL     a list taller than the room is as tall as the room, drawn from `off`, with a "..." row at each cut end; follow brings an item in
  */
 #define _GNU_SOURCE
@@ -407,6 +408,24 @@ static void scroll_suite(void)
 	CK(p.box.off == 0 && p.box.h == 5);
 }
 
+/* The row table is a bound on COST (a stack struct), and every caller stays under it by construction (kv_chooser_items.c, kv_bar.c assert it);
+ * what the table does AT the bound is pinned here: row KV_POP_MAX-1 is kept, the next is refused with -1 and the list is unchanged. */
+static void cap_suite(void)
+{
+	struct kv_popup p;
+	int i, last = -1;
+
+	kv_popup_init(&p, 1);
+	for (i = 0; i < KV_POP_MAX; i++)
+		last = kv_popup_add(&p, "x", 0u, i);
+	CK(last == KV_POP_MAX - 1);
+	CK(p.n == KV_POP_MAX);
+	CK(kv_popup_add(&p, "y", 0u, KV_POP_MAX) == -1);
+	CK(kv_popup_add(&p, "", KV_PR_RULE, -1) == -1);
+	CK(p.n == KV_POP_MAX);
+	CK(!strcmp(p.row[KV_POP_MAX - 1].text, "x"));
+}
+
 int main(void)
 {
 	width_suite();
@@ -416,6 +435,7 @@ int main(void)
 	hit_suite();
 	step_suite();
 	scroll_suite();
+	cap_suite();
 	printf("kx_popup: %d checks, %d failure(s)\n", checks, fails);
 	return fails != 0;
 }

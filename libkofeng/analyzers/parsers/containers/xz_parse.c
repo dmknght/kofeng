@@ -202,6 +202,25 @@ int kof_xz_sniff(kof_buf file)
 }
 
 /*
+ * AN XZ THAT IS A VARIABLE'S DATA: the magic and the stream header's own CRC32 over its two flag bytes. The magic alone was the
+ * whole check (13 of 13 real in the data of 5855 hosts) until a clean host showed what it cannot tell: libmagic's rodata holds
+ * the six bytes `\xfd 7zXZ \0` as a pattern of its database, and was opened as a damaged stream. A pattern is not followed by
+ * the CRC of the flags that follow it; a stream header is. The extent is not in the header (0).
+ */
+int kof_xz_embedded(kof_buf f, uint64_t *extent, uint64_t *work)
+{
+	uint8_t crc[4];
+
+	(void)work;
+	*extent = 0;
+	if (!kof_xz_sniff(f) || f.n < 12u)
+		return 0;
+	crc[0] = f.p[8]; crc[1] = f.p[9]; crc[2] = f.p[10]; crc[3] = f.p[11];
+	return kof_crc32(f.p + KOF_XZ_MAGIC_LEN, 2) ==
+	       ((uint32_t)crc[0] | (uint32_t)crc[1] << 8 | (uint32_t)crc[2] << 16 | (uint32_t)crc[3] << 24);
+}
+
+/*
  * ONE STREAM, read from its footer: the index it points at (every record read, not the
  * first KOF_XZ_MAX_BLOCKS), and from the sizes in it where the stream begins.
  *

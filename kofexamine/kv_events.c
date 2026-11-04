@@ -211,6 +211,21 @@ void on_release(struct view *v)
 		v->dragging = 0;
 }
 
+
+/* The wheel over the block table's rows: moves the table's window by three rows and answers 1; the clamp is prow_blocks's, next frame. */
+static int blk_wheel(struct view *v, int down)
+{
+	int t, b, full;
+
+	if (!blk_win_rows(v, &t, &b, &full) || g_my < t || g_my > b)
+		return 0;
+	if (down)
+		v->blk_off += 3u;
+	else
+		v->blk_off = v->blk_off > 3u ? v->blk_off - 3u : 0u;
+	return 1;
+}
+
 /*
  * on_wheel - what handle() does about a wheel notch, either direction.
  *
@@ -373,6 +388,8 @@ static void on_wheel(struct view *v, int k)
 			else
 				v->tree_top = v->tree_top > 3u
 					      ? v->tree_top - 3u : 0u;
+		} else if (blk_wheel(v, down)) {
+			/* The wheel over the block table's rows moved the table (its own scroll), not the panel. */
 		} else if (g_decl_rows && g_my > decl_top() &&
 			   g_my < mark_row()) {
 			/* The draft grows past its pane long before the object

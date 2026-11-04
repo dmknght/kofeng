@@ -14,6 +14,7 @@
 
 #include "scan_int.h"
 #include "objctx_int.h"
+#include "objtree.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -549,6 +550,13 @@ static void open_finish(struct kof_pipeline *p)
 	p->out->broken = sx_open_end(p->sc, &p->ctx, p->opt, &p->open);
 }
 
+/* The objects an executable holds in its variables. What it makes is found by looking, not declared, so it
+ * is a carve: the host is still the subject (see KOF_ANALYZE_CARVE). */
+static void st_embed(struct kof_pipeline *p)
+{
+	p->sc->child.n_carved += kof_objtree_embedded(&p->ctx, p->opt);
+}
+
 static void st_normz(struct kof_pipeline *p)
 {
 	sx_norm_emit(p->sc, &p->ctx, p->buf);
@@ -582,6 +590,7 @@ static const struct stage_row {
 	{ KOF_STAGE_UNPACK,    KOF_ANALYZE_UNPACK,  ROW_CHAIN,                      st_open },
 	{ KOF_STAGE_DECRYPT,   KOF_ANALYZE_DECRYPT, ROW_CHAIN,                      st_open },
 	{ KOF_STAGE_CARVE,     KOF_ANALYZE_CARVE,   ROW_CHAIN | ROW_GROUP_END,      st_open },
+	{ KOF_STAGE_EMBED,     KOF_ANALYZE_CARVE,   ROW_CHAIN,                      st_embed },
 	{ KOF_STAGE_NORMZ,     KOF_ANALYZE_NORMZ,   ROW_CHAIN | ROW_GROUP_END,      st_normz },
 	{ KOF_STAGE_SIMILAR,   KOF_ANALYZE_UNWRAP,  ROW_CHAIN | ROW_GROUP_END,      st_similar },
 	{ KOF_STAGE_SCRIPT,    KOF_ANALYZE_UNWRAP,  0,                              st_script },
@@ -615,7 +624,7 @@ static int stage_slot(enum kof_stage s)
 static const char *stage_word(enum kof_stage s)
 {
 	static const char *const w[KOF_STAGE_COUNT] = {
-		"FACTS", "RECOVER", "DETECT", "EXAMINE", "UNWRAP", "UNPACK", "DECRYPT", "CARVE", "NORMZ", "SIMILAR", "SCRIPT",
+		"FACTS", "RECOVER", "DETECT", "EXAMINE", "UNWRAP", "UNPACK", "DECRYPT", "CARVE", "EMBED", "NORMZ", "SIMILAR", "SCRIPT",
 		"SERVE", "ANALYSE", "PUBLISH", "VERDICT", "REPORT"
 	};
 

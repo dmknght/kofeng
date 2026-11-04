@@ -444,7 +444,7 @@ enum kv_cap {
 int kv_cap(uint8_t format, int cap);
 
 /*
- * The scrollbars - see kofview.c for what the thumb is counted in.
+ * The scrollbars - see kv_scrollbar.c for what the thumb is counted in.
  *
  * kv_scrollbar and kv_scrollbar_h draw one where a pane has room for it;
  * kv_bar_at hands back the single cell instead, for a caller that is building

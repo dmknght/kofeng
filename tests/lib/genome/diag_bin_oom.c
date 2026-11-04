@@ -236,7 +236,7 @@ static struct outcome codemap_once(const struct seed *s)
 	uint32_t i;
 
 	memset(&m, 0, sizeof m);
-	if (!kgenome_codemap_build(&st.obj, s->img, s->n, NULL, &m)) {
+	if (!kgenome_codemap_build(&st.obj, s->img, s->n, NULL, NULL, &m)) {
 		o.nomem_said = m.status == KGENOME_NOMEM;
 		return o;
 	}

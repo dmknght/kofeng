@@ -207,11 +207,11 @@ static void t_funcs(void)
 	/* with a caller's walk and without one: the same answer, and the walk is reusable */
 	w = kgenome_diag_walk_new();
 	CK(w != NULL);
-	kgenome_diag_funcs_with_walk(&o, E.b, E.n, w, 0, &b);
-	kgenome_diag_funcs_with_walk(&o, E.b, E.n, w, 1, &c);
+	kgenome_diag_funcs_with_walk(&o, E.b, E.n, w, &b);
+	kgenome_diag_funcs_with_walk(&o, E.b, E.n, w, &c);
 	CK(b.n == a.n && c.n == a.n && !memcmp(a.v, b.v, a.n * sizeof a.v[0]) && !memcmp(a.v, c.v, a.n * sizeof a.v[0]));
 	kgenome_funcs_free(&c);
-	kgenome_diag_funcs_with_walk(&o, E.b, E.n, NULL, 0, &c);        /* NULL walk: one is made and freed inside */
+	kgenome_diag_funcs_with_walk(&o, E.b, E.n, NULL, &c);        /* NULL walk: one is made and freed inside */
 	CK(c.n == a.n);
 	kgenome_funcs_free(&b);
 	kgenome_funcs_free(&c);

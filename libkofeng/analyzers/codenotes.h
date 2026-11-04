@@ -7,8 +7,10 @@
  * nothing here depends on what it shows. A scan does not build this: it costs a read of the whole code, and only a reader who asked for it pays.
  *
  * THREE KINDS OF NOTE, because they are drawn differently and must never be read as one another:
- *   FUNC     a function's name, where it starts: a named symbol, or `fcn_<offset>` (kof_func_name) for an entry the code itself calls or the function table lists and no symbol names.
- *   LABEL    a place a jump lands that is not a function: `.L-<offset>`. A jump label is NOT a function name and never borrows one.
+ *   FUNC     a function's name, where it starts: a function of the function table, by its symbol or `fcn_<offset>` (kof_func_name) when no symbol names it. A call target the table does not
+ *            hold is not a function (the table is the one answer).
+ *   LABEL    a place something branches to that is not a function of the table: `.L-<offset>` for a jump landing, `fcn_<offset>` for a call target the table lacks (spelled as the call that reaches
+ *            it spells it). A jump label is NOT a function name and never borrows one.
  *   COMMENT  what an instruction does: where a call or jump goes, that a jump goes backward (a loop's back edge is one, but a backward jump is not always a loop: that takes the flow graph), which syscall a syscall is.
  * A FUNC or LABEL text ends with `  ; xrefs: ...` - who refers to the place - and a viewer draws that part as a comment.
  */
@@ -49,6 +51,26 @@ struct kof_codenotes {
  * jump that lands on a PLT stub or PE thunk, or goes through an import slot, is then named `rand@plt` instead of `fcn_<offset>`. Free it
  * with kof_codenotes_free.
  */
+/*
+ * THE REQUEST: the same inputs, with two the caller may hold and the analysis would otherwise make again. `wk` is the object's walk (libgenome/phenotype: its trace is the decode of
+ * the code, so the codemap READS it and decodes nothing); `relocs` the object's CODE relocation table as the engine holds it (NULL: read from the object). Both NULL is what
+ * kof_codenotes_build does. The product is examine-only: nothing on the scan path calls it.
+ */
+struct kgenome_diag_walk;
+struct kgenome_elf_relocs;
+struct kof_codenotes_req {
+	const struct kof_obj_ctx *ctx;
+	kof_buf data;
+	const struct kgenome_func_set *funcs;
+	const uint8_t *sym;
+	uint32_t sym_n;
+	unsigned bits;
+	const struct kgenome_callnames *names;
+	struct kgenome_diag_walk *wk;
+	const struct kgenome_elf_relocs *relocs;
+};
+int kof_codenotes_make(const struct kof_codenotes_req *rq, struct kof_codenotes *out);
+/* The positional form kofexamine calls (parked): kof_codenotes_make with no walk and no relocations of the caller's. */
 int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struct kgenome_func_set *funcs,
 			const uint8_t *sym, uint32_t sym_n, unsigned bits, const struct kgenome_callnames *names,
 			struct kof_codenotes *out);

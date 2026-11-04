@@ -92,6 +92,9 @@ static uint32_t func_hold(const struct xwalk *w, const struct xpend *p, const st
 	rq.off = first->off;
 	rq.len = first->len;
 	rq.host = w->cfg;
+	rq.wk = kof_scan_of(w->ctx)->obj.diag.walk;     /* the table's decode and the object's frames, as the feed reads them */
+	rq.fs = oc_funcs(w->ctx);
+	rq.frames = oc_frames(w->ctx);
 	*id = 0;
 	if (kof_cfgsign_function(&rq, &cs) != KOF_CFGSIGN_SIGNED)
 		return 0;
@@ -144,7 +147,7 @@ static int unit_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint
 		part->region_name = mname(w->fp, region);
 		part->func[0] = 0;
 		if (first && w->syms)
-			kof_sym_name_at(w->syms, w->n_syms, first->value, -1, part->func, sizeof part->func);
+			kof_sym_name_at(w->syms, w->n_syms, &first->value, -1, part->func, sizeof part->func);
 	}
 	return 0;
 }

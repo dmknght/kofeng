@@ -24,16 +24,18 @@ static int64_t get_vz(const uint8_t **pp)
 	return (int64_t)(z >> 1) ^ -(int64_t)(z & 1u);
 }
 
-void kgenome_diag_wrapper_trace_get(struct kgenome_diag_wrapper_reader *r, struct kgenome_diag_wrapper_insn *w)
+/* The record at `r`, the whole instruction as the decoder returned it (every field but the padding is written; an absent operand arrives as the decoder leaves it). */
+void kgenome_diag_wrapper_trace_get_cell(struct kgenome_diag_wrapper_reader *r, struct kgenome_cell_insn *ci)
 {
 	const uint8_t *p = r->p, *q = p + 7;
-	unsigned ctl = p[1], n = (ctl >> KGENOME_DIAG_WRAPPER_TRACE_NOP_SHIFT) & 3u, i;
+	const unsigned ctl = p[1], n = (ctl >> KGENOME_DIAG_WRAPPER_TRACE_NOP_SHIFT) & 3u;
+	unsigned i;
 
-	w->op = p[2];
-	w->len = p[3];
-	w->flags = p[4] & 0x0fu;
-	w->cond = (uint8_t)(p[4] >> 4);
-	w->wmask = kof_ld_le16(p + 5);
+	ci->op = p[2];
+	ci->len = p[3];
+	ci->flags = p[4] & 0x0fu;
+	ci->cond = (uint8_t)(p[4] >> 4);
+	ci->wmask = kof_ld_le16(p + 5);
 	if (ctl & KGENOME_DIAG_WRAPPER_TRACE_HAS_AT) {
 		uint32_t a;
 
@@ -45,36 +47,61 @@ void kgenome_diag_wrapper_trace_get(struct kgenome_diag_wrapper_reader *r, struc
 		memcpy(&r->delta, q, 8);
 		q += 8;
 	}
-	w->at = r->at;
-	w->at_va = r->at + r->delta;
+	ci->at = r->at;
+	ci->at_va = r->at + r->delta;
+	ci->target = KGENOME_BROKEN;
 	if (ctl & KGENOME_DIAG_WRAPPER_TRACE_HAS_TGT) {
 		uint32_t t;
 
 		memcpy(&t, q, 4);
-		w->target = t;
+		ci->target = t;
 		q += 4;
-	} else {
-		w->target = KGENOME_BROKEN;
 	}
-	w->n_op = (uint8_t)n;
+	if (ctl & KGENOME_DIAG_WRAPPER_TRACE_HAS_WHI)
+		ci->wmask |= (uint64_t)get_vz(&q) << 16;
+	ci->target_va = ctl & KGENOME_DIAG_WRAPPER_TRACE_HAS_TVA ? ci->at_va + (uint64_t)get_vz(&q) : KGENOME_BROKEN;
+	ci->n_op = (uint8_t)n;
+	ci->_pad[0] = ci->_pad[1] = ci->_pad[2] = 0;
 	for (i = 0; i < n; i++) {
-		struct kgenome_diag_wrapper_op *o = &w->o[i];
+		struct kgenome_cell_operand *o = &ci->o[i];
+		const unsigned both = q[0] & KGENOME_DIAG_WRAPPER_TRACE_OP_BOTH;
 
-		o->kind = q[0]; o->reg = q[1]; o->index = q[2]; o->scale = q[3];
+		o->kind = (uint8_t)(q[0] & ~KGENOME_DIAG_WRAPPER_TRACE_OP_BOTH);
+		o->reg = q[1]; o->index = q[2]; o->scale = q[3];
 		o->size = q[4]; o->flags = q[5]; o->seg = q[6];
+		o->_pad = 0;
 		q += 7;
-		o->v = get_vz(&q);
+		if (both) {
+			o->disp = get_vz(&q);
+			o->imm = (uint64_t)get_vz(&q);
+		} else {
+			const int64_t v = get_vz(&q);
+
+			o->disp = o->kind == KGENOME_CELL_O_MEM ? v : 0;
+			o->imm = o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL ? (uint64_t)v : 0;
+		}
 	}
 	for (; i < 3u; i++) {
-		struct kgenome_diag_wrapper_op *o = &w->o[i];
+		struct kgenome_cell_operand *o = &ci->o[i];
 
 		o->kind = KGENOME_CELL_O_NONE;
 		o->reg = o->index = o->seg = KGENOME_CELL_REG_NONE;
 		o->scale = o->size = o->flags = 0;
-		o->v = 0;
+		o->_pad = 0;
+		o->disp = 0;
+		o->imm = 0;
 	}
-	r->at += w->len;
+	r->at += ci->len;
 	r->p = p + p[0];
+}
+
+/* The same record in the narrower form the wrapper analysis reads (kgenome_diag_wrapper_winsn_of: a mask of sixteen registers, one value to an operand). */
+void kgenome_diag_wrapper_trace_get(struct kgenome_diag_wrapper_reader *r, struct kgenome_diag_wrapper_insn *w)
+{
+	struct kgenome_cell_insn ci;
+
+	kgenome_diag_wrapper_trace_get_cell(r, &ci);
+	kgenome_diag_wrapper_winsn_of(w, &ci);
 }
 
 /* The first record of the trace of segment `g` at or after `off`, if it holds one.
@@ -164,7 +191,7 @@ void kgenome_diag_wrapper_isrc_seek(struct kgenome_diag_wrapper_isrc *it, uint64
 	it->at = off;
 	it->kat = 0;
 	it->rend = NULL;
-	for (i = 0; i < KGENOME_ELF_MAX_SEGMENTS; i++)
+	for (i = 0; i < KGENOME_DIAG_WALK_SEGS; i++)
 		if (trace_find(c->wk, &c->wk->tseg[i], off, &it->rd)) {
 			it->rend = c->wk->tr + c->wk->tseg[i].end;
 			return;
@@ -249,7 +276,6 @@ static uint32_t walk_held(void *priv, uint64_t off, uint64_t va, uint32_t left, 
 {
 	struct kgenome_diag_walk *wk = priv;
 	struct kgenome_diag_wrapper_reader t;
-	struct kgenome_diag_wrapper_insn w;
 	unsigned i;
 
 	wk->h_asked++;
@@ -258,37 +284,44 @@ static uint32_t walk_held(void *priv, uint64_t off, uint64_t va, uint32_t left, 
 		t.at = wk->h_at;
 		t.delta = wk->h_delta;
 	} else {
-		for (i = 0; i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+		for (i = 0; i < KGENOME_DIAG_WALK_SEGS; i++) {
 			if (trace_find(wk, &wk->tseg[i], off, &t)) {
 				wk->h_end = wk->tr + wk->tseg[i].end;
 				break;
 			}
 		}
-		if (i == KGENOME_ELF_MAX_SEGMENTS) {
+		if (i == KGENOME_DIAG_WALK_SEGS) {
 			wk->h_p = NULL;
 			return 0;
 		}
 	}
-	kgenome_diag_wrapper_trace_get(&t, &w);
-	if (w.at != off || w.len > left)
+	kgenome_diag_wrapper_trace_get_cell(&t, out);
+	if (out->at != off || out->len > left)
 		return 0;
 	wk->h_p = t.p;
 	wk->h_at = t.at;
 	wk->h_delta = t.delta;
 	/* The address is the cursor's, not the record's: the bytes decode the same under any load address
 	 * and what depends on it (the branch target) is made from the one the cursor gives. */
-	w.at_va = va;
-	kgenome_diag_wrapper_cinsn(out, &w);
+	if (out->at_va != va) {
+		/* a branch's address is relative to the instruction only where the branch is (x86: rel8/rel32, and the same bytes anywhere); a MIPS `j` or a PowerPC `ba` names a
+		 * place of the address space, so a record made for another address is not this instruction's */
+		if (wk->arch != KGENOME_ARCH_X86 && wk->arch != KGENOME_ARCH_X86_64)
+			return 0;
+		if (out->target_va != KGENOME_BROKEN)
+			out->target_va += va - out->at_va;
+	}
+	out->at_va = va;
 	out->at = va;                   /* as the decoder leaves it; cell_fetch sets the offset */
 	out->target = out->target_va;   /* likewise: an address until cell_fetch makes it an offset */
 	wk->h_served++;
-	return w.len;
+	return out->len;
 }
 
 int kgenome_diag_walk_hold(struct kgenome_cell_space *sp, struct kgenome_diag_walk *wk)
 {
 	if (!wk || !wk->built || !wk->has_trace || !wk->tr || wk->base != sp->base || wk->size != sp->size ||
-	    wk->arch != sp->arch || (sp->arch != KGENOME_ARCH_X86 && sp->arch != KGENOME_ARCH_X86_64))
+	    wk->arch != sp->arch)
 		return 0;
 	sp->held = walk_held;
 	sp->held_priv = wk;

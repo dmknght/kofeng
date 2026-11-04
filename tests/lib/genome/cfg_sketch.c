@@ -3,6 +3,9 @@
  * ascending) and how two are COMPARED (kgenome_cfg_overlap / kgenome_cfg_pct / kgenome_cfg_pct_callee: the matches among the 32
  * smallest of the union).
  *
+ * The key of an element is rkey (cfg_kit.h), the formula spelled out in the test (S1, 2026-11-03): it used to call the lib's own kgenome_cfg_key, so a wrong key function was
+ * wrong in the lib and the oracle alike.
+ *
  * THE ORACLE IS THE FIRST IMPLEMENTATION, spelled out below (`old_window_add`, `old_overlap`: a sorted 32-slot window and a branching
  * merge). The sketch is stored in packs and the threshold was measured on it, so the form that replaced it (a heap of the 32 smallest and
  * a branch-free merge) has to give the SAME keys for every input and the same hit/taken for every pair. Not "close": equal.
@@ -294,7 +297,7 @@ static void sign_struct_matches(void)
 			for (run = 0, j = 0; j < nseen; j++)
 				run += seen_lab[j] == label[i];
 			seen_lab[nseen++] = label[i];
-			old_window_add(want, &m, kgenome_cfg_key(label[i], run));
+			old_window_add(want, &m, rkey(label[i], run));
 		}
 		n_cases++;
 		CKM(s.n_key == m && memcmp(s.key, want, m * sizeof *want) == 0, "struct sign seed %u n %u: n_key %u want %u", seed, n, s.n_key, m);
@@ -347,7 +350,7 @@ static void sign_callees_match(void)
 			for (run = 0, j = 0; j < nseen; j++)
 				run += seen[j] == id;
 			seen[nseen++] = id;
-			old_window_add(want, &m, kgenome_cfg_key(id, run));
+			old_window_add(want, &m, rkey(id, run));
 		}
 		n_cases++;
 		CKM(s.n_ckey == m && memcmp(s.ckey, want, m * sizeof *want) == 0, "callee sign seed %u n %u: n_ckey %u want %u", seed, n, s.n_ckey, m);
@@ -378,7 +381,7 @@ static void sign_callees_collisions(void)
 	static const uint32_t fills[] = { 0, 1, 5, 29, 31, 32, 33, 40, 300, 1000 };
 
 	for (id = 1; id <= 6000000u && n < 60000u; id++) {
-		const uint32_t k = kgenome_cfg_key(kgenome_cfg_mix(id, 0), 0);
+		const uint32_t k = rkey(kgenome_cfg_mix(id, 0), 0);
 
 		if (k < (1u << 24)) {
 			small[n].key = k;
@@ -445,7 +448,7 @@ static void sign_callees_collisions(void)
 					for (run = 0, i = 0; i < nseen; i++)
 						run += seen[i] == lab;
 					seen[nseen++] = lab;
-					old_window_add(want, &m, kgenome_cfg_key(lab, run));
+					old_window_add(want, &m, rkey(lab, run));
 				}
 				n_cases++;
 				CKM(s.n_ckey == m && memcmp(s.ckey, want, m * sizeof *want) == 0, "collision pair %u fill %u order %u: n_ckey %u want %u", p, fill, order, s.n_ckey, m);

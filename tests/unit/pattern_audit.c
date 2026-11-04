@@ -167,7 +167,7 @@ static int gen(char *msg, size_t cap)
 
 static struct decl *decl_text(const char *s, uint32_t n)
 {
-	struct decl *d = &E.dr.decl[E.dr.n_decl++];
+	struct decl *d = decl_push(&E);
 
 	memset(d, 0, sizeof *d);
 	d->bytes = malloc(n ? n : 1u);
@@ -178,7 +178,7 @@ static struct decl *decl_text(const char *s, uint32_t n)
 
 static struct decl *decl_hex(const char *hexs)
 {
-	struct decl *d = &E.dr.decl[E.dr.n_decl++];
+	struct decl *d = decl_push(&E);
 
 	memset(d, 0, sizeof *d);
 	d->hex = DECL_HEX;
@@ -220,6 +220,7 @@ static void free_draft(void)
 
 	for (i = 0; i < E.dr.n_decl; i++)
 		free(E.dr.decl[i].bytes);
+	free(E.dr.decl);
 	memset(&E.dr, 0, sizeof E.dr);
 }
 
@@ -923,6 +924,29 @@ static void caps_of_a_unit(void)
 		clean();
 	}
 
+	/* DECL-CAP: the strings table has no capacity (owner's standing order, 2026-11-03): forty markers, ten to a matcher, all written - the
+	 * generator once looped `i < 32u` and dropped markers 33 on without a word.
+	 * Why the old tests missed it: (a) the `32u` bound was unreachable while the table held 32 rows; (b) no fixture held more. */
+	header();
+	for (i = 0; i < 40u; i++) {
+		char t[8];
+
+		snprintf(t, sizeof t, "mk%02u", i);
+		decl_text(t, 4u);
+	}
+	for (g = 0; g < 4u; g++) {
+		matcher(1, 0, KOF_SCAN_ALL);
+		for (k = 0; k < 10u; k++)
+			use(g * 10u + k, g);
+	}
+	condition("1&2&3&4", KOF_MALTYPE_BOTNET, "flood");
+	rc = gen(msg, sizeof msg);
+	CK(E.dr.n_decl == 40u);
+	CK(rc == 1);
+	if (rc == 1)
+		CK(parse_file("botnet_mirai_flood_01.c", &d) == 0 && count_items(&d, KDS_STR) == 40u && count_items(&d, KDS_FIND) == 4u);
+	clean();
+
 	/* eight matchers over eight different regions: eight ranges, each matcher names its own */
 	header();
 	{
@@ -950,7 +974,7 @@ static void caps_of_a_unit(void)
 	/* 32 markers of 170 bytes that need the hex spelling (509 characters each): what does not fit is refused, what is
 	 * written reads back; never a half file */
 	header();
-	for (i = 0; i < MAX_DECL; i++) {
+	for (i = 0; i < 32u; i++) {
 		char big[170];
 
 		memset(big, (int)(0xf0u + (i & 7u)), sizeof big);

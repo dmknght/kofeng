@@ -46,4 +46,7 @@ const char *kof_xz_anomaly_name(unsigned index);
 extern const uint32_t kof_xz_region_bits[];
 #define KOF_XZ_REGION_COUNT 3u   /* asserted against the array in the .c */
 
+/* An xz at the start of `f` that is a variable's data: the magic and the stream header's CRC32. `*extent` is 0. */
+int kof_xz_embedded(kof_buf f, uint64_t *extent, uint64_t *work);
+
 #endif /* KOFENG_XZ_PARSE_H */

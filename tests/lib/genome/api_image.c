@@ -12,6 +12,7 @@
  */
 
 #include <kgenome.h>
+#include <genotype/image/fntab.h>
 
 #include "hk.h"
 #include "../../unit/known_miss.h"
@@ -655,56 +656,90 @@ static void t_clr(void)
 
 /* ---- funcs ------------------------------------------------------------------- */
 
+/* The entry-walk strategy's output goes through the merge and the ends step: the cut that kgenome_elf_funcs_from_entries made (to the next entry, the
+ * code extent bounding the last) is now those two functions, tested on the same bytes. */
+static void put_entries(struct kgenome_fntab_list *l, const uint64_t *ent, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		struct kgenome_func f;
+
+		memset(&f, 0, sizeof f);
+		f.off = ent[i];
+		f.source = KGENOME_FN_S_WALK;
+		CK(kgenome_fntab_list_add(l, &f));
+	}
+}
+
 static void t_funcs(void)
 {
-	static struct kgenome_elf_info ei;
-	struct kgenome_obj o;
 	struct kgenome_func_set fs;
+	struct kgenome_fntab_list l;
+	struct kgenome_fntab_extent ext;
 	uint64_t ent[3];
-	kof_buf f;
 
 	hk_elf(&E, 1, 0, 0);
-	f = kof_buf_make(E.b, E.n);
-	CK(parse_elf(&E, &ei, &o));
+	ext.at = E.text;
+	ext.len = E.n - E.text;
 
-	/* no symbols (stripped): functions from entries cut the code segment */
+	/* entries with no end: each runs to the next entry, the last to the end of the code extent */
+	memset(&l, 0, sizeof l);
+	memset(&fs, 0, sizeof fs);
 	ent[0] = E.text; ent[1] = E.text + 10u; ent[2] = E.text + 14u;
-	kgenome_elf_funcs_from_entries(f, &ei, E.text, ent, 3, &fs);
+	put_entries(&l, ent, 3);
+	kgenome_fntab_merge(&l, 0, &fs);
+	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
 	CK(fs.status == KGENOME_OK && fs.n == 3);
 	CK(fs.v[0].off == E.text && fs.v[0].len == 10);
 	CK(fs.v[1].off == E.text + 10u && fs.v[1].len == 4);
 	CK(fs.v[2].off == E.text + 14u);
-	CK(fs.v[2].off + fs.v[2].len <= E.n);
+	CK(fs.v[2].off + fs.v[2].len == E.n);
+	CK(fs.v[0].end_source == KGENOME_FN_E_NEXT_START && (fs.v[0].flags & KGENOME_FN_F_END_OPEN));
+	CK(fs.partial & KGENOME_FNTAB_P_ENDS);
 	kgenome_funcs_free(&fs);
 	CK(fs.v == NULL && fs.n == 0);
 	kgenome_funcs_free(&fs);                /* idempotent */
+	kgenome_fntab_list_free(&l);
 
-	/* the entry point is added when the list lacks it; an entry outside the code
-	 * segment is an entry of nothing */
+	/* a start in no code extent is an entry of nothing, and counted */
+	memset(&l, 0, sizeof l);
 	ent[0] = E.text + 10u; ent[1] = E.n + 100u; ent[2] = 1u << 30;
-	kgenome_elf_funcs_from_entries(f, &ei, E.text, ent, 3, &fs);
-	CK(fs.n == 2 && fs.v[0].off == E.text && fs.v[1].off == E.text + 10u);
+	put_entries(&l, ent, 3);
+	kgenome_fntab_merge(&l, 0, &fs);
+	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
+	CK(fs.n == 1 && fs.v[0].off == E.text + 10u);
+	CK(fs.n_extra == 2);
 	kgenome_funcs_free(&fs);
+	kgenome_fntab_list_free(&l);
 
-	/* degenerate requests */
-	kgenome_elf_funcs_from_entries(f, &ei, E.text, ent, 0, &fs);
+	/* degenerate requests: an empty list, no extent */
+	memset(&l, 0, sizeof l);
+	kgenome_fntab_merge(&l, 0, &fs);
 	CK(fs.n == 0 && fs.v == NULL);
-	kgenome_elf_funcs_from_entries(kof_buf_make(NULL, 0), &ei, E.text, ent, 3, &fs);
+	kgenome_fntab_ends(&fs, NULL, 0, NULL, 0);
 	CK(fs.n == 0 && fs.v == NULL);
-	kgenome_elf_funcs_from_entries(f, NULL, E.text, ent, 3, &fs);
-	CK(fs.n == 0 && fs.v == NULL);
-	kgenome_elf_funcs_from_entries(f, &ei, KGENOME_BROKEN, ent, 3, &fs);
-	CK(fs.status == KGENOME_OK);
+	memset(&l, 0, sizeof l);
+	put_entries(&l, ent, 1);
+	kgenome_fntab_merge(&l, 0, &fs);
+	kgenome_fntab_ends(&fs, NULL, 0, NULL, 0);
+	CK(fs.n == 0 && fs.n_extra == 1);        /* no extent holds it: nothing stands */
 	kgenome_funcs_free(&fs);
-	/* unsorted and duplicate entries: memory-safe, and every function stays in the file */
+	kgenome_fntab_list_free(&l);
+	/* unsorted and duplicate entries: memory-safe, one function a start, every function stays in the file */
+	memset(&l, 0, sizeof l);
 	ent[0] = E.text + 14u; ent[1] = E.text; ent[2] = E.text;
-	kgenome_elf_funcs_from_entries(f, &ei, E.text + 5u, ent, 3, &fs);
+	put_entries(&l, ent, 3);
+	kgenome_fntab_merge(&l, 0, &fs);
+	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
+	CK(fs.n == 2 && fs.v[0].off == E.text && fs.v[1].off == E.text + 14u);
 	{
 		uint32_t i;
 		for (i = 0; i < fs.n; i++)
 			CK(fs.v[i].off + fs.v[i].len <= E.n);
 	}
 	kgenome_funcs_free(&fs);
+	kgenome_fntab_list_free(&l);
 }
 
 /* ---- the ledger's note --------------------------------------------------------- */

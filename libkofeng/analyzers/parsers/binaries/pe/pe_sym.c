@@ -1,11 +1,19 @@
 /*
- * pe_sym.c - a PE's imports and exports, in the KSYM layout.
+ * pe_sym.c - a PE's imports, exports and its own COFF local symbols, in the KSYM layout.
  *
  * The PE half of what elf_sym.c does for ELF, and it exists so that a rule
  * asking "what does this object import" or "what does it export" asks it the
  * same way whatever the format is. The layout, the record length and the enum
  * values are kofmod/kofsym.h's; nothing here is PE-shaped except where the
  * names come from.
+ *
+ * A fourth source joined the two directories: a toolchain that keeps local
+ * symbols (GNU ld - MinGW, Cygwin) leaves its own COFF symbol table in the
+ * image, and fntab_pe_coff.c already reads it for a function's boundaries
+ * (value, shndx). coff_put below is the name half of that same table,
+ * through the one shared walk, kgenome_pe_coff_syms (pe_coff_sym.c) - this
+ * closed PE-SYM-NAME-GAP, where a COFF function's boundary was correct but
+ * its name was never in this block for kof_sym_name_at to find.
  *
  *
  * WHAT A PE CALLS A SYMBOL
@@ -92,22 +100,29 @@ static uint32_t name_at(kof_buf f, uint64_t off, char *out, uint32_t cap)
 	return i;
 }
 
-/* One symbol, with the fields every caller of this file sets the same way: an
- * import or an export is a global function (see the header), named `name`. */
-static int sym_put(struct kof_symw *w, uint8_t flags, uint64_t value,
+/* One symbol, with the fields every caller of this file sets the same way: a
+ * global function (see the header), named `name`, at section `shndx`.
+ * Imports and exports pass 0xffffu - "not a real section index", which is
+ * what a PE import or export is: the directories name a module and an RVA,
+ * not a section, spelled the way elf_sym.c spells an ELF reserved index so a
+ * rule comparing the field has one value to compare against. A COFF local
+ * symbol (coff_put, below) passes its real, 1-based SectionNumber: that and
+ * `value` are the pair kof_sym_name_at matches a function-table entry
+ * against (kof_func_name, sym_any.c), so here they must be the same pair
+ * fntab_pe_coff.c already put in the entry. */
+static int sym_put(struct kof_symw *w, uint8_t flags, uint16_t shndx, uint64_t value,
 		   const char *name, uint32_t name_len, int cut)
 {
 	struct kof_symrec r;
 
 	r.type  = 2u;                   /* STT_FUNC - see the header */
-	r.bind  = 1u;                   /* STB_GLOBAL */
+	r.bind  = 1u;                   /* STB_GLOBAL - the approximation this file already makes
+					    for imports and exports; a COFF STATIC function (file-
+					    local, C's "static") keeps it too, since what a rule here
+					    keys on is (value, shndx), not bind. */
 	r.vis   = 0u;                   /* STV_DEFAULT */
 	r.flags = flags;
-	/* 0xffff, "not a real section index", which is what a PE import or
-	 * export is: the directories name a module and an RVA, not a section.
-	 * Spelled the same way elf_sym.c spells an ELF reserved index so a rule
-	 * comparing the field has one value to compare against. */
-	r.shndx = 0xffffu;
+	r.shndx = shndx;
 	r.size  = 0;
 	r.value = value;
 	r.name = name;
@@ -174,7 +189,7 @@ static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_im
 		 * on the record. The MODULE part is cut here, at DLL_ROOM bytes ("api-ms-win-
 		 * core-synch-l1-2-0.dll" is 31): the record says so too, so a name that
 		 * does not match "dll!func" can be told from one that was never there. */
-		if (!sym_put(w, KOF_SYM_F_UNDEFINED, 0, sym, len, strlen(dll) > DLL_ROOM))
+		if (!sym_put(w, KOF_SYM_F_UNDEFINED, 0xffffu, 0, sym, len, strlen(dll) > DLL_ROOM))
 			break;
 	}
 }
@@ -201,7 +216,7 @@ static int export_put(void *user, uint64_t nameoff, uint32_t frva)
 	      x->f.p[nameoff + len] != 0;
 	return sym_put(x->w, (uint8_t)(KOF_SYM_F_DEFINED |
 				       (frva ? KOF_SYM_F_IN_EXEC : 0u)),
-		       frva, fn, len, cut);
+		       0xffffu, frva, fn, len, cut);
 }
 
 static enum kgenome_status do_exports(struct kof_symw *w, kof_buf f,
@@ -231,6 +246,40 @@ uint32_t kof_pe_syms(kof_buf file, const struct kgenome_pe_info *p,
 	return kof_pe_syms_with(file, p, NULL, out, cap);
 }
 
+/*
+ * THE FILE'S OWN COFF LOCAL SYMBOLS, spelled as records - closes PE-SYM-NAME-GAP.
+ *
+ * fntab_pe_coff.c already reads this same table for a function's boundaries
+ * (f.value, f.shndx); without a matching record here kof_sym_name_at found
+ * nothing for it and kof_func_name fell back to fcn_<offset> on every
+ * unstripped mingw/cygwin PE, even though the boundary itself was correct.
+ * kgenome_pe_coff_syms (pe_coff_sym.c) is the one walk of the table - the
+ * SAME walk fntab_pe_coff.c now calls too - so the record layout, the
+ * aux-record skip and the bounds-checking are not re-derived here.
+ *
+ * The name is sanitised printable-only for the reason name_at() above gives:
+ * it is compared against text in a rule. `value`/`shndx` are passed through
+ * exactly as the walk reports them, which is exactly what fntab_pe_coff.c
+ * already put on the function-table entry - the pair kof_sym_name_at needs
+ * to find it.
+ */
+static int coff_put(void *user, const struct kgenome_pe_coff_sym *s)
+{
+	struct kof_symw *w = user;
+	char clean[KOF_SYM_NAME_MAX + 2u];
+	uint32_t i, len = s->name_len;
+
+	if (!len)
+		return 1;        /* no name: nothing this block can key on, same as an unnamed export */
+	if (len > KOF_SYM_NAME_MAX)
+		len = KOF_SYM_NAME_MAX;
+	for (i = 0; i < len; i++)
+		clean[i] = (s->name[i] >= 0x20 && s->name[i] < 0x7f) ? s->name[i] : '?';
+	clean[i] = 0;
+	return sym_put(w, (uint8_t)(KOF_SYM_F_DEFINED | KOF_SYM_F_IN_EXEC), s->shndx,
+		      s->value, clean, len, s->name_len > KOF_SYM_NAME_MAX);
+}
+
 uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 			  const struct kgenome_pe_imptab *tab,
 			  uint8_t *out, uint32_t cap)
@@ -238,7 +287,8 @@ uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 	struct kgenome_pe_imptab own;
 	struct kof_symw w;
 	enum kgenome_status src;
-	uint32_t bytes;
+	uint32_t bytes, n_before_coff;
+	int coff_any;
 
 	if (!out || cap < KOF_SYM_HDRLEN)
 		return 0;
@@ -273,6 +323,16 @@ uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 		kgenome_pe_imptab_free(&own);
 	src = kgenome_status_merge(src, do_exports(&w, file, p));
 
+	/*
+	 * THE FILE'S OWN COFF LOCAL SYMBOLS, after the directories - the same
+	 * order rule as imports-before-exports does not apply here (COFF locals
+	 * are neither), so they go last and do not disturb the imports-first
+	 * contract kofviewer and kofexaminer read the block by.
+	 */
+	n_before_coff = w.n;
+	kgenome_pe_coff_syms(file, p, coff_put, &w, NULL);
+	coff_any = w.n != n_before_coff;
+
 	bytes = kof_symw_end(&w);
 	/* A bound of the walks that feed the block (the thunk budget, the export
 	 * name bound, memory) is a cut the buffer's size does not change: it has
@@ -284,11 +344,11 @@ uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 	 *
 	 * "none" over a block with four records in it reads as a contradiction,
 	 * and the honest answer exists: the records came from the import and
-	 * export directories. Only when there ARE records - a PE with neither
-	 * directory genuinely has no origin.
+	 * export directories, the file's own COFF table, or both. Only when
+	 * there ARE records - a PE with neither genuinely has no origin.
 	 */
 	if (w.n)
-		out[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_PE_DIR;
+		out[KOF_SYM_H_ORIGIN] = coff_any ? KOF_SYM_ORIGIN_PE_COFF : KOF_SYM_ORIGIN_PE_DIR;
 	/*
 	 * TRUNCATED is the writer's: a symbol it was offered and could not hold -
 	 * the table or the pool was full. It was "the block filled exactly",
@@ -414,7 +474,7 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 		}
 		if (k < i)
 			continue;
-		if (!sym_put(&w, KOF_SYM_F_UNDEFINED, 0, sym, len, 0))
+		if (!sym_put(&w, KOF_SYM_F_UNDEFINED, 0xffffu, 0, sym, len, 0))
 			break;
 		added++;
 	}

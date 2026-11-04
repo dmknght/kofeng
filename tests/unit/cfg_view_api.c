@@ -16,6 +16,8 @@
 #include "../lib/genome/cfg_kit.h"
 #include "../../libkofeng/analyzers/cfgview.h"
 #include "../../libkofeng/analyzers/genome_obj.h"
+#include "../../libkofeng/analyzers/cfgsign.h"
+#include "../../libkofeng/kofcore/kofmod/kofmutation.h"
 
 #define BASE_OFF 0x40u          /* where the function sits in the object */
 #define PAD_AFTER 0x30u
@@ -310,17 +312,15 @@ static void anchor(void)
 		CK(kof_cfgview_build(&rq, &v) == 1);
 		CKM(v.view.n_blk == nb, "blocks %u of %u", v.view.n_blk, nb);
 		CKM(v.anchor_pass == (v.view.n_blk >= KGENOME_CFG_ANCHOR_MIN), "nb %u: pass %d at %u reachable blocks", nb, v.anchor_pass, v.view.n_blk);
-		if (!v.anchor_pass)
-			CK(strstr(v.text, ": BELOW\n") != NULL && strstr(v.text, "is not hashed") == NULL);
-		else
-			CK(strstr(v.text, ": PASS\n") != NULL && strstr(v.text, "is hashed") == NULL);
+		/* no anchor line in either case: the floor is 1 and the line was always PASS */
+		CK(strstr(v.text, "anchor") == NULL && strstr(v.text, "PASS") == NULL && strstr(v.text, "BELOW") == NULL);
 		kof_cfgview_free(&v);
 		/* the caller's own anchor: min 3 passes anything above it, min 1000 passes nothing */
 		rq.anchor_min = 3;
 		CK(kof_cfgview_build(&rq, &v) == 1 && v.anchor_pass == 1 && v.anchor_min == 3);
 		kof_cfgview_free(&v);
 		rq.anchor_min = 1000;
-		CK(kof_cfgview_build(&rq, &v) == 1 && v.anchor_pass == 0 && strstr(v.text, "< 1000: BELOW") != NULL);
+		CK(kof_cfgview_build(&rq, &v) == 1 && v.anchor_pass == 0 && v.anchor_min == 1000 && strstr(v.text, "anchor") == NULL);
 		kof_cfgview_free(&v);
 		scene_free(&s);
 		blob_free(&x);
@@ -454,22 +454,35 @@ static void text_is_the_facts(void)
 	request(&rq, &s);
 	CK(kof_cfgview_build(&rq, &v) == 1 && v.text);
 	CK(!strncmp(v.text, "function ", 9) && strstr(v.text, "x86-64") && strstr(v.text, "little-endian") && strstr(v.text, "instructions="));
-	CK(strstr(v.text, "extent  0x40 +") != NULL && strstr(v.text, "calls=1") != NULL);
+	CK(strstr(v.text, "extent  0x40 +") != NULL && strstr(v.text, "calls=") == NULL);        /* a function with calls: the table title says the count */
 	CK(strstr(v.text, "legend") == NULL && strstr(v.text, "letters") == NULL);
 	CK(v.n_top == 3 && v.n_lines >= 6);
-	/* the head carries what the researcher decides by: counts, anchor, canon, keys, status */
+	/* the head carries what the researcher decides by: the counts, the unit id, the keys; a status only when it is not ok */
 	{
 		char want[64];
 
-		snprintf(want, sizeof want, "canon  0x%016llx", (unsigned long long)v.view.canon);
-		CK(strstr(v.text, want) != NULL);
-		snprintf(want, sizeof want, "keys   %08x", (unsigned)v.view.key[0]);
-		CK(strstr(v.text, want) != NULL);
-		snprintf(want, sizeof want, "CFG  reachable=%u  edges=%u  unreachable=%u  all=%u  status=ok", v.view.n_blk, v.view.n_edge, v.view.n_unr, v.n_all);
+		snprintf(want, sizeof want, "unit   %08x\nkeys   %08x", (unsigned)kof_mutation_fold(v.view.key, v.view.n_key), (unsigned)v.view.key[0]);
+		CKM(strstr(v.text, want) != NULL, "unit line then keys line '%s'", want);
+		snprintf(want, sizeof want, "CFG  reachable=%u  edges=%u\n", v.view.n_blk, v.view.n_edge);
 		CKM(strstr(v.text, want) != NULL, "no counts line '%s'", want);
-		snprintf(want, sizeof want, "anchor  %u reachable blocks %s %u: %s", v.view.n_blk, v.view.n_blk >= KGENOME_CFG_ANCHOR_MIN ? ">=" : "<", KGENOME_CFG_ANCHOR_MIN,
-			 v.view.n_blk >= KGENOME_CFG_ANCHOR_MIN ? "PASS" : "BELOW");
-		CKM(strstr(v.text, want) != NULL && v.anchor_pass == (v.view.n_blk >= KGENOME_CFG_ANCHOR_MIN), "anchor line '%s' (blocks %u)", want, v.view.n_blk);
+		CK(strstr(v.text, "canon") == NULL && strstr(v.text, "anchor") == NULL && strstr(v.text, "all=") == NULL && strstr(v.text, "unreachable=") == NULL &&
+		   strstr(v.text, "status=") == NULL);
+		CK(v.anchor_pass == (v.view.n_blk >= KGENOME_CFG_ANCHOR_MIN));
+	}
+	/* the unit id is the id the Blocks table gives the row (kv_mutation.c: kof_cfgsign_function, then kof_mutation_fold of the keys) */
+	{
+		struct kof_cfgsign cs;
+		struct kof_cfgsign_req sq;
+		char want[32];
+
+		memset(&sq, 0, sizeof sq);
+		sq.ctx = rq.ctx;
+		sq.data = rq.data;
+		sq.off = rq.func_off;
+		sq.len = rq.func_len;
+		CK(kof_cfgsign_function(&sq, &cs) == KOF_CFGSIGN_SIGNED);
+		snprintf(want, sizeof want, "\nunit   %08x\n", (unsigned)kof_mutation_fold(cs.sign.key, cs.sign.n_key));
+		CKM(strstr(v.text, want) != NULL, "the Overview's unit is not the table's id '%s'", want);
 	}
 	CK(v.gv.n_node == v.view.n_blk && v.gv.n_edge == v.view.n_edge);
 	CK(v.gv.n_note == 1 && v.gv.note_total == 1 && strstr(v.gv.note[0].text, "call") != NULL && !strcmp(v.gv.note_title, "calls: 1"));

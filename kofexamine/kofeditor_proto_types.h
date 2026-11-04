@@ -9,7 +9,11 @@
 #ifndef KOF_KOFEDITOR_PROTO_TYPES_H
 #define KOF_KOFEDITOR_PROTO_TYPES_H
 
-#define MAX_DECL  32
+/*
+ * THE STRINGS TABLE HAS NO CAPACITY OF ITS OWN (owner's standing order, 2026-11-03): `decl` holds every marker the author declares, grown
+ * by decl_reserve (kofeditor_decl.c) as blk_reserve grows the blocks, and a refusal is said on the draft (say_err), never a marker dropped.
+ * MAX_DECL (32) was here; the screen's rows, the edit codes (ED_STR) and the pick-list no longer read a number of it.
+ */
 
 /*
  * THE LARGEST DECLARATION, AND THE TWO BUFFERS THAT MUST AGREE WITH IT.
@@ -698,17 +702,10 @@ struct cond {
  * status line only decides where to put it.
  */
 /*
- * How many similarity blocks one draft can hold - the engine's offers for the
- * object in front of it, plus whatever a loaded rule declared.
- *
- * A BOUND ON A HOSTILE FILE, not a taste. The functions of a binary are offered
- * one block each, and a few hundred is ordinary (46652 author functions over 133
- * measured binaries); a file that names a hundred thousand is not asking to be
- * browsed. It was sixty-four when the offer was a carve of the bytes into
- * roughly eight-kilobyte pieces, which is still how everything that is not
- * code is offered - see MTN_DATA_BLOCKS.
+ * THE BLOCK TABLE HAS NO CAPACITY OF ITS OWN: it holds what the engine offers for the object. A function is a block, a binary can have more
+ * than four thousand (5573 units in one unpacked ARM object), and a fixed number dropped the rest without a word. It grows with the rows
+ * (blk_reserve, kofeditor.c) and says so when memory refuses.
  */
-#define MTN_MAX_BLOCK 4096u
 
 /* The share of the table the byte carve may fill: the regions that are not
  * code. Unchanged from when the table held no more than this. */
@@ -798,8 +795,9 @@ struct mtn_block {
 };
 
 struct kof_draft {
-	struct decl  decl[MAX_DECL];
+	struct decl *decl;                 /* the declared markers; owned by the draft, grown by decl_reserve */
 	uint32_t     n_decl, sel_decl;
+	uint32_t     cap_decl;             /* rows the allocation has room for */
 	/*
 	 * THE SIMILARITY BLOCKS, which are declarations like the markers above.
 	 *
@@ -815,7 +813,7 @@ struct kof_draft {
 	 * see where ext and probe are.
 	 */
 	struct mtn_block *blk;
-	uint32_t     n_blk;
+	uint32_t     n_blk, cap_blk;   /* rows held, rows the allocation has room for */
 	/*
 	 * AND ITS STRINGS, after the static library was subtracted.
 	 *

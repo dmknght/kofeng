@@ -7,7 +7,7 @@ screen changes because somebody asked for that change, not because a function wa
 States, all reached by the mouse and the menus (no key route is used or added):
   per sample (run1 = a Mirai build the release database detects, clean = an ELF the engine finds nothing in, pe = a small PE,
   zip = an archive with children): the tree and status bar as opened, and the dashboard's five tabs;
-  run1 only: the verdict-carrying view row (//0:norm) with its dashboard Detection block, the diagnose panel's Patterns / Blocks / Graphs
+  run1 only: the verdict-carrying view row (//0:norm), the diagnose panel's Patterns / Blocks / Graphs
   tabs for the file and for that view; the five menus open; the dialogs of Edit and Help and Analysis > Decode string; the
   disassembly panel; the context menu of the hex pane.
 
@@ -159,13 +159,10 @@ reg('hex_context_menu', lambda v: (v.rclick(60, 8), v.pump_quiet()))
 # recorded as the new truth; these rows are the part of each screen that the viewer's features stand on, and a golden file that
 # lacks one fails here whatever the manifest says. A row is added here when the owner names a part of a screen as required.
 REQUIRED = {
-    # the object that is the file shows the engine's file verdict (kverdict_filemap): in the status bar and as the one `verdict` row
+    # the object that is the file shows the engine's file verdict (kverdict_filemap) in the status bar
     'run1_tree': ['ELF  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose'],
-    'run1_dash_overview': ['Detection', 'verdict     Infected#ELF-x64/Botnet:Mirai.A!Diagnose'],
     'clean_tree': ['ELF  |  no verdict'],
     'run1_norm_tree': ['Norm  |  Infected#ELF-x64/Botnet:Mirai.A!Diagnose'],
-    'run1_norm_dash_overview': ['Detection', 'verdict     Infected#ELF-x64/Botnet:Mirai.A!Diagnose', 'family      Mirai', 'variant     Mirai.A',
-                                'diagnose    botnet_mirai_mirai-ops-str_01'],
     # the head parses the matched diagnose: family, variant, and the variant's comment; the Blocks tab ticks the blocks that decided it
     # and shows the engine's one percentage in the score column, on the file and on its normalised view.
     # A function row shows the unit id of its CFG signature in the hash column (CFG step 2c), or a dash when it has fewer than 12 reachable blocks;
@@ -185,14 +182,14 @@ FORBIDDEN = {
     # the Graphs tab is for the lineage design: it does not list the diagnoses of the object (the old design did)
     'run1_norm_panel_graphs': ['Diagnoses', 'botnet_mirai_mirai-flood'],
     'run1_panel_graphs': ['Diagnoses'],
-    'run1_dash_overview': ['family      ', 'variant     ', 'basis       '],
+    'run1_dash_overview': ['Detection', 'family      ', 'variant     ', 'basis       '],
+    'run1_norm_dash_overview': ['Detection'],
 }
 
 # SUSPENDED (owner 2026-10-30, still true after CFG step 2c): the 12 diagnoses whose blocks are WINDOW hashes of functions stay disabled
 # (docs/disabled/diagnoses), so the rows only they can make true cannot exist. Turn them back on (move them into REQUIRED) in the change that
 # restores those diagnoses or replaces them with CFG ones.
 SUSPENDED_REQUIRED = {
-    'run1_norm_dash_overview': ['diagnose    botnet_mirai_mirai-flood_01'],
     'run1_norm_panel_blocks': ['[x]  0x00006c7a  846060fe  SendHTTP', 'CODE    100%'],
     'run1_panel_blocks': ['[x]  0x00008064  846060fe  SendHTTP'],
 }
@@ -200,7 +197,7 @@ SUSPENDED_REQUIRED = {
 
 @case(A)
 def golden_required_rows_are_present():
-    """The Dashboard Detection block, the Blocks tab's ticked matched blocks with the parsed head, and the Patterns tab's Matchers / Conditions
+    """The Blocks tab's ticked matched blocks with the parsed head, and the Patterns tab's Matchers / Conditions
     rows are in the golden files (and so in the viewer)."""
     miss = []
     for name, rows in REQUIRED.items():

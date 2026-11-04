@@ -55,7 +55,7 @@ struct blk_ctx {
 };
 
 /* A function unit, printed from its CFG signature (kof_cfgsign_function, the engine's one signing function): the block count, the id as the table
- * and a diagnose carry it, the canonical hash and the keys. An unsigned one says why. */
+ * and a diagnose carry it, and the keys. An unsigned one says why. */
 static void blk_func(struct blk_ctx *c, const struct kgenome_func *first)
 {
 	struct kof_cfgsign cs;
@@ -75,8 +75,7 @@ static void blk_func(struct blk_ctx *c, const struct kgenome_func *first)
 		printf(")\n");
 		return;
 	}
-	printf("  windows=-  cfg_blocks=%u  block_id=%08x  canon=%016llx\n      block", cs.sign.n_blk, kof_mutation_fold(cs.sign.key, cs.sign.n_key),
-	       (unsigned long long)cs.sign.canon);
+	printf("  windows=-  cfg_blocks=%u  block_id=%08x\n      block", cs.sign.n_blk, kof_mutation_fold(cs.sign.key, cs.sign.n_key));
 	for (k = 0; k < cs.sign.n_key; k++)
 		printf(" %08x", cs.sign.key[k]);
 	printf("\n");
@@ -96,7 +95,7 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 
 	sym[0] = 0;
 	if (first && c->syms)
-		kof_sym_name_at(c->syms, c->syms_n, first->value,
+		kof_sym_name_at(c->syms, c->syms_n, &first->value,
 				     (int)first->shndx, sym, sizeof sym);
 	nb = kgenome_mutation_unit_minhash(first, c->buf.p + off, len, block);
 	c->units++;

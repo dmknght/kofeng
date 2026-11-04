@@ -10,6 +10,38 @@
  * which is the seam the pipeline rewrite replaces with an explicit input.
  */
 
+/*
+ * IMPROVE embed-walk-1 (owner, 2026-11-01; NOTE ONLY, nothing built; measured on /home/dmknght/Desktop/MalwareLab, 14208 files, header scan only): the walk of an object must also look,
+ * in the object's own DATA - the variables, byte arrays compiled into the image - for an ELF HEADER, because a payload can be carried as data INSIDE the loaded segment (it is not past the
+ * ELF's logical end, so it is not appended). Measured: 102 files hold a validated ELF header inside their logical end, 89 of them under new_Mirai (e.g. i.3_detected, 307960 bytes: ELF
+ * headers of x86-64, ARM, SPARC, MIPS and i386 of 1400-2400 bytes each, at 0x382cc 0x38a80 0x3916c 0x39780 0x3a0cc, all inside an R-X PT_LOAD); the carve module finds none of them (3 files run).
+ * Not verified: that the program writes those arrays out. A header is validated, not 4 magic bytes: 7f 45 4c 46 alone is in 48 of 513 ELF as a libc constant; validated = class, data, version,
+ * type 2 or 3, a known machine, e_ehsize 52/64, e_phentsize 32/56, e_phnum > 0; the embedded extent comes from its own header (the union rule of IMPROVE appended-carve-1). */
+
+/*
+ * IMPROVE embed-var-1 (owner, 2026-11-03; the measurement behind KOF_STAGE_EMBED (objtree_embed.c, built 2026-11-03); experiment exp_embvar, MalwareLab 4738 ELF hosts): which signal tells an ELF held in a VARIABLE from a constant
+ * that merely starts with the 4 magic bytes. Measured: the validated header alone separates them (1198 candidates in 102 files; 0 false hits on 2828 magic-only occurrences and 3999
+ * random offsets; 0 of 2485 benign hosts except one real cubin). Entropy has no floor above string-only data (strings 0.51..6.10 bits, candidates 0.09..7.93, 1192 of 1198 inside the
+ * string range). The declared extent fits before the segment end for 1198 of 1198, so it only confirms. A reference from code is seen for 3 of 41 x86 candidates (the sweep reads
+ * x86 only, its map is partial on static hosts) and no product says WHICH call the address reaches. Order when built: magic (0.2 ms/MB), header (23 ns), extent fit, then entropy
+ * and xref as evidence only. Corpus bias: the 1198 candidates are 42 distinct ELFs in 13 distinct host files. */
+
+/*
+ * IMPROVE embed-sniff-1 (owner, 2026-11-03; the measurement behind KOF_STAGE_EMBED (objtree_embed.c, built 2026-11-03; no magic field was added: the pointer/symbol sources only); experiment exp_embsniff, MalwareLab 5855 ELF/PE hosts, 4384 MB, the engine's own kof_parser_list rows run at EVERY offset
+ * as a child-like window, hits verified by readelf / unzip / zlib / file): the sniff chain CAN be reused on a variable or a data region, but only behind a per-format second check and a
+ * candidate source, because most rows are not sniffs of a boundary. In data (1079 MB): ELF 1617 accepted, 1170 real (no libc constant passes the validated header; 9 of the 1479 that pass fail readelf's dynamic-segment check only; the other 447 are the 4 magic bytes in libc
+ * constants, the engine's ELF parse accepts them), PE 30/30 real, 7z/rar/xz/cab/rtf 13/13 real (few), gzip 30 accepted 9 real (reserved flags and the first deflate block remove the rest),
+ * zip 736 accepted on "PK\3\4" 8 real (members of a real zip and constants; the tail probe accepts every offset before an appended EOCD, 22498 hits, never use it in a variable), tar
+ * 1557 / pdf 1345 / arj 143 accepted 0 real, script 138398 accepted (128 per MB) 21 real, and those 21 are exactly the rows whose shebang NAMES an interpreter (sheb_kind != KOF_SCRIPT_ANY:
+ * 21 real of 27 named, 6 of 15226 unnamed "#!" + binary accepted). Cost: a declining chain is ~25 ns per offset plus the zip tail probe (8-280 ns) plus the script row (about 2 ns per
+ * window byte per offset: 530 ns at 256 B, 4-5 us at 4 KiB, 80-90 us at 64 KiB); every-offset over the host cost 0.82 us per byte (script window 256). Sources, recall of the 1251 real in
+ * data: magic anchors 100% (679 candidates per MB of data; the chain exposes NO magic, kof_parser has no field for it, and bases/decomp/overlay.c keeps a second short magic list because of that),
+ * pointer words in data 93% of hits but 45% of distinct contents, ELF only (4338 per MB, 2 ms per MB), OBJECT symbols 0.3% (stripped hosts; 17% in the 485 hosts that have them), xref 0.4%
+ * (x86 only: 2558 of 5855 hosts cannot be asked, 1771 are ARM and carry 1131 of the 1251). Not seen by any sniff: encoded variables (xor tables, PLAN str-decode-1), raw zlib, PE resource leaves
+ * (no kgenome API walks the tree), tar and arj with no strong magic. Overlap: 51 of 2159 real candidates start inside the declared extent of another (44 are zip members); of 576 real past
+ * the host's logical end only 220 start AT it, which is all appended_00.c / overlay.c reach. Rule when built: a candidate inside an accepted child's extent is not offered; magic first,
+ * the format's own check second, the sniff row third, the parse last. Corpus bias: 40 distinct ELFs in 99 hosts. */
+
 #define _GNU_SOURCE
 
 #include "scan_int.h"

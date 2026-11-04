@@ -148,7 +148,7 @@ static void check_layout(const struct ins *in, unsigned n, uint32_t size, const 
 	int64_t eax = -1;
 	unsigned i, ri = 0, probe;
 
-	CK(kgenome_codemap_build(&obj, buf, size, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, buf, size, NULL, NULL, &m) == 1);
 	for (i = 0; i < n; i++) {
 		unsigned k = in[i].kind, hit;
 		int64_t t;
@@ -230,23 +230,23 @@ static void t_named_edges(void)
 	uint32_t first;
 
 	obj.obj_size = sizeof jmp_self;
-	CK(kgenome_codemap_build(&obj, jmp_self, sizeof jmp_self, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, jmp_self, sizeof jmp_self, NULL, NULL, &m) == 1);
 	CK(m.n == 1 && m.v[0].to == 0 && (m.v[0].flags & KGENOME_CMF_BACK));
 	CK(kgenome_codemap_to(&m, 0, &first) == 1);
 	kgenome_codemap_free(&m);
 
 	obj.obj_size = sizeof two;
-	CK(kgenome_codemap_build(&obj, two, sizeof two, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, two, sizeof two, NULL, NULL, &m) == 1);
 	CK(m.n == 1 && m.v[0].kind == KGENOME_CM_SYSCALL && (m.v[0].flags & KGENOME_CMF_NR) && m.v[0].nr == 60u);
 	kgenome_codemap_free(&m);
 
 	obj.obj_size = sizeof join;
-	CK(kgenome_codemap_build(&obj, join, sizeof join, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, join, sizeof join, NULL, NULL, &m) == 1);
 	CK(m.n == 2 && m.v[1].kind == KGENOME_CM_SYSCALL && !(m.v[1].flags & KGENOME_CMF_NR));
 	kgenome_codemap_free(&m);
 
 	/* nothing to read, and an architecture with no decoder, are answers and not crashes */
-	CK(kgenome_codemap_build(&obj, join, 0, NULL, &m) == 0 && m.n == 0);
+	CK(kgenome_codemap_build(&obj, join, 0, NULL, NULL, &m) == 0 && m.n == 0);
 	kgenome_codemap_free(&m);
 }
 
@@ -259,11 +259,11 @@ static void t_relocated_call(void)
 	struct kgenome_elf_relocs t = { .v = &rel, .n = 1 };
 	struct kgenome_codemap m;
 
-	CK(kgenome_codemap_build(&obj, code, sizeof code, &t, &m) == 1);
+	CK(kgenome_codemap_build(&obj, code, sizeof code, &t, NULL, &m) == 1);
 	CK(m.n == 2 && m.v[0].kind == KGENOME_CM_CALL && (m.v[0].flags & KGENOME_CMF_RELOC) && m.v[0].to == KGENOME_BROKEN);
 	CK(m.n_to == 0);
 	kgenome_codemap_free(&m);
-	CK(kgenome_codemap_build(&obj, code, sizeof code, NULL, &m) == 1);
+	CK(kgenome_codemap_build(&obj, code, sizeof code, NULL, NULL, &m) == 1);
 	CK(m.v[0].to == 5 && !(m.v[0].flags & KGENOME_CMF_RELOC));     /* without the table it is call-next */
 	kgenome_codemap_free(&m);
 }

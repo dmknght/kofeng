@@ -505,9 +505,9 @@ int main(int argc, char **argv)
 	make_alt_db(dbB, "alt_b");
 	make_alt_db(dbN, "alt_none");
 	/* Function units carry no similarity signature (prototype 2026-10-30, kgenome_mutation_signature): a diagnose whose block is cut from a function
-	 * is not scored on run1. What matches is what the DATA blocks say: of the release database's sixteen, the two data ones (Mirai-Ops-Str,
-	 * Mirai-wordlist: the lead is Mirai-Ops-Str); of alt_a (6 function diagnoses + trojan_zorg_zorg-wave_07) and alt_b (3 + _04), the one data diagnose. */
-	cases[0] = (struct dbcase){ "release", "build/release/databases", "bases", 2u, "Mirai", "Mirai.A", "Mirai-Ops-Str", "Botnet", NULL };
+	 * is not scored on run1. What matches is what the DATA blocks say: of the release database's, the data ones (the tag the owner renamed from
+	 * Mirai-Ops-Str to Mirai-Strings in bases/syndromes: the lead is Mirai-Strings); of alt_a (6 function diagnoses + trojan_zorg_zorg-wave_07) and alt_b (3 + _04), the one data diagnose. */
+	cases[0] = (struct dbcase){ "release", "build/release/databases", "bases", 2u, "Mirai", "Mirai.A", "Mirai-Strings", "Botnet", NULL };
 	cases[1] = (struct dbcase){ "alt_a(6+1)", dbA, "tests/agree/alt_a", 1u, "Zorg", "Zorg.C", "Zorg-wave", "Trojan", "Mirai" };
 	cases[2] = (struct dbcase){ "alt_b(3+1)", dbB, "tests/agree/alt_b", 1u, "Zorg", "Zorg.C", "Zorg-wave", "Trojan", "Mirai" };
 	cases[3] = (struct dbcase){ "alt_none(0)", dbN, "tests/agree/alt_none", 0u, "", "", "", "", "Mirai" };

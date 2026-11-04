@@ -481,6 +481,8 @@ uint16_t kgenome_cell_call_keeps(unsigned arch)
 	case KGENOME_ARCH_X86:    return 0xfff8u;       /* ebx esp ebp esi edi */
 	case KGENOME_ARCH_X86_64: return 0xf038u;       /* rbx rsp rbp r12-r15 */
 	case KGENOME_ARCH_ARM:    return 0xeff0u;       /* r4-r11 sp lr pc: r0-r3 and r12 are the callee's */
+	case KGENOME_ARCH_PPC:
+	case KGENOME_ARCH_PPC64:  return 0x2006u;       /* r1 sp, r2 toc/tls, r13 small-data/tls: r0, r3-r12 are the callee's; r14-r31 are kept but the map holds r0-r15 only */
 	default:                  return 0;             /* AArch64 (x0-x15 are all the callee's) and the rest: nothing */
 	}
 }

@@ -469,6 +469,7 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n)
 	case KOF_SYM_ORIGIN_DYNSYM: return ".dynsym";
 	case KOF_SYM_ORIGIN_PE_DIR: return "imports+exports";
 	case KOF_SYM_ORIGIN_PE_RESOLVED: return "imports+exports+resolved";
+	case KOF_SYM_ORIGIN_PE_COFF: return "imports+exports+coff";
 	default:                    return "none";
 	}
 }

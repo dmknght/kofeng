@@ -405,15 +405,16 @@ static void block_path(kof_scanner *sc)
 		CK(kscan_bytes(sc, le.b, le.n, "block-le", &opt, fixture_found, hit) > 0);
 		/* The little-endian object holds the block, in a function: a function unit is listed and not scored. */
 		CK(!hit[0] && !hit[1]);
-		/* mips32: the small function is signed now (no floor of 12), the object is not counted unsigned; ppc64: still unsigned (measured: the count rises; the engine's reason is not asserted here) */
-		CK(k == 0 ? kscan_stats(sc)->mutation_unsigned_objects == unsigned_before : kscan_stats(sc)->mutation_unsigned_objects > unsigned_before);
+		/* the small function is signed on both (floor of one block, owner 2026-11-01; the function table and the frame read every architecture): the object is not counted unsigned. The test pinned
+		 * ppc64 as unsigned, a count it measured and whose reason it said it did not assert: stale since the floor and the frames (measured: the count does not move for either). */
+		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before);
 		unsigned_before = kscan_stats(sc)->mutation_unsigned_objects;
 		hit[0] = hit[1] = 0;
 		notes_clear();
 		CK(kscan_bytes(sc, be.b, be.n, "block-be", &opt, fixture_found, hit) > 0);
 		CK(!hit[0]);                            /* the big-endian object does not */
 		CK(!hit[1]);                            /* nor does its canonical view: its functions are found again (remapped) but not scored */
-		CK(k == 0 ? kscan_stats(sc)->mutation_unsigned_objects == unsigned_before : kscan_stats(sc)->mutation_unsigned_objects > unsigned_before);
+		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before);
 	}
 }
 

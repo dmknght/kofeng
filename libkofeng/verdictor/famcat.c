@@ -437,6 +437,7 @@ enum kof_famcat_status kof_famcat_add_family(struct kof_famcat *c, const char *n
 	}
 	memcpy(c->fam[c->n_fam].name, name, strlen(name) + 1u);
 	memcpy(c->var[c->n_var].name, first, strlen(first) + 1u);
+	comment_put(c->fam[c->n_fam].comment, NULL);    /* the family's own comment, set with kof_famcat_set_family_comment */
 	c->fam[c->n_fam].next = 2u;
 	c->var[c->n_var].letter = 1u;
 	comment_put(c->var[c->n_var].comment, comment);
@@ -504,7 +505,7 @@ enum kof_famcat_status kof_famcat_add_variant(struct kof_famcat *c, uint32_t fam
 
 /* ---- restoring a saved catalog (the loader's three steps) ------------------------------------------------------- */
 
-enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *name, uint32_t *fam)
+enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *name, const char *comment, uint32_t *fam)
 {
 	enum kof_famcat_status st = kof_famcat_name_check(name);
 
@@ -514,12 +515,16 @@ enum kof_famcat_status kof_famcat_load_family(struct kof_famcat *c, const char *
 		return KOF_FAMCAT_DUP_FAMILY;
 	if (strlen(name) > kof_famcat_family_max(c))
 		return KOF_FAMCAT_VARIANT_NAME;
+	st = kof_famcat_comment_check(comment);
+	if (st != KOF_FAMCAT_OK)
+		return st;
 	if (c->n_fam >= c->cap_fam)
 		return KOF_FAMCAT_FULL;
 	st = clash_check(c, kof_catid_of(c->hash, c->hash_ud, 'F', name, NULL), name, UINT32_MAX, NULL, NULL, 0u);
 	if (st != KOF_FAMCAT_OK)
 		return st;
 	memcpy(c->fam[c->n_fam].name, name, strlen(name) + 1u);
+	comment_put(c->fam[c->n_fam].comment, comment);
 	c->fam[c->n_fam].next = 1u;
 	if (fam)
 		*fam = c->n_fam;
@@ -589,7 +594,8 @@ int kof_famcat_dirty(const struct kof_famcat *c, const struct kof_famcat *snap)
 	if (c->n_fam != snap->n_fam || c->n_var != snap->n_var)
 		return 1;
 	for (i = 0; i < c->n_fam; i++)
-		if (c->fam[i].next != snap->fam[i].next || strcmp(c->fam[i].name, snap->fam[i].name))
+		if (c->fam[i].next != snap->fam[i].next || strcmp(c->fam[i].name, snap->fam[i].name) ||
+		    strcmp(c->fam[i].comment, snap->fam[i].comment))
 			return 1;
 	for (i = 0; i < c->n_var; i++)
 		if (c->var[i].letter != snap->var[i].letter || c->var[i].family != snap->var[i].family ||
@@ -713,6 +719,23 @@ enum kof_famcat_status kof_famcat_rename_family(struct kof_famcat *c, uint32_t f
 	return KOF_FAMCAT_OK;
 }
 
+enum kof_famcat_status kof_famcat_set_family(struct kof_famcat *c, uint32_t fam, const char *name, const char *comment)
+{
+	enum kof_famcat_status st;
+
+	if (fam >= c->n_fam)
+		return KOF_FAMCAT_NO_FAMILY;
+	st = kof_famcat_comment_check(comment);
+	if (st != KOF_FAMCAT_OK)
+		return st;
+	st = kof_famcat_rename_family(c, fam, name);
+	if (st != KOF_FAMCAT_OK)
+		return st;
+	comment_put(c->fam[fam].comment, comment);
+	kof_famcat_touch(c);
+	return KOF_FAMCAT_OK;
+}
+
 /* Remove variant `var` from the table, the others keep their order. */
 static void variant_remove(struct kof_famcat *c, uint32_t var)
 {
@@ -761,6 +784,25 @@ enum kof_famcat_status kof_famcat_set_comment(struct kof_famcat *c, uint32_t var
 const char *kof_famcat_comment(const struct kof_famcat *c, uint32_t var)
 {
 	return var < c->n_var ? c->var[var].comment : "";
+}
+
+const char *kof_famcat_family_comment(const struct kof_famcat *c, uint32_t fam)
+{
+	return fam < c->n_fam ? c->fam[fam].comment : "";
+}
+
+enum kof_famcat_status kof_famcat_set_family_comment(struct kof_famcat *c, uint32_t fam, const char *comment)
+{
+	enum kof_famcat_status st;
+
+	if (fam >= c->n_fam)
+		return KOF_FAMCAT_NO_FAMILY;
+	st = kof_famcat_comment_check(comment);
+	if (st != KOF_FAMCAT_OK)
+		return st;
+	comment_put(c->fam[fam].comment, comment);
+	kof_famcat_touch(c);
+	return KOF_FAMCAT_OK;
 }
 
 uint32_t kof_famcat_list(const struct kof_famcat *c, struct kof_famcat_item *out, uint32_t cap)

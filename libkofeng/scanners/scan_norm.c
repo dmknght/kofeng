@@ -426,7 +426,10 @@ static int norm_view_possible(const struct norm_work *w, kof_buf buf)
 	 * view pays for the part of it read before the evidence. */
 	if (kof_exe_has_wide(buf.p, buf.n))
 		return 1;
-	return kof_exe_decode_would_change(buf.p, buf.n);
+	if (kof_exe_decode_would_change(buf.p, buf.n))
+		return 1;
+	/* The string table of a one-byte coding (executables_strtab.c): the costliest read, so last. */
+	return kof_exe_strtab_would_change(buf.p, buf.n);
 }
 
 /*
@@ -455,7 +458,14 @@ static void norm_decode(struct kof_scanner *sc, struct norm_work *w, kof_buf buf
 	/* UTF-16BE text first, so what follows reads it as the text it is. */
 	if (w->nr)
 		sx_endian_wide(&w->en, w->tmp, buf.n, w->keep);
-	w->changed = kof_exe_decode_ex(w->tmp, buf.n, &dres);
+	/*
+	 * THE STRING TABLE FIRST: it is the outer coding, and what it says may itself be an escape, hex
+	 * or base64 run the layered decode below then reads. It writes only the bytes the keep map
+	 * leaves free, in place and 1:1, so the restore below has nothing of it to undo and the view's
+	 * offsets are the parent's. Decided here, once; the matcher never decodes (scan path).
+	 */
+	w->changed = kof_exe_strtab(w->tmp, buf.n, w->nr ? w->keep : NULL, NULL);
+	w->changed |= kof_exe_decode_ex(w->tmp, buf.n, &dres);
 	/* A bound of the decode fired: layers under what it left were not read, and
 	 * the parent says so rather than reading as fully decoded. */
 	if (dres.limit)

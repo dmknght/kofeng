@@ -119,14 +119,9 @@ static void redraw_draft_rows(struct view *v)
 		 * disagreed only because one of them ran again after a resize
 		 * and the other did not.
 		 */
-		int rows = (int)(want < v->ed.dr.decl_cap ? want
-							  : v->ed.dr.decl_cap);
-		int room = g_rows - 8;
+		uint32_t cap = decl_cap_rows(v);
+		int rows = (int)(want < cap ? want : cap);
 
-		if (room < 1)
-			room = 1;
-		if (rows > room)
-			rows = room;
 		g_decl_rows = rows + 2;
 		if (g_decl_rows) {
 			/* The furthest it can be scrolled, computed before the

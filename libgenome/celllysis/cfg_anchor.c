@@ -6,6 +6,16 @@
  * `min_blk` counts REACHABLE blocks. The optional extensions (a syscall, a diagnose site, a list of callee identities the
  * function must all call: the caller's own, 0 never matches) are other facts a caller may OR in; the first two measured the same
  * as the block count and all are off by default.
+ *
+ * IMPROVE anchor-floor-1 (owner, 2026-11-03; measured by an agent, not re-run; NOT a wrong gene): a floor of ONE block lets a
+ * function of 1 to 3 blocks be signed, and its sketch has 1 to 3 keys, which carry no content of the behaviour. Survey on MalwareLab
+ * (3248 ELF, 2,042,512 units, before the S1 fix): the 1-block `main` of two 199-byte reverse shells matched 2651 files at pct 100
+ * (82% of the corpus; frame_dummy, cpuid, getRandomIP...). So a block rule built from such a function matches by SHAPE and not by
+ * behaviour: a false match that comes from the floor and the data, not from choosing the wrong function as the gene. Same limit for
+ * 1-3 block wrappers (direct syscall). Not a defect of the overlap (the port matched the engine 20/20 pairs).
+ * Next algorithms, none built: raise the floor per use (the caller's `min_blk` already exists); require the callee identities
+ * (KGENOME_CFG_ANCHOR_CALLEES, `ckey`) so a small function is signed with what it calls; leave the content to lineage.
+ * Decide with a measurement of the share of units a given floor drops against what it covers.
  */
 #include "cfg.h"
 

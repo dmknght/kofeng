@@ -86,6 +86,15 @@ uint32_t kgenome_cell_decode_arm32(const uint8_t *p, uint32_t n, uint64_t va,
 uint32_t kgenome_cell_decode_thumb(const uint8_t *p, uint32_t n, uint64_t va,
 			int be, struct kgenome_cell_insn *out);
 
+/*
+ * PowerPC: r0..r31 as 0..31, LR 32, CTR 33, XER 34, CR 35 (wmask, operands). `be` is the byte order
+ * of the object (PowerPC 32 and ppc64 BE are big-endian, ppc64le is little-endian), `wide` the 64-bit
+ * architecture. Always 4 or 0 (short buffer); an instruction the table does not cover is
+ * KGENOME_CELL_UD with length 4 (decode_ppc.c says what is and is not claimed).
+ */
+uint32_t kgenome_cell_decode_ppc(const uint8_t *p, uint32_t n, uint64_t va, int be, int wide,
+			struct kgenome_cell_insn *out);
+
 /* AArch64: x0..x30 as 0..30, sp as 31 (wmask bit 31). Always little-endian. */
 uint32_t kgenome_cell_decode_arm64(const uint8_t *p, uint32_t n, uint64_t va,
 			struct kgenome_cell_insn *out);

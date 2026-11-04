@@ -19,7 +19,7 @@
  *                     the caller - and the ledger the lib charges its big products
  *                     to. The lib never reads engine state to find a limit.
  *
- *   genotype/         which instruction: the decoders (x86, arm32, arm64) and the
+ *   genotype/         which instruction: the decoders (x86, arm32, arm64, ppc) and the
  *                     structure of the file - image/ (PE, ELF, CLR layout, the
  *                     function table, the rebuild writers).
  *   celllysis/        the analysis of code without running it: the decoder front
@@ -57,6 +57,7 @@
 #include "genotype/genotype.h"
 #include "genotype/image/obj.h"
 #include "genotype/image/image_addr.h"
+#include "genotype/image/image_embed.h"
 #include "genotype/image/section_flags.h"
 #include "genotype/image/offmap.h"
 #include "genotype/image/elf_types.h"
@@ -89,7 +90,6 @@
 #include "celllysis/trueline.h"
 #include "celllysis/mutation.h"
 #include "celllysis/mutation_window.h"
-#include "celllysis/fnprint.h"
 #include "celllysis/cfg.h"
 #include "celllysis/gview.h"
 
@@ -102,6 +102,7 @@
 #include "phenotype/diag_scan_state.h"
 #include "phenotype/diag_lineage.h"
 #include "phenotype/codemap.h"
+#include "phenotype/frame.h"
 #include "phenotype/callnames.h"
 
 #endif /* KGENOME_H */

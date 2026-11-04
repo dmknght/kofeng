@@ -93,4 +93,13 @@ int kof_objtree_may_open(const struct kof_scan_option *opt);
 uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 			      const struct kof_scan_option *opt);
 
+/*
+ * THE OBJECTS AN EXECUTABLE HOLDS IN ITS OWN VARIABLES, opened as children (objtree_embed.c has
+ * the whole account). An ELF or PE whose data starts an object at the target of a pointer stored in
+ * that data, or at a sized OBJECT symbol, and where the sniff chain accepts the bytes there by its
+ * stricter check for a variable (kof_parser_embedded). Returns how many children it made; a bound that
+ * fired is reported on the object (oc_scan_limit, or the sticky LIMIT of a refused child).
+ */
+uint32_t kof_objtree_embedded(const struct kof_obj_ctx *ctx, const struct kof_scan_option *opt);
+
 #endif /* KOFENG_OBJTREE_H */

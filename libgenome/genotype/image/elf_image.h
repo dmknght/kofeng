@@ -395,6 +395,8 @@ int kgenome_elf_entry_sec(const struct kgenome_elf_info *e, uint32_t *index, uin
  * format is known. Reading four bytes to decide is what keeps a scanner that only
  * ever sees one format from carrying every other format's view.
  */
+/* The four bytes an ELF starts with. */
+extern const uint8_t kgenome_elf_magic[4];
 int kgenome_elf_sniff(kof_buf file);
 
 #endif /* KGENOME_IMAGE_ELF_IMAGE_H */

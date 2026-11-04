@@ -555,6 +555,14 @@ void bar_to(struct view *v, int which)
 		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
 							     : g_my - top);
 		v->prow_off = (uint32_t)(frac * max / (uint64_t)(bot - top));
+	} else if (which == 5) {                /* the block table's own bar */
+		int t, b, full;
+
+		if (!blk_win_rows(v, &t, &b, &full) || b <= t)
+			return;
+		max = v->blk_nshown - v->blk_nwin;
+		frac = (uint64_t)(g_my < t ? 0 : g_my > b ? b - t : g_my - t);
+		v->blk_off = (uint32_t)(frac * max / (uint64_t)(b - t));
 	} else if (which == 4) {                /* the disassembly panel */
 		/*
 		 * The track is the hex pane's range, not the file's - see the
@@ -589,6 +597,13 @@ int bar_under(struct view *v)
 	if (g_disasm_rows && g_mx == g_cols &&
 	    g_my >= dis_top() && g_my <= hex_bot() && dis_max_bias(v) > 0)
 		return 4;
+	{
+		int t, b, full;
+
+		/* The table's bar sits beside the panel's and is the narrower claim, so it is asked first. */
+		if (g_mx == g_cols - 1 && blk_win_rows(v, &t, &b, &full) && full && g_my >= t && g_my <= b)
+			return 5;
+	}
 	if (g_decl_rows && g_mx == g_cols && g_my > decl_top() &&
 	    g_my < decl_top() + g_decl_rows - 1)
 		return 3;

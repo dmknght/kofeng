@@ -278,12 +278,6 @@ static const char *decl_why(struct view *v, int hex)
 
 	if (v->sel_a == KGENOME_BROKEN || v->sel_b == KGENOME_BROKEN)
 		return "Select the bytes first - drag over them in the pane";
-	if (v->ed.dr.n_decl >= MAX_DECL) {
-		snprintf(why, sizeof why,
-			 "This draft already holds %u markers, which is all a "
-			 "rule may have", (unsigned)MAX_DECL);
-		return why;
-	}
 	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
 	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 	/* Bounded whichever kind it is. Unbounded, a drag over a whole object

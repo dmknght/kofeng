@@ -22,6 +22,7 @@
 #include <kofmod/kofsig.h>
 #include <genotype/image/funcs.h>
 #include <celllysis/cfg.h>
+#include <phenotype/frame.h>
 
 enum kof_cfgsign_state {
 	KOF_CFGSIGN_SIGNED = 0,
@@ -39,6 +40,7 @@ const char *kof_cfgsign_state_name(enum kof_cfgsign_state s);
  * THE CALLER'S LEDGER: the allocator that charges the scan's memory (NULL: malloc), and what one call may hold (0 = 64 MiB, the CFG view's
  * allowance). Nothing else: there is no work allowance.
  */
+struct kgenome_diag_walk;
 struct kof_cfgsign_host {
 	struct kgenome_cfg_mem mem;
 	uint64_t max_bytes;
@@ -51,6 +53,12 @@ struct kof_cfgsign_req {
 	uint32_t floor;                 /* reachable blocks needed to be SIGNED; 0 = KGENOME_CFG_ANCHOR_MIN (one) */
 	int      keep;                  /* 1: hand back the instructions, the graph and the labels (kof_cfgsign_release) */
 	const struct kof_cfgsign_host *host;    /* may be NULL */
+	/* The object's walk, when it has one: its trace is the decode of the code (x86), so the function is READ from it and not decoded again. NULL decodes. */
+	struct kgenome_diag_walk *wk;
+	/* The object's function table and the cache of its frames (libgenome/phenotype/frame.h): when the function is an entry of the table its frame is asked from the cache, so
+	 * the graph is built once for every reader (the lineage reads the same). NULL for both: the frame is made here and given back. */
+	const struct kgenome_func_set *fs;
+	struct kgenome_frame_cache *frames;
 };
 
 struct kof_cfgsign {

@@ -11,10 +11,10 @@
  * The BODY of the CFG dialog of a function (kv_cfgdlg.c) for the two tabs that need no view: what the dialog lists and draws, as rows, with no screen and no view - so the
  * tests read the same rows the dialog shows (tests/unit/cfg_view_scene.c prints them, tests/tui/t_cfg_view.py compares the screen with them).
  *
- *   Overview   the engine's head lines (the function, the extent, the counts, the canonical hash, the keys, the anchor - or the one sentence of why there is no graph),
+ *   Overview   the engine's head lines (the function, the extent, the counts, the unit id, the keys (the CFG hash, called Scaffold in the docs) - or the one sentence of why there is no graph),
  *              then the calls as a TABLE (every struct kof_cfgview_call: its block, its instruction's offset, its kind, its target, the object's name for it), then the
  *              unreachable blocks the engine listed. Every cell is a field the engine returned; nothing is derived here.
- *   Graph      the drawing (the engine's graph laid out and drawn by kv_graph.c), then what the drawing did not show (the nodes and edges past its bounds, one line each).
+ *   Graph      the drawing (the engine's graph laid out and drawn by kv_graph*.c), then what the drawing did not show (the nodes and edges past its bounds, one line each).
  *
  * The facts are the engine's lines, listed as they came; the owner reviews their layout later. Nothing here decides a thing of the graph.
  */
@@ -288,6 +288,147 @@ static void overview_make(struct kv_cfg_body *u)
 			u->ol_col = (uint32_t)strlen(u->ol[i]);
 }
 
+/*
+ * THE COLOURS OF THE OVERVIEW, by the label the viewer knows (the engine's lines stay plain text): a label dim (A_DIM), a value in the colour the Properties dialog and the Blocks
+ * table already use for its kind - a name and the hashes A_ID, an offset or an address A_LOC, a non-ok status A_WARN - and a number in the terminal's own colour. The label of a
+ * `key=value` word is its key and its `=`. Nothing is derived: the class of a word is read off its spelling and its row's first word.
+ */
+#define OV_ROW_MAX 512u
+
+static int ov_is_hex8(const char *t, size_t n)
+{
+	size_t i;
+
+	if (n != 8u)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (!((t[i] >= '0' && t[i] <= '9') || (t[i] >= 'a' && t[i] <= 'f')))
+			return 0;
+	return 1;
+}
+
+static void ov_paint(size_t a, size_t b, const char *attr, const char **at)
+{
+	size_t i;
+
+	for (i = a; i < b; i++)
+		at[i] = attr;
+}
+
+static void ov_attrs(const char *row, const char **at)
+{
+	const size_t len = strlen(row);
+	size_t i = 0, tok = 0, kind_toks = 1;
+	int is_func = 0, is_head = 0, is_head_tbl = 0, is_call = 0, is_asideh = 0;
+
+	memset((void *)at, 0, len * sizeof *at);
+	while (i < len) {
+		size_t b, e;
+		const char *eq, *t;
+
+		while (i < len && row[i] == ' ')
+			i++;
+		if (i >= len)
+			break;
+		b = i;
+		while (i < len && row[i] != ' ')
+			i++;
+		e = i;
+		t = row + b;
+		eq = memchr(t, '=', e - b);
+		if (tok == 0) {
+			const size_t n = e - b;
+
+			is_func = n == 8u && !memcmp(t, "function", 8);
+			is_head = (n == 6u && !memcmp(t, "extent", 6)) || (n == 4u && !memcmp(t, "unit", 4)) || (n == 4u && !memcmp(t, "keys", 4)) ||
+				  (n == 3u && !memcmp(t, "CFG", 3) && !strncmp(row + e, "  reachable=", 12));
+			is_head_tbl = n == 5u && !memcmp(t, "block", 5) && !strncmp(row + e, "  offset", 8);
+			is_asideh = !strncmp(row, "unreachable blocks:", 19);
+			is_call = row[0] == ' ' && t[0] == 'B' && n > 1u;
+			if (is_head_tbl) {
+				ov_paint(b, len, A_DIM, at);       /* the header of the calls table */
+				return;
+			}
+			if (is_func || is_head || is_asideh || (n == 6u && !memcmp(t, "calls:", 6)))
+				ov_paint(b, e, A_DIM, at);
+			else if (ov_is_hex8(t, n))
+				ov_paint(b, e, A_ID, at);          /* a continuation row of the keys */
+			else if (n > 2u && t[0] == '0' && t[1] == 'x')
+				ov_paint(b, e, A_LOC, at);         /* an unreachable block's offset */
+		} else if (is_func) {
+			ov_paint(b, len, A_ID, at);                /* the function's name: it may hold spaces */
+			return;
+		} else if (is_asideh && tok == 1u) {
+			ov_paint(b, e, A_DIM, at);                 /* "blocks:" of "unreachable blocks: N" */
+		} else if (is_call && tok >= 2u && tok <= 1u + kind_toks + 1u) {
+			/* `  B4  0x2a  call  0x10  name` or `... call indirect  -  name`: the offset and the target are places; the name is the rest of the row */
+			if (tok == 2u && e - b == 4u && !memcmp(t, "call", 4) && i < len && !strncmp(row + i, "  indirect", 10))
+				kind_toks = 2u;
+			if (tok == 1u + kind_toks + 1u) {
+				size_t n = i;
+
+				if (e - b > 2u && t[0] == '0' && t[1] == 'x')
+					ov_paint(b, e, A_LOC, at);
+				while (n < len && row[n] == ' ')
+					n++;
+				if (n < len)
+					ov_paint(n, len, A_ID, at);
+				return;
+			}
+		} else if (eq && eq > t) {
+			ov_paint(b, (size_t)(eq - row) + 1u, A_DIM, at);
+			if ((size_t)(eq - t) == 6u && !memcmp(t, "status", 6))
+				ov_paint((size_t)(eq - row) + 1u, e, A_WARN, at);
+		} else if (e - b > 2u && t[0] == '0' && t[1] == 'x') {
+			ov_paint(b, e, A_LOC, at);
+		} else if (ov_is_hex8(t, e - b)) {
+			ov_paint(b, e, A_ID, at);
+		}
+		tok++;
+	}
+}
+
+const char *kv_cfgbody_text_attr(const char *row, size_t at)
+{
+	const char *a[OV_ROW_MAX];
+
+	if (!row || strlen(row) >= OV_ROW_MAX || at >= strlen(row))
+		return NULL;
+	ov_attrs(row, a);
+	return a[at];
+}
+
+/* A window of an Overview row from column `hoff`, `n` columns, with the escapes of the attributes above; one A_OFF closes a coloured run. */
+static void ov_window(const char *row, uint32_t hoff, uint32_t n, char *out, size_t cap)
+{
+	const char *a[OV_ROW_MAX], *cur = NULL;
+	const size_t len = strlen(row);
+	size_t w = 0, i;
+
+	if (len >= OV_ROW_MAX) {
+		snprintf(out, cap, "%.*s", (int)n, hoff < len ? row + hoff : "");
+		return;
+	}
+	ov_attrs(row, a);
+	for (i = hoff; i < len && i - hoff < n; i++) {
+		const size_t room = cap - w;
+
+		if (a[i] != cur) {
+			if (cur && room > sizeof A_OFF + 8u)
+				w += (size_t)snprintf(out + w, cap - w, "%s", A_OFF);
+			if (a[i] && cap - w > 16u)
+				w += (size_t)snprintf(out + w, cap - w, "%s", a[i]);
+			cur = a[i];
+		}
+		if (cap - w < sizeof A_OFF + 2u)
+			break;
+		out[w++] = row[i];
+	}
+	if (cur && cap - w > sizeof A_OFF)
+		w += (size_t)snprintf(out + w, cap - w, "%s", A_OFF);
+	out[w] = 0;
+}
+
 void kv_cfgbody_make(struct kv_cfg_body *u, const struct kof_cfgview_req *rq)
 {
 	memset(u, 0, sizeof *u);
@@ -327,7 +468,9 @@ void kv_cfgbody_row(const void *user, uint32_t row, uint32_t hoff, uint32_t ncol
 	out[0] = ' ';
 	out[1] = 0;
 	if (u->tab == KV_CFG_TAB_OVERVIEW) {
-		t = row < u->n_ol ? u->ol[row] : NULL;
+		if (row < u->n_ol)
+			ov_window(u->ol[row], hoff, ncols - 1u, out + 1, cap - 1u);
+		return;
 	} else if (row < gh) {
 		const struct kv_graph_style st = kv_cfgbody_style();
 

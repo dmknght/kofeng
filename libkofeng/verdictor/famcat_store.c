@@ -53,6 +53,10 @@ size_t kof_famcat_family_text(const struct kof_famcat *c, uint32_t fam, char *ou
 	if (fam >= c->n_fam)
 		return 0u;
 	PUT("%s\n%s(\"%s\");\n", kw_header, kw_family, c->fam[fam].name);
+	/* The family's own comment: a `//` line directly above the counter line (never above KOF_MALWARE_FAMILY_NAME, which already has
+	 * the fixed header line there; famcat.h "storage"). */
+	if (c->fam[fam].comment[0])
+		PUT("// %s\n", c->fam[fam].comment);
 	/* The counter line (KOF_MALWARE_NEXT_VARIANT) is kept for now: a deleted HIGHEST letter leaves no other trace, and the menu of deleted
 	 * names (kof_famcat_free_letter) counts the gaps below it from this value. The owner (2026-10-31): to be reviewed and improved later. */
 	if (kof_famcat_letter_text(c->fam[fam].next, letters, sizeof letters))
@@ -108,7 +112,10 @@ static int read_line(struct rd *r, char *t, const char **why)
 			*why = "more than one family";
 			return -1;
 		}
-		st = kof_famcat_load_family(r->c, name, &r->fam);
+		/* The comment directly above THIS line is never the family's own: that position already holds the fixed header line
+		 * (famcat.h "storage"), so it is discarded here, same as before. The family's own comment is the pend directly above
+		 * KOF_MALWARE_NEXT_VARIANT, applied there. */
+		st = kof_famcat_load_family(r->c, name, NULL, &r->fam);
 		r->have_fam = st == KOF_FAMCAT_OK;
 		kof_catpend_clear(&r->pend);
 		if (st != KOF_FAMCAT_OK)
@@ -123,10 +130,19 @@ static int read_line(struct rd *r, char *t, const char **why)
 			*why = "malformed line";
 			return -1;
 		}
-		st = r->have_fam ? kof_famcat_load_next(r->c, r->fam, n) : KOF_FAMCAT_NO_FAMILY;
+		if (!r->have_fam) {
+			kof_catpend_clear(&r->pend);
+			*why = "variant counter before the family name";
+			return -1;
+		}
+		/* A comment directly above the counter line is the FAMILY's own (famcat.h "storage"); applied once, here, before the
+		 * counter itself is read back. */
+		st = kof_famcat_set_family_comment(r->c, r->fam, r->pend.text);
+		if (st == KOF_FAMCAT_OK)
+			st = kof_famcat_load_next(r->c, r->fam, n);
 		kof_catpend_clear(&r->pend);
 		if (st != KOF_FAMCAT_OK)
-			*why = r->have_fam ? kof_famcat_why(r->c, st) : "variant counter before the family name";
+			*why = kof_famcat_why(r->c, st);
 		return st == KOF_FAMCAT_OK ? 0 : -1;
 	}
 	if ((p = kof_catfmt_after(t, kw_variant)) != NULL) {

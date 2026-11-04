@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "kv.h"
+#include "kv_decl_private.h"
 
 
 /*
@@ -123,7 +124,7 @@ static int mtn_mark(struct view *v, const struct object *o,
 	const uint8_t *base = o->buf.p;
 	const uint64_t base_n = o->buf.n;
 
-	if (v->ed.dr.n_blk >= MTN_MAX_BLOCK || lo >= hi || lo >= base_n)
+	if (lo >= hi || lo >= base_n || !blk_reserve(&v->ed, v->ed.dr.n_blk + 1u))
 		return 0;
 	len = hi - lo;
 	if (len > base_n - lo)
@@ -369,7 +370,8 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
 	const char *rn, *lbl;
 	char sym[sizeof ((struct mtn_block *)0)->sym];
 
-	if (c->v->ed.dr.n_blk >= MTN_MAX_BLOCK)
+	/* A refused allocation ends the walk and the draft says so (blk_reserve). */
+	if (!blk_reserve(&c->v->ed, c->v->ed.dr.n_blk + 1u))
 		return 1;
 	if (!s || s->taken >= s->quota || s->seen++ % s->stride)
 		return 0;
@@ -465,8 +467,9 @@ void mtn_segment(struct view *v)
 	 * when nothing is ticked, which is when the answer is identical.
 	 */
 	if (!keep && o->carve_done && o->carve) {
-		for (i = 0; i < o->n_carve && v->ed.dr.n_blk < MTN_MAX_BLOCK;
-		     i++)
+		/* All of it, or as many as the allocation took (blk_reserve has said so). */
+		(void)blk_reserve(&v->ed, v->ed.dr.n_blk + o->n_carve);
+		for (i = 0; i < o->n_carve && v->ed.dr.n_blk < v->ed.dr.cap_blk; i++)
 			v->ed.dr.blk[v->ed.dr.n_blk++] = o->carve[i];
 		/*
 		 * AND THEIR SCORES CAME WITH THEM, which is not a shortcut.
@@ -662,4 +665,272 @@ void mtn_rescore(struct view *v)
 	kof_mutation_set_free(set);
 	free(blk);
 	free(pool);
+}
+
+/*
+ * IS THIS RULE ABOUT SOME OTHER OBJECT?
+ *
+ * Every block it carries scores zero here, so none of them was cut from what
+ * is on screen - and the panel refuses to CHANGE it for that reason:
+ * a block's row shows an offset, a region and a length belonging to the file
+ * it came from, and editing those against this object edits a rule about two
+ * files at once.
+ *
+ * The rule is still SHOWN, and still scored, because that is what opening one
+ * on a different sample is for.
+ */
+int mtn_foreign(const struct view *v)
+{
+	uint32_t i, carried = 0, scored = 0;
+
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		if (!v->ed.dr.blk[i].kept)
+			continue;
+		carried++;
+		if (v->ed.dr.blk[i].score)
+			scored++;
+	}
+	return carried && carried == v->ed.dr.n_blk && !scored;
+}
+
+
+/* A percentage is digits and nothing else - the box refuses the rest rather
+ * than accepting what it will then have to ignore. */
+int mtn_digit(int c)
+{
+	return c >= '0' && c <= '9';
+}
+
+
+/*
+ * THE LIST READS IN FILE ORDER.
+ *
+ * A rule loaded for an infected file puts its blocks in first and the carve
+ * appends the rest, so the block the rule fired on sat at the top of the table
+ * whatever its offset - on a Gafgyt sample at 0xf9ce, above five blocks that
+ * come before it in the file. The table is about an object, and an object is
+ * read from its start.
+ *
+ * A block with no place in THIS object - a declared block the carve did not
+ * reproduce - has no offset to sort by and goes last, which is also where a
+ * reader looking for it in the hex pane will not be sent hunting.
+ *
+ * Insertion sort: sixty-four rows at most, once per object.
+ */
+static void mtn_order(struct view *v)
+{
+	struct mtn_block *tmp;
+	uint32_t *ord, *to;
+	uint32_t i, j, n = v->ed.dr.n_blk;
+
+	if (n < 2u)
+		goto colour;
+	/* Sized by the rows held. A refusal leaves the table in the order it came (the offset order is a convenience, nothing is lost) and says so. */
+	tmp = malloc((size_t)n * sizeof *tmp);
+	ord = malloc((size_t)n * sizeof *ord);
+	to = malloc((size_t)n * sizeof *to);
+	if (!tmp || !ord || !to) {
+		free(tmp);
+		free(ord);
+		free(to);
+		say_err(&v->ed, "out of memory: the block table could not be put in file order");
+		goto colour;
+	}
+
+	/*
+	 * SORTED AS A PERMUTATION, so what names a block can follow it.
+	 *
+	 * Moving the records directly leaves nothing to say where each one went
+	 * - see mtn_moved - and a matcher holds an index. The order is worked
+	 * out first, then applied, then the matchers are told.
+	 */
+	for (i = 0; i < n; i++)
+		ord[i] = i;
+	for (i = 1; i < n; i++) {
+		uint32_t t = ord[i];
+
+		for (j = i; j; j--) {
+			const struct mtn_block *a = &v->ed.dr.blk[ord[j - 1u]];
+			const struct mtn_block *b = &v->ed.dr.blk[t];
+			int after = !a->len ? (b->len != 0)
+				  : (b->len && b->off < a->off);
+
+			if (!after)
+				break;
+			ord[j] = ord[j - 1u];
+		}
+		ord[j] = t;
+	}
+	for (i = 0; i < n; i++)
+		tmp[i] = v->ed.dr.blk[ord[i]];
+	{
+		/* Where each block went, handed over whole: see blk_permute. */
+		for (i = 0; i < n; i++) {
+			v->ed.dr.blk[i] = tmp[i];
+			to[ord[i]] = i;
+		}
+		blk_permute(&v->ed, to, n);
+	}
+	free(tmp);
+	free(ord);
+	free(to);
+colour:
+	/* Cycled by POSITION, so neighbours never share - which is a property
+	 * of the order and has to be redone when the order changes. */
+	for (i = 0; i < v->ed.dr.n_blk; i++)
+		v->ed.dr.blk[i].colour = (uint8_t)(i % MTN_COLOURS);
+}
+
+/*
+ * CARVED AND SCORED BEFORE THE PANEL IS LAID OUT, not while it is drawn.
+ *
+ * The layout decides how tall the panel is from how many blocks there are, so
+ * the carve has to have happened by then. Done inside the drawing it was a
+ * frame late: the first frame sized the panel for no blocks at all and the row
+ * count went from zero to sixty-four, which the draft's "it just grew, show me
+ * its end" rule read as new rows arriving at the bottom - so the table opened
+ * scrolled to its last six blocks and the wheel was already at the stop.
+ *
+ * Carved on arrival at an object, because a list left over from the previous
+ * file would be a list of blocks that are not in this one. Scored separately:
+ * the score also moves when a block's normalizer is changed by hand, which is
+ * not a re-carve.
+ */
+/*
+ * ON ARRIVAL AT AN OBJECT THE ENGINE SAYS MATCHED: its blocks that decided a matched form are ticked, the way a reader would tick them (so
+ * they become matchers), and the header's Family and Variant take the catalog's names of the diagnose (only while the header holds none).
+ * What matched is the engine's report (decided_diags); nothing is worked out here.
+ */
+static void mtn_from_match(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t n = 0, i;
+	const struct kof_diag_report *dd = decided_diags(v, ob, &n);
+	const struct kof_diag_report *first = NULL;
+
+	struct { uint32_t g; uint32_t id; char name[KDET_TEXT_MAX]; } made[MAX_GROUP];
+	uint32_t n_made = 0;
+
+	/* What was loaded for the previous object is not this object's: links and the loaded list start empty on every arrival. */
+	draft_links_reset(&v->ed);
+	if (!dd || mtn_foreign(v))
+		return;
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		const struct kof_diag_report *d = NULL;
+		const struct kof_diag_part *part = kdet_block_part(dd, n, v->ed.dr.blk[i].id, &d);
+
+		if (part) {
+			struct kdet_diag kd = { 0 };
+			uint32_t g;
+
+			if (!first)
+				first = d;
+			blk_set_picked(&v->ed, i, 1);
+			/* The matcher that ticking made takes the catalog's tag of the diagnose that decided the block. */
+			g = grp_of_block(&v->ed, i);
+			if (g < MAX_GROUP && kdet_diag_of(v->eng, d->id, &kd) && kd.has_catalog) {
+				snprintf(v->ed.dr.grp[g].tag, sizeof v->ed.dr.grp[g].tag, "%.*s", KOF_NAME_MAX, kd.tag);
+				/* And its type, which the diagnose declares: a unit that is to be recognised as that diagnose has to say the same. */
+				if (kd.type >= 0)
+					v->ed.dr.grp[g].utype = (uint8_t)(kd.type + 1);
+			}
+			/* The link is the diagnose's id value; the name is what the engine turns that id into (the file stem). */
+			if (g < MAX_GROUP && n_made < MAX_GROUP && d->id && kd.name) {
+				made[n_made].g = g;
+				made[n_made].id = d->id;
+				snprintf(made[n_made++].name, sizeof made[0].name, "%s", kd.name);
+			}
+			/* And the threshold the diagnose demands of that block, not the editor's default. */
+			if (g < MAX_GROUP && kdet_part_need(d, part))
+				v->ed.dr.grp[g].pct = (uint8_t)kdet_part_need(d, part);
+		}
+	}
+	if (first && !v->ed.dr.family[0]) {
+		struct kdet_diag kd;
+		int created;
+		struct kv_fam_ui *u = fam_ensure(v, &created);
+		int32_t f;
+
+		if (u && kdet_diag_of(v->eng, first->id, &kd) && kd.has_catalog) {
+			/* By the ids the diagnose carries: the engine's text of a variant ("Mirai.A") is not the catalog's name ("Mirai_A"). */
+			f = kv_fam_find_family_id(&u->cat, kdb_diagnose_family(v->eng, first->id));
+			if (f >= 0) {
+				int32_t w;
+
+				decl_pick_family(v, (uint32_t)f);
+				w = kv_fam_find_variant_id(&u->cat, kdb_diagnose_variant(v->eng, first->id));
+				if (w >= 0)
+					decl_pick_variant(v, (uint32_t)w);
+			}
+		}
+	}
+	/*
+	 * THE LINKS, last: a matcher is linked to the diagnose it was made from only when the draft - family, variant, format, type, tag,
+	 * block, threshold - regenerates exactly what that file says (draft_link_unit decides; nothing is compared here). The format the
+	 * rule targets is seeded on arrival as well (draft_seed_target, idempotent), because it is part of what the file says.
+	 */
+	if (n_made) {
+		char dir[300];
+
+		draft_seed_target(v);
+		snprintf(dir, sizeof dir, "%s/diagnoses", v->basedir[0] ? v->basedir : "bases");
+		for (i = 0; i < n_made; i++)
+			(void)draft_link_unit(&v->ed, 1, made[i].g, dir, made[i].id, made[i].name);
+	}
+}
+
+void mtn_sync(struct view *v)
+{
+	if (!v->mtn_segged || v->mtn_seg_obj != v->node[v->sel_node].obj) {
+		/*
+		 * WHAT THE ENGINE OFFERS ON ARRIVAL IS NOT THE READER'S EDIT (DR-2).
+		 *
+		 * mtn_from_match writes the header's family, variant and note, ticks blocks and sets their tag and
+		 * threshold, all of which the draft hash mixes, so an untouched draft read as edited at once and
+		 * every guard that asks draft_edited (next/previous file, unpack, dump, rebuild) refused with
+		 * "Finish or undo the draft first". A draft that was not edited BEFORE the arrival takes the
+		 * seeded state as its baseline; one the reader had edited keeps its baseline, so the seeding is
+		 * added to a real edit and cannot hide it. Chosen over a flag per field (the opt_auto shape):
+		 * the seeding writes six kinds of field, each also written by a reader's click, and a flag would
+		 * have to be cleared in every one of those writers.
+		 */
+		int was_edited = draft_edited(&v->ed);
+
+		mtn_segment(v);
+		mtn_order(v);
+		v->mtn_segged = 1;
+		v->mtn_seg_obj = v->node[v->sel_node].obj;
+		mtn_from_match(v);
+		if (!was_edited)
+			draft_mark_saved(&v->ed);
+		/* The rows just moved; a box open on one of them is open on a
+		 * different block now. */
+		if (v->edit >= ED_GRP_PCT &&
+		    v->edit < ED_GRP_PCT + (int)MAX_GROUP)
+			v->edit = 0;
+		/* A NEW LIST STARTS AT ITS TOP: prow_home says so (the row count is not
+		 * known here, prow_build has not run yet, and the scroll does not need it). */
+		v->prow_off = 0;
+		v->prow_home = 1;
+	}
+	/*
+	 * AND THE RULE TARGETS THE FORMAT OF THE FILE IN FRONT OF IT.
+	 *
+	 * The draft seeds this when the first marker is taken; mutation mode
+	 * takes no markers, so nothing seeded it and the Format row read "None"
+	 * on an ELF that was plainly an ELF. Same call, same rule: only when
+	 * nothing has been chosen yet, so a format the author set by hand
+	 * stands.
+	 */
+	draft_seed_target(v);
+	if (!v->mtn_scored || v->mtn_scored_n != v->ed.dr.n_blk ||
+	    v->mtn_scored_obj != v->node[v->sel_node].obj) {
+		/* Unless they arrived with the blocks - see mtn_scores_known. */
+		if (!v->mtn_scores_known)
+			mtn_rescore(v);
+		v->mtn_scores_known = 0;
+		v->mtn_scored = 1;
+		v->mtn_scored_n = v->ed.dr.n_blk;
+		v->mtn_scored_obj = v->node[v->sel_node].obj;
+	}
 }

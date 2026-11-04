@@ -443,10 +443,8 @@ static struct kgenome_diag_walk *oc_walk(struct kof_scanner *sc)
 	return sc->obj.diag.walk;
 }
 
-/* `want_trace`: the wrapper resolution will read the code again, so the walk
- * that finds the entries keeps its decode for it. */
-static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
-					   int want_trace)
+/* The table is the first reader of the walk and asks for its trace, so no later reader (the signing of a function, the wrapper resolution) decodes again. */
+static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
@@ -469,7 +467,7 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 			kof_genome_obj(ctx, &gobj);
 			kof_prod_ran(sc, KOF_PROD_FUNCS);
 			kgenome_diag_funcs_with_walk(&gobj, sc->match.m.data.p, sc->match.m.data.n,
-						 oc_walk(sc), want_trace,
+						 oc_walk(sc),
 						 &sc->obj.sym.funcs);
 			kof_prod_sync_walk(sc);
 		} else {
@@ -498,7 +496,12 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 
 const struct kgenome_func_set *oc_funcs(const struct kof_obj_ctx *ctx)
 {
-	return funcs_of(ctx, 0);
+	return funcs_of(ctx);
+}
+
+static const struct kgenome_func_set *funcs_cb(void *ctx)
+{
+	return funcs_of(ctx);
 }
 
 /*
@@ -1238,11 +1241,23 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			struct kgenome_diag_inputs in;
 			struct kgenome_obj gobj;
 			struct oc_emu_diag emu_acct;
+			/* ZEROED: the struct has fields this function does not set (lineage_stages, frames, funcs_fn, funcs_user) and an unset one is the stack's garbage - `lineage_stages`
+			 * was read uninitialised here until 2026-11-03, and the stages the lineage ran then followed the layout of the stack (measured: one 0.18 MB ELF changed from OK to
+			 * Limit reached when the frame of this function moved by 16 bytes). */
+			memset(&in, 0, sizeof in);
 			in.relocs = sc_relocs(sc, ctx);
 			/* Read from the same table the symbol block is, once - and only
 			 * for a route that walks functions. */
 			in.funcs = (run & (KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_EMULATE))
-				   ? funcs_of(ctx, (run & KGENOME_DIAG_RUN_SYSCALL) != 0) : NULL;
+				   ? funcs_of(ctx) : NULL;
+			/* The lineage reads the table only when it gets as far as a function (it returns first for another architecture or an object with no node on a call): it is made
+			 * then, from the same product, and not for every object that asks for the stage. */
+			if (!in.funcs && (run & KGENOME_DIAG_RUN_LINEAGE)) {
+				in.funcs_fn = funcs_cb;
+				in.funcs_user = (void *)(uintptr_t)ctx;
+			}
+			/* The frames the lineage reads: the same cache the signing of a function reads. */
+			in.frames = (run & KGENOME_DIAG_RUN_LINEAGE) ? oc_frames(ctx) : NULL;
 			/* The same walk finds the entries and, for the syscall route, the
 			 * kernel-entry sites: one decode of the code. */
 			in.walk = oc_walk(sc);
@@ -1267,6 +1282,11 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			 */
 			kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
 			kb.max_bytes = oc_scan_room(sc);
+			/* The frames the lineage reads are the OBJECT'S cache, charged to the scanner's ledger while the scan runs, where the scan's own bytes are the lib's ledger and reach the
+			 * scanner's only when it ends: the cache may keep at most a quarter of the room (oc_frames), so the scan is given the rest, and the two together never pass the
+			 * ceiling (diag_ledger_e2e pins that the peak does not). */
+			if (in.frames)
+				kb.max_bytes -= kb.max_bytes / 4u;
 			oc_emu_diag_begin(sc, &emu_acct, &kb, &run);
 			if (!run)
 				return;

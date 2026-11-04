@@ -431,6 +431,30 @@ int kof_rar_sniff(kof_buf file)
 }
 
 /*
+ * A RAR THAT IS A VARIABLE'S DATA: the marker and then the main archive header that must follow it. The marker alone was the
+ * check (4 of 4 real in the data of 5855 hosts) until two hosts showed what it cannot tell: a file-type recogniser's table holds
+ * `Rar!\x1a\x07\x00` and `Rar!\x1a\x07\x01\x00` as patterns, each followed by its mask or a number - 4 children of a
+ * PE that were data. An archive's marker is followed by its main header: RAR3, a CRC16, the type 0x73; RAR5, a CRC32, a size
+ * that is not zero, the type 1. The extent is not in the marker (0).
+ */
+int kof_rar_embedded(kof_buf f, uint64_t *extent, uint64_t *work)
+{
+	uint64_t at, size, type;
+	int ok_size, ok_type;
+
+	(void)work;
+	*extent = 0;
+	if (!kof_rar_sniff(f))
+		return 0;
+	if (f.p[6] == 0x00)
+		return kof_in_range(f, RAR3_MAGIC_LEN, 7) && f.p[RAR3_MAGIC_LEN + 2u] == 0x73;
+	at = RAR5_MAGIC_LEN + 4u;
+	size = rd_vint(f, &at, &ok_size);
+	type = rd_vint(f, &at, &ok_type);
+	return ok_size && ok_type && size > 0 && type == 1u;
+}
+
+/*
  * One file block.
  *
  * `size` is the header length the block declared and has already been checked

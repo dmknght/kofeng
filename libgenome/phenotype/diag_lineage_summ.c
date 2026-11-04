@@ -44,22 +44,6 @@
 
 #define KGENOME_LINEAGE_ROUNDS 8u
 
-uint32_t kgenome_lineage_fn_of_va(const struct kgenome_lineage *L, uint64_t va)
-{
-	const uint32_t lo = kof_lower_bound_u64(L->fn_by_va, L->n_fn, sizeof *L->fn_by_va, 0, va);
-
-	return lo < L->n_fn && L->fn_by_va[lo].va == va ? L->fn_by_va[lo].fn : UINT32_MAX;
-}
-
-/* The function an offset lies in, or UINT32_MAX. */
-uint32_t kgenome_lineage_fn_at(const struct kgenome_lineage *L, uint64_t off)
-{
-	const uint32_t lo = kof_first_ending_above_u64(L->fn, L->n_fn, sizeof *L->fn, offsetof(struct kgenome_lineage_fn, off),
-						       offsetof(struct kgenome_lineage_fn, len), off);
-
-	return lo < L->n_fn && L->fn[lo].off <= off ? lo : UINT32_MAX;
-}
-
 int kgenome_lineage_sum_find(struct kgenome_lineage *L, uint64_t entry, uint32_t *lo, uint32_t *hi)
 {
 	uint32_t p = kgenome_diag_wrapper_summary_pos(&L->sums, entry), q = p;
@@ -86,7 +70,7 @@ void kgenome_lineage_apply(struct kgenome_lineage *L, struct kgenome_lineage_sta
 	int any = 0;
 
 	memset(&r, 0, sizeof r);
-	if (!kgenome_lineage_sum_find(L, L->fn[callee].off, &lo, &hi)) {
+	if (!kgenome_lineage_sum_find(L, L->fs->v[callee].off, &lo, &hi)) {
 		kgenome_lineage_val_unknown(ret, KGENOME_LINEAGE_W_SKIP);       /* not solved: it reaches no node, or is not done yet */
 		/* a function that was not read may be wanted: if what it returns reaches a consumer, the caller's obligation asks for it */
 		if ((L->plan & KGENOME_LINEAGE_S_DEMAND) && L->skipped && L->skipped[callee] == 1u && L->n_need < L->n_fn) {
@@ -198,12 +182,12 @@ static int publish(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineag
 	if (h == L->sumhash[fi])
 		return 0;
 	L->sumhash[fi] = h;
-	if (kgenome_lineage_sum_find(L, L->fn[fi].off, &lo, &hi))
+	if (kgenome_lineage_sum_find(L, L->fs->v[fi].off, &lo, &hi))
 		for (k = lo; k < hi; k++)
 			kgenome_diag_wrapper_summary_at(&L->sums, k)->flow = KGENOME_DIAG_WRAPPER_FLOW_DEAD;
 	for (i = 0; i < nt; i++) {
 		memset(&m, 0, sizeof m);
-		m.entry = L->fn[fi].off;
+		m.entry = L->fs->v[fi].off;
 		m.flow = KGENOME_DIAG_WRAPPER_FLOW_RET;
 		if (t[i] == UINT32_MAX) {
 			m.ret.t = KGENOME_DIAG_WRAPPER_V_UNK;
@@ -219,7 +203,7 @@ static int publish(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineag
 	}
 	for (i = 0; i < o->n_sink; i++) {
 		memset(&m, 0, sizeof m);
-		m.entry = L->fn[fi].off;
+		m.entry = L->fs->v[fi].off;
 		m.flow = KGENOME_DIAG_WRAPPER_FLOW_SINK;
 		m.site = L->s->hit[o->sink[i].node].at;
 		m.role = o->sink[i].role;
@@ -267,9 +251,9 @@ static int graph_edges(const struct kgenome_codemap *cm, const struct kgenome_li
 		if ((r->kind != KGENOME_CM_CALL && r->kind != KGENOME_CM_JMP) || r->to == KGENOME_BROKEN ||
 		    (r->flags & KGENOME_CMF_INDIRECT))
 			continue;
-		a = kgenome_lineage_fn_at(L, r->at);
-		b = kgenome_lineage_fn_at(L, r->to);
-		if (a == UINT32_MAX || b == UINT32_MAX || L->fn[b].off != r->to)
+		a = L->ref_from[k];
+		b = L->ref_to[k];
+		if (a == UINT32_MAX || b == UINT32_MAX || L->fs->v[b].off != r->to)
 			continue;
 		if (r->kind == KGENOME_CM_JMP && a == b)
 			continue;       /* a loop to its own top is not a call */
@@ -353,7 +337,7 @@ static int graph_build(struct kgenome_lineage *L, const struct kgenome_codemap *
 
 		if (q) {
 			for (k = 0; k < L->n_site; k++) {
-				uint32_t f = kgenome_lineage_fn_at(L, L->site_at[k]);
+				uint32_t f = L->site_fn[k];
 
 				if (f != UINT32_MAX && !g->rel[f]) {
 					g->rel[f] = 1;
@@ -391,11 +375,11 @@ static void publish_ret(struct kgenome_lineage *L, uint32_t fi, int widen)
 	struct kgenome_diag_wrapper_summary m;
 	uint32_t lo, hi, k;
 
-	if (kgenome_lineage_sum_find(L, L->fn[fi].off, &lo, &hi))
+	if (kgenome_lineage_sum_find(L, L->fs->v[fi].off, &lo, &hi))
 		for (k = lo; k < hi; k++)
 			kgenome_diag_wrapper_summary_at(&L->sums, k)->flow = KGENOME_DIAG_WRAPPER_FLOW_DEAD;
 	memset(&m, 0, sizeof m);
-	m.entry = L->fn[fi].off;
+	m.entry = L->fs->v[fi].off;
 	m.flow = KGENOME_DIAG_WRAPPER_FLOW_RET;
 	m.ret.t = widen ? KGENOME_DIAG_WRAPPER_V_UNK : KGENOME_DIAG_WRAPPER_V_CONST;
 	m.ret.v = widen ? KGENOME_LINEAGE_W_LIMIT : 0;
@@ -404,47 +388,49 @@ static void publish_ret(struct kgenome_lineage *L, uint32_t fi, int widen)
 }
 
 /*
- * THE FUNCTIONS THAT NEVER RETURN, from the object's own branches (the codemap): no ret, no jump out of the function, no jump
- * through a register or memory (a thunk), and at least one call or syscall (what it does before it stops). An object stripped of
- * names has no other way to know __stack_chk_fail and abort from their callers; the imports are named (diag_lineage_chain.c).
+ * THE FUNCTIONS THAT NEVER RETURN, from the function's own FRAME (phenotype/frame.h): no REACHABLE block ends in a `ret`, goes out of the function (a jump, a conditional jump or a loop past
+ * its extent, or through a register or memory: a thunk) or runs on past the end of the extent into the next function's code (the last block, with no branch and no call to end it). What is
+ * left is a function whose every path stops: a call that does not come back (`call abort` is the last instruction of the function when the compiler knows it), a trap (`ud2`, `hlt`), or a
+ * loop with no way out. Decided from the bytes of each case (tests/lib/genome/lineage_frame.c, row NORET): a function of `ud2` alone does not return, one of `nop; nop` runs into the next,
+ * one that is `call x` and ends there does not come back. An earlier rule asked for a call or a system call in a reachable block and no more: it called the function of `ud2` alone one that
+ * returns, and could not tell a call that ends the function from a call the next function's code follows. An object stripped of names has no other way to know __stack_chk_fail and abort
+ * from their callers; the imports are named (diag_lineage_chain.c). It was read off every branch of the extent in the linear decode, reachable or not, and the extent of the last function of
+ * a section runs to the end of the section: a PE whose data sits in the code section had a `jcc` in the bytes of its tables and `stop()` was a function that returns (measured, lineage_chain
+ * "stop() does not return" pe64 on the PE function table). Asked when a call to the function is met, once per function (the memo), and a frame is built for the callees that are called
+ * and no others.
  */
-static void noret_build(struct kgenome_lineage *L, const struct kgenome_codemap *cm)
+int kgenome_lineage_noret(struct kgenome_lineage *L, uint32_t fi)
 {
-	uint8_t *bad = calloc(L->n_fn ? L->n_fn : 1u, 1), *refs = calloc(L->n_fn ? L->n_fn : 1u, 1);
-	uint32_t k, f;
+	struct kgenome_lineage_fn fn;
+	struct kgenome_frame own;
+	const struct kgenome_frame *fr;
+	uint32_t b;
+	int bad = 0;
 
+	if (L->noret_fn[fi])
+		return L->noret_fn[fi] == 1u;
+	L->noret_fn[fi] = 2u;
+	if (!kgenome_lineage_fn_get(L, fi, &fn))
+		return 0;
+	memset(&own, 0, sizeof own);
+	fr = kgenome_frame_of_extent(L->frames, &L->fsrc, fn.off, fn.len, &own);
+	if (!fr)
+		return 0;
+	if (fr->state == KGENOME_FRAME_OK && fr->cfg.n_all && kgenome_frame_facts_of(fr, &L->fsrc)) {
+		for (b = 0; b < fr->cfg.n_all; b++)
+			if (fr->cfg.b[b].reach)
+				bad |= (fr->bits[b] & (KGENOME_FRAME_B_RET | KGENOME_FRAME_B_LEAVES | KGENOME_FRAME_B_RUNS_OUT)) != 0;
+		L->noret_fn[fi] = (uint8_t)(bad ? 2u : 1u);
+	}
+	kgenome_frame_release(&own, &L->fsrc.mem);
+	return L->noret_fn[fi] == 1u;
+}
+
+static void noret_build(struct kgenome_lineage *L)
+{
 	L->noret_fn = calloc(L->n_fn ? L->n_fn : 1u, 1);
-	if (!bad || !refs || !L->noret_fn) {
+	if (!L->noret_fn)
 		kgenome_diag_note(L->s, KGENOME_NOMEM);
-		free(L->noret_fn);
-		L->noret_fn = NULL;
-		free(bad);
-		free(refs);
-		return;
-	}
-	for (k = 0; k < cm->n; k++) {
-		const struct kgenome_codemap_ref *r = &cm->v[k];
-
-		f = kgenome_lineage_fn_at(L, r->at);
-		if (f == UINT32_MAX)
-			continue;
-		if (r->kind == KGENOME_CM_RET) {
-			bad[f] = 1;
-		} else if (r->kind == KGENOME_CM_JMP || r->kind == KGENOME_CM_JCC || r->kind == KGENOME_CM_LOOP) {
-			uint32_t t = (r->flags & KGENOME_CMF_INDIRECT) || r->to == KGENOME_BROKEN ? UINT32_MAX : kgenome_lineage_fn_at(L, r->to);
-
-			if (r->kind == KGENOME_CM_JMP && (r->flags & KGENOME_CMF_INDIRECT))
-				bad[f] = 1;
-			else if (t != f)
-				bad[f] = 1;
-		} else {
-			refs[f] = 1;    /* a call or a syscall */
-		}
-	}
-	for (f = 0; f < L->n_fn; f++)
-		L->noret_fn[f] = (uint8_t)(refs[f] && !bad[f]);
-	free(bad);
-	free(refs);
 }
 
 /* Does the function's summary say anything a caller can use: a sink, or a return that is a producer or a parameter. */
@@ -452,7 +438,7 @@ static int summary_nontrivial(struct kgenome_lineage *L, uint32_t fi)
 {
 	uint32_t lo, hi, p;
 
-	if (!kgenome_lineage_sum_find(L, L->fn[fi].off, &lo, &hi))
+	if (!kgenome_lineage_sum_find(L, L->fs->v[fi].off, &lo, &hi))
 		return 0;
 	for (p = lo; p < hi; p++) {
 		const struct kgenome_diag_wrapper_summary *m = kgenome_diag_wrapper_summary_at(&L->sums, p);
@@ -660,7 +646,7 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 	struct lin_graph g;
 	uint32_t p;
 
-	if (!cm || !L->n_fn)
+	if (!cm || !L->n_fn || !kgenome_lineage_refs(L, cm))
 		return;
 	L->callers = calloc(L->n_fn, sizeof *L->callers);
 	L->has_site = calloc(L->n_fn, 1);
@@ -678,7 +664,7 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 		L->sumhash[p] = 0;
 	L->sums.s = L->s;
 	for (p = 0; p < L->n_site; p++) {
-		uint32_t f = kgenome_lineage_fn_at(L, L->site_at[p]);
+		uint32_t f = L->site_fn[p];
 
 		if (f != UINT32_MAX)
 			L->has_site[f] = 1;
@@ -686,7 +672,7 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 	if (!graph_build(L, cm, &g))
 		return;
 	L->rel = g.rel;
-	noret_build(L, cm);
+	noret_build(L);
 	tarjan(L, &g);
 	L->rel = NULL;
 	L->ag = &L->glob;
@@ -698,7 +684,7 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 
 		if (m->flow != KGENOME_DIAG_WRAPPER_FLOW_SINK)
 			continue;
-		f = kgenome_lineage_fn_at(L, m->entry);
+		f = kgenome_funcs_at(L->fs, m->entry);
 		if (f == UINT32_MAX || L->callers[f] || !kgenome_lineage_site_of(L, m->site, &node))
 			continue;
 		{

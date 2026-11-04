@@ -371,6 +371,42 @@ struct kof_exe_decode_res {
 int kof_exe_decode_ex(uint8_t *p, uint64_t n, struct kof_exe_decode_res *res);
 
 /*
+ * A STRING TABLE HIDDEN WITH ONE BYTE, said as the strings it holds - in place, length preserving,
+ * over the bytes the keep map leaves free. SCAN PATH (the normalise step), not a viewer's.
+ *
+ * The family's source encodes every entry as `text xor K` with the NUL encoded too, so a record (a
+ * run of non-zero bytes a zero follows) ends in K: that is where the key is read, one candidate a
+ * record, and it is believed only when the stretch carries a RUN of KOF_EXE_STR_ANCHOR_MIN records,
+ * next to each other, that end in it, are unreadable as they stand and read as text under it
+ * (KOF_EXE_STR_LEN_MIN characters or more each), KOF_EXE_STR_CHARS_MIN characters in all. No
+ * key is tried and no cap bounds anything: the work is a read of each stretch. See
+ * executables_strtab.c for the evidence and what it was measured on.
+ *
+ * `keep` is the bitmap of bytes not to touch (NULL: none); the evidence of a key comes from the
+ * free stretch it decodes in, never from kept code. Returns non-zero when a record was decoded.
+ */
+#define KOF_EXE_STR_ANCHOR_MIN 16u      /* records that end in the key and read as text under it */
+#define KOF_EXE_STR_CHARS_MIN  256u     /* characters those records hold between them */
+#define KOF_EXE_STR_LEN_MIN    4u       /* characters a record of the run holds, at least: its terminator is not one */
+
+struct kof_exe_strtab_res {
+	uint32_t keys;          /* keys the evidence reached the floors for, over all stretches */
+	uint64_t stretches;     /* free stretches read */
+	uint64_t records;       /* records rewritten */
+	uint64_t chars;         /* characters in them, terminators not counted */
+};
+
+int kof_exe_strtab(uint8_t *p, uint64_t n, const uint8_t *keep, struct kof_exe_strtab_res *res);
+
+/*
+ * Whether kof_exe_strtab could change a byte of `p`, answered by reading it, with no keep map (the
+ * map is not built when this is asked): the evidence is read over the whole object, so a "no" is
+ * exact except for a table whose records a kept edge cuts, and a "yes" may come from code - the
+ * decode then finds nothing in the free stretches and the collapse decides whether a view results.
+ */
+int kof_exe_strtab_would_change(const uint8_t *p, uint64_t n);
+
+/*
  * Whether kof_exe_decode_ex would change a byte of `p`, answered by READING it: no copy
  * of the object is needed to know that nothing would be decoded. Non-zero also when a
  * bound of the decode would fire. See the definition for why "zero" is exact.

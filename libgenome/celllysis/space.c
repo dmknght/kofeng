@@ -96,5 +96,6 @@ void kgenome_cell_space_init(struct kgenome_cell_space *sp, const struct kgenome
 	sp->seg_at = obj_seg_at;
 	sp->off_of_va = obj_off_of_va;
 	sp->held = NULL;
+	sp->raw = 0;
 	sp->held_priv = NULL;
 }

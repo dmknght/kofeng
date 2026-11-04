@@ -131,6 +131,10 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 /* The functions of the object, built once - see funcs.h. Never NULL. */
 const struct kgenome_func_set *oc_funcs(const struct kof_obj_ctx *ctx);
+/* The object's frames (the cache, made on the first ask), and the allocator they are charged to: the scanner's ledger, refused when the object's share has no room. */
+struct kgenome_frame_cache *oc_frames(const struct kof_obj_ctx *ctx);
+void *oc_cfg_alloc(void *user, size_t n);
+void oc_cfg_release(void *user, void *p, size_t n);
 int oc_diag(const struct kof_obj_ctx *ctx, uint16_t id);
 int oc_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 			uint16_t a, uint16_t b);

@@ -377,6 +377,15 @@ void dash_regions(const struct view *v, const struct object *ob, struct dash_blo
  * and an absent section reads as a section that was not checked. A reconstructed payload says what it is in place
  * of the parser's list (display only: no anomaly bit is added).
  */
+/*
+ * PLAN dash-packer-1 (owner, 2026-11-01; PLAN ONLY, NOT DONE: written down to be done later).
+ * The packer and the anomalies belong to the OBJECT they are about, not to the end of the page. Today `opened by <module>` is a row of the Object block
+ * (kv_props_obj.c) and Anomalies is the LAST block (this function). Wanted: (1) where it now says `opened by <packer>` write `Packer: <packer info>` in that same
+ * place; (2) an anomaly that belongs to an object is written with that object (or its enclosing one), not in a block at the bottom; (3) a NORMALISED view
+ * INHERITS its parent's anomalies, so the info block of the view must NOT repeat them ("Normalize thừa hưởng anomalies thì không nhắc lại ở phía info object").
+ * Sample: HEUR-Backdoor.Linux.Mirai.r-be0826d7 shows `packer ELF:UPX 3.94` and `anomalies SEG_PAST_EOF SECTAB_MISSING` in kofexaminer's list for the file itself.
+ * Open: what "enclosing" is on screen (the stacked blocks: file, unpacked child, view); the owner's rule for a view is the only one given.
+ */
 void dash_anomalies(const struct object *ob, struct dash_block *b)
 {
 	struct dash_row *r;
@@ -410,113 +419,6 @@ void dash_anomalies(const struct object *ob, struct dash_block *b)
 		r = row_new(b, "", DT_NONE);
 		span(r, DT_DIM, "  no parser claimed these bytes");
 	}
-}
-
-/* ---- the detection block ----------------------------------------------------------------------------------- */
-
-/* The matcher rows of one diagnose, from the report a kscan_explain run holds for the object. */
-static void detection_why(struct dash_block *b, const struct kdet_object *why, uint32_t id)
-{
-	uint32_t k, m;
-
-	for (k = 0; why && k < why->res.n_diag; k++) {
-		const struct kof_diag_report *d = &why->res.diag[k];
-		struct dash_row *r;
-
-		if (d->id != id)
-			continue;
-		for (m = 0; d->form && m < d->n_match_total && m < KOF_DIAG_REPORT_MATCH; m++) {
-			char t[96];
-			int res = kdet_matcher_text(&d->match[m], t, sizeof t);
-
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "      matcher %u ", m);
-			span(r, res == KDET_M_NOT_ASKED ? DT_DIM : res ? DT_ID : DT_WARN, "%s", t);
-		}
-		for (m = 0; d->form && m < d->n_part; m++) {
-			char t[240];
-			int hit = kdet_part_text(&d->part[m], t, sizeof t);
-
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "      part ");
-			span(r, hit ? DT_ID : DT_WARN, "%s", t);
-		}
-		if (d->form && d->n_part_total > d->n_part) {
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "      (%u more part(s) not listed)", (unsigned)(d->n_part_total - d->n_part));
-		}
-		if (!d->form && d->state == KOF_DIAG_ST_MATCH && d->n_bound) {
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "      lineage %u of %u node(s), head at %#llx", (unsigned)d->n_bound, (unsigned)d->n_node,
-			     (unsigned long long)d->at[0]);
-		}
-		if (d->form && d->n_match_total > KOF_DIAG_REPORT_MATCH) {
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "      (%u more matcher(s) not listed)", (unsigned)(d->n_match_total - KOF_DIAG_REPORT_MATCH));
-		}
-		return;
-	}
-}
-
-/* What the engine says about this object's detection (kdet_info, kdet_diag: the verdict, the catalog facts it was decided from, each
- * matched diagnose) and, when a run of kscan_explain is given, why each diagnose matched. Nothing is decided here. */
-void dash_detection(const struct view *v, const struct object *ob, const struct kdet_object *why, struct dash_block *b)
-{
-	struct kdet_info in;
-	struct dash_row *r;
-	uint32_t i;
-
-	block_begin(b, "Detection");
-	kdet_info(v->eng, &ob->heur, &in);
-	if (!in.has_verdict) {
-		const char *fv = file_verdict_of(v, ob);
-
-		if (fv) {
-			r = row_new(b, "verdict", DT_DIM);
-			span(r, DT_BAD, "%s", fv);
-		}
-		return;
-	}
-	r = row_new(b, "verdict", DT_DIM);
-	span(r, DT_BAD, "%s", in.verdict);
-	if (in.incomplete)
-		span(r, DT_WARN, "  (may be missing a disease)");
-	if (in.level) {
-		r = row_new(b, "family", DT_DIM);
-		span(r, DT_NAME, "%s", in.family);
-		r = row_new(b, "variant", DT_DIM);
-		span(r, DT_NAME, "%s", in.variant);
-		r = row_new(b, "tag", DT_DIM);
-		span(r, DT_NAME, "%s", in.tag);
-		r = row_new(b, "basis", DT_DIM);
-		span(r, DT_TYPE, "%s", in.level == KOF_VCAT_VARIANT ? "variant" : "tag");
-		span(r, DT_DIM, "  cover %u  jaccard %u  groups %u  matched %u%s", (unsigned)in.cover, (unsigned)in.jaccard,
-		     (unsigned)in.groups, (unsigned)in.fired, in.cut ? "  (cut)" : "");
-	}
-	for (i = 0; i < in.n_diag; i++) {
-		struct kdet_diag d;
-
-		if (!kdet_diag(v->eng, &ob->heur, i, &d))
-			continue;
-		r = row_new(b, i ? "" : "diagnose", DT_DIM);
-		span(r, DT_NAME, "%s", d.name ? d.name : "?");
-		if (d.type >= 0)
-			span(r, DT_TYPE, "  %s", kof_maltype_name((uint32_t)d.type));
-		r = row_new(b, "", DT_NONE);
-		span(r, DT_DIM, "    family %s  variant %s  tag %s", d.family, d.variant, d.tag);
-		if (d.kind == KDET_KIND_GRAPH) {
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "    graph (lineage)");
-		}
-		if (d.has_form) {
-			r = row_new(b, "", DT_NONE);
-			span(r, DT_DIM, "    %s over %u matcher(s): %s", d.form.similarity ? "similarity" : "strings",
-			     (unsigned)d.form.matchers, d.expr);
-		}
-		detection_why(b, why, d.id);
-	}
-	if (in.diag_total > in.n_diag)
-		b->not_shown += in.diag_total - in.n_diag;
 }
 
 /* ---- the layout tables ----------------------------------------------------------------------------------- */

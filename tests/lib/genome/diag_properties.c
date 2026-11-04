@@ -397,10 +397,10 @@ static void p3_p4(void)
 		memset(&f1, 0, sizeof f1);
 		memset(&f2, 0, sizeof f2);
 		/* P3: the functions, the trace given back, the functions again */
-		kgenome_diag_funcs_with_walk(&o, img, n, wk, 1, &f1);
+		kgenome_diag_funcs_with_walk(&o, img, n, wk, &f1);
 		runs_after_funcs = kgenome_diag_walk_runs(wk);
 		kgenome_diag_walk_trim(wk);
-		kgenome_diag_funcs_with_walk(&o, img, n, wk, 1, &f2);
+		kgenome_diag_funcs_with_walk(&o, img, n, wk, &f2);
 		CK(funcs_same(&f1, &f2));
 		/* P4: the scan that shares the walk reads the same decode */
 		memset(&in, 0, sizeof in);

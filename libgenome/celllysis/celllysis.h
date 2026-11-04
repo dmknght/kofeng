@@ -97,6 +97,9 @@ struct kgenome_cell_space {
 	uint32_t (*held)(void *priv, uint64_t off, uint64_t va, uint32_t left,
 			 struct kgenome_cell_insn *out);
 	void    *held_priv;
+	/* The instruction as the decoder wrote it: 1 skips what the cursor does after the decode (ARM's literal-pool load made the MOV of the constant it loads), 0, the default of every
+	 * existing initialiser, keeps it. The walk that keeps the decode (diag_wrapper_walk.c) asks for the raw one: what it holds is what kgenome_cell_decode writes, `held` above. APPENDED. */
+	int      raw;
 };
 
 /*

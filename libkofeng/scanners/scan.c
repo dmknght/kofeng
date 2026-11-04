@@ -323,6 +323,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->syms.decl);
 	free(sc->syms.buf);
 	kgenome_funcs_free(&sc->obj.sym.funcs);
+	kgenome_frame_cache_free(sc->obj.diag.frames);
 	kgenome_diag_walk_free(sc->obj.diag.walk);
 	free(sc->pend.syms);
 	free(sc->pend.desc_buf);
@@ -677,6 +678,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 	kof_prod_sync_walk(sc);
 	if (kgenome_diag_walk_capped(sc->obj.diag.walk))
 		sc->st.trace_capped++;
+	kgenome_frame_cache_free(sc->obj.diag.frames);
 	kgenome_diag_walk_free(sc->obj.diag.walk);
 
 	/* The bitmaps are the scanner's, sized by the database and kept; only their

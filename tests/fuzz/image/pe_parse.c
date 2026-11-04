@@ -36,6 +36,39 @@ static void seed_one(struct fz_corpus *c, const char *name, int plus)
 	unsigned v = (unsigned)plus, i;
 
 	hk_pe(q, plus);
+
+	/*
+	 * A small COFF local symbol table past the object's declared end (0x800, well inside
+	 * HK_PE_MAX's 0x1000): two function symbols at .text (section 1) - one with an inline
+	 * name, one needing the string table right after it - so kgenome_pe_coff_syms (the
+	 * function this adapter now also fuzzes, see coff_cb) has real structure to corrupt,
+	 * not only whatever random bytes used to land past the file's old end.
+	 */
+	{
+		uint8_t *t = q->b + q->n;
+		uint32_t coff_off = q->n;
+		static const char longname[] = "a_long_mingw_style_name";
+		uint32_t strsz = 4u + (uint32_t)sizeof longname;
+
+		memset(t, 0, 2u * 18u + strsz);
+		memcpy(t, "calc", 4);           /* inline name: Name[0..3] non-zero, Value 0, section 1 */
+		hk_w(t + 12, 1, 2, 0);
+		hk_w(t + 14, 0x20, 2, 0);        /* Type: DTYPE_FUNCTION */
+		t[16] = 2;                      /* StorageClass EXTERNAL */
+
+		hk_w(t + 18 + 4, 4, 4, 0);       /* Name[0..3] zero: long-name form, offset 4 in the string table */
+		hk_w(t + 18 + 8, 4, 4, 0);       /* Value 4, section 1 */
+		hk_w(t + 18 + 12, 1, 2, 0);
+		hk_w(t + 18 + 14, 0x20, 2, 0);
+		t[18 + 16] = 2;
+
+		hk_w(t + 2u * 18u, strsz, 4, 0); /* the string table's own declared size, including itself */
+		memcpy(t + 2u * 18u + 4u, longname, sizeof longname);
+
+		hk_w(q->b + q->lfanew + 12, coff_off, 4, 0);   /* PointerToSymbolTable */
+		hk_w(q->b + q->lfanew + 16, 2, 4, 0);          /* NumberOfSymbols */
+		q->n = coff_off + 2u * 18u + strsz;
+	}
 	map[v].f = fld[v];
 	map[v].n = 0;
 	field(v, 0x3c, 4, FZ_OFFSET);
@@ -113,6 +146,29 @@ static int exp_cb(void *u, uint64_t nameoff, uint32_t rva)
 	return 1;
 }
 
+struct coffacc {
+	struct fz_ctx *c;
+	const uint8_t *base;
+	uint64_t       n;
+	uint32_t       calls;
+};
+
+static int coff_cb(void *u, const struct kgenome_pe_coff_sym *s)
+{
+	struct coffacc *a = (struct coffacc *)u;
+
+	a->calls++;
+	fz_step(&a->c->steps, 1);
+	FZ_CHECK(a->c, s->shndx > 0, "a COFF symbol reported with no real section");
+	FZ_CHECK(a->c, s->off < a->n, "a COFF symbol's file offset outside the object");
+	FZ_CHECK(a->c, !s->has_size || s->off + s->size <= a->n, "a COFF symbol's size runs past the object");
+	FZ_CHECK(a->c, !s->name_len ||
+		       (s->name >= (const char *)a->base && s->name + s->name_len <= (const char *)a->base + a->n),
+		 "a COFF symbol name pointing outside the object");
+	fz_digest(a->c, s->value ^ ((uint64_t)s->shndx << 32) ^ s->name_len);
+	return 1;
+}
+
 static void *parse(struct fz_ctx *c, const uint8_t *in, size_t n)
 {
 	kof_buf f = kof_buf_make(in, n);
@@ -161,9 +217,17 @@ static void walk(struct fz_ctx *c, void *h, const uint8_t *in, size_t n)
 	}
 	kgenome_pe_imptab_free(&t);
 	fz_digest(c, ((uint64_t)got << 20) ^ gote ^ ((uint64_t)ist << 50));
+	{
+		struct coffacc ca;
+		uint32_t n_bad = 0;
+
+		ca.c = c; ca.base = in; ca.n = n; ca.calls = 0;
+		kgenome_pe_coff_syms(f, &s->info, coff_cb, &ca, &n_bad);
+		fz_digest(c, ca.calls ^ ((uint64_t)n_bad << 24));
+	}
 	infect_check(c, &s->obj, f, kgenome_infect_regions);
 }
 
 FZ_ADAPTER(pe_parse, .name = "kgenome/pe_image", .covers = "kgenome_pe_image_parse kgenome_pe_sniff kgenome_pe_imports kgenome_pe_exports "
-	   "kgenome_pe_imptab_build kgenome_pe_imptab_free kgenome_pe_imptab_is_of kgenome_pe_imp_name",
+	   "kgenome_pe_imptab_build kgenome_pe_imptab_free kgenome_pe_imptab_is_of kgenome_pe_imp_name kgenome_pe_coff_syms",
 	   .shape = FZ_PARSE, .seeds = seeds, .dict = dict, .parse = parse, .walk = walk);

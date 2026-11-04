@@ -3,8 +3,8 @@
  * where a PE's functions come from.
  *
  * The scanner and the authoring tool both call kgenome_mutation_units, so what this
- * pins is the cut itself: a function region yields functions - grouped when
- * small, dropped when stubs or the library's, none when the symbols are absent -
+ * pins is the cut itself: a function region yields ONE unit per function - no
+ * minimum, no grouping; only the library's and those outside the region are not offered, none when the symbols are absent -
  * and any other region tiles exactly, split at a library boundary with a side
  * on every piece.
  */
@@ -53,9 +53,9 @@ static void functions(void)
 	static uint8_t obj[8192];
 	struct kgenome_func v[6] = {
 		{ 100, 300, 0, 0 },   /* a function */
-		{ 500, 100, 0, 0 },   /* small, next to the next one ... */
-		{ 610, 100, 0, 0 },   /* ... so the two are one unit of 500..710 */
-		{ 2000, 40, 0, 0 },   /* a stub: under the floor alone */
+		{ 500, 100, 0, 0 },   /* small, next to the next one: still a unit of its own (was grouped with it) ... */
+		{ 610, 100, 0, 0 },   /* ... and so is this one */
+		{ 2000, 40, 0, 0 },   /* 40 bytes: a unit, there is no minimum size */
 		{ 3000, 200, 0, 0 },  /* the library's */
 		{ 5000, 100, 0, 0 },  /* outside the region */
 	};
@@ -63,7 +63,9 @@ static void functions(void)
 	struct kof_range ext = { 0, 4000 };
 	struct kgenome_true_all lib;
 	struct got g;
+	struct kgenome_mutation_tally tally;
 
+	memset(&tally, 0, sizeof tally);
 	memset(&fs, 0, sizeof fs);
 	fs.v = v; fs.n = 6;
 	memset(&lib, 0, sizeof lib);
@@ -81,12 +83,17 @@ static void functions(void)
 			.lib = &lib,
 			.fn = take,
 			.user = &g,
+			.tally = &tally,
 		});
-	check(g.n == 2u, "the units of a function region are the functions that count");
+	check(g.n == 4u, "the units of a function region are its functions, the library's and the outside one excepted");
+	/* FP-18: what the cut left out is COUNTED (it was dropped with no word). RED on the base: there is no tally; the units themselves did not change */
+	check(tally.funcs == 6u && tally.units == 4u && tally.outside == 1u && tally.lib == 1u,
+	      "the cut says how many functions it offered, left outside the region and left to the library");
 	check(g.n >= 1u && g.off[0] == 100u && g.len[0] == 300u,
 	      "a function is a unit of its own extent");
-	check(g.n >= 2u && g.off[1] == 500u && g.len[1] == 210u,
-	      "small functions that sit together are one unit");
+	check(g.n >= 4u && g.off[1] == 500u && g.len[1] == 100u && g.off[2] == 610u && g.len[2] == 100u,
+	      "small functions that sit together are one unit each");
+	check(g.n >= 4u && g.off[3] == 2000u && g.len[3] == 40u, "a function of 40 bytes is a unit");
 	check(g.side[0] == KGENOME_MUTATION_SIDE_USER, "a function is on the author's side");
 
 	memset(&g, 0, sizeof g);
@@ -103,6 +110,30 @@ static void functions(void)
 			.user = &g,
 		});
 	check(g.n == 0u, "no symbols, no functions, no units - and no byte carve");
+	/* a tally is added to by every function region the request cuts, and a stopped walk counts only what it met; a NULL tally is the ordinary call (the rows above) */
+	{
+		struct kgenome_mutation_tally t2;
+		struct kof_range cut = { 100, 250 };         /* [100, 350): function 0 (100..400) straddles the end of the extent */
+
+		memset(&t2, 0, sizeof t2);
+		memset(&g, 0, sizeof g);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF, .mask = KGENOME_SCAN_ELF_CODE,
+				.ext = &cut, .n_ext = 1, .funcs = &fs, .lib = &lib, .fn = take, .user = &g, .tally = &t2,
+			});
+		check(t2.funcs == 6u && t2.units == 0u && t2.outside == 6u && t2.lib == 0u,
+		      "a function not wholly inside an extent is counted outside, whatever the library does");
+	}
+	{
+		struct kof_mutation_ctx c;
+
+		memset(&c, 0, sizeof c);
+		kof_mutation_note_dropped(&c, 0, 0);
+		check(!(c.status & KOF_MTN_S_FUNC_DROPPED), "nothing dropped, nothing said");
+		kof_mutation_note_dropped(&c, 2, 3);
+		check((c.status & KOF_MTN_S_FUNC_DROPPED) && c.funcs_lib == 2u && c.funcs_out == 3u, "a dropped function says so on the object");
+		kof_mutation_note_dropped(NULL, 1, 1);
+	}
 
 	/* a region that is not offered a function at a time is cut by bytes, whole */
 	{
@@ -182,6 +213,7 @@ static void pe_functions(void)
 	p.sec_count = 1;
 	p.sec[0].mem_rva = 0x1000; p.sec[0].mem_size = 0x1000;
 	p.sec[0].file_off = 0x200; p.sec[0].file_size = 0x1000;
+	p.sec[0].perm = KGENOME_PE_PERM_X;      /* the section is code: an exception table entry whose function is in a section that does not execute is refused (fntab_pe_pdata.c) */
 	p.dir[KGENOME_PE_DIR_EXCEPTION].rva = 0x1800;
 	p.dir[KGENOME_PE_DIR_EXCEPTION].size = 4u * 12u;
 	/* unwind info: at 0x1900 no flags, at 0x1920 CHAININFO */
@@ -193,9 +225,10 @@ static void pe_functions(void)
 	put32(t + 36, 0x1300); put32(t + 40, 0x1380); put32(t + 44, 0x1901); /* indirect */
 
 	kgenome_pe_funcs_build(kof_buf_make(file, sizeof file), &p, &fs);
-	check(fs.n == 2u, "the functions of a PE are its unchained, direct entries");
-	check(fs.n == 2u && fs.v[0].off == 0x200u + 0x0u && fs.v[0].len == 0x80u &&
-	      fs.v[1].off == 0x300u && fs.v[1].len == 0x50u,
+	/* the entry with an indirect unwind address (low bit set) is a function with its own Begin and End: its info is not read (PDATA-1: it used to be dropped without a word); the chained one is a fragment */
+	check(fs.n == 3u, "the functions of a PE are its unchained entries, the indirect one included");
+	check(fs.n == 3u && fs.v[0].off == 0x200u + 0x0u && fs.v[0].len == 0x80u &&
+	      fs.v[1].off == 0x300u && fs.v[1].len == 0x50u && fs.v[2].off == 0x500u && fs.v[2].len == 0x80u,
 	      "a function is where its RVA lands in the file, as long as it says");
 	kgenome_funcs_free(&fs);
 
@@ -526,7 +559,7 @@ int main(void)
 		printf("mutation units: %d failure(s)\n", failures);
 		return 1;
 	}
-	printf("mutation units: function units grouped and filtered, byte pieces tile "
+	printf("mutation units: one function unit per function, byte pieces tile "
 	       "and split at the library, a PE's functions from .pdata - ok\n");
 	return 0;
 }

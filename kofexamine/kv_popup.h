@@ -2,11 +2,11 @@
  * kv_popup.h - THE pop-up list of the viewer, as data: the menu bar's drop-down and its submenu, the right-click menu, the pick-lists of the
  * draft panel (the choosers, and the submenu a row of one opens), the tick menu of a table cell. One description of the rows, ONE function
  * that places the box (kv_popup_place), one text for every row (kv_popup_text), one hit test, one key step, one renderer (kv_popup_draw,
- * kofview.c). What a caller keeps is its items and the anchor; the box (x, y, w, h, which side it opened on, how far it is scrolled) is
+ * kv_popup.c). What a caller keeps is its items and the anchor; the box (x, y, w, h, which side it opened on, how far it is scrolled) is
  * returned, never worked out again at a draw, a click or a key.
  *
  * Pure: no terminal and no global. The screen is a parameter of the request, so tests/unit/kx_popup.c can ask for a box on any screen,
- * a tiny one included. The functions are defined in kofview.c with the other widgets.
+ * a tiny one included. The functions are defined in kv_popup.c.
  *
  * kv_box_fit is the one rule for "keep a box on the screen" and is shared with the dialogs' frames (dframe_begin, kv_dd_place).
  */

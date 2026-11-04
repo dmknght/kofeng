@@ -69,4 +69,7 @@ const char *kof_rar_anomaly_name(unsigned index);
 extern const uint32_t kof_rar_region_bits[];
 #define KOF_RAR_REGION_COUNT 5u   /* asserted against the array in the .c */
 
+/* A rar at the start of `f` that is a variable's data: the marker and the main archive header after it. `*extent` is 0. */
+int kof_rar_embedded(kof_buf f, uint64_t *extent, uint64_t *work);
+
 #endif /* KOFENG_RAR_PARSE_H */

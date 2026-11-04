@@ -349,66 +349,6 @@ static void anomalies_rows(void)
 	memset(&FMT, 0, sizeof FMT);
 }
 
-/* The detection block is the engine's answer put in rows (kdet_info / kdet_diag): a verdict, the catalog facts and the basis it was
- * decided from, each matched diagnose, and - from a kscan_explain run - why each matched. Without a verdict there is nothing to say. */
-static void detection_rows(void)
-{
-	static struct view V;
-	static struct kdet_object why;
-	static struct kof_diag_report rep;
-	char t[160];
-
-	memset(&OB, 0, sizeof OB);
-	dash_detection(&V, &OB, NULL, &BK);
-	CK(strcmp(BK.head, "Detection") == 0 && BK.n == 0u);
-	/* The object that is the file has no verdict of its own; the engine's per-file roll-up has one: it is shown, as the verdict row only. */
-	g_file_verdict = "Infected#ELF-x64/Botnet:Mirai.A!Diagnose";
-	dash_detection(&V, &OB, NULL, &BK);
-	CK(BK.n == 1u && strcmp(BK.row[0].label, "verdict") == 0 && strstr(BK.row[0].s[0].text, "Mirai.A") && BK.row[0].s[0].tone == DT_BAD);
-	g_file_verdict = NULL;
-	dash_detection(&V, &OB, NULL, &BK);
-	CK(BK.n == 0u);
-	OB.heur.has_verdict = 1;
-	snprintf(OB.heur.verdict.name, sizeof OB.heur.verdict.name, "Infected#ELF-x64/Botnet:Mirai.A!Diagnose");
-	dash_detection(&V, &OB, NULL, &BK);
-	CK(BK.n == 1u && strcmp(BK.row[0].label, "verdict") == 0 && BK.row[0].s[0].tone == DT_BAD);
-	OB.heur.cat.level = KOF_VCAT_VARIANT;
-	OB.heur.cat.cover = 1000u;
-	OB.heur.cat.jaccard = 900u;
-	OB.heur.cat.n_groups = 1u;
-	OB.heur.cat.n_fired = 6u;
-	OB.heur.verdict.n_diag = 1u;
-	OB.heur.verdict.diag_total = 3u;
-	OB.heur.verdict.diag[0] = 7u;
-	rep.id = 7u;
-	rep.form = 1;
-	rep.n_match_total = 2u;
-	rep.state = KOF_DIAG_ST_MATCH;
-	rep.match[0].kind = KDET_M_SIMILAR;
-	rep.match[0].result = KDET_M_YES;
-	rep.match[0].n = 1u;
-	rep.match[0].pct = 100u;
-	rep.match[0].need = 70u;
-	rep.match[1].result = KDET_M_NOT_ASKED;
-	why.res.diag = &rep;
-	why.res.n_diag = 1u;
-	dash_detection(&V, &OB, &why, &BK);
-	CK(find_row(&BK, "family") && find_row(&BK, "variant") && find_row(&BK, "tag") && find_row(&BK, "diagnose"));
-	row_text(find_row(&BK, "basis"), t, sizeof t);
-	CK(strstr(t, "variant") && strstr(t, "cover 1000") && strstr(t, "jaccard 900") && strstr(t, "groups 1") && strstr(t, "matched 6"));
-	{
-		uint32_t i, hit = 0, skipped = 0;
-
-		for (i = 0; i < BK.n; i++) {
-			row_text(&BK.row[i], t, sizeof t);
-			hit += strstr(t, "matcher 0 similarity 100% of the 1 block(s), 70% demanded") != NULL;
-			skipped += strstr(t, "matcher 1 not asked") != NULL;
-		}
-		CK(hit == 1u && skipped == 1u);
-	}
-	CK(BK.not_shown == 2u);                  /* the verdict listed 1 of 3 diagnoses: the other two are counted, not silent */
-}
-
 /* ================================================================================ LAYOUT */
 
 static void layout_elf_shapes(void)
@@ -1397,7 +1337,6 @@ int main(int argc, char **argv)
 	header_pe_rows();
 	regions_rows();
 	anomalies_rows();
-	detection_rows();
 	layout_elf_shapes();
 	layout_hostile();
 	layout_pe();

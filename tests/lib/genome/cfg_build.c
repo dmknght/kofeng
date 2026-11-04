@@ -289,6 +289,107 @@ static void consolidation(void)
 	}
 }
 
+/* FNR-1 (2026-11-04): KGENOME_CFG_F_TRAP_EXITS used to end the path at EVERY one-byte int3/hlt, so an int3 carried
+ * INLINE in a function body (instrumented or obfuscated code) cut the block there and orphaned the real code behind
+ * it as unreachable. No existing test built a request with this flag at all (the TRAP_EXITS branch of classify()
+ * had zero coverage - reason (a), "line never executed"), so the bug was never hit. Fixed: an int3/hlt is the exit
+ * only when it stands right after a CALL (the MSVC "call does not return" idiom); anywhere else it is a plain
+ * (non-flow) instruction and does not split the block. */
+static void fnr1_trap_exits(void)
+{
+	struct kgenome_cfg_req rq;
+	struct kgenome_cfg g;
+
+	/* mid-body int3, NOT after a call: nop; int3; nop; ret - must stay ONE reachable block (the int3 does not end it) */
+	{
+		static const uint8_t code[] = { 0x90, 0xcc, 0x90, 0xc3 };
+		struct kgenome_cell_insn v[4];
+		uint32_t i;
+
+		for (i = 0; i < 4; i++) {
+			CK(kgenome_cell_decode(KGENOME_ARCH_X86_64, 0, code + i, (uint32_t)sizeof code - i, 0x1000 + i, &v[i]) == 1u);
+			v[i].at = i;
+		}
+		memset(&rq, 0, sizeof rq);
+		rq.in = v; rq.n_in = 4; rq.arch = KGENOME_ARCH_X86_64; rq.va_lo = 0x1000; rq.va_hi = 0x1004;
+		rq.bytes = code; rq.bytes_len = sizeof code; rq.flags = KGENOME_CFG_F_TRAP_EXITS;
+		CK(kgenome_cfg_build(&rq, &g) == KGENOME_OK);
+		CKM(g.n_all == 1, "fnr1 mid-body int3: n_all %u (want 1: must not split the block)", g.n_all);
+		if (g.n_all == 1) {
+			CKM(g.b[0].n_insn == 4 && g.b[0].term == KGENOME_CFG_T_EXIT && g.b[0].reach == 1,
+			    "fnr1 mid-body int3: n_insn %u term %u reach %u", g.b[0].n_insn, g.b[0].term, g.b[0].reach);
+		}
+		kgenome_cfg_free(&g, NULL);
+	}
+	/* the idiom TRAP_EXITS exists for is unchanged: call abort(); int3  - the int3 right after the CALL still ends the path, and the code behind it (another function's bytes here) is unreachable. */
+	{
+		static const uint8_t code[] = { 0xe8, 0, 0, 0, 0, 0xcc, 0x90, 0xc3 };
+		struct kgenome_cell_insn v[4];
+		uint32_t pos = 0, k = 0, l;
+
+		while (pos < sizeof code) {
+			l = kgenome_cell_decode(KGENOME_ARCH_X86_64, 0, code + pos, (uint32_t)sizeof code - pos, 0x1000 + pos, &v[k]);
+			CK(l != 0 && k < 4);
+			v[k].at = pos;
+			k++;
+			pos += l;
+		}
+		CKM(k == 4, "fnr1 call+int3 fixture: decoded %u insns (want 4)", k);
+		memset(&rq, 0, sizeof rq);
+		rq.in = v; rq.n_in = k; rq.arch = KGENOME_ARCH_X86_64; rq.va_lo = 0x1000; rq.va_hi = 0x1000 + (uint64_t)sizeof code;
+		rq.bytes = code; rq.bytes_len = sizeof code; rq.flags = KGENOME_CFG_F_TRAP_EXITS;
+		CK(kgenome_cfg_build(&rq, &g) == KGENOME_OK);
+		CKM(g.n_all == 2 && g.n_blk == 1, "fnr1 call+int3: n_all %u n_blk %u (want 2,1: the mark after the call still exits)", g.n_all, g.n_blk);
+		if (g.n_all == 2)
+			CKM(g.b[0].term == KGENOME_CFG_T_EXIT && g.b[0].reach == 1 && g.b[1].reach == 0,
+			    "fnr1 call+int3: b0.term %u b0.reach %u b1.reach %u", g.b[0].term, g.b[0].reach, g.b[1].reach);
+		kgenome_cfg_free(&g, NULL);
+	}
+	/* the other byte the flag watches, hlt (0xf4), mid-body and NOT after a call: nop; hlt; nop; ret - same rule, same result */
+	{
+		static const uint8_t code[] = { 0x90, 0xf4, 0x90, 0xc3 };
+		struct kgenome_cell_insn v[4];
+		uint32_t i;
+
+		for (i = 0; i < 4; i++) {
+			CK(kgenome_cell_decode(KGENOME_ARCH_X86_64, 0, code + i, (uint32_t)sizeof code - i, 0x1000 + i, &v[i]) == 1u);
+			v[i].at = i;
+		}
+		memset(&rq, 0, sizeof rq);
+		rq.in = v; rq.n_in = 4; rq.arch = KGENOME_ARCH_X86_64; rq.va_lo = 0x1000; rq.va_hi = 0x1004;
+		rq.bytes = code; rq.bytes_len = sizeof code; rq.flags = KGENOME_CFG_F_TRAP_EXITS;
+		CK(kgenome_cfg_build(&rq, &g) == KGENOME_OK);
+		CKM(g.n_all == 1, "fnr1 mid-body hlt: n_all %u (want 1: must not split the block)", g.n_all);
+		if (g.n_all == 1)
+			CKM(g.b[0].n_insn == 4 && g.b[0].term == KGENOME_CFG_T_EXIT, "fnr1 mid-body hlt: n_insn %u term %u", g.b[0].n_insn, g.b[0].term);
+		kgenome_cfg_free(&g, NULL);
+	}
+	/* hlt right after a call still exits too (the idiom is not int3-only): call abort(); hlt */
+	{
+		static const uint8_t code[] = { 0xe8, 0, 0, 0, 0, 0xf4, 0x90, 0xc3 };
+		struct kgenome_cell_insn v[4];
+		uint32_t pos = 0, k = 0, l;
+
+		while (pos < sizeof code) {
+			l = kgenome_cell_decode(KGENOME_ARCH_X86_64, 0, code + pos, (uint32_t)sizeof code - pos, 0x1000 + pos, &v[k]);
+			CK(l != 0 && k < 4);
+			v[k].at = pos;
+			k++;
+			pos += l;
+		}
+		CKM(k == 4, "fnr1 call+hlt fixture: decoded %u insns (want 4)", k);
+		memset(&rq, 0, sizeof rq);
+		rq.in = v; rq.n_in = k; rq.arch = KGENOME_ARCH_X86_64; rq.va_lo = 0x1000; rq.va_hi = 0x1000 + (uint64_t)sizeof code;
+		rq.bytes = code; rq.bytes_len = sizeof code; rq.flags = KGENOME_CFG_F_TRAP_EXITS;
+		CK(kgenome_cfg_build(&rq, &g) == KGENOME_OK);
+		CKM(g.n_all == 2 && g.n_blk == 1, "fnr1 call+hlt: n_all %u n_blk %u (want 2,1: hlt after the call still exits)", g.n_all, g.n_blk);
+		if (g.n_all == 2)
+			CKM(g.b[0].term == KGENOME_CFG_T_EXIT && g.b[0].reach == 1 && g.b[1].reach == 0,
+			    "fnr1 call+hlt: b0.term %u b0.reach %u b1.reach %u", g.b[0].term, g.b[0].reach, g.b[1].reach);
+		kgenome_cfg_free(&g, NULL);
+	}
+}
+
 /* Random programs: the lib's graph equals the reference's on every architecture that can spell the program. */
 static void random_vs_reference(void)
 {
@@ -374,6 +475,7 @@ int main(void)
 	random_vs_reference();
 	memory_shape();
 	consolidation();
+	fnr1_trap_exits();
 	if (fails)
 		printf("cfg_build: %d FAILED\n", fails);
 	else

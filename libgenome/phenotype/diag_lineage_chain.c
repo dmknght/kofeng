@@ -74,56 +74,9 @@ static const struct lineage_row lineage_rows[] = {
 
 /* ---- what a block holds ---- */
 
-/*
- * IS THE FRAME POINTER ONE? `push rbp; mov rbp, rsp` at the top and no other instruction that writes rbp but the epilogue's
- * (`pop rbp`, and `leave`, which has no operand): then `[rbp+x]` is a slot of the frame, which FLOW follows, and not a cell LOCS
- * would follow. A function that uses rbp for anything else - a pointer into an object, say - has no frame pointer here and every
- * `[rbp+x]` is a place. The test is conservative in the direction that matters: when it is not sure, the operand is a place, and
- * the stage that follows places is asked for. It is learned in the one loop over the instructions, so what the loop sees of
- * `[rbp+x]` before it knows is held apart (BPCELL, BPSTORE) and joined to the others afterwards, a block at a time.
- */
-struct frame_scan {
-	int pushed, framed, bad;
-};
-
-static void frame_step(struct frame_scan *f, uint32_t i, const struct kgenome_cell_insn *in)
-{
-	if (!f->framed && i < 4u) {
-		if (in->op == KGENOME_CELL_PUSH && in->n_op && in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == KGENOME_CELL_REG_BP)
-			f->pushed = 1;
-		else if (f->pushed && in->op == KGENOME_CELL_MOV && in->n_op >= 2u && in->o[0].kind == KGENOME_CELL_O_REG &&
-			 in->o[0].reg == KGENOME_CELL_REG_BP && in->o[1].kind == KGENOME_CELL_O_REG && in->o[1].reg == KGENOME_CELL_REG_SP)
-			f->framed = 1;
-	} else if (f->framed && (in->wmask & (1ull << KGENOME_CELL_REG_BP)) && in->op != KGENOME_CELL_POP && in->n_op) {
-		f->bad = 1;
-	}
-}
-
 static int pred_holds(const struct lineage_pred *p, uint16_t bpred)
 {
 	return (bpred & p->all) == p->all && !(bpred & p->none) && (!p->any || (bpred & p->any));
-}
-
-/* What the memory operands of one instruction add to the block's bits. */
-static uint16_t mem_bits(const struct kgenome_cell_insn *in)
-{
-	uint16_t pr = 0;
-	uint8_t k;
-
-	if (in->op == KGENOME_CELL_LEA)
-		return 0;
-	for (k = 0; k < in->n_op && k < 2u; k++) {
-		const struct kgenome_cell_operand *o = &in->o[k];
-		const int bp = o->reg == KGENOME_CELL_REG_BP && o->index == KGENOME_CELL_REG_NONE;
-		const int store = (o->flags & KGENOME_CELL_OF_WRITE) && in->op != KGENOME_CELL_CALL && in->op != KGENOME_CELL_JMP &&
-				  in->op != KGENOME_CELL_CMP && in->op != KGENOME_CELL_TEST && in->op != KGENOME_CELL_PUSH;
-
-		if (o->kind != KGENOME_CELL_O_MEM || (o->reg == KGENOME_CELL_REG_SP && o->index == KGENOME_CELL_REG_NONE))
-			continue;
-		/* (a call through a slot names its operand 0 too, and does not write it) */
-		pr |= bp ? (uint16_t)(P(BPCELL) | (store ? P(BPSTORE) : 0u)) : (uint16_t)(P(MEMCELL) | (store ? P(MEMSTORE) : 0u));
-	}
-	return pr;
 }
 
 /* What a call or a jump that leaves the function adds. */
@@ -137,7 +90,7 @@ static uint16_t call_bits(const struct kgenome_lineage *L, const struct kgenome_
 		return P(ICALL);
 	if (in->target_va == KGENOME_BROKEN)
 		return 0;
-	f = kgenome_lineage_fn_of_va(L, in->target_va);
+	f = kgenome_lineage_fn_of_insn(L, in);
 	if (f == UINT32_MAX)
 		return P(EXTCALL);
 	return !L->rel || L->rel[f] || (L->skipped && L->skipped[f] == 3u) ? P(CALL_INT) : P(CALL_SKIP);
@@ -145,40 +98,42 @@ static uint16_t call_bits(const struct kgenome_lineage *L, const struct kgenome_
 
 static int fn_holds(const struct kgenome_lineage_cfg *g, const struct lineage_pred *p);
 
-/* One loop over the decoded instructions of the function, a block at a time. */
+/*
+ * THE PREDICATES OF A BLOCK. What needs no other input - a memory operand beyond the frame, a store through one, a push, whether the block calls or jumps at all, and the
+ * frame pointer decision they were read with - is the FRAME's (phenotype/frame.h: `fr->bits`, found once with the graph). What is added here needs the lineage's own inputs: the
+ * node table (NODE, PRODUCER), the function table (CALL_*, EXTCALL) and the solve (CALL_SKIP, the tail rule), so only the blocks the frame says call or jump are read
+ * instruction by instruction; a block with neither is not looked at again.
+ */
 void kgenome_lineage_preds(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g)
 {
-	struct frame_scan fs = { 0, 0, 0 };
 	uint32_t b;
 
 	for (b = 0; b < g->nb; b++) {
+		const uint16_t fb = g->fr->bits[b];
 		uint16_t pr = 0;
-		uint32_t i;
 
-		for (i = kgenome_lineage_bfirst(g, b); i < kgenome_lineage_bend(g, b); i++) {
-			const struct kgenome_cell_insn *in = &L->in[i];
+		if (fb & KGENOME_FRAME_B_MEMCELL)
+			pr |= P(MEMCELL);
+		if (fb & KGENOME_FRAME_B_MEMSTORE)
+			pr |= P(MEMSTORE);
+		if ((fb & KGENOME_FRAME_B_PUSH) && L->abi.callee_pops)
+			pr |= P(STACKARG);
+		if (fb & (KGENOME_FRAME_B_CALL | KGENOME_FRAME_B_JMP)) {
+			uint32_t i;
 
-			frame_step(&fs, i, in);
-			if (in->op == KGENOME_CELL_CALL || (in->op == KGENOME_CELL_JMP && kgenome_lineage_jmp_is_tail(L, g, b, in)))
-				pr |= call_bits(L, in);
-			else if (in->op == KGENOME_CELL_JMP && (in->flags & KGENOME_CELL_F_INDIRECT))
-				pr |= P(ICALL);
-			pr |= mem_bits(in);
-			if (in->op == KGENOME_CELL_PUSH && L->abi.callee_pops)
-				pr |= P(STACKARG);
+			for (i = kgenome_lineage_bfirst(g, b); i < kgenome_lineage_bend(g, b); i++) {
+				const struct kgenome_cell_insn *in = &L->in[i];
+
+				if (in->op == KGENOME_CELL_CALL || (in->op == KGENOME_CELL_JMP && kgenome_lineage_jmp_is_tail(L, g, b, in)))
+					pr |= call_bits(L, in);
+				else if (in->op == KGENOME_CELL_JMP && (in->flags & KGENOME_CELL_F_INDIRECT))
+					pr |= P(ICALL);
+			}
 		}
 		/* a push counts as a stack argument only in a block that calls */
 		if ((pr & P(STACKARG)) && !(pr & (P(NODE) | P(CALL_INT) | P(CALL_SKIP) | P(EXTCALL) | P(ICALL))))
 			pr &= (uint16_t)~P(STACKARG);
 		g->bpred[b] = pr;
-	}
-	/* with no frame pointer, what went through rbp is a place like any other */
-	for (b = 0; b < g->nb; b++) {
-		uint16_t pr = g->bpred[b];
-
-		if (!fs.framed || fs.bad)
-			pr |= (uint16_t)((pr & P(BPCELL) ? P(MEMCELL) : 0u) | (pr & P(BPSTORE) ? P(MEMSTORE) : 0u));
-		g->bpred[b] = (uint16_t)(pr & ~(P(BPCELL) | P(BPSTORE)));
 	}
 }
 
@@ -501,7 +456,7 @@ void kgenome_lineage_obligations(struct kgenome_lineage *L)
 		n = 0;
 		for (k = 0; k < L->n_site; k++) {
 			const struct kgenome_diag_hit *h = &s->hit[L->site_node[k]];
-			uint32_t f = kgenome_lineage_fn_at(L, L->site_at[k]);
+			uint32_t f = L->site_fn[k];
 			uint8_t seen[8], ns = 0;
 			unsigned q;
 

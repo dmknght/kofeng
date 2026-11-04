@@ -1,9 +1,12 @@
 /*
  * codemap.c - kgenome_codemap_build. See codemap.h for what the table holds and what a syscall number means here.
  *
- * TWO READS OF THE CODE, and why not one. The first (kgenome_cell_step, no register model: a third of a step's cost) finds the branches and so the
- * places that are branched to. The second runs the register model, and has to know those places before it starts, because the model must be dropped
- * at each of them - a forward jump's target is not known from a single pass. The second read happens only when the first met a syscall.
+ * ONE READ OF THE CODE, and a window for each syscall's number. The read (kgenome_diag_code_run, no register model) finds the branches and so
+ * the places that are branched to, and notes where each syscall's straight run begins (the instruction after the last branch, syscall or byte
+ * that did not decode). The number register's value needs the register model, which must be dropped at every place branched to - and a place
+ * is known only when the whole read is over (a backward jump names an address already passed). So the model is asked afterwards, for the
+ * syscalls only, over the window from the run's start to the syscall (cm_number_at): the object is no longer read twice, and a window is
+ * read again only because the value in a register is what the record of an instruction does not hold.
  */
 
 #include "codemap.h"
@@ -24,8 +27,16 @@ struct cm_ext {
 	uint64_t at, len;
 };
 
+/* A syscall the read met: where it is, and where its straight run began (the window the register model is asked over). */
+struct cm_sys {
+	uint64_t at, run;
+};
+
 struct cm_build {
 	struct kgenome_codemap *m;
+	struct cm_sys *sys;
+	struct kgenome_diag_walk *wk;
+	uint32_t n_sys, cap_sys;
 	uint32_t cap;
 	const struct kgenome_elf_relocs *relocs;
 	struct kgenome_cell_space sp;
@@ -125,7 +136,25 @@ struct cm_obs {
 	struct cm_build *b;
 	int identity;   /* the object has no load address: the file is its own address space */
 	int fail;
+	int fresh;      /* the next instruction starts a straight run */
+	uint64_t run;   /* where the current straight run began */
 };
+
+static int cm_push_sys(struct cm_build *b, uint64_t at, uint64_t run)
+{
+	if (b->n_sys == b->cap_sys) {
+		uint32_t nc = kgenome_grow_cap(b->cap_sys, 64u);
+		struct cm_sys *nv = nc ? realloc(b->sys, (size_t)nc * sizeof *nv) : NULL;
+
+		if (!nv)
+			return 0;
+		b->sys = nv;
+		b->cap_sys = nc;
+	}
+	b->sys[b->n_sys].at = at;
+	b->sys[b->n_sys++].run = run;
+	return 1;
+}
 
 static void cm_observe(void *user, const struct kgenome_cell_insn *in)
 {
@@ -133,11 +162,24 @@ static void cm_observe(void *user, const struct kgenome_cell_insn *in)
 	struct kgenome_codemap_ref r;
 	unsigned kind;
 
-	if (!in || o->fail)
+	if (o->fail)
 		return;
+	if (!in) {
+		o->fresh = 1;   /* a byte that did not decode: nothing is known across it */
+		return;
+	}
+	if (o->fresh) {
+		o->run = in->at;
+		o->fresh = 0;
+	}
 	kind = cm_kind(in);
 	if (!kind)
 		return;
+	o->fresh = 1;   /* after a branch, a return or a syscall (which returns in the number register) */
+	if (kind == KGENOME_CM_SYSCALL && !cm_push_sys(o->b, in->at, o->run)) {
+		o->fail = 1;
+		return;
+	}
 	memset(&r, 0, sizeof r);
 	r.at = in->at;
 	r.len = in->len;
@@ -170,10 +212,10 @@ static void cm_observe(void *user, const struct kgenome_cell_insn *in)
 static int cm_read_extent(struct cm_build *b, const struct cm_ext *e, uint64_t size, const uint8_t *base)
 {
 	uint64_t va = kgenome_image_off_to_addr(b->obj, e->at);
-	struct cm_obs o = { b, va == KGENOME_BROKEN, 0 };
+	struct cm_obs o = { b, va == KGENOME_BROKEN, 0, 1, e->at };
 
 	kgenome_diag_code_run(&(const struct kgenome_diag_code_req){
-		.obj = b->obj, .base = base, .size = size, .off = e->at, .n = e->len,
+		.obj = b->obj, .base = base, .size = size, .off = e->at, .n = e->len, .wk = b->wk,
 		.va = o.identity ? e->at : va, .fn = cm_observe, .user = &o });
 	return !o.fail;
 }
@@ -198,46 +240,29 @@ static uint64_t cm_next_target(const struct kgenome_codemap *m, uint32_t *p, uin
 }
 
 /*
- * The second read of one extent: the register model, dropped at each target and after each branch, and the number register read
- * at each syscall instruction BEFORE it runs. `ri` walks the references, in the order of `at`, as the read meets them.
+ * The number register at the syscall `sy`, by the register model over its straight run: dropped at every place branched to that the model
+ * lands on (nothing is known across a join), read BEFORE the syscall runs. 0 when it holds no constant.
  */
-static void cm_numbers_extent(struct cm_build *b, const struct cm_ext *e, int sel, uint32_t *ri)
+static int cm_number_at(struct cm_build *b, const struct cm_sys *sy, int sel, uint64_t *nr)
 {
-	struct kgenome_codemap *m = b->m;
+	const struct kgenome_codemap *m = b->m;
 	struct kgenome_cell_cur k;
 	struct kgenome_cell_insn in;
-	uint32_t tp = 0;
-	int reset = 1;
+	uint32_t tp;
 
+	(void)kgenome_codemap_to(m, sy->run, &tp);
 	memset(&k, 0, sizeof k);
-	if (!kgenome_cell_seek(&k, e->at, 0))
-		return;
-	/* the extents are not in order of `at`, so each starts its own cursor over the ordered refs */
-	*ri = kof_lower_bound_u64(m->v, m->n, sizeof *m->v, offsetof(struct kgenome_codemap_ref, at), e->at);
-	while (k.at < e->at + e->len) {
-		while (*ri < m->n && m->v[*ri].at < k.at)
-			(*ri)++;
-		if (reset || cm_next_target(m, &tp, k.at) == k.at) {
-			(void)kgenome_cell_seek(&k, k.at, 0);   /* nothing is known across a join or a branch */
-			reset = 0;
-		}
-		if (*ri < m->n && m->v[*ri].at == k.at && m->v[*ri].kind == KGENOME_CM_SYSCALL) {
-			uint64_t nr;
-
-			if (kgenome_cell_reg(&k, (uint8_t)sel, &nr) && nr <= 0xffffu) {
-				m->v[*ri].nr = (uint32_t)nr;
-				m->v[*ri].flags |= KGENOME_CMF_NR;
-			}
-		}
-		if (!kgenome_cell_next(&k, &b->sp, &in)) {
-			k.at++;
-			reset = 1;
-			continue;
-		}
-		/* a syscall too: it returns in the number register, and the model does not know that, so the next syscall would read this one's number */
-		if (cm_kind(&in))
-			reset = 1;
+	if (!kgenome_cell_seek(&k, sy->run, 0))
+		return 0;
+	while (k.at < sy->at) {
+		if (cm_next_target(m, &tp, k.at) == k.at)
+			(void)kgenome_cell_seek(&k, k.at, 0);
+		if (!kgenome_cell_next(&k, &b->sp, &in))
+			return 0;
 	}
+	if (k.at != sy->at || cm_next_target(m, &tp, k.at) == k.at)
+		return 0;
+	return kgenome_cell_reg(&k, (uint8_t)sel, nr) && *nr <= 0xffffu;
 }
 
 static int cm_index(struct kgenome_codemap *m)
@@ -262,16 +287,15 @@ static int cm_cmp_at(const void *a, const void *b)
 }
 
 /* CONSOLIDATION DEC-2 (2026-10-30, M): KEEP (will be the single table of branches, calls, returns and syscalls with the ordered by_to index; 2 callers:
- * diag_lineage.c, codenotes.c). MERGE-FROM -> nothing; but it takes no walk, so it decodes the object a second time (2.02 calls per offset alone, +1 for
- * the register-model re-read of cm_numbers_extent): it must read through kgenome_diag_code_run with the scan's walk and pass the number reads to the
- * register model once. Prove with: deccnt.c rows "codemap_build alone" and "entry walk (with trace) + codemap" on 19 x86-64 ELF. */
+ * diag_lineage.c, codenotes.c). One read through kgenome_diag_code_run; the register model is asked only over each syscall's straight run. It takes
+ * the scan's walk when it has one (the trace serves the read and the windows), else the read decodes the object once. Prove with: deccnt rows "codemap_build alone" and "P4". */
 int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, uint64_t size,
-			  const struct kgenome_elf_relocs *relocs, struct kgenome_codemap *out)
+			  const struct kgenome_elf_relocs *relocs, struct kgenome_diag_walk *wk, struct kgenome_codemap *out)
 {
 	struct cm_build b;
 	struct cm_ext *ext;
-	uint32_t n, i, ri = 0;
-	int sel = cm_sel(obj), ok = 1, any_sys = 0;
+	uint32_t n, i;
+	int sel = cm_sel(obj), ok = 1;
 
 	memset(out, 0, sizeof *out);
 	if (!obj || !base || !size || sel < 0)
@@ -281,7 +305,9 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 	b.relocs = relocs;
 	b.obj = obj;
 	b.size = size;
+	b.wk = wk;
 	kgenome_cell_space_init(&b.sp, obj, base, size);
+	(void)kgenome_diag_walk_hold(&b.sp, wk);   /* the model's windows read the trace too */
 	n = cm_extents(obj, size, &ext);
 	if (!n) {
 		free(ext);
@@ -304,10 +330,16 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 	}
 	if (ok)
 		ok = cm_index(out);
-	for (i = 0; ok && i < out->n; i++)
-		any_sys |= out->v[i].kind == KGENOME_CM_SYSCALL;
-	for (i = 0; ok && any_sys && i < n; i++)
-		cm_numbers_extent(&b, &ext[i], sel, &ri);
+	for (i = 0; ok && i < b.n_sys; i++) {
+		uint64_t nr;
+		uint32_t at = kof_lower_bound_u64(out->v, out->n, sizeof *out->v, offsetof(struct kgenome_codemap_ref, at), b.sys[i].at);
+
+		if (at < out->n && out->v[at].at == b.sys[i].at && cm_number_at(&b, &b.sys[i], sel, &nr)) {
+			out->v[at].nr = (uint32_t)nr;
+			out->v[at].flags |= KGENOME_CMF_NR;
+		}
+	}
+	free(b.sys);
 	free(ext);
 	if (!ok) {
 		kgenome_codemap_free(out);

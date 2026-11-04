@@ -172,7 +172,7 @@ struct hit {
 
 /*
  * Enough for the busiest panel a draft can have: every marker row carries
- * three spans and every matcher four, and MAX_DECL and MAX_GROUP bound both.
+ * three spans and every matcher four, and MAX_GROUP bounds both (the marker table is dynamic).
  * Registering past it is dropped rather than written past the end - a control
  * that cannot be clicked is a visible fault; a smashed stack is not.
  */

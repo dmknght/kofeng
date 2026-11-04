@@ -49,6 +49,17 @@ struct kof_parser {
 	const char *(*region_name)(uint32_t bit);
 	const char *(*anomaly_name)(unsigned index);
 	uint64_t  (*anomalies)(const void *view);
+
+	/*
+	 * ONE OBJECT HELD IN A VARIABLE: the row's second check, and the only thing that makes a row
+	 * offered there (NULL: not offered; embed-sniff-1 lists which formats and why - tar, pdf, arj, bzip2
+	 * and the script tag have thousands of false hits and no real one). Called on the bytes
+	 * from the candidate to the end of the object; it runs the row's own sniff (or a stricter one:
+	 * the zip row's sniff has a tail probe that accepts every offset before an end record, and the
+	 * script row's reads ahead) and answers whether this is really a stored file, and sets `*extent` to its length when its own header says (0: it does
+	 * not). `*work` is the caller's allowance of steps and is spent.
+	 */
+	int (*embed)(kof_buf b, uint64_t *extent, uint64_t *work);
 };
 
 /*
@@ -110,6 +121,14 @@ const struct kof_parser *kof_parser_list(uint32_t *n);
 /* The row for one KOF_FMT_*, or NULL. For a caller that has a format in hand
  * and wants its parser rather than a sniff. */
 const struct kof_parser *kof_parser_of(uint8_t format);
+
+/*
+ * THE SNIFF CHAIN FOR THE START OF A VARIABLE: the rows that offer one (`embed`), in table order, each
+ * asked its own sniff and second check. 1 and the format (and extent, see `embed`) for the first
+ * row that accepts; 0 when none does. The same rows and the same sniffs as sx_identify, so a format
+ * added to the table is offered here by giving its row a check, never by a second table.
+ */
+int kof_parser_embedded(kof_buf b, uint8_t *format, uint64_t *extent, uint64_t *work);
 
 /*
  * Does THIS OBJECT have no regions although its format has some. A script in a language the lib lexes is read whole by
