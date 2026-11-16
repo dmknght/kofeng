@@ -201,8 +201,16 @@ static void t_funcs(void)
 
 	/* the symbols' extents: main and helper */
 	kgenome_diag_funcs_of(&o, E.b, E.n, &a);
-	CK(a.status == KGENOME_OK && a.n == 2);
-	CK(a.v[0].off == E.text && a.v[0].len == 6 && a.v[1].off == E.text + 10u && a.v[1].len == 6);
+	/* (round 2, 2026-11-16: the code between and around them that no symbol declares is an entry of trust NONE each) */
+	{
+		const uint32_t m = kgenome_funcs_start(&a, E.text), h = kgenome_funcs_start(&a, E.text + 10u);
+		uint32_t i, decl = 0;
+
+		for (i = 0; i < a.n; i++)
+			decl += a.v[i].trust != KGENOME_FN_TRUST_NONE;
+		CK(a.status == KGENOME_OK && decl == 2);
+		CK(m != KGENOME_FUNCS_NONE && h != KGENOME_FUNCS_NONE && a.v[m].len == 6 && a.v[h].len == 6 && a.v[m].trust == KGENOME_FN_TRUST_HIGH);
+	}
 	funcs_inside(&a, E.n, "funcs_of");
 	/* with a caller's walk and without one: the same answer, and the walk is reusable */
 	w = kgenome_diag_walk_new();

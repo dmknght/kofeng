@@ -4,13 +4,17 @@ Every entry below was checked by reading, not assumed: a name with no reference 
 definition and declaration, over .c .h .py .sh Makefile and the docs, with kofexamine/ counted
 as a user.
 
-1. TESTS-ONLY EXPORTS (88). Public functions whose only callers are tests. They are the
+1. TESTS-ONLY EXPORTS (103). Public functions whose only callers are tests. They are the
    surface a test drives (a boundary of the lib or the engine unit), and a function the test
    reaches by a name cannot be made static. Listed by defining file:
 
   libgenome/celllysis/cfg_sign.c: kgenome_cfg_sign, kgenome_cfg_pct (the per-function shape signature and its similarity; the engine integration is the next step, tests/lib/genome/cfg_*.c drive them)
   libgenome/celllysis/cfg_anchor.c: kgenome_cfg_anchor (is a function worth hashing; same)
   libgenome/celllysis/cfg_view.c: kgenome_cfg_view_make, kgenome_cfg_view_free (what the viewer's CFG dialog will draw; same)
+  libgenome/celllysis/cfg_obj.c: kgenome_cfg_obj_build, kgenome_cfg_obj_free, kgenome_cfg_obj_block_at (the block layer of an object, partition redesign STEP B 1b: harness and tests only until STEP B 2 makes the function table a view of it; tests/lib/genome/cfg_obj*.c, tests/fuzz/diag/cfg_obj.c)
+  libgenome/celllysis/cfg_isa.c: kgenome_cfg_isa_linked, kgenome_cfg_isa_returns (the block layer's two questions of the ISA table; cfg_build.c asks them in STEP B 2)
+  libgenome/phenotype/fntab_blocks.c: kgenome_fntab_blocks (the block layer seeded from the object's metadata over the walk's trace; same step)
+  libgenome/celllysis/nucleo.c: kgenome_nucleo_row_of, kgenome_nucleo_row_cap, kgenome_nucleo_row_role, kgenome_nucleo_row_field, kgenome_nucleo_row_res, kgenome_nucleo_row_hands_on, kgenome_nucleo_row_out, kgenome_nucleo_row_release, kgenome_nucleo_entry_arg (the row table's per-API answers, 2026-11-15; the lineage stage and the function partition are their next callers - followups of fix_roles; tests/lib/genome/nucleo_rows.c and the fuzz adapter diag/tables drive them)
   libgenome/celllysis/mutation_pool.c: kgenome_mutation_core, kgenome_mutation_member
   libgenome/celllysis/nucleo_sys.c: kgenome_nucleo_sys_ordered
   libgenome/celllysis/trueline.c: kgenome_true_find_all
@@ -138,3 +142,6 @@ as a user.
      "kof_cure", "kof_heur" (ksigbuilder/ksb_image.c): the two entry names of a module that the
         build refuses by name. An image that still defines one is not built, with a line saying
         the entry is retired; the name is what is refused.
+
+7. CFG DISABLED BY OWNER 2026-11-15, KEPT FOR RE-ENABLE. Compiled functions whose only product caller is inside #if 0 now:
+  libgenome/celllysis/gview_loops.c: kgenome_gv_loops (the loop marks of a drawn graph; only cfg_gv.c, inside #if 0, asked it; tests/lib/genome/gview_data.c and tests/fuzz/diag/cfg.c drive it). CFG disabled by owner 2026-11-15, kept for re-enable.

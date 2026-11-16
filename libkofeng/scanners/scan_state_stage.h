@@ -362,6 +362,12 @@ struct kof_scan_diag {
 	 */
 	uint8_t *fhit;
 	uint8_t *fdone;
+	/* THE SIGNATURE'S NUCLEO GATE (objctx_diag_gate.c), two bits beside them: `fexpr` the expression answered yes, `fgate`
+	 * the gate then said NO. A form whose expression said yes and that states a nucleo condition is SETTLED at the ANALYSE
+	 * stage, when the analysis is made (fexpr set, fhit and fgate not yet); a report reads "the nucleo conditions were
+	 * asked" off fhit or fgate. Same block, same reset. */
+	uint8_t *fgate;
+	uint8_t *fexpr;
 	/* The head sequences handed to the scan, which keeps the pointer while its
 	 * graph lives. */
 	struct kgenome_diag_seq *seq;
@@ -402,6 +408,17 @@ struct kof_scan_diag {
 	 */
 	uint8_t *gr;
 	uint32_t gr_cap;       /* its allocation: a header and a record per node */
+	/*
+	 * THE SAME GRAPH AGAIN, as kof_result.lineage reads it - a reader's copy, not a
+	 * module's: every input of a node, and the certainty (MUST/MAY) `gr` above drops.
+	 * Built only when the report is asked for (obj.diag.all), by st_report; realloc'd
+	 * to fit like `gr`, kept until the object ends because every later ask reads the
+	 * same records.
+	 */
+	struct kof_diag_lineage_rec *lineage;
+	uint32_t lineage_cap;  /* its allocation, in records */
+	struct kof_diag_lineage_in *lineage_in;     /* every input of every record (kof_result.lineage_in) */
+	uint32_t lineage_in_cap;
 	/* The report for the object being finished, built by kof_scan_diag_report and
 	 * lent to the caller for the length of its callback. */
 	struct kof_diag_report *rep;

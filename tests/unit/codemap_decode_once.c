@@ -187,6 +187,8 @@ int main(void)
 	wk = kgenome_diag_walk_new();
 	memset(&fs, 0, sizeof fs);
 	kgenome_diag_funcs_with_walk(&gobj, img, SZ, wk, &fs);
+	/* the function table decodes nothing since 2026-11-16 (metadata only): the walk is made with its trace by the reader that needs it, as the scan's routes do */
+	CK(kgenome_diag_walk_ensure(wk, &gobj, img, SZ, 1));
 	count_reset();
 	CK(kgenome_codemap_build(&gobj, img, SZ, NULL, wk, &b) == 1);
 	printf("  with walk: %llu decodes, %llu of them an instruction in the code\n", (unsigned long long)g_calls, (unsigned long long)g_ok_code);

@@ -8,6 +8,7 @@
  */
 
 #include "kofexaminer_private.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 /*
  * kofexamine - show what the engine sees in a file.
@@ -98,12 +99,55 @@ int kex_examine_bytes(kof_buf buf, const char *display, const char *dir)
 	const int dump = dir != 0;
 
 	{
-		printf("%s%s%s\n", kex_C_NAME, display, kex_C_OFF);
-		f = kof_inspect_identify(buf, &ctx, &view);
+		/*
+		 * "~" INSTEAD OF "//" FOR EVIDENCE (owner, 2026-11-10), display only: the
+		 * `display` parameter IS the engine's own name and stays exactly that for
+		 * every other use (kof_dump_walk's directory, the next recursive call) -
+		 * only this one printed line is rewritten, on a local copy, so a reader
+		 * does not take an evidence object (kex_g_decl_evidence, set from
+		 * kof_result.evidence_only) for a piece of the file's own structure. Its
+		 * own separator is the LAST KOF_OBJ_SEP in the name - the one before this
+		 * object's own index - so a grandchild's path keeps every ancestor's "//".
+		 */
+		/* 512: generous for a path a terminal can show at all - not the engine's
+		 * own hostile-input name cap, which this display rewrite has no need of. */
+		char shown[512];
+		const char *out_name = display;
+
+		if (kex_g_decl_evidence) {
+			const char *last = NULL, *p = display;
+
+			while ((p = strstr(p, KOF_OBJ_SEP)) != NULL) {
+				last = p;
+				p += KOF_OBJ_SEP_LEN;
+			}
+			if (last && (size_t)(last - display) < sizeof shown) {
+				size_t head = (size_t)(last - display);
+
+				memcpy(shown, display, head);
+				snprintf(shown + head, sizeof shown - head, "~%s",
+					 last + KOF_OBJ_SEP_LEN);
+				out_name = shown;
+			}
+		}
+		printf("%s%s%s\n", kex_C_NAME, out_name, kex_C_OFF);
+		/*
+		 * AND THE ENGINE'S ANSWER BEATS A SNIFF THAT FINDS NOTHING AT ALL, not only one that
+		 * disagrees (2026-11-10): a declared script child's own bytes need carry no tag of
+		 * their own (an island - objctx_script.c's script_island_declare - is the resolved
+		 * VALUE of an eval()/create_function() argument, not a file), so kof_inspect_identify's
+		 * plain sniff would find no format and this whole object would print "unrecognised"
+		 * with no blocks section - the declared format is asked for directly instead, the same
+		 * way kof_inspect_declare already exists for a caller that built the bytes itself.
+		 */
+		f = kex_g_decl_lang ? kof_inspect_declare(buf, KOF_FMT_SCRIPT, &ctx, &view)
+				    : kof_inspect_identify(buf, &ctx, &view);
 		/* And the engine's answer beats this one - see kex_g_decl_lang. */
-		if (kex_g_decl_lang) {
+		if (kex_g_decl_lang && f) {
 			ctx.subtype = kex_g_decl_subtype;
 			ctx.subfamily = kex_g_decl_subfam;
+			if (kex_g_decl_code)
+				kof_script_mark_code(&ctx);     /* the engine's entry kind: see kof_script_entry_is_code */
 		}
 		kex_g_parent_format = ctx.format;
 		/*

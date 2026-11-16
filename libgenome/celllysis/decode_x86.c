@@ -88,9 +88,15 @@ static const struct xcls g_cls[KGENOME_X86_I__COUNT] = {
 	[KGENOME_X86_I_JMPFI]    = { KGENOME_CELL_JMP, KGENOME_CELL_F_FAR | KGENOME_CELL_F_INDIRECT },
 	[KGENOME_X86_I_JMPFD]    = { KGENOME_CELL_JMP, KGENOME_CELL_F_FAR },
 	[KGENOME_X86_I_Jcc]      = { KGENOME_CELL_JCC, 0 },
-	/* KNOWN DEFECT CL-1 (2026-10-30, M) [sev M]: jecxz/jcxz/jrcxz (opcode e3; mnemonics JECXZ, JCXZ, JRCXZ in x86_tab.c) have no row in this table, so they decode as OTHER.
-	 * Trigger: any function that tests rcx with jrcxz. Effect: a conditional branch is no block end and no edge in the cfg (cfg.h).
-	 * Reproducer: tests/lib/genome/cfg_isa.c (row "jrcxz"). Fix: add the three ids with KGENOME_CELL_LOOP (a conditional branch with a rel8 target). */
+	/*
+	 * CL-1 (fixed): jecxz/jcxz/jrcxz (opcode e3) are one decoder id, KGENOME_X86_I_JrCXZ - the
+	 * mnemonic is address-size-dependent (JECXZ at 32-bit address size, JRCXZ at 64-bit, JCXZ with
+	 * the 0x67 prefix at 16-bit: kgenome_x86_asz, read by the emulator's own KGENOME_X86_I_JrCXZ case
+	 * in emu_x86.c) but the encoding and the branch shape are one thing: a conditional, rel8-only
+	 * branch on RCX/ECX/CX == 0 that touches no flag - the same shape LOOP/LOOPNZ/LOOPZ already have
+	 * KGENOME_CELL_LOOP for, which cfg_isa.c already classifies as KGENOME_CFG_X_BR_COND.
+	 */
+	[KGENOME_X86_I_JrCXZ]    = { KGENOME_CELL_LOOP, 0 },
 	[KGENOME_X86_I_LOOP]     = { KGENOME_CELL_LOOP, 0 },
 	[KGENOME_X86_I_LOOPNZ]   = { KGENOME_CELL_LOOP, 0 },
 	[KGENOME_X86_I_LOOPZ]    = { KGENOME_CELL_LOOP, 0 },

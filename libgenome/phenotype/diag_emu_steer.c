@@ -38,6 +38,11 @@ int kgenome_diag_emu_cap_hands_on_value(uint16_t cap, const char *nm)
 
 
 
+/* KNOWN DEFECT EMU-FORCE-1 (2026-11-15, R) [sev M]: kgenome_diag_emu_cap_force_kind answers by CAPABILITY, so a failed pipe, pipe2 or
+ * socketpair (PIPE_OPEN / NET_OPEN, whose rows say res=status0) is forced to a descriptor-like non-zero value, not to 0.
+ * Trigger: the emulate route steps over `if (pipe(fds)) goto fail` or a raw syscall tested for non-zero. Effect: the run takes the
+ * failure arm the steering exists to avoid. Reproducer: none yet (R). Fix: route_force (diag_emu.c) has the name
+ * (kgenome_nucleo_sys_name): answer FORCE_ZERO when kgenome_nucleo_sys_zero_on_success(name); the skip path has no name (cap only). */
 enum kgenome_diag_emu_force_kind kgenome_diag_emu_cap_force_kind(uint16_t cap)
 {
 	switch (cap) {

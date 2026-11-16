@@ -27,6 +27,9 @@
 #include "../lib/genome/hk.h"
 #include "../../kofexamine/kv_props_private.h"
 #include "../../libkofeng/analyzers/parsers/binaries/sym_pool.h"
+#include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
+#include "../../libkofeng/analyzers/parsers/scripts/script_route.h"
+#include <celllysis/script_islands.h>
 #include "kx_dash_stubs.h"
 
 #include <math.h>
@@ -1150,6 +1153,40 @@ static void infect_tabs(void)
 	free(v);
 }
 
+/* A script or a text (KV_CAP_TEXT) has no segment, section, import or export table: its strip is the Overview alone (owner,
+ * 2026-11-14), and a click reaches no other page because the strip draws no other label. Every format value is walked, so a
+ * format read as text that kept the binary tabs, or an executable that lost them, fails here. */
+static void text_tabs(void)
+{
+	struct view *v = calloc(1, sizeof *v);
+	char lab[DASH_TABS][32];
+	unsigned f;
+
+	memset(&OB, 0, sizeof OB);
+	for (f = 0; f < 256u; f++) {
+		uint32_t n;
+
+		OB.ctx.format = (uint8_t)f;
+		memset(lab, 0, sizeof lab);
+		n = dash_tabs(v, &OB, lab);
+		if (kv_cap((uint8_t)f, KV_CAP_TEXT))
+			CK(n == 1u && strcmp(lab[0], "Overview") == 0 && lab[1][0] == 0);
+		else
+			CK(n == 5u && strcmp(lab[1], "Segments") == 0 && strcmp(lab[4], "Exports") == 0);
+	}
+	OB.ctx.format = KOF_FMT_SCRIPT;
+	CK(dash_tabs(v, &OB, lab) == 1u);
+	OB.ctx.format = KOF_FMT_TEXT;
+	CK(dash_tabs(v, &OB, lab) == 1u);
+	OB.ctx.format = KOF_FMT_ELF;
+	CK(dash_tabs(v, &OB, lab) == 5u);
+	/* the Infection book is not the dashboard's strip and does not change */
+	v->prop_inf = 1;
+	OB.ctx.format = KOF_FMT_SCRIPT;
+	CK(dash_tabs(v, &OB, lab) == 2u && strcmp(lab[0], "Infected data") == 0);
+	free(v);
+}
+
 /* ================================================================================ ENTROPY AND THE COUNT */
 
 /* Independent oracle: Shannon entropy of n bytes in bits per byte, in doubles (the library's is integer arithmetic). */
@@ -1329,6 +1366,126 @@ static void count_text(void)
 	CK(strcmp(t, "3-5 of 9") == 0);
 }
 
+/*
+ * A SCRIPT's overview is its islands (owner 2026-11-14): the value row in the block, then a table (offset, place, bytes, ObfScore, nucleo; the counts are no
+ * columns) with one row per record of the engine's set, in its order - every cell the one kof_script_obf gave, read here from that same set (the oracle), so
+ * the data computes nothing of its own. The islands are the ENGINE's (its island table, level 0 of the server layer, any kind: a php
+ * tag, a server <script> body), not a list the measure finds. Asked once: a second build reads the kept set. A script with no code says so; a binary is no script.
+ */
+static void islands_block(void)
+{
+	static const char page[] = "<?php $f = 'sys' . 'tem'; ?>\n<p>x</p>\n<?php $f($_GET['c']); ?>\n";
+	static const char aspx[] = "<%@ Page Language=\"C#\" %>\n<html><body>\n<script runat=\"server\">\nvoid Page_Load() { Response.Write(\"x\"); }\n</script>\n</body></html>\n";
+	static struct dash_block b;
+	struct kof_script_info si;
+	struct dash_table d;
+	const struct kgenome_diag_text_obf_set *s;
+	char t[1024], want[64], cell[DASH_ISL_COLS - 1u][DASH_CELL], caps[400];
+	uint32_t i;
+	unsigned f;
+
+	memset(&OB, 0, sizeof OB);
+	for (f = 0; f < 256u; f++) {            /* a script and nothing else: a text, a binary, a container keep their regions */
+		OB.ctx.format = (uint8_t)f;
+		CK(dash_is_script(&OB) == (f == KOF_FMT_SCRIPT));
+	}
+	OB.buf = kof_buf_make((const uint8_t *)page, sizeof page - 1u);
+	CK(kof_script_parse(OB.buf, &si, &OB.ctx) && OB.ctx.format == KOF_FMT_SCRIPT && OB.ctx.subtype == KOF_SCRIPT_PHP && si.n_island == 2u);
+	CK(dash_is_script(&OB));
+	dash_islands(&OB, &b);
+	s = OB.obf_data;
+	CK(OB.obf_done && s && s->n == 2u && strcmp(b.head, "Islands") == 0 && b.n == 1u);
+	/* the islands are the ENGINE's table (level 0 of the server layer, kof_script_parts_build: the island package, 2026-11-14 - it was the
+	 * module ABI's first 256 of the parse's), each one a record, nothing found of the measure's own */
+	{
+		struct kgenome_script_parts pt;
+		const struct kgenome_script_isl_list *L;
+
+		kof_script_parts_build(&OB.ctx, OB.buf.p, OB.buf.n, KGENOME_SCRIPT_PART_ISLANDS, &pt);
+		L = &pt.isl.lv[KGENOME_SCRIPT_ISL_SERVER][0];
+		CK(L->n == 2u);
+		for (i = 0; s && i < s->n && i < L->n; i++)
+			CK(s->v[i].kind == KGENOME_DIAG_TEXT_OBF_ISLAND && s->v[i].at == L->v[i].off && s->v[i].len == L->v[i].len);
+		kgenome_script_parts_free(&pt);
+	}
+	if (s && s->n == 2u && b.n == 1u) {
+		row_text(&b.row[0], t, sizeof t);
+		snprintf(want, sizeof want, "%u.%02u", kgenome_diag_text_obf_value(s) / 1000u, (kgenome_diag_text_obf_value(s) % 1000u) / 10u);
+		CK(strcmp(b.row[0].label, "ObfScore") == 0 && strstr(t, want) != NULL && strstr(t, "the highest of 2") != NULL);
+	}
+	/* the table: offset first, place, bytes, ObfScore, nucleo - and none of the counts the score is made of */
+	dash_islands_table(&OB, &d);
+	CK(s && d.n_col == DASH_ISL_COLS && d.n_row == s->n && d.lead == 1u && strcmp(d.head[0], "offset") == 0 && strcmp(d.head[1], "place") == 0 &&
+	   strcmp(d.head[2], "bytes") == 0 && strcmp(d.head[3], "ObfScore") == 0 && strcmp(d.head[4], "nucleo") == 0);
+	for (i = 0; s && i < d.n_row; i++) {
+		const struct kgenome_diag_text_obf_rec *r = &s->v[i];
+
+		dash_islands_cell(&OB, i, cell, caps, sizeof caps);
+		snprintf(want, sizeof want, "0x%llx", (unsigned long long)r->at);
+		CK(strcmp(cell[0], want) == 0 && strcmp(cell[1], "island") == 0);
+		snprintf(want, sizeof want, "%llu", (unsigned long long)r->len);
+		CK(strcmp(cell[2], want) == 0);
+		snprintf(want, sizeof want, "%u.%02u", kgenome_diag_text_obf_milli(r) / 1000u, (kgenome_diag_text_obf_milli(r) % 1000u) / 10u);
+		CK(strcmp(cell[3], want) == 0);
+		/* every capability of the record, by its name, in its order; "-" for none */
+		{
+			const char *at = caps;
+			uint32_t k;
+
+			for (k = 0; k < r->n_cap; k++) {
+				at = strstr(at, kgenome_nucleo_cap_name(r->cap[k]));
+				CK(at != NULL);
+				if (!at)
+					break;
+			}
+			CK(r->n_cap || strcmp(caps, "-") == 0);
+		}
+	}
+	CK(s && s->v[1].n_cap > 0u && s->v[0].n_cap == 0u);    /* the second island calls system with the request, the first calls nothing */
+	dash_islands_cell(&OB, d.n_row, cell, caps, sizeof caps);       /* past the set: empty cells */
+	CK(!cell[0][0] && !cell[1][0] && !cell[2][0] && !cell[3][0] && !caps[0]);
+	/* a list longer than the room says what it could not hold */
+	if (s && s->v[1].n_cap > 1u) {
+		char small[24];
+
+		dash_islands_cell(&OB, 1u, cell, small, sizeof small);
+		CK(strchr(small, '+') != NULL);
+	}
+	dash_islands(&OB, &b);
+	CK(OB.obf_data == s);                                   /* kept: asked once */
+	dash_drop(&OB);
+	CK(!OB.obf_data && !OB.obf_done);
+	/* an island of another kind (a server <script> element's body, asp.net): the parse's island, whatever opens it */
+	memset(&OB, 0, sizeof OB);
+	OB.buf = kof_buf_make((const uint8_t *)aspx, sizeof aspx - 1u);
+	CK(kof_script_parse(OB.buf, &si, &OB.ctx) && OB.ctx.format == KOF_FMT_SCRIPT && si.n_island >= 1u);
+	dash_islands(&OB, &b);
+	s = OB.obf_data;
+	{
+		struct kgenome_script_parts pt;
+		const struct kgenome_script_isl_list *L;
+
+		kof_script_parts_build(&OB.ctx, OB.buf.p, OB.buf.n, KGENOME_SCRIPT_PART_ISLANDS, &pt);
+		L = &pt.isl.lv[KGENOME_SCRIPT_ISL_SERVER][0];
+		CK(s && L->n >= 1u && s->n >= L->n && s->v[0].kind == KGENOME_DIAG_TEXT_OBF_ISLAND && s->v[0].at == L->v[0].off &&
+		   s->v[0].len == L->v[0].len);
+		kgenome_script_parts_free(&pt);
+	}
+	dash_drop(&OB);
+	/* a script with no code: said, not an empty table */
+	memset(&OB, 0, sizeof OB);
+	OB.ctx.format = KOF_FMT_SCRIPT;
+	OB.ctx.subtype = KOF_SCRIPT_PHP;
+	OB.buf = kof_buf_make((const uint8_t *)"<p>no code</p>\n", 15u);
+	dash_islands(&OB, &b);
+	row_text(&b.row[0], t, sizeof t);
+	CK(b.n == 1u && strstr(t, "read no code") != NULL);
+	dash_islands_table(&OB, &d);
+	CK(d.n_col == 0u && d.n_row == 0u);                    /* no table under the sentence */
+	dash_drop(&OB);
+	memset(&OB, 0, sizeof OB);
+}
+
 int main(int argc, char **argv)
 {
 	hk_args(argc, argv);
@@ -1352,6 +1509,8 @@ int main(int argc, char **argv)
 	rows_out_of_memory();
 	shell_rows();
 	infect_tabs();
+	text_tabs();
+	islands_block();
 	printf("kx_dashdata: %d failure(s)\n", hk_fails);
 	return hk_fails != 0;
 }

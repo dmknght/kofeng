@@ -1,4 +1,10 @@
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from LIBTEST_CFG_DISABLED (mk/tests.mk) when cfg_sign.c is out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * genome / cfg_estimator - is the CFG sketch (celllysis/cfg_sign.c) an ESTIMATOR OF THE JACCARD INDEX OF TWO MULTISETS, as cfg.h says?
  *
  * DEFECT S1 (2026-11-03). The sketch is the 32 smallest keys of the elements (label, k-th occurrence), and kgenome_cfg_overlap is hit / taken over the
@@ -500,3 +506,4 @@ int main(int argc, char **argv)
 		printf("cfg_estimator: ok\n");
 	return fails != 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

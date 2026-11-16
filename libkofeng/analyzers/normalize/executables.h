@@ -126,7 +126,10 @@
  * treating them as text would rewrite structure as prose.
  */
 #define KOF_EXE_NORM_NULL_MIN 8u         /* zero bytes */
-#define KOF_EXE_NORM_WIDE_MIN 8u         /* characters, so sixteen bytes */
+/* KNOWN DEFECT NORM-WIDE-1 (2026-11-15, M) [sev M]: the floor KOF_EXE_NORM_WIDE_MIN (read by wide_run's callers) leaves UTF-16 text of 4-7 characters WIDE in the view: whs32res.dll//0:norm (sha256 19c6fd14d012ca92...) keeps 337 such runs ("Sunday", "(null)", "LC_ALL", "api-ms-") while every run of 8+ is narrowed.
+ * Trigger: any wide string of 4-7 characters. Effect: a rule that searches the normalised view for a short string in ASCII misses it. Reproducer: kofexaminer --dump --db on a read-only copy, count (printable,00){4,7} runs in 0.norm/object.
+ * Fix: also accept a run of >= 4 characters that is 2-aligned and ends in the UTF-16 terminator 00 00 (the evidence this floor stands in for); measure false narrowing on the frozen corpora before changing the floor. */
+#define KOF_EXE_NORM_WIDE_MIN 8u        /* characters, so sixteen bytes */
 
 /*
  * WHERE A PIECE OF THE OUTPUT CAME FROM.

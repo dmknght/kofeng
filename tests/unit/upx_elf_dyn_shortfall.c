@@ -1,5 +1,7 @@
 /*
- * upx_elf_dyn_shortfall.c - PINS the measured UPX-ELF-DYN-SHORTFALL shortfall (STATUS.md,
+ * upx_elf_dyn_shortfall.c - UPX-ELF-DYN-SHORTFALL on the two compiled fixtures. FIXED 2026-11-14 (see the
+ * check in main: the children are now the whole originals); what follows is the history of the pin.
+ * It first PINNED the measured UPX-ELF-DYN-SHORTFALL shortfall (STATUS.md,
  * "Symbol-route audit, groups 23-28", 2026-11-04 and the 2026-11-04 architecture-measurement
  * audit before it), as a regression-tracking test ONLY. This does not fix, and does not
  * investigate, bases/unp/upx_elf_00.c `kof_unpack`: the owner ruled that OUT OF SCOPE for now
@@ -259,47 +261,27 @@ int main(void)
 
 	if (dyn.child_len || stat_.child_len) {
 		/*
-		 * THE PIN. UPX-ELF-DYN-SHORTFALL (STATUS.md, module sink bases/unp/upx_elf_00.c
-		 * `kof_unpack`): the DYNAMIC build's decoded child is a small, near-empty prefix with
-		 * no recognisable function - measured here at well under a quarter of the packed
-		 * file's own size and 0 function-table units; the STATIC build of the SAME source,
-		 * packed the same way, decodes to a child several times the packed size (the embedded
-		 * libc unpacks to much more than the stub) holding hundreds of function-table units.
-		 * The exact byte counts are deliberately NOT pinned (a build's exact size is a
-		 * toolchain/UPX-version detail, not the defect); the RATIO and the zero-vs-nonzero
-		 * function count are the shortfall itself and are what a fix - or a silent regression
-		 * in either direction - would change.
+		 * FIXED (2026-11-14, codemap round 5): the DYNAMIC build's chain holds its code segment
+		 * as a STORED block (sz_cpr == sz_unc, method 0) and both builds' tails sit under a
+		 * format-22 PackHeader whose sizes are the whole file's; the module now copies the stored
+		 * block and finds the tail by the size the chain leaves (bases/unp/upx_elf_00.c,
+		 * upx_copy_stored, upx_tail_of). The simulated-byte RED test is tests/unit/upx_elf_stored.c;
+		 * this pin now holds the fixtures to the original sizes `upx -d` (4.2.4) writes: 17144 and
+		 * 759432 bytes, every byte of p_filesize, so the module's own shortfall note says 0.
 		 */
-		CK(dyn.child_len > 0, "DYNAMIC: a child was produced at all");
-		CK(dyn.child_len < 8192, "DYNAMIC: the decoded child stays tiny (today: %llu B) - a fix that recovers"
-		   " the program would grow this well past one page", (unsigned long long)dyn.child_len);
-		CK(dyn.funcs == 0, "DYNAMIC: the decoded child yields NO function-table unit today (got %u) - this is"
-		   " the '0 CODE units' half of the shortfall; a fix must move this off zero", dyn.funcs);
-
-		CK(stat_.child_len > 50000u, "STATIC: the decoded child is the bulk of the program (today: %llu B)",
+		CK(dyn.child_len == 17144u, "DYNAMIC: the child is the whole original (%llu B, upx -d writes 17144)",
+		   (unsigned long long)dyn.child_len);
+		CK(dyn.funcs > 0, "DYNAMIC: the child has function-table units (%u)", dyn.funcs);
+		CK(stat_.child_len == 759432u, "STATIC: the child is the whole original (%llu B, upx -d writes 759432)",
 		   (unsigned long long)stat_.child_len);
-		CK(stat_.funcs > 100u, "STATIC: the decoded child yields hundreds of function-table units (today: %u)",
-		   stat_.funcs);
-
-		/*
-		 * REFINED FINDING (M, this test, 2026-11-05), narrower than the existing STATUS.md
-		 * sentence "Engine reports the shortfall itself (not silent)": that is true of the
-		 * module's OWN debug note (kof_debug("UPX.ELF.shortfall", ...), caught here by fact id)
-		 * and NOT of kof_result.broken, which this measurement finds at KOF_BROKEN_NONE (0) on
-		 * BOTH the root and the produced child, for BOTH fixtures, dynamic (massive shortfall)
-		 * and static (minor one) alike. A host that does not register kscan_on_debug - which is
-		 * most of them; kofscanner needs -v - sees the dynamic object as a CLEAN, COMPLETE scan
-		 * today. This is not fixed here (out of scope, same as the shortfall itself); it is
-		 * pinned so a future change to either the note or kof_result.broken shows up as a
-		 * number changing here, in either direction.
-		 */
-		CK(dyn.saw_shortfall, "DYNAMIC: the module's own debug note (UPX.ELF.shortfall) fires");
-		CK(dyn.saw_shortfall && dyn.shortfall > 10000u, "DYNAMIC: the note's own shortfall value is"
-		   " substantial today (%llu bytes) - the module knows the gap", (unsigned long long)dyn.shortfall);
-		CK(dyn.root_broken == 0 && dyn.child_broken == 0, "DYNAMIC: kof_result.broken is 0 (root %u, child %u)"
-		   " on BOTH objects today, despite the shortfall - the debug note is the only channel that"
-		   " carries it, not kof_result; a fix SHOULD be expected to change this too", dyn.root_broken,
-		   dyn.child_broken);
+		CK(stat_.funcs > 100u, "STATIC: the decoded child yields hundreds of function-table units (%u)", stat_.funcs);
+		CK(dyn.saw_shortfall && dyn.shortfall == 0, "DYNAMIC: the module's shortfall note says 0 (%llu)",
+		   (unsigned long long)dyn.shortfall);
+		CK(stat_.saw_shortfall && stat_.shortfall == 0, "STATIC: the module's shortfall note says 0 (%llu)",
+		   (unsigned long long)stat_.shortfall);
+		CK(dyn.root_broken == 0 && dyn.child_broken == 0 && stat_.child_broken == 0,
+		   "a whole unpack is not broken (dyn root %u child %u, static child %u)", dyn.root_broken, dyn.child_broken,
+		   stat_.child_broken);
 	}
 
 	kscan_free(sc);

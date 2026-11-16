@@ -37,9 +37,61 @@
  * most KGENOME_EMU_DELAY_BODY bytes once per loop that reaches the probe count -
  * and a loop that is not a delay is not probed again until another branch has
  * been taken in between.
+ *
+ * NOT RECOGNISED YET: A DELAY WHOSE COUNTERS LIVE IN THE FRAME, WITH A TRAP ON THE
+ * SECOND COUNTER (to do; owner 2026-11-15: the emulator must detect this kind of
+ * anti-emulation and get past it). Measured on a real APT loader (a x64 service DLL
+ * posing as appmgmts.dll, sha256 0bf1fab5...868a, function at VA 0x180003440, MSVC
+ * debug-style code, every local in memory):
+ *
+ *     i = 0; j = 0; ret = 0;                      [rsp+20h]=i [rsp+24h]=j [rsp+28h]=ret
+ *     top:  cmp  dword [rsp+20h], 80000000h
+ *           jae  out                              ; unsigned i < 2^31
+ *           mov eax,[rsp+24h]; inc eax; mov [rsp+24h],eax     ; j++
+ *           mov eax,[rsp+20h]; inc eax; mov [rsp+20h],eax     ; i++
+ *           jmp  top
+ *     out:  cmp  dword [rsp+24h], 0
+ *           jge  wipe                             ; SIGNED: j must be 80000000h (< 0)
+ *           call next_stage                       ; the real work (VA 0x1800033a0)
+ *           ...
+ *     wipe: rep stosb 0x16a0 bytes of zero over its own global state, return
+ *
+ * Why the recogniser above misses it: the counters are frame cells (loads and stores),
+ * there are TWO induction variables, the exit test sits at the TOP (cmp/jae before the
+ * body, jmp back at the bottom) and the backward branch is an unconditional jmp. So it
+ * runs as an ordinary spin: 2^31 iterations x 9 instructions = ~19.3G instructions,
+ * the run ends on the instruction budget INSIDE the loop, nothing after it executes,
+ * and the scan says nothing. Why the trap matters: a shortcut that only moves the exit
+ * counter (i) to its last value and leaves j where it was makes j >= 0 at `out`, and
+ * the sample then zeroes its own config and exits - a skipper that does not reproduce
+ * EVERY side effect of the skipped iterations is detected by the sample, not fooled.
+ *
+ * What to build (the next algorithm, in this file):
+ *  1. Recognise a loop by its CFG, not by "body ends in a jcc to top": a natural loop
+ *     whose single exit is a compare of one induction variable against a constant,
+ *     test at the top or the bottom, back edge jcc or jmp.
+ *  2. Induction variables are registers OR frame cells ([rsp+c] / [rbp-c] with a
+ *     fixed rsp/rbp in the body). Each must move by a constant per iteration
+ *     (inc/dec/add/sub imm, also through load-op-store via a scratch register that is
+ *     dead at the back edge). Any other store, any call, any load of memory that is
+ *     not one of these cells, or a cell that is also stored with a non-constant value,
+ *     means it is not a delay: run it.
+ *  3. n = iterations left, from the exit compare (unsigned/signed by the jcc, as now).
+ *     Apply ALL of them in closed form: every induction cell/register += step * (n-1),
+ *     wrapping in its own width; scratch registers get the value the last iteration
+ *     leaves. Then let the last iteration run, as skip() does now, so flags and the
+ *     next instruction are exact. The test for this shape: after the skip, j ==
+ *     80000000h, and the branch at `out` goes to the call, not to the wipe.
+ *  4. Charge the skipped work to ff_insn as now. Report the skip as a fact of the run
+ *     (a delay of N iterations was skipped, at VA, with K induction variables), so a
+ *     diagnose can treat "a long compute-only delay guarding the next stage" as
+ *     evidence on its own: no benign library code counts to 2^31 before its work.
+ * Related variants to cover with the same rule: the counter in a global (.data) cell,
+ * a 64-bit counter, a down-counter compared against 0 with jg/jns, and a second
+ * variable derived per iteration (j += 3 is linear; j ^= const is NOT linear: run it).
  */
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 #define KGENOME_EMU_DELAY_BODY 48u
 

@@ -710,6 +710,32 @@ int handle_chooser_key(struct view *v, int k)
 			v->num_fresh = 0;
 			return 1;
 		}
+		/* Esc closes the Open dialog outright, whether or not the field
+		 * has the caret - the same rule the Go to box has above. */
+		if (v->opendlg_open && k == 27) {
+			v->opendlg_open = 0;
+			v->edit = 0;
+			return 1;
+		}
+		if (v->edit == 540) {
+			/*
+			 * Typing a path. Any printable character, like the Find
+			 * field - a path is not the restricted alphabet an offset
+			 * is. Enter tries to open it and LEAVES THE FIELD OPEN on
+			 * failure, so a mistyped path can be corrected without
+			 * reopening the dialog; opendlg_take re-closes it on
+			 * success.
+			 */
+			int run = k == '\r' || k == '\n';
+			int r2 = field_key(v, v->opendlg_path,
+					    sizeof v->opendlg_path, k, NULL);
+
+			if (run) {
+				v->edit = 540;
+				opendlg_take(v);
+			}
+			return r2;
+		}
 		if (v->edit == 500) {
 			/*
 			 * Typing into the find dialog.

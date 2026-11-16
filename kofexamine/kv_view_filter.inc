@@ -68,6 +68,15 @@
 	uint32_t    find_off;       /* how far the field is scrolled */
 	uint32_t    goto_off;       /* the same, for the Go to field */
 	int         g_txt[2], g_mode[2], g_go[2], g_cancel[2];
+	/*
+	 * THE OPEN DIALOG (File > Open, Ctrl+O): one path field and two buttons -
+	 * see kv_dialogs.c's opendlg_show/opendlg_take/draw_opendlg/opendlg_click.
+	 * The path persists across openings, the same convention find and goto use.
+	 */
+	char        opendlg_path[KOF_DUMP_PATH_ROOM];
+	int         opendlg_open;   /* the dialog is up */
+	uint32_t    opendlg_off;    /* how far the field is scrolled */
+	int         o_txt[2], o_go[2], o_cancel[2];
 	/* One offset per field that can hold more than it shows. Separate
 	 * because they scroll independently: a caret in one says nothing about
 	 * where another is being read from. */

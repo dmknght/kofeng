@@ -186,7 +186,7 @@ static void examples_fold(void)
 	fold("$c = substr('abcdef', -3);", "$c='def';", 1);
 	fold("$c = substr('abcdef', 1, -2);", "$c='bcd';", 1);
 	fold("$c = strtr('hello', 'el', 'ip');", "$c='hippo';", 1);
-	fold("$c = ucfirst('word'); $d = lcfirst('WORD'); $e = strtoupper('w'); $f = strtolower('W');", "$c='Word';$d='wORD';$e='W';$f='w';", 4);
+	fold("$c = ucfirst('word'); $d = lcfirst('WORD'); $e = strtoupper('w'); $f = strtolower('W');", "$c='Word';\n$d='wORD';\n$e='W';\n$f='w';", 4);
 	fold("$c = trim('  q  ') . ltrim('  q ') . rtrim(' q  ');", "$c='qq  q';", 3);
 	/* a name kept from a scan by a join of calls and literals is ONE literal */
 	fold("$c = chr(115) . chr(121) . 'stem';", "$c='system';", 2);
@@ -240,7 +240,7 @@ static void examples_fold(void)
 	fold("$c = chr('A');", "$c=chr('A');", 0);                                    /* not a number: the table's rule, the hook is not asked */
 	fold("$c = chr();", "$c=chr();", 0);
 	fold("$c = substr('abc', 1,);", "$c=substr('abc',1,);", 0);
-	fold("$o->trim('x'); X::trim('y'); $z = $trim('w');", "$o->trim('x');X::trim('y');$z=$trim('w');", 0);
+	fold("$o->trim('x'); X::trim('y'); $z = $trim('w');", "$o->trim('x');\nX::trim('y');\n$z=$trim('w');", 0);
 	fold("function trim($s) { return $s; } $n = new strtr('a', 'b', 'c');", "function trim($s){return$s;}$n=new strtr('a','b','c');", 0);
 	fold("$c = ns\\trim(' q ');", "$c=ns\\trim(' q ');", 0);
 	fold("$c = strtolower_(' Q ') . xtrim(' q ') . trim_(' q ');", "$c=strtolower_(' Q ').xtrim(' q ').trim_(' q ');", 0);

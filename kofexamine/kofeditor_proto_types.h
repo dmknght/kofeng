@@ -9,6 +9,8 @@
 #ifndef KOF_KOFEDITOR_PROTO_TYPES_H
 #define KOF_KOFEDITOR_PROTO_TYPES_H
 
+#include <kofmod/kofdiagtree.h>   /* struct kof_diag_when, KOF_DIAG_MAX_WHEN: the draft's gate is the record's conditions */
+
 /*
  * THE STRINGS TABLE HAS NO CAPACITY OF ITS OWN (owner's standing order, 2026-11-03): `decl` holds every marker the author declares, grown
  * by decl_reserve (kofeditor_decl.c) as blk_reserve grows the blocks, and a refusal is said on the draft (say_err), never a marker dropped.
@@ -774,9 +776,9 @@ struct mtn_block {
 	 * finds it here, which is when it learns where it is.
 	 */
 	uint8_t  kept;
-	uint8_t  nosig;                    /* a function unit the engine did not sign (kof_cfgsign_function: below the floor, undecodable, no rules): listed, no hashes, no id; `why` says which */
-	uint8_t  why;                      /* a function unit: the engine's state for it, enum kof_cfgsign_state */
-	uint32_t fn_blk;                   /* a function unit: its reachable blocks, as the engine counted them */
+	uint8_t  nosig;                    /* a function unit with no signature (KGENOME_MUTATION_SIG_NONE: CFG signing disabled by the owner 2026-11-15): listed, no hashes, no id */
+	uint8_t  why;                      /* set only by the DISABLED CFG branch of mtn_mark (enum kof_cfgsign_state): 0 while CFG signing is disabled */
+	uint32_t fn_blk;                   /* set only by the DISABLED CFG branch of mtn_mark (reachable blocks): 0 while CFG signing is disabled */
 	uint64_t fn_off, fn_len;           /* a function unit: the extent of its first function (the unit's signature is about it): what a press on the function's name asks the engine about */
 	uint8_t  picked;                   /* ticked: goes into the rule */
 	uint8_t  lit;                      /* painted in the hex pane */
@@ -880,6 +882,16 @@ struct kof_draft {
 	 * the hash until the reader sets it themselves, which clears the flag.
 	 */
 	int         opt_auto[OPT_COUNT];
+	/*
+	 * THE GATE OF THE SIGNATURE (owner, 2026-11-17: "add thêm anomalies để check", "add được nucleo từ trong list nucleo
+	 * thấy được từ file"): conditions on what the ENGINE reported for the sample - an anomaly its parse raised, a
+	 * capability its analysis saw (KOF_FACT_ANOMALY / KOF_FACT_NUCLEO, written KOF_DIAG_HAS_ANOMALY / _NUCLEO). In the
+	 * record's own type, picked from the engine's lists (draft_gate_offer) and never typed. The header's, like the
+	 * options above: every unit the draft generates states them. At most the record's bound; the reader refuses a
+	 * source whose conditions together pass it, and Save says so.
+	 */
+	struct kof_diag_when gate[KOF_DIAG_MAX_WHEN];
+	uint32_t    n_gate;
 	/*
 	 * THE HEADER'S FAMILY AND VARIANT: names chosen from the Pathogens catalog
 	 * (kof_famcat), never typed. The variant is the catalog's own name

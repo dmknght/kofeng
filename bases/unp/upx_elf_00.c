@@ -229,10 +229,12 @@ KOF_UPX_DEFINE_METHOD_OF()
  *
  * THE TRANSFORMATION, for the ids this handles. The four bytes at the
  * displacement hold, big-endian, the target's OFFSET FROM THE START OF THE
- * BLOCK, with the top byte replaced by the block's `cto` marker - which is why
+ * BLOCK less four, with the top byte replaced by the block's `cto` marker - which is why
  * the table in UPX gives these ids a 0x00ffffff mask and refuses them on an
- * image over 16MB. So the original displacement is that offset minus the block
- * offset of the NEXT instruction, and a branch whose second byte is not the
+ * image over 16MB. What UPX stored is the displacement plus the block offset of
+ * the displacement field (its filter's `get_le32(b+ic+1) + ic + 1`), so the
+ * original displacement is that value minus the field's offset (it was the
+ * next instruction's, four too many, until 2026-11-14), and a branch whose second byte is not the
  * marker was never transformed and is left alone. That marker test is the whole
  * of the inverse: UPX guarantees it round-trips, because it only keeps a filter
  * whose own scan found it reversible.
@@ -251,6 +253,7 @@ KOF_UPX_DEFINE_METHOD_OF()
 #define UPX_UF_JCC  4u
 #define UPX_UF_ARM  8u      /* word filters: not a byte scan, see upx_unfilter_words */
 #define UPX_UF_PPC  16u
+#define UPX_UF_A64  32u     /* AArch64 B / BL words: upx_unfilter_words */
 
 /* Which branches this id transformed, or 0 for one this module does not do. */
 static unsigned upx_filter_ops(unsigned id)
@@ -263,6 +266,7 @@ static unsigned upx_filter_ops(unsigned id)
 	case 0x46: return UPX_UF_E8 | UPX_UF_E9;
 	case 0x49: return UPX_UF_E8 | UPX_UF_E9 | UPX_UF_JCC;
 	case 0x50: return UPX_UF_ARM;
+	case 0x52: return UPX_UF_A64;
 	case 0xd0: return UPX_UF_PPC;
 	default:   return 0u;
 	}
@@ -292,19 +296,25 @@ static unsigned upx_filter_ops(unsigned id)
  *         block. Inverse: imm24 = (imm24 - pos/4) mod 2^24. No range test: a
  *         range test on this id leaves 72 bytes wrong on the sample.
  *   0xd0  PowerPC, big-endian words. A word with opcode 18 and AA = 0 (`b` and
- *         `bl`: mask 0xfc000002 == 0x48000000) holds the displacement PLUS the
- *         word's byte offset in the block, and ONLY when that sum is an offset
- *         inside the block (a target before the block or past it was left as it
- *         was). Inverse: when li < the block length, li = (li - pos) mod 2^26.
- *         "Below the length" is what the sample shows (a word with li 0x442200 in
- *         a 118064 byte block is untouched); that the bound is exclusive is not
- *         proven by a sample with li == length.
+ *         `bl`: mask 0xfc000002 == 0x48000000) whose target lay inside the block
+ *         holds, in li, the block's 4-bit `cto` marker in bits 25..22 and the
+ *         target's offset in the block (displacement PLUS the word's byte offset)
+ *         in bits 21..2. Inverse: when the marker is cto and the offset is below
+ *         the block length, li = (offset - pos) mod 2^26. A word whose marker is
+ *         not cto was never changed (UPX picks a cto no untouched branch carries).
+ *         MEASURED (2026-11-15, `upx -d` 4.2.4 the oracle): the first samples had
+ *         cto 0, where "li below the length" and "marker 0 and offset below the
+ *         length" agree; 24 PowerPC samples of format 132 carry cto 1, every
+ *         filtered word read 0x0040.... and stayed filtered (6463..41335 bytes
+ *         wrong each), and with the marker read all 24 come back byte for byte.
+ *         Not known: whether UPX filters a word past the first 4 MiB of a block
+ *         (the offset has 22 bits); no sample has a block that large.
  * pos is measured from the START OF THE BLOCK, so the walk is aligned to the block
- * and not to the file, and a window of 4096 keeps it. cto is 0 in both samples and
- * is not used.
+ * and not to the file, and a window of 4096 keeps it. 0x50 and 0x52 carry no
+ * marker (cto is 0 in their samples and is not read).
  */
 static void upx_unfilter_words(const struct kof_obj_ctx *ctx, uint64_t base,
-			       uint32_t len, unsigned ops)
+			       uint32_t len, unsigned ops, unsigned cto)
 {
 	uint8_t w[UPX_UF_WIN];
 	uint32_t pos = 0;
@@ -320,7 +330,28 @@ static void upx_unfilter_words(const struct kof_obj_ctx *ctx, uint64_t base,
 		if (have == 0)
 			break;
 		for (i = 0; i < have; i += 4) {
-			if (ops & UPX_UF_ARM) {
+			if (ops & UPX_UF_A64) {
+				/* 0x52, AArch64: a B or a BL (bits 30..26 == 00101,
+				 * bit 31 the link) holds in imm26 the displacement PLUS
+				 * the word's index in the block, as 0x50 does in imm24.
+				 * Measured: 40 UPX AArch64 samples (format 42) of the
+				 * corpus differed from `upx -d` 4.2.4 in exactly those
+				 * words, by the word index (BL alone left the B words:
+				 * 5289 bytes on Gafgyt.ix-27b1...). */
+				uint32_t v = ((uint32_t)w[i + 3] << 24) |
+					     ((uint32_t)w[i + 2] << 16) |
+					     ((uint32_t)w[i + 1] << 8) | w[i];
+
+				if (((v >> 26) & 0x1fu) != 0x05u)
+					continue;
+				v = (v & 0xfc000000u) |
+				    (((v & 0x03ffffffu) - ((pos + i) >> 2)) &
+				     0x03ffffffu);
+				w[i]     = (uint8_t)v;
+				w[i + 1] = (uint8_t)(v >> 8);
+				w[i + 2] = (uint8_t)(v >> 16);
+				w[i + 3] = (uint8_t)(v >> 24);
+			} else if (ops & UPX_UF_ARM) {
 				uint32_t v = ((uint32_t)w[i + 3] << 24) |
 					     ((uint32_t)w[i + 2] << 16) |
 					     ((uint32_t)w[i + 1] << 8) | w[i];
@@ -339,9 +370,10 @@ static void upx_unfilter_words(const struct kof_obj_ctx *ctx, uint64_t base,
 					     ((uint32_t)w[i + 1] << 16) |
 					     ((uint32_t)w[i + 2] << 8) |
 					     w[i + 3];
-				uint32_t li = v & 0x03fffffcu;
+				uint32_t li = v & 0x003ffffcu;
 
 				if ((v & 0xfc000002u) != 0x48000000u ||
+				    ((v >> 22) & 0xfu) != (cto & 0xfu) ||
 				    li >= len)
 					continue;
 				v = (v & 0xfc000003u) |
@@ -365,8 +397,8 @@ static void upx_unfilter(const struct kof_obj_ctx *ctx, uint64_t base,
 	uint8_t w[UPX_UF_WIN];
 	uint32_t pos = 0;
 
-	if (ops & (UPX_UF_ARM | UPX_UF_PPC)) {
-		upx_unfilter_words(ctx, base, len, ops);
+	if (ops & (UPX_UF_ARM | UPX_UF_PPC | UPX_UF_A64)) {
+		upx_unfilter_words(ctx, base, len, ops, cto);
 		return;
 	}
 	while (pos + 6u <= len) {
@@ -401,9 +433,15 @@ static void upx_unfilter(const struct kof_obj_ctx *ctx, uint64_t base,
 			 * with the marker where its top byte would be. */
 			t = ((uint32_t)w[ic + 2] << 16) |
 			    ((uint32_t)w[ic + 3] << 8) | w[ic + 4];
-			/* ... minus where the next instruction begins, which
-			 * is what a displacement is measured from. */
-			rel = t - (pos + ic + 5u);
+			/* ... minus the block offset of the displacement FIELD
+			 * (ic + 1), which is what UPX's filter added: it stores
+			 * displacement + ic + 1, the target less four. Subtracting
+			 * the next instruction's offset instead left every branch
+			 * four bytes short of its target - measured on a static
+			 * amd64 build packed by upx 4.2.4 (ftid 0x49, cto 23):
+			 * 13854 bytes of the code block differed from `upx -d`, every
+			 * one a displacement exactly 4 too small; 0 after. */
+			rel = t - (pos + ic + 1u);
 			w[ic + 1] = (uint8_t)(rel & 0xffu);
 			w[ic + 2] = (uint8_t)((rel >> 8) & 0xffu);
 			w[ic + 3] = (uint8_t)((rel >> 16) & 0xffu);
@@ -610,7 +648,18 @@ struct upx_layout {
 	uint64_t off[UPX_MAX_LOADS];
 	uint64_t len[UPX_MAX_LOADS];
 	uint32_t n;
+	/* Every program header was read (none past the peek, none past
+	 * UPX_MAX_LOADS, the table in order): only then is the end of the last
+	 * PT_LOAD the end of the chain (upx_layout_end). */
+	uint32_t whole;
 };
+
+/* Where the chain ends, from the layout: the end of the last PT_LOAD, or 0 when
+ * the table was not read whole and so says nothing about its end. */
+static uint64_t upx_layout_end(const struct upx_layout *L)
+{
+	return L->whole && L->n ? L->off[L->n - 1u] + L->len[L->n - 1u] : 0;
+}
 
 static uint32_t rd_le32(const uint8_t *p)
 {
@@ -681,6 +730,7 @@ static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 	int be, is64;
 
 	L->n = 0;
+	L->whole = 0;
 	if (n < 64u || !upx_ident_ok(h))
 		return;
 	is64 = h[4] == 2;
@@ -729,6 +779,7 @@ static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 		L->len[L->n] = fsz;
 		L->n++;
 	}
+	L->whole = i == phnum;
 }
 
 /*
@@ -853,6 +904,7 @@ static uint64_t upx_gap_at(const struct upx_layout *L, uint64_t written)
  * structure it does not control.
  */
 static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
+		       uint64_t chain_end, uint64_t rem,
 		       uint64_t *out_off, uint64_t *out_len, uint32_t *out_m,
 		       uint64_t *out_unc)
 {
@@ -930,8 +982,71 @@ static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
 			}
 			}
 		}
+		/*
+		 * THE PACKHEADER'S PAIR IS NOT ALWAYS THE TAIL'S.
+		 *
+		 * UPX 4.2.4, format 22 (amd64): the PackHeader's sizes are the
+		 * WHOLE file's - u_len is p_filesize and c_len is the offset of
+		 * the PackHeader itself - so the pair above names no b_info and
+		 * the tail was never found. Measured on one source built twice
+		 * and packed the same way: 4832 of 17144 bytes lost on the PIE
+		 * build, 84928 of 759432 on the static one, all of it the section
+		 * header table and what follows the last PT_LOAD
+		 * (UPX-ELF-DYN-SHORTFALL). The tail's own b_info is still there,
+		 * between the end of the chain and the PackHeader, and what it
+		 * must expand to is known without it: what the original's size
+		 * leaves after the chain and its gaps, `rem`. A record whose
+		 * sz_unc is exactly that, whose sz_cpr does not exceed it and
+		 * whose data ends before this PackHeader, under a PackHeader that
+		 * states the same original size as p_info, is the tail.
+		 */
+		if (rem && RD32(ph + 24u) == want && chain_end < ph) {
+			for (at = chain_end; at + B_INFO_LEN <= ph; at++) {
+				uint64_t c = RD32(at + 4u);
+
+				if (RD32(at) != rem || c == 0u || c > rem)
+					continue;
+				if (at + B_INFO_LEN + c > ph)
+					continue;
+				*out_off = at + B_INFO_LEN;
+				*out_len = c;
+				*out_m   = kof_u8(at + 8u);
+				*out_unc = rem;
+				kof_debug("UPX.ELF.tail", rem);
+				return 1;
+			}
+		}
 	}
 	return 0;
+}
+
+/*
+ * A STORED block: copied, not decoded.
+ *
+ * sz_cpr == sz_unc is the block saying so in arithmetic rather than in a method
+ * number - the stub's own rule (it decompresses only when sz_cpr < sz_unc and
+ * copies otherwise) - and UPX writes method 0 for it, which method_of does not
+ * know. One copy for the chain and the tail. Returns the bytes written; a
+ * refusal by the host is said (LIMIT).
+ */
+static uint64_t upx_copy_stored(const struct kof_obj_ctx *ctx, uint64_t off,
+				uint64_t len)
+{
+	uint64_t k = 0, got = 0;
+
+	while (k < len) {
+		uint8_t buf[4096];
+		uint32_t n = 0;
+
+		while (n < sizeof buf && k < len)
+			buf[n++] = kof_u8(off + k++);
+		if (!kunp_rcstruct_write(buf, n)) {
+			kunp_rcstruct_broken(KOF_UNP_LIMIT);
+			break;
+		}
+		got += n;
+	}
+	return got;
 }
 
 /*
@@ -992,6 +1107,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	uint32_t hdr_len = 0;
 
 	L.n = 0;
+	L.whole = 0;
 
 	/*
 	 * Find the stub's magic. Bounded to the front of the object because the
@@ -1066,6 +1182,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	{
 		uint32_t sz_cpr, sz_unc0, method, decoder, skip = 0, got_hdr;
+		int stored0;
 
 		if (kof_in_obj(at, B_INFO_LEN)) {
 			sz_unc0 = RD32(at);
@@ -1110,13 +1227,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * time and the magic test was the bug - see
 			 * upx_magic_tampered above for what replaced it.
 			 */
-			if (decoder && sz_cpr > skip && sz_unc0 &&
+			/* A stored first block is its own bytes (upx_copy_stored):
+			 * read where it lies, so its layout is known as well. */
+			stored0 = sz_cpr == sz_unc0;
+			if ((decoder || stored0) && sz_cpr > skip && sz_unc0 &&
 			    sz_unc0 <= UPX_HDR_PEEK &&
 			    kof_in_obj(at + B_INFO_LEN, sz_cpr)) {
-				got_hdr = kunp_static_peek(decoder,
-							  at + B_INFO_LEN + skip,
-							  sz_cpr - skip, hdr,
-							  (uint32_t)sz_unc0);
+				if (stored0) {
+					for (got_hdr = 0; got_hdr < sz_unc0; got_hdr++)
+						hdr[got_hdr] = kof_u8(at + B_INFO_LEN + got_hdr);
+				} else
+					got_hdr = kunp_static_peek(decoder,
+								  at + B_INFO_LEN + skip,
+								  sz_cpr - skip, hdr,
+								  (uint32_t)sz_unc0);
 				upx_layout_of(hdr, got_hdr, &L);
 				if (upx_magic_tampered(hdr, got_hdr,
 						       sz_unc0)) {
@@ -1145,6 +1269,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/* Set when this block's compressed data is cut off by the end of
 		 * the object and only its front is being decoded. */
 		int cut = 0;
+		/* A stored block (upx_copy_stored): decided on the sizes as the
+		 * record states them, before a cut shortens sz_cpr. */
+		int stored;
 
 		if (!kof_in_obj(at, B_INFO_LEN))
 			break;
@@ -1165,6 +1292,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			break;
 		if (sz_cpr > sz_unc)
 			break;
+		/*
+		 * THE CHAIN ENDS WHERE THE LAYOUT ENDS. The stub maps the
+		 * original's PT_LOADs from the program headers of block 0, so
+		 * once the blocks and their gaps reach the end of the last
+		 * PT_LOAD there is nothing more in the chain, whatever the next
+		 * twelve bytes look like - which matters now that a stored record
+		 * is read (a record of two equal sizes is a cheap accident in the
+		 * loader's code that follows).
+		 */
+		if (upx_layout_end(&L) && got >= upx_layout_end(&L))
+			break;
+		stored = sz_cpr == sz_unc;
 
 		/*
 		 * A FOURTH CASE THAT IS NOT THE CHAIN ENDING: THE FILE ENDING.
@@ -1223,7 +1362,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 			/* Not a coding this module runs: these bytes were never
 			 * a b_info, so nothing is wrong and nothing is said. */
-			if (!upx_method_of(method) && method != UPX_M_LZMA)
+			if (!stored && !upx_method_of(method) &&
+			    method != UPX_M_LZMA)
 				break;
 			kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 			if (have < UPX_MIN_CUT)
@@ -1256,7 +1396,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			break;
 		}
 
-		if (decoder == 0 && method == UPX_M_LZMA) {
+		if (stored) {
+			decoder = 0;    /* copied below, whatever the method byte says */
+		} else if (decoder == 0 && method == UPX_M_LZMA) {
 			if (sz_cpr <= UPX_LZMA_SKIP)
 				break;
 			decoder = upx_lzma_method(kof_u8(at + B_INFO_LEN));
@@ -1268,7 +1410,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			}
 			skip = UPX_LZMA_SKIP;
 		} else if (decoder == 0) {
-			break;          /* not a coding at all: the chain ended */
+			/*
+			 * Not a coding this module runs. Before the layout is
+			 * filled that is not the chain ending: the blocks the
+			 * original's program headers still need are behind this
+			 * record, so the object is said to be short. Without a
+			 * layout it is the old answer, the end of the chain.
+			 */
+			if (got < upx_layout_end(&L))
+				kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
+			break;
 		}
 
 		kof_debug("UPX.ELF.method", method);
@@ -1283,6 +1434,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			n = kunp_rcstruct_write(hdr, hdr_len) ? hdr_len : 0;
 			if (!n)
 				kunp_rcstruct_broken(KOF_UNP_LIMIT);
+		} else if (stored) {
+			n = upx_copy_stored(ctx, at + B_INFO_LEN, sz_cpr);
 		} else {
 			n = kof_unpack_at(decoder, at + B_INFO_LEN + skip,
 					  sz_cpr - skip, sz_unc);
@@ -1387,7 +1540,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		uint64_t t_off, t_len, t_unc;
 		uint32_t t_m, t_dec;
 
-		if (upx_tail_of(ctx, be, want, &t_off, &t_len, &t_m, &t_unc)) {
+		if (upx_tail_of(ctx, be, want, at, want > got ? want - got : 0,
+				&t_off, &t_len, &t_m, &t_unc)) {
 			/*
 			 * Asked of the sizes AS THE RECORD STATED THEM, before
 			 * anything below adjusts them.
@@ -1425,20 +1579,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * in the object, uncompressed, unread.
 			 */
 			if (t_stored) {
-				uint64_t k = 0;
-
-				while (k < t_len) {
-					uint8_t buf[4096];
-					uint32_t n = 0;
-
-					while (n < sizeof buf && k < t_len)
-						buf[n++] = kof_u8(t_off + k++);
-					if (!kunp_rcstruct_write(buf, n)) {
-						kunp_rcstruct_broken(KOF_UNP_LIMIT);
-						break;
-					}
-					got += n;
-				}
+				got += upx_copy_stored(ctx, t_off, t_len);
 			} else if (t_dec) {
 				/*
 				 * Bounded by what the PackHeader declared it

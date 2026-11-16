@@ -1,5 +1,5 @@
 /*
- * upx_filter_words - the ARM (id 0x50) and PowerPC (id 0xd0) branch filters of the UPX/ELF module.
+ * upx_filter_words - the ARM (id 0x50), AArch64 (id 0x52) and PowerPC (id 0xd0) branch filters of the UPX/ELF module.
  *
  * The module is a blob, so the only way to run its inverse is the whole engine: this builds a
  * small UPX-packed ELF at run time from inert bytes (a block of NOP words with branch-with-link
@@ -10,13 +10,21 @@
  * The forward rule is stated independently of the module (it is the data of two `upx -d` runs,
  * see the note above upx_unfilter_words in bases/unp/upx_elf_00.c):
  *   ARM  LE word, bits 27..24 == 1011: imm24 += word index in the block (mod 2^24), any condition.
+ *   A64  LE word, bits 30..26 == 00101 (B, and BL with bit 31): imm26 += word index in the block (mod 2^26). Added
+ *        2026-11-14: 40 of the 1428 UPX ELF samples `upx -d` unpacks differed from it in exactly these words (the id was not
+ *        reversed). Words planted: B and BL at the field's edges, and look-alikes (BLR, other opcodes) the filter leaves.
  *   PPC  BE word, (w & 0xfc000002) == 0x48000000: when displacement + byte offset is an offset
- *        inside the block, the field holds that offset; otherwise the word is left alone.
+ *        inside the block (and the word is in the block's first 4 MiB), bits 21..2 hold that offset and
+ *        bits 25..22 the block's 4-bit cto marker (b_info byte 10); otherwise the word is left alone.
+ *        Added 2026-11-15 (arch "ppc-cto"): 24 PowerPC samples of format 132 carry cto 1, and the module
+ *        read the field as one 26-bit offset, so every filtered word (0x0040....) stayed filtered.
  * Words are placed at the window edges of the module's 4096-byte reads, at both ends of the block,
  * with displacements at the field's boundaries, with non-branch words beside them and with
  * branch-looking words whose target is outside the block (PPC: left alone).
  *
- * Why the old tests missed it: (a) no test ran the UPX module at all (line never executed).
+ * Why the old tests missed it: (a) no test ran the UPX module at all (line never executed); for 0x52, (a) no row
+ * had the id (it was not reversed and the module said UNSUPPORTED on the packed object only); for the PPC marker,
+ * (b) every fixture was built with cto 0, the one value where the marker and "below the block length" agree.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -44,6 +52,7 @@ static unsigned fails;
 	} while (0)
 
 static uint8_t want_obj[BLK];
+static unsigned cur_cto;        /* the PPC marker of the fixture being built (b_info byte 10) */
 static uint64_t got_len;
 static uint8_t got_obj[BLK + 64];
 static int got_found;
@@ -86,9 +95,12 @@ static int forward(uint8_t *blk, int ppc)
 	uint32_t pos;
 
 	for (pos = 0; pos + 4u <= BLK; pos += 4) {
-		uint32_t v = get32(blk + pos, ppc);
+		uint32_t v = get32(blk + pos, ppc == 1);
 
-		if (!ppc) {
+		if (ppc == 2) {
+			if (((v >> 26) & 0x1fu) == 0x05u)
+				v = (v & 0xfc000000u) | (((v & 0x03ffffffu) + (pos >> 2)) & 0x03ffffffu);
+		} else if (!ppc) {
 			if (((v >> 24) & 0xfu) == 0xbu)
 				v = (v & 0xff000000u) | (((v & 0xffffffu) + (pos >> 2)) & 0xffffffu);
 		} else if ((v & 0xfc000002u) == 0x48000000u) {
@@ -96,11 +108,11 @@ static int forward(uint8_t *blk, int ppc)
 			uint32_t abs = (li + pos) & 0x03fffffcu;
 
 			if (abs < BLK)
-				v = (v & 0xfc000003u) | abs;
-			else if (li < BLK)
+				v = (v & 0xfc000003u) | (cur_cto << 22) | abs;
+			else if (((li >> 22) & 0xfu) == cur_cto && (li & 0x003ffffcu) < BLK)
 				return 0;
 		}
-		put32(blk + pos, v, ppc);
+		put32(blk + pos, v, ppc == 1);
 	}
 	return 1;
 }
@@ -143,7 +155,7 @@ static uint64_t build(uint8_t *f, const uint8_t *filtered, int ppc, unsigned fti
 	uint8_t z[BLK * 2];
 	size_t clen;
 	uint64_t at = 0x60;
-	int be = ppc;
+	int be = ppc == 1;
 
 	memset(f, 0, FILEMAX);
 	memcpy(f, "\x7f" "ELF", 4);
@@ -174,7 +186,7 @@ static uint64_t build(uint8_t *f, const uint8_t *filtered, int ppc, unsigned fti
 	put32(f + at + 4, (uint32_t)clen, be);
 	f[at + 8] = 3;                                              /* NRV2B, 8-bit tags */
 	f[at + 9] = (uint8_t)ftid;
-	f[at + 10] = 0;
+	f[at + 10] = (uint8_t)cur_cto;
 	memcpy(f + at + 12, z, clen);
 	return at + 12 + clen + 64;
 }
@@ -195,11 +207,23 @@ static void make_original(uint8_t *blk, int ppc, unsigned round)
 {
 	static const uint32_t arm_imm[] = { 0, 1, 2, 53, 0x7fffff, 0x800000, 0xfffffe, 0xffffff };
 	static const uint32_t arm_cond[] = { 0xeb, 0x1b, 0x0b, 0xfb, 0x8b, 0xea, 0xe5, 0xf0, 0x0a };
-	static const uint32_t ppc_li[] = { 0, 4, 0x2000, BLK - 4, BLK, 0x03fffffc, 0x03ffe000, 0x01000000, 0x02000000, 0x03fffff0 };
+	static const uint32_t ppc_li[] = { 0, 4, 0x2000, BLK - 4, BLK, 0x03fffffc, 0x03ffe000, 0x01000000, 0x02000000, 0x03fffff0,
+					   0x00440000, 0x00400000 | (BLK + 8), 0x00fc0000, 0x03c00000 | 0x10000, 0x00c00100 };
 	static const uint32_t ppc_op[] = { 0x48000001, 0x48000000, 0x48000003, 0x48000002, 0x4c000001, 0x40000001 };
 	static const uint32_t at[] = { 0, 4, 4092, 4096, 4100, 8188, 8192, 8196, BLK - 8, BLK - 4, 1000, 6000 };
+	static const uint32_t a64_imm[] = { 0, 1, 2, 77, 0x1ffffff, 0x2000000, 0x3fffffe, 0x3ffffff };
 	uint32_t pos, k;
 
+	if (ppc == 2) {         /* AArch64: nops, BL words and B/BLR look-alikes the filter does not touch */
+		for (pos = 0; pos < BLK; pos += 4)
+			put32(blk + pos, 0xd503201fu, 0);
+		for (k = 0; k < sizeof at / sizeof at[0]; k++)
+			plant(blk, at[k], ((k + round) % 4u == 3u ? 0xd63f0000u : (k + round) % 3u ? 0x94000000u : 0x14000000u) |
+			      ((k + round) % 4u == 3u ? 0x20u : a64_imm[(k * 5u + round) % 8u]), 0);
+		for (k = 0; k < 6; k++)
+			plant(blk, (next() % (BLK / 4)) * 4u, (next() << 8) ^ next(), 0);
+		return;
+	}
 	for (pos = 0; pos < BLK; pos += 4)
 		put32(blk + pos, ppc ? 0x60000000u : 0xe1a00000u, ppc);
 	for (k = 0; k < sizeof at / sizeof at[0]; k++) {
@@ -239,7 +263,7 @@ int main(int argc, char **argv)
 		return 1;
 	snprintf(path, sizeof path, "build/test/upx-filter-%d.bin", (int)getpid());
 
-	for (arch = 0; arch < 2; arch++) {
+	for (arch = 0; arch < 4; arch++) {
 		for (round = 0; round < 24; round++) {
 			uint8_t filt[BLK];
 			struct kof_scan_option opt;
@@ -247,13 +271,17 @@ int main(int argc, char **argv)
 			FILE *fp;
 			unsigned i;
 
-			make_original(want_obj, (int)arch, round);
+			/* arch 3 is PowerPC again with a non-zero marker, 1..15 */
+			int a = arch == 3 ? 1 : (int)arch;
+
+			cur_cto = arch == 3 ? 1u + round % 15u : 0u;
+			make_original(want_obj, a, round);
 			memcpy(filt, want_obj, BLK);
-			if (!forward(filt, (int)arch))
+			if (!forward(filt, a))
 				continue;               /* not carried by the real filter */
 			if (!memcmp(filt, want_obj, BLK))
 				continue;
-			flen = build(f, filt, (int)arch, arch ? 0xd0u : 0x50u);
+			flen = build(f, filt, a, a == 2 ? 0x52u : a ? 0xd0u : 0x50u);
 			fp = fopen(path, "wb");
 			if (!fp || fwrite(f, 1, (size_t)flen, fp) != (size_t)flen)
 				return 1;
@@ -266,17 +294,17 @@ int main(int argc, char **argv)
 			got_found = 0;
 			kscan_path(sc, path, &opt, on_object, NULL);
 			CK(got_found, "%s round %u: the unpacked object (%u bytes) was not delivered",
-			   arch ? "ppc" : "arm", round, BLK);
+			   arch == 3 ? "ppc-cto" : arch == 2 ? "a64" : arch ? "ppc" : "arm", round, BLK);
 			if (got_found) {
 				for (i = 0; i < BLK && got_obj[i] == want_obj[i]; i++)
 					;
 				CK(i == BLK, "%s round %u: first byte that is not the original: %u (%02x, want %02x)",
-				   arch ? "ppc" : "arm", round, i, got_obj[i < BLK ? i : 0], want_obj[i < BLK ? i : 0]);
+				   arch == 3 ? "ppc-cto" : arch == 2 ? "a64" : arch ? "ppc" : "arm", round, i, got_obj[i < BLK ? i : 0], want_obj[i < BLK ? i : 0]);
 			}
 			done++;
 		}
 	}
-	CK(done >= 30, "only %u fixtures were carried by the forward rule", done);
+	CK(done >= 50, "only %u fixtures were carried by the forward rule", done);
 	unlink(path);
 	kscan_free(sc);
 	keng_close(eng);

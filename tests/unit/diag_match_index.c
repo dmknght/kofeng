@@ -10,6 +10,10 @@
  * a literal value; 0 to 4 inputs from any node (earlier, later, itself), the stack, none, the same parent twice, with roles and both kinds. Diagnoses of 1 to 6 specs in a tree
  * whose parents are earlier specs (a chain, a fan, a diamond of two children on one parent), with roles, kinds and values demanded or not. 40,000 cases of up to 150 nodes.
  *
+ * THE REACHED TIER (2026-11-14): a child linked to its parent through nodes in between (kofdiag.c, "A LINK THROUGH NODES IN BETWEEN"). The reference reads it a
+ * second way (a matrix of edge kinds, reached sets by relaxation); a match only that tier finds is counted, and the matcher's work bound may turn a "no" into
+ * UNKNOWN (counted, rare) but never into a wrong answer. The join's capability is read as a spec reads it (a kind of it counts: DL-2).
+ *
  * usage: diag_match_index [cases]
  */
 
@@ -122,6 +126,84 @@ static int ref_linked(const struct kgenome_diag_hit *child, uint16_t parent_idx,
 	return 0;
 }
 
+/*
+ * ---- the reached tier (2026-11-14), written here a second way: the edges as a matrix of four kinds and the reached set by relaxation until nothing changes ----
+ *
+ * A value edge u -> v: v has an input from u in a role that is not BUFFER. A content edge u -> v: u has a BUFFER input naming v (u wrote into v). Each also as "of kind
+ * SHARED". A child is reached from parent p when an input it takes (role, kind of the last hop) names a node x != p that p reaches: over value edges only when that
+ * input is BUFFER or the tail names a kind, over every edge otherwise (never through a PATH or an unclassified NONE input); a tail that asks for SHARED alone walks SHARED edges only.
+ */
+#define RE_VAL    1u
+#define RE_VAL_SH 2u
+#define RE_CON    4u
+#define RE_CON_SH 8u
+static uint8_t ref_fl[160][160];
+
+static void ref_edges(const struct kgenome_diag_scan *s)
+{
+	uint32_t i, k;
+
+	memset(ref_fl, 0, sizeof ref_fl);
+	for (i = 0; i < s->n_hit; i++)
+		for (k = 0; k < s->hit[i].n_in; k++) {
+			uint16_t p = s->hit[i].in[k].from;
+			int sh = s->hit[i].in[k].kind == KGENOME_DIAG_KIND_SHARED;
+
+			if (p >= s->n_hit)
+				continue;
+			if (s->hit[i].in[k].role == KGENOME_DIAG_ROLE_BUFFER)
+				ref_fl[i][p] |= (uint8_t)(RE_CON | (sh ? RE_CON_SH : 0u));
+			else if (s->hit[i].in[k].role != KGENOME_DIAG_ROLE_PATH && s->hit[i].in[k].role != KGENOME_DIAG_ROLE_NONE)
+				ref_fl[p][i] |= (uint8_t)(RE_VAL | (sh ? RE_VAL_SH : 0u));   /* only through an input that carries data */
+		}
+}
+
+static void ref_set(const struct kgenome_diag_scan *s, uint16_t from, int value_only, int shared_only, uint8_t *set)
+{
+	uint8_t mask = shared_only ? (uint8_t)(RE_VAL_SH | (value_only ? 0u : RE_CON_SH))
+				   : (uint8_t)(RE_VAL | (value_only ? 0u : RE_CON));
+	uint32_t u, v;
+	int changed;
+
+	memset(set, 0, 160);
+	set[from] = 1;
+	do {
+		changed = 0;
+		for (u = 0; u < s->n_hit; u++)
+			if (set[u])
+				for (v = 0; v < s->n_hit; v++)
+					if ((ref_fl[u][v] & mask) && !set[v]) {
+						set[v] = 1;
+						changed = 1;
+					}
+	} while (changed);
+}
+
+static int ref_linked_reach(const struct kgenome_diag_scan *s, const struct kgenome_diag_hit *child, uint16_t p, uint8_t role, uint8_t want)
+{
+	static uint8_t all[160], val[160];
+	int shared_only = (want & (KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED)) == KOF_DIAG_B_SHARED;
+	int one_kind = shared_only || (want & (KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED)) == KOF_DIAG_B_PRODUCED;
+	uint8_t i, w = (uint8_t)(want & (KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED));
+
+	/* a tail that names a kind is about the object, which travels on value edges only */
+	ref_set(s, p, one_kind, shared_only, all);
+	ref_set(s, p, 1, shared_only, val);
+	for (i = 0; i < child->n_in; i++) {
+		uint16_t x = child->in[i].from;
+
+		if (x >= s->n_hit || x == p)
+			continue;
+		if (role != KGENOME_DIAG_ROLE_NONE && child->in[i].role != role)
+			continue;
+		if (w && !(w & (child->in[i].kind == KGENOME_DIAG_KIND_SHARED ? KOF_DIAG_B_SHARED : KOF_DIAG_B_PRODUCED)))
+			continue;
+		if (child->in[i].role == KGENOME_DIAG_ROLE_BUFFER ? val[x] : all[x])
+			return 1;
+	}
+	return 0;
+}
+
 static int ref_bind(const struct kgenome_diag_scan *s, const struct kof_diag *d, uint8_t k, uint16_t *bound)
 {
 	uint8_t c;
@@ -139,9 +221,40 @@ static int ref_bind(const struct kgenome_diag_scan *s, const struct kof_diag *d,
 			if (ref_bind(s, d, c, bound))
 				goto next;
 		}
+		/* the reached tier: a node the direct tier tried is not tried again */
+		for (i = 0; i < s->n_hit; i++) {
+			if (ref_linked(&s->hit[i], bound[k], &s->hit[bound[k]], d->node[c].role, d->node[c].bits))
+				continue;
+			if (!ref_spec_ok(&s->hit[i], &d->node[c]) ||
+			    !ref_linked_reach(s, &s->hit[i], bound[k], d->node[c].role, d->node[c].bits))
+				continue;
+			bound[c] = (uint16_t)i;
+			if (ref_bind(s, d, c, bound))
+				goto next;
+		}
 		return 0;
 next:
 		;
+	}
+	return 1;
+}
+
+/* Is `b` an instance of the diagnose: every node fits its spec and is linked, directly or reached, to its parent's node. */
+static int ref_valid(const struct kgenome_diag_scan *s, const struct kof_diag *d, const uint16_t *b)
+{
+	uint8_t c;
+
+	for (c = 0; c < d->n_node; c++) {
+		uint16_t p;
+
+		if (b[c] >= s->n_hit || !ref_spec_ok(&s->hit[b[c]], &d->node[c]))
+			return 0;
+		if (d->node[c].parent == KOF_DIAG_NO_PARENT)
+			continue;
+		p = b[d->node[c].parent];
+		if (!ref_linked(&s->hit[b[c]], p, &s->hit[p], d->node[c].role, d->node[c].bits) &&
+		    !ref_linked_reach(s, &s->hit[b[c]], p, d->node[c].role, d->node[c].bits))
+			return 0;
 	}
 	return 1;
 }
@@ -160,6 +273,45 @@ static int ref_first(const struct kgenome_diag_scan *s, const struct kof_diag *d
 			continue;
 		memcpy(out, bound, d->n_node * sizeof *out);
 		return 1;
+	}
+	return 0;
+}
+
+/* The direct reading alone (the matcher before 2026-11-14), to count the matches only the reached tier finds. */
+static int ref_bind_direct(const struct kgenome_diag_scan *s, const struct kof_diag *d, uint8_t k, uint16_t *bound)
+{
+	uint8_t c;
+	uint32_t i;
+
+	for (c = 0; c < d->n_node; c++) {
+		if (d->node[c].parent != k)
+			continue;
+		for (i = 0; i < s->n_hit; i++)
+			if (ref_spec_ok(&s->hit[i], &d->node[c]) &&
+			    ref_linked(&s->hit[i], bound[k], &s->hit[bound[k]], d->node[c].role, d->node[c].bits)) {
+				bound[c] = (uint16_t)i;
+				if (ref_bind_direct(s, d, c, bound))
+					goto next;
+			}
+		return 0;
+next:
+		;
+	}
+	return 1;
+}
+
+static int ref_first_direct(const struct kgenome_diag_scan *s, const struct kof_diag *d)
+{
+	uint16_t bound[256];
+	uint32_t i;
+
+	for (i = 0; i < s->n_hit; i++) {
+		if (!ref_spec_ok(&s->hit[i], &d->node[0]))
+			continue;
+		memset(bound, 0xff, sizeof bound);
+		bound[0] = (uint16_t)i;
+		if (ref_bind_direct(s, d, 0, bound))
+			return 1;
 	}
 	return 0;
 }
@@ -183,7 +335,8 @@ static int ref_reach(const struct kgenome_diag_scan *s, uint16_t cap, const uint
 				flow[p][i] = 1;
 		}
 	for (x = 0; x < nb; x++) {
-		if (b[x] >= s->n_hit || s->hit[b[x]].cap != cap)
+		/* a node of `cap` or of a kind of it, as a spec reads it (DL-2: the join compared for equality) */
+		if (b[x] >= s->n_hit || (s->hit[b[x]].cap != cap && kgenome_nucleo_cap_generic(s->hit[b[x]].cap) != cap))
 			continue;
 		memset(seen, 0, sizeof seen);
 		seen[b[x]] = 1;
@@ -209,6 +362,7 @@ int main(int argc, char **argv)
 {
 	int cases = argc > 1 ? atoi(argv[1]) : 40000, r;
 	unsigned long found = 0, deep = 0, stack_hits = 0, generic_hits = 0, refused_runs = 0, allocs_seen = 0, joins = 0, joined = 0;
+	unsigned long unknown = 0, later = 0, reached = 0;
 	static struct kgenome_diag_hit hit[160];
 	struct kgenome_diag_scan s;
 
@@ -240,7 +394,7 @@ int main(int argc, char **argv)
 				h->in[k].from = pick == 0 ? (uint16_t)KGENOME_DIAG_FROM_STACK : pick == 1 ? (uint16_t)0xffffu
 					      : pick == 2 ? (uint16_t)i : pick == 3 && k ? h->in[k - 1u].from
 					      : pick == 4 && rnd() % 4u == 0 ? (uint16_t)(n + rnd() % 2u) : (uint16_t)(rnd() % n);
-				h->in[k].role = (uint8_t)(rnd() % 4u);
+				h->in[k].role = (uint8_t)(rnd() % 5u);
 				h->in[k].kind = (uint8_t)(rnd() & 1u);
 			}
 		}
@@ -278,12 +432,28 @@ int main(int argc, char **argv)
 			CK((kof_diag_flow_join(&s, jcap, ab, na, bb, nbb) != 0) == (ref_reach(&s, jcap, ab, na, bb, nbb) != 0));
 			joined += kof_diag_flow_join(&s, jcap, ab, na, bb, nbb) != 0;
 		}
+		ref_edges(&s);
 		fa = ref_first(&s, &d, want);
 #ifdef HAVE_INTERPOSE
 		allocs = 0;
 		fail_at = 0;
 #endif
-		fb = kof_diag_match(&s, &d, got, &nb);
+		fb = kof_diag_match_known(&s, &d, got, &nb);
+		/*
+		 * THE MATCHER'S BOUND (kofdiag.c, KOF_DIAG_REACH_WALKS): when the reached tier runs out of work the answer is UNKNOWN, never a wrong no; a
+		 * match found after that is still an instance (it may be a later one than the unbounded reading's). Counted, and must stay rare here.
+		 */
+		if (fb == KOF_DIAG_MATCH_UNKNOWN) {
+			unknown++;
+			fb = fa;
+			memcpy(got, want, sizeof got);
+			nb = fa ? (uint8_t)nn : 0;
+		} else if (fb == KOF_DIAG_MATCH_YES && fa && memcmp(got, want, nn * sizeof *got) != 0) {
+			CK(ref_valid(&s, &d, got));
+			later++;
+			memcpy(got, want, sizeof got);
+		}
+		reached += fa && !ref_first_direct(&s, &d);
 #ifdef HAVE_INTERPOSE
 		allocs_seen += (unsigned long)allocs;
 		if (allocs && r % 8 == 0) {
@@ -293,13 +463,17 @@ int main(int argc, char **argv)
 				uint16_t g2[256];
 				uint8_t nb2 = 0;
 
+				int k2;
+
 				memset(g2, 0xee, sizeof g2);
 				allocs = 0;
 				fail_at = a;
-				CK(kof_diag_match(&s, &d, g2, &nb2) == fa);
+				k2 = kof_diag_match_known(&s, &d, g2, &nb2);
 				fail_at = 0;
-				if (fa)
-					CK(nb2 == nn && memcmp(g2, want, nn * sizeof *g2) == 0);
+				/* a refused allocation of the reached tier's scratch is a "cannot say", never a wrong answer; the index's refusal changes nothing */
+				CK(k2 == KOF_DIAG_MATCH_UNKNOWN || k2 == fa);
+				if (k2 == KOF_DIAG_MATCH_YES)
+					CK(nb2 == nn && (memcmp(g2, want, nn * sizeof *g2) == 0 || ref_valid(&s, &d, g2)));
 				refused_runs++;
 			}
 		}
@@ -326,6 +500,10 @@ int main(int argc, char **argv)
 	CK(stack_hits > (unsigned long)cases / 400u);
 	CK(generic_hits > (unsigned long)cases / 400u);
 	CK(joined > joins / 20u && joined < joins);      /* reachable in some cases and not in others */
+	/* the reached tier is exercised (matches the direct reading does not find), and its bound is rarely what answers */
+	CK(reached > (unsigned long)cases / 400u);
+	CK(unknown + later < (unsigned long)cases / 100u);
+	printf("diag_match_index: %lu matches only through nodes in between, %lu unknown at the work bound, %lu later instances after it\n", reached, unknown, later);
 #ifdef HAVE_INTERPOSE
 	CK(refused_runs > (unsigned long)cases / 100u);
 	CK(allocs_seen > 0);

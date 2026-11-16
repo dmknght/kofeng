@@ -605,6 +605,15 @@ int  kdet_matcher_text(const struct kof_diag_match *, char *out, size_t cap);
  * Answers the part's `hit` (1 or 0) so a tool can colour it. Cut at `cap`. */
 int  kdet_part_text(const struct kof_diag_part *, char *out, size_t cap);
 
+/*
+ * THE NUCLEO SEEN IN AN OBJECT: the distinct capabilities (enum kgenome_nucleo_cap, never NONE) of the nodes the diagnose
+ * analysis made of it, read from a result that carries the graph (kof_result.lineage: a kscan_explain run), ascending, into
+ * out[0..cap). The answer is how many there are, more than `cap` when the caller's array was short (never cut silently); 0
+ * for a result without the graph. The list a researcher picks a signature's nucleo gate from, and exactly what that gate
+ * asks of an object (KOF_DIAG_HAS_NUCLEO: a node of the capability, scanners/objctx_diag_gate.c).
+ */
+uint32_t kdet_nucleo_seen(const struct kof_result *, uint16_t *out, uint32_t cap);
+
 /* The run kscan_explain returns: one entry per object the scan reported. */
 typedef struct kdet_run kdet_run;
 struct kdet_object {

@@ -14,6 +14,7 @@
 
 #include <kofcore.h>
 #include <kgenome_budget.h>   /* kgenome_grow_cap */
+#include <kofcmp.h>
 #include <genotype/image/elf_types.h>
 #include <genotype/image/pe_types.h>
 #include "funcs.h"
@@ -57,7 +58,169 @@ void kgenome_funcs_free(struct kgenome_func_set *s)
 	if (!s)
 		return;
 	free(s->v);
+	free(s->rng);
+	free(s->rng_by_fn);
+	free(s->st);
 	memset(s, 0, sizeof *s);
+}
+
+const char *kgenome_fn_trust_name(uint8_t trust)
+{
+	static const char *const nm[] = { "-", "none", "?", "high", "derived" };  /* 2 was "medium": removed in round 4 */
+
+	return trust < sizeof nm / sizeof *nm ? nm[trust] : "?";
+}
+
+uint32_t kgenome_funcs_starts_in(const struct kgenome_func_set *fs, uint32_t i, uint32_t *first)
+{
+	uint32_t lo = 0, hi, a;
+	uint64_t end;
+
+	if (first)
+		*first = 0;
+	if (!fs || i >= fs->n || !fs->n_st || !fs->st)
+		return 0;
+	hi = fs->n_st;
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->st[mid].off < fs->v[i].off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	end = fs->v[i].off + fs->v[i].len;
+	for (a = lo; a < fs->n_st && fs->st[a].off < end; a++)
+		;
+	if (first)
+		*first = lo;
+	return a - lo;
+}
+
+/* The part (index into fs->rng) that holds `off`, or KGENOME_FUNCS_NONE. The parts of one table do not overlap (each is one .pdata entry, the merge refused overlaps), so the
+ * one whose start is the last at or below `off` is the only candidate. */
+static uint32_t range_at(const struct kgenome_func_set *fs, uint64_t off)
+{
+	uint32_t lo = 0, hi = fs->n_rng;
+
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->rng[mid].off <= off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	if (!lo)
+		return KGENOME_FUNCS_NONE;
+	lo--;
+	return off - fs->rng[lo].off < fs->rng[lo].len ? lo : KGENOME_FUNCS_NONE;
+}
+
+/* The first index of rng_by_fn whose part belongs to function `i`. */
+static uint32_t range_first(const struct kgenome_func_set *fs, uint32_t i)
+{
+	uint32_t lo = 0, hi = fs->n_rng;
+
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->rng[fs->rng_by_fn[mid]].fn < i)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+uint32_t kgenome_funcs_n_ranges(const struct kgenome_func_set *fs, uint32_t i)
+{
+	uint32_t a, b;
+
+	if (!fs || i >= fs->n)
+		return 0;
+	if (!fs->n_rng || !fs->rng_by_fn)
+		return 1;
+	a = range_first(fs, i);
+	for (b = a; b < fs->n_rng && fs->rng[fs->rng_by_fn[b]].fn == i; b++)
+		;
+	return 1u + (b - a);
+}
+
+struct kgenome_func_range kgenome_funcs_range(const struct kgenome_func_set *fs, uint32_t i, uint32_t k)
+{
+	struct kgenome_func_range r = { 0, 0, KGENOME_FUNCS_NONE };
+	uint32_t a;
+
+	if (!fs || i >= fs->n)
+		return r;
+	if (!k) {
+		r.off = fs->v[i].off;
+		r.len = fs->v[i].len;
+		r.fn = i;
+		return r;
+	}
+	if (!fs->n_rng || !fs->rng_by_fn)
+		return r;
+	a = range_first(fs, i) + (k - 1u);
+	if (a < fs->n_rng && fs->rng[fs->rng_by_fn[a]].fn == i)
+		r = fs->rng[fs->rng_by_fn[a]];
+	return r;
+}
+
+static int rng_cmp_off(const void *a, const void *b)
+{
+	const struct kgenome_func_range *x = a, *y = b;
+
+	return x->off < y->off ? -1 : x->off > y->off;
+}
+
+int kgenome_funcs_set_ranges(struct kgenome_func_set *fs, const struct kgenome_func_range *parts, uint32_t n)
+{
+	uint32_t i;
+
+	if (!fs)
+		return 0;
+	free(fs->rng);
+	free(fs->rng_by_fn);
+	fs->rng = NULL;
+	fs->rng_by_fn = NULL;
+	fs->n_rng = 0;
+	if (!n || !parts)
+		return 1;
+	fs->rng = malloc((size_t)n * sizeof *fs->rng);
+	fs->rng_by_fn = malloc((size_t)n * sizeof *fs->rng_by_fn);
+	if (!fs->rng || !fs->rng_by_fn) {
+		free(fs->rng);
+		free(fs->rng_by_fn);
+		fs->rng = NULL;
+		fs->rng_by_fn = NULL;
+		fs->status = KGENOME_NOMEM;
+		return 0;
+	}
+	memcpy(fs->rng, parts, (size_t)n * sizeof *parts);
+	qsort(fs->rng, n, sizeof *fs->rng, rng_cmp_off);
+	/* by (fn, off): the parts are already in offset order, so (fn, index) is the key */
+	{
+		uint64_t *key = malloc((size_t)n * sizeof *key);
+
+		if (!key) {
+			free(fs->rng);
+			free(fs->rng_by_fn);
+			fs->rng = NULL;
+			fs->rng_by_fn = NULL;
+			fs->status = KGENOME_NOMEM;
+			return 0;
+		}
+		for (i = 0; i < n; i++)
+			key[i] = (uint64_t)fs->rng[i].fn << 32 | i;
+		qsort(key, n, sizeof *key, kof_cmp_u64);
+		for (i = 0; i < n; i++)
+			fs->rng_by_fn[i] = (uint32_t)key[i];
+		free(key);
+	}
+	fs->n_rng = n;
+	return 1;
 }
 
 /* The index of the function that holds `off`: the first entry whose END is above it (the table's ends rise with its starts: the merge removes a
@@ -78,7 +241,15 @@ uint32_t kgenome_funcs_at(const struct kgenome_func_set *fs, uint64_t off)
 		else
 			hi = mid;
 	}
-	return lo < fs->n && fs->v[lo].off <= off ? lo : KGENOME_FUNCS_NONE;
+	if (lo < fs->n && fs->v[lo].off <= off)
+		return lo;
+	if (fs->n_rng) {
+		const uint32_t r = range_at(fs, off);
+
+		if (r != KGENOME_FUNCS_NONE)
+			return fs->rng[r].fn;
+	}
+	return KGENOME_FUNCS_NONE;
 }
 
 uint32_t kgenome_funcs_start(const struct kgenome_func_set *fs, uint64_t off)
@@ -339,17 +510,22 @@ void kgenome_fntab_symtab(kof_buf file, const struct kgenome_elf_info *e, int dy
 				continue;
 			memset(&f, 0, sizeof f);
 			f.kind = ty == STT_GNU_IFUNC_ ? KGENOME_FN_IFUNC : KGENOME_FN_FUNC;
+			/* PMA-3 (audit, round 3): FUNC and IFUNC are exact. A NOTYPE with a size is a data table in .text as often as an asm function (`.long` /
+			 * `.size table`): it is a DECLARED START only (flag NOTYPE: kgenome_fntab_exact answers no; since round 4 a start-only entry is held in the
+			 * set's starts inside a NONE unit and declares no body), and it is exact only where an FDE names the same start (the merge keeps the exact
+			 * FDE body: HIGH).
+			 * TODO(owner): default applied 2026-11-16 = kept as a declared start; the alternative is not using an unconfirmed NOTYPE at all. */
+			if (ty == STT_NOTYPE_)
+				f.flags |= KGENOME_FN_F_NOTYPE;
 		}
 		if (!sy.shndx || sy.shndx >= e->sec_count ||
 		    sy.shndx >= KGENOME_ELF_MAX_SECTIONS)
 			continue;
 		sec = &e->sec[sy.shndx];
-		/* KNOWN DEFECT ELF-SEC-EXEC-CODE (2026-11-05, M) [sev M]: gates on the SECTION flag SHF_EXECINSTR
-		 * alone, never cross-checked against diag_code.c's own authoritative segment-level definition of
-		 * ELF code (PT_LOAD && PF_X). Trigger: a crafted ELF with a FUNC symbol in a SHF_EXECINSTR section
-		 * whose VA falls outside any executable PT_LOAD segment. Effect: bytes outside real code get
-		 * decoded, CFG-signed and mutation-hashed as a function - the same signature-poisoning class as
-		 * PE-RSRC-EXEC-CODE. Fix: cross-check sec's VA against the segment-level code definition here. */
+		/* ELF-SEC-EXEC-CODE, fixed: SHF_EXECINSTR is the LINKER's claim, not the loader's. A
+		 * crafted section table can set it on a section no executable PT_LOAD covers, and the
+		 * cross-check against the AUTHORITATIVE segment-level definition (diag_code.c,
+		 * kgenome_elf_seg_is_code) below - once the symbol's address is a real VA - closes it. */
 		if (!(sec->flags & KGENOME_ELF_SHF_EXEC))
 			continue;
 		value = sy.value;
@@ -363,6 +539,10 @@ void kgenome_fntab_symtab(kof_buf file, const struct kgenome_elf_info *e, int dy
 		 * as relocatable. */
 		if (e->e_type != KGENOME_ELF_REL) {
 			if (!kgenome_elf_va_to_off(e, value, sy.size ? sy.size : 1u, &off))
+				continue;
+			/* The segment cross-check: an ET_REL object (a .ko, a .o) has no program
+			 * headers at all, so this runs only where a VA is a real one. */
+			if (!kgenome_elf_va_is_code(e, value))
 				continue;
 		} else {
 			if (value > file.n || sec->file_off > file.n - value)
@@ -381,7 +561,7 @@ void kgenome_fntab_symtab(kof_buf file, const struct kgenome_elf_info *e, int dy
 		if (sy.size) {
 			f.end_source = KGENOME_FN_E_SYMBOL;
 		} else {
-			f.flags = KGENOME_FN_F_SIZE0;
+			f.flags |= KGENOME_FN_F_SIZE0;
 			n_zero++;
 		}
 		if (!kgenome_fntab_list_add(out, &f))

@@ -345,6 +345,10 @@ struct kof_scan_pend {
 	uint8_t desc_set;
 	/* And what it is for, which is also its name when nothing named it. */
 	uint32_t kind;
+	/* And whether it is evidence rather than a scan target of its own - see
+	 * kof_src_declare_evidence_only in objsrc.h. Spent by kid_push beside
+	 * `kind` and cleared there whatever happens to the child. */
+	uint8_t evidence_only;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
 	uint32_t entry;
 	/* And what the producing module says has to be DONE to it, in the same

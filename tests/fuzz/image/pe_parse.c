@@ -120,6 +120,7 @@ struct acc {
 	struct fz_ctx *c;
 	uint64_t       n;
 	uint32_t       calls;
+	const struct kgenome_pe_info *info;   /* exp_cb only: kgenome_pe_export_is_forwarder */
 };
 
 static void imp_cb(void *u, uint64_t slot, const char *dll, const char *name, uint32_t ordinal, uint64_t nameoff)
@@ -138,11 +139,16 @@ static void imp_cb(void *u, uint64_t slot, const char *dll, const char *name, ui
 static int exp_cb(void *u, uint64_t nameoff, uint32_t rva)
 {
 	struct acc *a = (struct acc *)u;
+	/* PE-EXPFWD-INEXEC: a forwarder's RVA lies inside the export directory's own
+	 * range and is never a function address - fuzzed here against whatever the
+	 * mutators do to the export directory's rva/size and to `rva` itself. */
+	int fwd = kgenome_pe_export_is_forwarder(a->info, rva);
 
 	a->calls++;
 	fz_step(&a->c->steps, 1);
 	FZ_CHECK(a->c, nameoff < a->n, "an export name offset outside the object");
-	fz_digest(a->c, rva);
+	FZ_CHECK(a->c, fwd == 0 || fwd == 1, "kgenome_pe_export_is_forwarder answered outside {0,1}");
+	fz_digest(a->c, rva ^ ((uint64_t)fwd << 40));
 	return 1;
 }
 
@@ -198,6 +204,7 @@ static void walk(struct fz_ctx *c, void *h, const uint8_t *in, size_t n)
 	ia.c = ea.c = c;
 	ia.n = ea.n = n;
 	ia.calls = ea.calls = 0;
+	ia.info = ea.info = &s->info;
 	got = kgenome_pe_imports(f, &s->info, imp_cb, &ia, &ist);
 	FZ_CHECK(c, got == ia.calls, "kgenome_pe_imports returned a count other than the callbacks seen");
 	FZ_CHECK(c, (unsigned)ist <= (unsigned)KGENOME_NOMEM, "import status outside the enum");
@@ -220,14 +227,24 @@ static void walk(struct fz_ctx *c, void *h, const uint8_t *in, size_t n)
 	{
 		struct coffacc ca;
 		uint32_t n_bad = 0;
+		/* kgenome_pe_coff_count (sym_any.c's sizing hint) must never claim fewer
+		 * outcomes than the walk it is a cheap preview of actually produces: every
+		 * 18-byte record the walk visits either calls back, is counted in n_bad, or
+		 * is silently skipped (not a FUNCTION record) - calls + n_bad is therefore
+		 * at most the declared-and-clamped count, on every mutation of
+		 * PointerToSymbolTable / NumberOfSymbols this adapter tries. */
+		uint32_t coff_n = kgenome_pe_coff_count(f, &s->info);
 
 		ca.c = c; ca.base = in; ca.n = n; ca.calls = 0;
 		kgenome_pe_coff_syms(f, &s->info, coff_cb, &ca, &n_bad);
-		fz_digest(c, ca.calls ^ ((uint64_t)n_bad << 24));
+		FZ_CHECK(c, (uint64_t)ca.calls + n_bad <= coff_n,
+			 "kgenome_pe_coff_count undercounted what the walk actually visits");
+		fz_digest(c, ca.calls ^ ((uint64_t)n_bad << 24) ^ ((uint64_t)coff_n << 40));
 	}
 	infect_check(c, &s->obj, f, kgenome_infect_regions);
 }
 
 FZ_ADAPTER(pe_parse, .name = "kgenome/pe_image", .covers = "kgenome_pe_image_parse kgenome_pe_sniff kgenome_pe_imports kgenome_pe_exports "
-	   "kgenome_pe_imptab_build kgenome_pe_imptab_free kgenome_pe_imptab_is_of kgenome_pe_imp_name kgenome_pe_coff_syms",
+	   "kgenome_pe_imptab_build kgenome_pe_imptab_free kgenome_pe_imptab_is_of kgenome_pe_imp_name kgenome_pe_coff_syms "
+	   "kgenome_pe_export_is_forwarder kgenome_pe_coff_count",
 	   .shape = FZ_PARSE, .seeds = seeds, .dict = dict, .parse = parse, .walk = walk);

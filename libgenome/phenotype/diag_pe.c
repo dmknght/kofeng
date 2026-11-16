@@ -34,6 +34,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,6 +54,7 @@ struct pe_imp {
 	uint64_t slot;          /* the address a call goes through            */
 	uint64_t name_off;      /* where the import's name is, 0 if unknown   */
 	uint16_t cap;
+	uint16_t row;           /* the vocabulary's row of the import (kgenome_diag_hit.row) */
 	uint8_t  noret;         /* an import that never returns (ExitProcess ...): no node, an end of block */
 };
 
@@ -78,14 +80,24 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 	for (k = 0; k < t->n; k++) {
 		const struct kgenome_pe_imp *im = &t->v[k];
 		char name[KGENOME_PE_IMP_DLLLEN];
-		uint16_t cap;
+		uint16_t cap, row;
 		struct pe_imp *e;
 		int nr;
 
-		if (!kgenome_pe_imp_name(f, im, name, sizeof name))
-			continue;               /* by ordinal: no word to match */
-		cap = kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, name);
-		nr = cap == KGENOME_NUCLEO_NONE && kgenome_diag_name_is_noreturn(name);
+		/*
+		 * BY ORDINAL: named when the library's ordinals are fixed by its ABI (ws2_32, wsock32: kgenome_nucleo_ordinal_name), and
+		 * skipped otherwise - a build's own ordinal names nothing. Such a node has no name in the file (no symref) and carries
+		 * its row all the same (kgenome_diag_hit.row): the readers ask the row, not the name.
+		 */
+		if (!kgenome_pe_imp_name(f, im, name, sizeof name)) {
+			const char *on = im->dll < t->n_dll ? kgenome_nucleo_ordinal_name(t->dll[im->dll], im->ordinal) : NULL;
+
+			if (!on)
+				continue;
+			(void)snprintf(name, sizeof name, "%s", on);
+		}
+		cap = kgenome_nucleo_name_lookup(KGENOME_NUCLEO_T_PE, name, &row);
+		nr = cap == KGENOME_NUCLEO_NONE && kgenome_nucleo_row_res(row) == KGENOME_NUCLEO_RES_NORET;
 		if (cap == KGENOME_NUCLEO_NONE && !nr)
 			continue;
 		if (a->n == a->cap_n) {
@@ -104,6 +116,7 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 		e = &a->v[a->n++];
 		e->slot = im->slot;
 		e->cap = cap;
+		e->row = row;
 		e->noret = (uint8_t)nr;
 		e->name_off = im->nameoff;
 	}
@@ -133,6 +146,8 @@ static void add_node(struct kgenome_diag_scan *s, uint64_t at,
 		return;
 	}
 	h = kgenome_diag_hit_add(s, at, im->cap, 0);
+	if (h)
+		h->row = im->row;
 	if (h && im->name_off) {
 		h->symref = im->name_off;
 		h->bits |= KGENOME_DIAG_H_SYMREF;
@@ -307,9 +322,7 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 		}
 	}
 out:
-	/* the calls through thunks are noted after the code is read: the list is searched in address order */
-	if (s->n_noret > 1u)
-		qsort(s->noret_at, s->n_noret, sizeof *s->noret_at, kof_cmp_u64);
+	/* (the calls through thunks are noted after the code is read: the list is put in address order once, by its reader, kgenome_diag_noret_settle) */
 	free(w.imp.v);
 	free(w.thunk);
 	free(w.call);

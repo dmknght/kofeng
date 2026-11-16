@@ -223,6 +223,7 @@ void sx_norm_keep_exec_pe(uint8_t *keep, uint64_t n, const struct kgenome_pe_inf
 uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint8_t *out,
 		      uint32_t cap);
 
+
 /* ---- stages of one object (scan.c and the stage units) ---- */
 int sx_prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 		      uint32_t present, struct kof_stats *st,      struct kof_result *out);
@@ -279,7 +280,7 @@ uint32_t sx_regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
 uint32_t sx_sym_halves_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
 void sx_dense_code_unread(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 struct kof_scan_cut;
-void sx_feed_cut(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t present, int from_packer,
+void sx_feed_cut(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t present,
 		 struct kof_scan_cut *cut);
 void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint32_t present,
 		      int from_packer);

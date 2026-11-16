@@ -13,6 +13,7 @@ kgenome_textual_islands	pending WP3 (kgenome/textual lexer, shape S3)
 kgenome_textual_kind_name	pending WP3 (kgenome/textual tables, shape S5)
 kgenome_textual_lex	pending WP3 (kgenome/textual lexer, shape S3)
 kgenome_textual_name_ok	pending WP3 (kgenome/textual tables, shape S5)
+kgenome_textual_pretty	pending WP3 (kgenome/textual form/value, shape S3): new 2026-11-11, same shape as kgenome_textual_form
 kgenome_textual_range_is	pending WP3 (kgenome/textual tables, shape S5)
 kgenome_textual_subst	pending WP3 (kgenome/textual subst, shape S3)
 kgenome_textual_subst_can	pending WP3 (kgenome/textual subst, shape S3)

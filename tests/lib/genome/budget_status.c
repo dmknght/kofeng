@@ -171,7 +171,14 @@ static void diag_budget(void)
 	kgenome_diag_scan_free(s);
 	b.max_nodes = 39;
 	s = scan(40, &b);
-	CK(kgenome_diag_scan_count(s) == 39u);
+	/* (the table refused one node, and then the keep rule - fix_lgtab, kgenome_diag_nodes_keep - kept what is on a link or named, the
+	 * drops counted by class: what the table held is what is left plus what the rule dropped) */
+	{
+		struct kgenome_diag_drops dr;
+
+		kgenome_diag_scan_drops(s, &dr);
+		CK(dr.refused == 1u && kgenome_diag_scan_count(s) + dr.unlinked + dr.nocap == 39u);
+	}
 	CK(kgenome_diag_scan_status(s) == KGENOME_TRUNCATED && kgenome_diag_scan_full(s) == 1);
 	kgenome_diag_scan_free(s);
 

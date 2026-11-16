@@ -23,6 +23,9 @@ struct kof_prod {
 	 * trace is in the parent's coordinates. */
 	struct kgenome_diag_walk *walk;
 	struct kgenome_diag_apihash_set   *apihash;
+	/* The routes the graph was made by (sc->obj.diag.run): it goes with the graph, or a view's nucleo gate would read a
+	 * graph without knowing what made it (objctx_diag_gate.c). */
+	unsigned run;
 
 	uint32_t n_diag, bm;
 	uint8_t *bits;          /* hit, gate, unk - bm bytes each      */
@@ -98,6 +101,7 @@ static struct kof_prod *prod_take(struct kof_scanner *sc)
 	if (sc->obj.diag.graph && sc->cur.src && !sc->cur.prod_borrowed) {
 		p->graph = sc->obj.diag.graph;
 		p->walk = sc->obj.diag.walk;
+		p->run = sc->obj.diag.run;
 		p->src = kof_src_ref(sc->cur.src);
 		sc->obj.diag.graph = NULL;
 		sc->obj.diag.walk = NULL;
@@ -163,6 +167,7 @@ void kof_prod_adopt(struct kof_scanner *sc, const struct kof_prod *p)
 	sc->obj.latch[KOF_OL_DIAG_GATE] = 1;
 	sc->obj.latch[KOF_OL_APIHASH] = 1;
 	sc->obj.diag.graph = p->graph;
+	sc->obj.diag.run = p->graph ? p->run : 0u;
 	sc->obj.diag.apihash = p->apihash;
 	sc->cur.prod_borrowed = 1;
 }

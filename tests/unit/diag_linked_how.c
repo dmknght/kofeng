@@ -83,11 +83,24 @@ int main(void)
 		CK(kgenome_diag_note_in_how(&s, h, 0u, KGENOME_DIAG_ROLE_FD, KGENOME_DIAG_KIND_PRODUCED,
 					KGENOME_DIAG_LINK_MAY) == 0);
 		CK(kgenome_diag_scan_status(&s) == KGENOME_OK);
-		/* the fifth distinct one is dropped and said */
+		/* only the ledger bounds the inputs past the view: with no room for their table the fifth is lost, and said */
+		s.led.limit = s.led.used ? s.led.used : 1u;
+		s.led.used = s.led.limit;
 		CK(kgenome_diag_note_in_how(&s, h, 4u, KGENOME_DIAG_ROLE_FD, KGENOME_DIAG_KIND_PRODUCED,
 					KGENOME_DIAG_LINK_MAY) == 1);
-		CK(kgenome_diag_scan_status(&s) == KGENOME_TRUNCATED);
-		CK(h->n_in == 4u);
+		/* (the ledger's OVER_BUDGET is the worse word and is what the scan says) */
+		CK(kgenome_diag_scan_status(&s) == KGENOME_OVER_BUDGET || kgenome_diag_scan_status(&s) == KGENOME_TRUNCATED);
+		CK(kgenome_diag_in_count(&s, 6u) == 4u);
+		/* with room, the fifth distinct one is KEPT past the four-input view (lineage2, LG-10: the fixed four deleted evidence) */
+		s.led.limit = 0;
+		CK(kgenome_diag_note_in_how(&s, h, 4u, KGENOME_DIAG_ROLE_FD, KGENOME_DIAG_KIND_PRODUCED,
+					KGENOME_DIAG_LINK_MAY) == 0);
+		CK(h->n_in == 4u && kgenome_diag_in_count(&s, 6u) == 5u);
+		CK(kgenome_diag_in_at(&s, 6u, 4u) && kgenome_diag_in_at(&s, 6u, 4u)->from == 4u &&
+		   kgenome_diag_in_at(&s, 6u, 4u)->how == KGENOME_DIAG_LINK_MAY);
+		free(s.xin);
+		free(s.xin_tab);
+		free(s.xin_ord);
 	}
 	printf("diag_linked_how: %d failure(s)\n", fails);
 	return fails != 0;

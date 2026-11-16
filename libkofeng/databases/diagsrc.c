@@ -10,6 +10,8 @@
 
 #include "diagsrc_int.h"
 #include "pack/dbcore.h"
+#include "../analyzers/parsers/kofformat.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <ctype.h>
 
 
@@ -67,7 +69,6 @@
 #define KOF_WHEN_VALUES(X) \
 	X(KOF_PERM_R) X(KOF_PERM_W) X(KOF_PERM_X) \
 	X(KOF_PE_PERM_R) X(KOF_PE_PERM_W) X(KOF_PE_PERM_X) \
-	X(KOF_ELF_REL) X(KOF_ELF_EXEC) X(KOF_ELF_DYN) X(KOF_ELF_CORE) \
 	X(KOF_FMT_UNKNOWN) X(KOF_FMT_ELF) X(KOF_FMT_PE) X(KOF_FMT_MACHO) \
 	X(KOF_FMT_SCRIPT) X(KOF_FMT_TEXT) X(KOF_FMT_GZIP) X(KOF_FMT_DOCOLE) \
 	X(KOF_FMT_ZIP) X(KOF_FMT_DOCZIP) X(KOF_FMT_TAR) X(KOF_FMT_7Z) \
@@ -82,6 +83,31 @@ static const struct { const char *w; uint64_t v; } when_word[] = {
 	KOF_WHEN_VALUES(KDS_WHEN_ROW)
 #undef KDS_WHEN_ROW
 };
+
+/*
+ * A SUBTYPE'S OWN WORDS, in a table of its own and not folded into when_word[]
+ * above: ELF, PE and Script subtype values all number from zero (KOF_ELF_EXEC,
+ * KOF_PE_DLL and KOF_SCRIPT_SHELL are all 1), AND a format's permission words
+ * share that same low range (KOF_PE_PERM_X is 1 too) - one shared table would
+ * need the prefix match to somehow skip "KOF_PE_PERM_X" while accepting
+ * "KOF_PE_DLL", both of which start with "KOF_PE_". Kept apart, from the SAME
+ * three lists the panel offers subtypes from (kofeditor_vocab.c's
+ * elf_sub/pe_sub/script_sub), there is nothing to skip. A hand-typed copy of
+ * only the ELF four lived in KOF_WHEN_VALUES above until 2026-11-06: PE and
+ * Script were never added, so KOF_TARGET_SUBTYPE for a script printed the ELF
+ * word sharing its number (a draft that declared php printed KOF_ELF_EXEC, a
+ * diagnose that could never match anything) - kofmod/script.h's own comment
+ * already named the fault this was: "a second copy of this list somewhere
+ * else is a copy that falls behind without anything saying so".
+ */
+static const struct { const char *w; uint64_t v; } subtype_word[] = {
+#define KDS_SUB_ROW(name, val) { #name, (uint64_t)(val) },
+	KOF_ELF_TYPE_LIST(KDS_SUB_ROW)
+	KOF_PE_IMAGE_LIST(KDS_SUB_ROW)
+	KOF_SCRIPT_TYPE_LIST(KDS_SUB_ROW)
+#undef KDS_SUB_ROW
+};
+#define N_SUBTYPE (sizeof subtype_word / sizeof subtype_word[0])
 
 static const struct { const char *w; uint16_t v; } cap_ident[] = {
 #define KDS_CAP_ROW(id) { #id, (uint16_t)(id) },
@@ -202,6 +228,18 @@ int kof_dsrc_when_value(const char *w, uint64_t *out)
 				break;
 		if (i < N_WHEN) {
 			v |= when_word[i].v;
+			continue;
+		}
+		/* A subtype word (KOF_ELF_/KOF_PE_/KOF_SCRIPT_ - subtype_word[]
+		 * above, not when_word[]): the two tables are apart so a format's
+		 * permission words and a format's subtype words, which share
+		 * numbers, never shadow each other; a reader of either has to be
+		 * able to find both. */
+		for (i = 0; i < N_SUBTYPE; i++)
+			if (strcmp(tok, subtype_word[i].w) == 0)
+				break;
+		if (i < N_SUBTYPE) {
+			v |= subtype_word[i].v;
 			continue;
 		}
 		num = strtoull(tok, &e, 0);
@@ -438,7 +476,7 @@ int kof_dsrc_same(const struct kof_dsrc_item *a, const struct kof_dsrc_item *b)
  * number is always a spelling the reader accepts, so a value this cannot name
  * is still one a file can hold.
  */
-static size_t words_of(uint64_t v, unsigned fact, char *out, size_t cap)
+static size_t words_of(uint64_t v, unsigned fact, uint8_t fmt_hint, char *out, size_t cap)
 {
 	static const char *const perm[] = { "KOF_PERM_R", "KOF_PERM_W", "KOF_PERM_X",
 					    "KOF_PE_PERM_R", "KOF_PE_PERM_W",
@@ -470,16 +508,30 @@ static size_t words_of(uint64_t v, unsigned fact, char *out, size_t cap)
 			return o;
 		o = 0;
 		any = 0;
-	} else if (fact == (unsigned)KOF_FACT_FORMAT ||
-		   fact == (unsigned)KOF_FACT_OBJ_KIND) {
-		/* A format is a KOF_FMT word and a subtype a KOF_ELF one; the two
-		 * share numbers, so the prefix is what says which. */
-		const char *pre = fact == (unsigned)KOF_FACT_FORMAT ? "KOF_FMT_"
-								      : "KOF_ELF_";
-
+	} else if (fact == (unsigned)KOF_FACT_FORMAT) {
 		for (i = 0; i < N_WHEN; i++)
-			if (when_word[i].v == v && !strncmp(when_word[i].w, pre, 8))
+			if (when_word[i].v == v && !strncmp(when_word[i].w, "KOF_FMT_", 8))
 				return (size_t)snprintf(out, cap, "%s", when_word[i].w);
+	} else if (fact == (unsigned)KOF_FACT_OBJ_KIND) {
+		/*
+		 * A subtype's own word depends on WHICH format it belongs to
+		 * (ELF/PE/Script all number their subtypes from zero, so one value
+		 * names three different things) - `fmt_hint` is the caller's answer
+		 * to that, set when the KDS_SUBTYPE item was built from the draft's
+		 * own declared format (kofeditor_units.c), not guessed here. An
+		 * unrecognised hint falls back to ELF, the one format this ever
+		 * printed correctly before PE and Script subtypes were added
+		 * (subtype_word[] above).
+		 */
+		const char *pre = "KOF_ELF_";
+
+		if (fmt_hint == (uint8_t)KOF_FMT_PE)
+			pre = "KOF_PE_";
+		else if (fmt_hint == (uint8_t)KOF_FMT_SCRIPT)
+			pre = "KOF_SCRIPT_";
+		for (i = 0; i < N_SUBTYPE; i++)
+			if (subtype_word[i].v == v && !strncmp(subtype_word[i].w, pre, strlen(pre)))
+				return (size_t)snprintf(out, cap, "%s", subtype_word[i].w);
 	}
 	return (size_t)snprintf(out, cap, v < 10u ? "%llu" : "0x%llx",
 				(unsigned long long)v);
@@ -553,7 +605,7 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 			n = snprintf(out, cap, "KOF_TARGET_FORMAT(%s);", w1);
 			break;
 		}
-		words_of(it->v, (unsigned)KOF_FACT_FORMAT, w1, sizeof w1);
+		words_of(it->v, (unsigned)KOF_FACT_FORMAT, 0, w1, sizeof w1);
 		n = snprintf(out, cap, "KOF_TARGET_FORMAT(%s);", w1);
 		break;
 	case KDS_SUBTYPE:
@@ -564,7 +616,7 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 			n = snprintf(out, cap, "KOF_TARGET_SUBTYPE(%s);", w1);
 			break;
 		}
-		words_of(it->v, (unsigned)KOF_FACT_OBJ_KIND, w1, sizeof w1);
+		words_of(it->v, (unsigned)KOF_FACT_OBJ_KIND, (uint8_t)it->b, w1, sizeof w1);
 		n = snprintf(out, cap, "KOF_TARGET_SUBTYPE(%s);", w1);
 		break;
 	case KDS_ATTRB: {
@@ -576,7 +628,7 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 				fw = k;
 		if (fw == N_WHEN)
 			return 0;
-		words_of(it->v, it->a, w1, sizeof w1);
+		words_of(it->v, it->a, 0, w1, sizeof w1);
 		n = snprintf(out, cap, "KOF_DIAG_HAS_ATTRB(%s, %s);",
 			     when_word[fw].w, w1);
 		break;
@@ -604,6 +656,11 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		else
 			n = snprintf(out, cap, "KOF_DIAG_DECLARE_TAIL(%s);", c1);
 		break;
+	case KDS_JOIN:
+		if (!(c1 = kof_dsrc_cap_word(it->a)))
+			return 0;
+		n = snprintf(out, cap, "KOF_DIAG_DECLARE_JOIN(%s);", c1);
+		break;
 	case KDS_ACTION:
 		if (!(c1 = kof_dsrc_cap_word(it->a)) ||
 		    !(c2 = kof_dsrc_cap_word(it->b)))
@@ -623,6 +680,24 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		    !(c2 = kof_dsrc_cap_word(it->b)))
 			return 0;
 		n = snprintf(out, cap, "KOF_DIAG_DECLARE_SEQUENCE(%s, %s);", c1, c2);
+		break;
+	case KDS_ANOMALY: {
+		/* Written from the value, by the engine's names: an item the reader would refuse is not written (0). */
+		const struct kof_parser *fp = kof_parser_of((uint8_t)it->a);
+
+		if (it->a > 0xffu || it->b > 63u ||
+		    !kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, ((uint64_t)it->a << 32) | it->b))
+			return 0;
+		words_of(it->a, (unsigned)KOF_FACT_FORMAT, 0, w1, sizeof w1);
+		if (strncmp(w1, "KOF_FMT_", 8u))
+			return 0;
+		n = snprintf(out, cap, "KOF_DIAG_HAS_ANOMALY(%s, %s);", w1, fp->anomaly_name(it->b));
+		break;
+	}
+	case KDS_NUCLEO:
+		if (!kof_diag_gate_valid((uint16_t)KOF_FACT_NUCLEO, it->a) || !(c1 = kof_dsrc_cap_word(it->a)))
+			return 0;
+		n = snprintf(out, cap, "KOF_DIAG_HAS_NUCLEO(%s);", c1);
 		break;
 	default:
 		/* The form's declarations: their own printer. */

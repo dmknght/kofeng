@@ -348,6 +348,12 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask,
 		     uint32_t side, const uint8_t *p, uint64_t n);
 
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out with the one at kof_mutation_cfg_unit in kofmutation.c.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * Credit one FUNCTION UNIT by its CFG sketch (celllysis/cfg.h): the second scoring kind of this matcher, see kofmutation.c. `sg` is the
  * signature of the unit's function (KGENOME_CFG_MIN_KEYS..KGENOME_CFG_KEYS keys), `scan_mask`, `side` and `n` as in kof_mutation_unit.
  * A block's score becomes the better of its window count and the best Jaccard estimate any unit reached against it.
@@ -355,6 +361,7 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask,
 struct kgenome_cfg_sign;
 void kof_mutation_cfg_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t side,
 			   const struct kgenome_cfg_sign *sg, uint64_t n);
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /*
  * How much of block `b` was found in what was fed, as a percentage.

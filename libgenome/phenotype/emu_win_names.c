@@ -29,7 +29,7 @@
  * instructions per lookup (the Themida samples spend about 5-7 percent of their run in it). That is a cost
  * of being a faithful library and is paid by the run that asked.
  */
-#include "emu_private.h"
+#include "emu_win_private.h"
 static const struct kgenome_emu_win_name names_kernel32[] = {
 	{ "AcquireSRWLockExclusive", 255 }, { "AcquireSRWLockShared", 255 }, { "ActivateActCtx", 255 },
 	{ "AddAtomA", 255 }, { "AddAtomW", 255 }, { "AddConsoleAliasA", 255 }, { "AddConsoleAliasW", 255 },

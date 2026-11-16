@@ -192,6 +192,39 @@ static uint64_t elf64(uint8_t *b, const struct cb *c, uint64_t entry_va)
 	return 0x78u + c->n;
 }
 
+/* The same ELF64 with a section table that DECLARES its functions (round 4, 2026-11-16: only an extent source declares a function - a sized .symtab FUNC,
+ * an FDE; a start-only table declares a start of undeclared code, and the static lineage solves no undeclared code): .text over the code and a .symtab
+ * of one FUNC per start `at[]` (offsets in the code), each running to the next start or the code's end. The code stays at +0x78. */
+static uint64_t elf64_fns(uint8_t *b, const struct cb *c, const uint32_t *at, unsigned n_at)
+{
+	static const char shs[] = "\0.text\0.symtab\0.strtab\0.shstrtab";
+	uint64_t n = elf64(b, c, 0), sym, str, shstr, sh;
+	unsigned k;
+
+	sym = (n + 7u) & ~7ull;
+	memset(b + sym, 0, 24u * (n_at + 1u));
+	for (k = 0; k < n_at; k++) {
+		const uint32_t o = (uint32_t)sym + 24u * (k + 1u), end = k + 1u < n_at ? at[k + 1u] : (uint32_t)c->n;
+
+		p32(b, o, 1); b[o + 4] = 0x12; b[o + 6] = 1; p64(b, o + 8, 0x400078u + at[k]); p64(b, o + 16, end - at[k]);
+	}
+	str = sym + 24u * (n_at + 1u);
+	b[str] = 0; b[str + 1] = 'f'; b[str + 2] = 0;
+	shstr = str + 4u;
+	memcpy(b + shstr, shs, sizeof shs);
+	sh = (shstr + sizeof shs + 7u) & ~7ull;
+	memset(b + sh, 0, 5u * 64u);
+	p32(b, (uint32_t)sh + 64u, 1); p32(b, (uint32_t)sh + 68u, 1); p64(b, (uint32_t)sh + 72u, 6); p64(b, (uint32_t)sh + 80u, 0x400078u);
+	p64(b, (uint32_t)sh + 88u, 0x78u); p64(b, (uint32_t)sh + 96u, c->n);
+	p32(b, (uint32_t)sh + 128u, 7); p32(b, (uint32_t)sh + 132u, 2); p64(b, (uint32_t)sh + 152u, sym); p64(b, (uint32_t)sh + 160u, 24u * (n_at + 1u));
+	p32(b, (uint32_t)sh + 168u, 3); p64(b, (uint32_t)sh + 184u, 24);
+	p32(b, (uint32_t)sh + 192u, 15); p32(b, (uint32_t)sh + 196u, 3); p64(b, (uint32_t)sh + 216u, str); p64(b, (uint32_t)sh + 224u, 4);
+	p32(b, (uint32_t)sh + 256u, 23); p32(b, (uint32_t)sh + 260u, 3); p64(b, (uint32_t)sh + 280u, shstr); p64(b, (uint32_t)sh + 288u, sizeof shs);
+	p64(b, 40, sh);
+	b[58] = 64; b[60] = 5; b[62] = 4;
+	return sh + 5u * 64u;
+}
+
 /* An ELF32 (ARM) with one RWX PT_LOAD from offset zero; the code is at +0x54, the entry too. */
 static uint64_t elf32(uint8_t *b, const struct cb *c)
 {
@@ -296,9 +329,8 @@ struct want {
 	unsigned    must, may;
 };
 
-static void expect(const char *what, const struct cb *c, unsigned run, unsigned must, unsigned may)
+static void expect_scan(const char *what, struct kgenome_diag_scan *s, unsigned must, unsigned may)
 {
-	struct kgenome_diag_scan *s = scan_cb(c, run);
 	unsigned m = 0, y = 0;
 
 	if (!s) {
@@ -313,6 +345,11 @@ static void expect(const char *what, const struct cb *c, unsigned run, unsigned 
 	}
 	links_valid(what, s);
 	kgenome_diag_scan_free(s);
+}
+
+static void expect(const char *what, const struct cb *c, unsigned run, unsigned must, unsigned may)
+{
+	expect_scan(what, scan_cb(c, run), must, may);
 }
 
 /* ---- the cases ----------------------------------------------------------------------------------- */
@@ -444,7 +481,45 @@ static void t_fanin(void)
 	}
 	write_sys(&c); ret(&c);
 	expect("W1b sweep", &c, SWEEP, 0, 0);
-	expect("W1b sweep + lineage", &c, SWEEP | KGENOME_DIAG_RUN_LINEAGE, 0, 0);
+	/*
+	 * With the lineage the wrapper's own syscall is still linked to no caller's socket (three callers, three producers); what IS
+	 * linked is the write each CALL is (the wrapper analysis makes a node at every call of the wrapper), each to the socket its own
+	 * function made and put in rdi - three PROVEN links, one per call, true on every path. Before the lineage read a system call as
+	 * a site (LG-3) the socket's result was no token, so this case wrote 0 links and encoded that gap as the answer.
+	 */
+	/* the image declares its four functions (the lineage solves functions of the table; with no metadata it is one unpartitioned unit, solved by nothing) */
+	{
+		static const uint32_t starts[4] = { 0, 64, 128, 192 };
+		static struct kgenome_obj o;
+
+		expect_scan("W1b sweep + lineage", scan_img(elf64_fns(img, &c, starts, 4), SWEEP | KGENOME_DIAG_RUN_LINEAGE, NULL, 0, &o), 3, 0);
+	}
+	{
+		static const uint32_t starts[4] = { 0, 64, 128, 192 };
+		static struct kgenome_obj o;
+		struct kgenome_diag_scan *s = scan_img(elf64_fns(img, &c, starts, 4), SWEEP | KGENOME_DIAG_RUN_LINEAGE, NULL, 0, &o);
+		uint32_t i, cnt = s ? kgenome_diag_scan_count(s) : 0;
+		uint64_t last = 0;
+
+		CK(s != NULL);
+		for (i = 0; i < cnt; i++)
+			if (is_write(kgenome_diag_scan_at(s, i)->cap) && kgenome_diag_scan_at(s, i)->at > last)
+				last = kgenome_diag_scan_at(s, i)->at;          /* the wrapper's syscall: the last write in the code */
+		for (i = 0; i < cnt; i++) {
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
+			unsigned k;
+
+			if (!is_write(h->cap))
+				continue;
+			/* the wrapper's syscall (inside it) has no link; a call's link names the socket of the function the call is in */
+			if (h->at == last)
+				CK(h->n_in == 0);
+			for (k = 0; k < h->n_in; k++)
+				CK(h->in[k].from < cnt && kgenome_diag_scan_at(s, h->in[k].from)->at / 64u == h->at / 64u);
+		}
+		if (s)
+			kgenome_diag_scan_free(s);
+	}
 }
 
 static void want_status(const char *what, const struct kgenome_diag_scan *s, enum kgenome_status want)
@@ -1525,6 +1600,21 @@ static void km_expect(const char *what, struct kmod *m, unsigned must, unsigned 
 		return;
 	}
 	links_cap(s, cap_named("prepare_creds"), cap_named("commit_creds"), &y, &n);
+	{
+		/* the symbol route's node carries the row of the import it calls (kgenome_diag_hit.row, fix_linrow) */
+		uint32_t i;
+
+		for (i = 0; i < kgenome_diag_scan_count(s); i++) {
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
+			const char *nm = h->cap == cap_named("prepare_creds") ? "prepare_creds" :
+					 h->cap == cap_named("commit_creds") ? "commit_creds" : NULL;
+
+			if (nm && h->row != kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, nm)) {
+				printf("  FAIL %s: the %s node carries row %u\n", what, nm, h->row);
+				hk_fails++;
+			}
+		}
+	}
 	if (y != must || n != may) {
 		printf("  FAIL %s: PROVEN %u MAY %u, wanted PROVEN %u MAY %u\n", what, y, n, must, may);
 		hk_fails++;
@@ -1535,7 +1625,7 @@ static void km_expect(const char *what, struct kmod *m, unsigned must, unsigned 
 static void t_x2(void)
 {
 	static struct kmod m;
-	unsigned h;
+	unsigned h, a;
 
 	/* control: the god_mode shape, prepare_creds, move, commit_creds */
 	km_start(&m);
@@ -1587,6 +1677,82 @@ static void t_x2(void)
 	km_start(&m);
 	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7); ret(&m.c); km_call(&m, "commit_creds"); ret(&m.c);
 	km_expect("X2 code after a ret", &m, 0, 1);
+
+	/*
+	 * SYM-BRANCH-1: give_root's own shape - `call prepare_creds; test rax,rax; jz SKIP; mov
+	 * rdi,rax; SKIP: call commit_creds`. The move only happens on the fallthrough; the taken
+	 * side reaches the same call with no producer for rdi at all. Before the fix this route
+	 * read past the jcc as if only the fallthrough existed - PROVEN. The two paths agree on
+	 * nothing, so the honest answer is MAY.
+	 */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x85, 0xc0) /* test rax,rax */;
+	a = jz_fwd(&m.c);
+	E(&m.c, 0x48, 0x89, 0xc7);                      /* mov rdi,rax - fallthrough only */
+	here(&m.c, a);
+	km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 jcc skips the move on one path", &m, 0, 1);
+
+	/* the move is BEFORE the jcc (give_root's actual order: the null check decides whether to
+	 * zero the cred fields and tail-call, not whether rdi was ever set) - both paths that reach
+	 * the join hold the same producer, so the link stands. Proves the fix does not also demote
+	 * what a branch never put in question. */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7) /* mov rdi,rax */;
+	E(&m.c, 0x48, 0x85, 0xc0) /* test rax,rax */;
+	a = jz_fwd(&m.c);
+	E(&m.c, 0x90);                                  /* filler the jcc skips, touches no register */
+	here(&m.c, a);
+	km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 control, move before the jcc stands", &m, 1, 0);
+
+	/*
+	 * SYM-BRANCH-1's own fallback paths: a jcc this walk cannot place a join for falls back
+	 * to the blanket demote (the same one `ret` gets), same as before the fix - never
+	 * silently PROVEN past a fork it did not account for, even when it cannot do better.
+	 */
+
+	/* BACKWARD jcc (a loop): target <= its own address, so it is not forward-trackable. */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7) /* mov rdi,rax */;
+	{
+		unsigned L = m.c.n, hb;
+
+		E(&m.c, 0x48, 0x85, 0xc0);                      /* test rax,rax */
+		hb = m.c.n;
+		E(&m.c, 0x0f, 0x85, 0, 0, 0, 0);                /* jnz, placeholder displacement */
+		p32(m.c.b, hb + 2u, (uint32_t)(L - m.c.n));     /* backward: L is before this instruction */
+	}
+	km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 backward jcc (loop): not tracked, demoted", &m, 0, 1);
+
+	/* NOT TESTED HERE, named so it is not mistaken for an oversight: the `in.flags &
+	 * KGENOME_CELL_F_INDIRECT` and `in.target != KGENOME_BROKEN` guards in the same condition.
+	 * x86 has no indirect or unresolved-target Jcc encoding - only JMP/CALL can be indirect -
+	 * so neither is reachable through a real Jcc on this decoder; the guards exist for honesty
+	 * against a future architecture or decoder change, not because this one can hit them. */
+
+	/* THE JOIN TABLE FULL: SYM_JOIN_MAX (16) forward jccs pending at once, each to its OWN
+	 * distinct, not-yet-reached target (so none is consumed early and frees a slot) - the
+	 * 17th cannot be placed and falls back to demote right there, before any of the 17
+	 * targets is ever physically reached. */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7) /* mov rdi,rax */;
+	{
+		unsigned hole[17];
+		unsigned j;
+
+		for (j = 0; j < 17u; j++) {
+			E(&m.c, 0x48, 0x85, 0xc0);              /* test rax,rax: filler, touches nothing */
+			hole[j] = jz_fwd(&m.c);
+		}
+		for (j = 0; j < 17u; j++) {
+			here(&m.c, hole[j]);                    /* 17 distinct targets, set before any is reached */
+			E(&m.c, 0x90);
+		}
+	}
+	km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 join table full (17th jcc): not tracked, demoted", &m, 0, 1);
 }
 
 /* ---- X5: the stack ring follows the stack pointer ---------------------------------------------- */

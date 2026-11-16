@@ -11,6 +11,26 @@
  */
 #include "fntab_kit.h"
 
+/* The entries a metadata source declared (2026-11-16 round 2: the code no metadata declares is an entry too, trust NONE, source UNDECLARED). */
+static __attribute__((unused)) uint32_t n_decl(const struct kgenome_func_set *s)
+{
+	uint32_t i, k = 0;
+
+	for (i = 0; i < s->n; i++)
+		k += s->v[i].trust != KGENOME_FN_TRUST_NONE;
+	return k;
+}
+
+/* The entries of trust DERIVED (phase 2, 2026-11-16). */
+static __attribute__((unused)) uint32_t n_derived(const struct kgenome_func_set *s)
+{
+	uint32_t i, k = 0;
+
+	for (i = 0; i < s->n; i++)
+		k += s->v[i].trust == KGENOME_FN_TRUST_DERIVED;
+	return k;
+}
+
 #include <genotype/image/pe_types.h>
 
 /* ---- the allocation wrap: fail the Nth allocation ----------------------------------------------------------------------------- */
@@ -52,7 +72,7 @@ static void t_selector_exhaustive(void)
 	unsigned f, bits, n_elf = 0;
 
 	for (f = 0; f < sizeof fmts; f++)
-		for (bits = 0; bits < 16384u; bits++) {
+		for (bits = 0; bits < 131072u; bits++) {
 			struct kgenome_fntab_meta m;
 			struct kgenome_fntab_plan p;
 			unsigned want_case, want_run = 0, want_chk = 0;
@@ -73,29 +93,39 @@ static void t_selector_exhaustive(void)
 			m.coff_empty = (bits >> 11) & 1u;
 			m.pe_nocode = (bits >> 12) & 1u;
 			m.pe_arm = (bits >> 13) & 1u;
+			m.has_initarr = (bits >> 14) & 1u;
+			m.has_exidx = (bits >> 15) & 1u;
+			m.has_gopcln = (bits >> 16) & 1u;
 			p = kgenome_fntab_select(&m);
 			if (m.format == KGENOME_FMT_ELF) {
 				n_elf++;
-				/* ELF-NO-REACH, fixed 2026-11-05: every row that runs WALK runs KGENOME_FNTAB_X_PE_REACH beside it too (RED
-				 * on base: these three want_run values held no REACH bit there); ELF_SYMTAB never sets WALK so it is unchanged. */
+				/* 2026-11-16 (metadata only): no row runs WALK or REACH (DISABLED, decode-derived); the start-only tables run where the object has them, and
+				 * ENTRY in every row of a linked object; the Go table is a check beside the symbol table and a source elsewhere */
+				const unsigned starts = (m.has_initarr ? KGENOME_FNTAB_X_INITARR : 0u) | (m.has_exidx ? KGENOME_FNTAB_X_EXIDX : 0u) | KGENOME_FNTAB_X_ENTRY;
+				const unsigned go = m.has_gopcln ? KGENOME_FNTAB_X_GOPCLN : 0u;
+
 				if (m.has_symtab && !m.symtab_empty) {
 					want_case = KGENOME_FNTAB_C_ELF_SYMTAB;
-					want_run = KGENOME_FNTAB_X_SYMTAB | (m.has_unwind ? KGENOME_FNTAB_X_FDE : 0u);
-					want_chk = m.has_unwind ? KGENOME_FN_S_FDE : 0u;
+					want_run = KGENOME_FNTAB_X_SYMTAB | (m.has_unwind ? KGENOME_FNTAB_X_FDE : 0u) | go | (m.elf_rel ? 0u : starts);
+					want_chk = m.has_gopcln ? KGENOME_FN_S_GOPCLN : 0u;      /* PMA-6 (round 3): the unwind table is a source beside the symbols */
 				} else if (m.has_dynsym && !m.dynsym_empty && !m.elf_rel) {
 					want_case = KGENOME_FNTAB_C_ELF_DYNSYM;
-					want_run = KGENOME_FNTAB_X_DYNSYM | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH | (m.has_unwind ? KGENOME_FNTAB_X_FDE : 0u);
+					want_run = KGENOME_FNTAB_X_DYNSYM | (m.has_unwind ? KGENOME_FNTAB_X_FDE : 0u) | go | starts;
 				} else if (m.has_unwind && !m.elf_rel) {
 					want_case = KGENOME_FNTAB_C_ELF_FDE;
-					want_run = KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH;
+					want_run = KGENOME_FNTAB_X_FDE | go | starts;
+				} else if (m.has_gopcln && !m.elf_rel) {
+					want_case = KGENOME_FNTAB_C_ELF_GO;
+					want_run = go | starts;
 				} else {
-					want_case = KGENOME_FNTAB_C_ELF_WALK;
-					want_run = m.elf_rel ? 0u : (KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH);
+					want_case = KGENOME_FNTAB_C_ELF_META;
+					want_run = m.elf_rel ? 0u : starts;
 				}
 			} else if (m.format == KGENOME_FMT_PE) {
-				/* the PE rows (A2), written as sentences: a managed image is empty; an x64 exception table that held functions is the exact source with the guessing sources beside it and
-				 * the reach step after (and the COFF symbols when the file has the table); x86 with COFF symbols that held functions; x86 with neither; any other machine nothing */
-				const unsigned starts = KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_THUNK;
+				/* the PE rows (A2, 2026-11-16 metadata only), written as sentences: a managed image is empty; no code in the file is empty; an x64 exception table that
+				 * held functions is the exact source with the start-only tables beside it (and the COFF symbols when the file has the table); x86 with COFF symbols
+				 * that held functions; x86 with neither: the start-only tables; ARM: its exception table and the start-only tables; any other machine the start-only tables */
+				const unsigned starts = KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_ENTRY;
 
 				if (m.pe_clr) {
 					want_case = KGENOME_FNTAB_C_PE_CLR;
@@ -103,18 +133,19 @@ static void t_selector_exhaustive(void)
 					want_case = KGENOME_FNTAB_C_PE_NOCODE;
 				} else if (m.pe_x64_pdata && !m.pdata_empty) {
 					want_case = KGENOME_FNTAB_C_PE_PDATA;
-					want_run = KGENOME_FNTAB_X_PDATA | starts | KGENOME_FNTAB_X_PE_REACH | (m.pe_coff ? KGENOME_FNTAB_X_PE_COFF : 0u);
+					want_run = KGENOME_FNTAB_X_PDATA | starts | (m.pe_coff ? KGENOME_FNTAB_X_PE_COFF : 0u);
 				} else if (m.pe_x86 && m.pe_coff && !m.coff_empty) {
 					want_case = KGENOME_FNTAB_C_PE_COFF;
-					want_run = KGENOME_FNTAB_X_PE_COFF | starts | KGENOME_FNTAB_X_PE_REACH;
+					want_run = KGENOME_FNTAB_X_PE_COFF | starts;
 				} else if (m.pe_x86) {
-					want_case = KGENOME_FNTAB_C_PE_WALK;
-					want_run = starts | KGENOME_FNTAB_X_PE_REACH;
+					want_case = KGENOME_FNTAB_C_PE_META;
+					want_run = starts;
 				} else if (m.pe_arm) {
 					want_case = KGENOME_FNTAB_C_PE_ARM;
-					want_run = KGENOME_FNTAB_X_PE_ARMPDATA | KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG;
+					want_run = KGENOME_FNTAB_X_PE_ARMPDATA | starts;
 				} else {
 					want_case = KGENOME_FNTAB_C_PE_NONE;
+					want_run = starts;
 				}
 			} else {
 				want_case = KGENOME_FNTAB_C_NONE;
@@ -125,7 +156,10 @@ static void t_selector_exhaustive(void)
 			if (p.run & KGENOME_FNTAB_X_DYNSYM) CK(m.has_dynsym && !m.dynsym_empty && !m.elf_rel);
 			if (p.run & KGENOME_FNTAB_X_FDE) CK(m.has_unwind);
 			if (p.run & KGENOME_FNTAB_X_PDATA) CK(m.pe_x64_pdata && m.format == KGENOME_FMT_PE);
-			if (p.run & KGENOME_FNTAB_X_WALK) CK((m.format == KGENOME_FMT_ELF && !m.elf_rel) || m.format == KGENOME_FMT_PE);
+			CK(!(p.run & (KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_THUNK | KGENOME_FNTAB_X_PE_REACH)));     /* nothing decode-derived runs (2026-11-16) */
+			if (p.run & KGENOME_FNTAB_X_INITARR) CK(m.has_initarr && m.format == KGENOME_FMT_ELF && !m.elf_rel);
+			if (p.run & KGENOME_FNTAB_X_EXIDX) CK(m.has_exidx && m.format == KGENOME_FMT_ELF && !m.elf_rel);
+			if (p.run & KGENOME_FNTAB_X_GOPCLN) CK(m.has_gopcln && m.format == KGENOME_FMT_ELF);
 			if (p.run & KGENOME_FNTAB_X_PDATA) CK(!m.pdata_empty && !m.pe_clr);
 			/* a check-only source is a strategy that runs; the symbol strategies run once, SYMTAB and DYNSYM never together */
 			CK(!(p.check_only & KGENOME_FN_S_FDE) || (p.run & KGENOME_FNTAB_X_FDE));
@@ -136,7 +170,7 @@ static void t_selector_exhaustive(void)
 			if (m.format == KGENOME_FMT_ELF && m.has_dynsym && m.dynsym_empty && m.symtab_empty)
 				CK(p.ccase != KGENOME_FNTAB_C_ELF_DYNSYM);
 		}
-	CK(n_elf == 16384u);      /* every ELF row of the 14 metadata bits (the PE bits do not change an ELF answer, and the case says so) */
+	CK(n_elf == 131072u);     /* every ELF row of the 17 metadata bits (the PE bits do not change an ELF answer, and the case says so) */
 }
 
 /* ---- 2. the probe ------------------------------------------------------------------------------------------------------------- */
@@ -505,11 +539,12 @@ static void t_fde_stub_section(void)
 		ei.sec_count++;
 		CK(kgenome_elf_sec_is_stub(&ei, ei.sec_count - 1u) && !kgenome_elf_sec_is_stub(&ei, text));
 		fde_of(B, n, &ei, &r);
-		if (r.n != 2u || r.v[0].off != TEXT_OFF + F3[0].off || r.v[1].off != TEXT_OFF + F3[2].off) {
-			printf("  [%s] n=%u (wanted the two functions of the program's code)\n", what, r.n);
+		/* round 3 (audit PMA-1): the stub section's FDE is a function too - code is code, whichever executable section holds it */
+		if (r.n != 3u || r.v[0].off != TEXT_OFF + F3[0].off || r.v[1].off != TEXT_OFF + F3[1].off || r.v[2].off != TEXT_OFF + F3[2].off) {
+			printf("  [%s] n=%u (wanted all three functions)\n", what, r.n);
 			fails++;
 		}
-		CK(r.n_bad == 1u && (r.partial & KGENOME_FNTAB_P_BAD_FDE));      /* the dropped one is said */
+		CK(r.n_bad == 0u && !(r.partial & KGENOME_FNTAB_P_BAD_FDE));
 	}
 }
 
@@ -1270,6 +1305,8 @@ static unsigned sym_expect(const struct elf_in *in, const struct symcase *sc, in
 			continue;                                          /* 0: undefined, >= 2: not executable here (or out of range) */
 		memset(&f, 0, sizeof f);
 		f.kind = ty == 10 ? KGENOME_FN_IFUNC : KGENOME_FN_FUNC;
+		if (ty == 0)
+			f.flags |= KGENOME_FN_F_NOTYPE;            /* PMA-3 (round 3): a NOTYPE symbol's size is not exact */
 		if (in->em == 40 && ty == 2 && (value & 1u)) { value &= ~(uint64_t)1; f.isa_mode = KGENOME_FN_ISA_THUMB; }
 		if (!rel) {
 			uint64_t sz = y->size ? y->size : 1u;
@@ -1304,7 +1341,7 @@ static unsigned sym_expect(const struct elf_in *in, const struct symcase *sc, in
 static int func_eq(const struct kgenome_func *a, const struct kgenome_func *b)
 {
 	return a->off == b->off && a->len == b->len && a->value == b->value && a->shndx == b->shndx && a->kind == b->kind && a->end_source == b->end_source &&
-	       a->isa_mode == b->isa_mode && a->source == b->source && a->flags == b->flags;
+	       a->isa_mode == b->isa_mode && a->source == b->source && a->flags == b->flags && a->trust == b->trust;
 }
 
 static void sym_random(struct symcase *sc, const struct elf_in *in, int rel)
@@ -1563,6 +1600,19 @@ static void t_merge_rows(void)
 	kgenome_fntab_merge(&l, 0, &s);
 	CK(s.n == 2 && s.n_disagree == 0);
 	kgenome_funcs_free(&s);
+	/* an equal-rank PDATA overlap, by contrast, IS said on both entries and counted once: PDATA's own
+	 * format specifies Begin/End ranges that do not overlap (RUNTIME_FUNCTION, see fntab_pe_pdata.c's
+	 * header), so an overlap there is itself the anomaly, unlike the SYMTAB case above, where two
+	 * overlapping bodies are routine and not flagged. The PDATA-only test in kgenome_fntab_merge is
+	 * therefore scoped on purpose, not a drift from the file's general header comment -
+	 * t_pdata_count_and_overlap (fntab_pe.c) pins the same fact through a real PE image; this is the
+	 * same fact at the merge's own abstract level. */
+	v[0] = mkf(0x100, 64, S_PDA, UNW_E); v[1] = mkf(0x120, 64, S_PDA, UNW_E);
+	list_of(&l, v, 2); memset(&s, 0, sizeof s);
+	kgenome_fntab_merge(&l, 0, &s);
+	CK(s.n == 2 && s.n_disagree == 1);
+	CK((s.v[0].flags & KGENOME_FN_F_DISAGREE) && (s.v[1].flags & KGENOME_FN_F_DISAGREE));
+	kgenome_funcs_free(&s);
 	/* a BETTER body that overlaps the one before: kept */
 	v[0] = mkf(0x100, 64, S_FDE, UNW_E); v[1] = mkf(0x120, 64, S_SYM, SYM_E);
 	list_of(&l, v, 2); memset(&s, 0, sizeof s);
@@ -1712,32 +1762,30 @@ static void t_merge_props(void)
 
 /* ---- the ends: against a straight reading of the rule ------------------------------------------------------------------------------------------------ */
 
-struct eres { struct kgenome_func v[16]; unsigned n; uint16_t partial; uint32_t n_extra; };
+struct eres { struct kgenome_func v[16]; unsigned n; uint16_t partial; uint32_t n_extra; uint64_t st[16]; uint16_t st_src[16]; unsigned n_st; };
 
+/* ROUND 4 (2026-11-16): an entry with a declared (exact) end is a unit of trust HIGH; every other entry is a declared START in its extent (no format
+ * declares where it ends: the rule changed, the next start is no end); a start in no extent is counted. The padding runs are not read. */
 static void ends_oracle(const struct kgenome_func *in, unsigned n, const struct kgenome_fntab_extent *ext, unsigned n_ext, const uint64_t *pad, unsigned n_pad, struct eres *r)
 {
-	unsigned i, x, p;
+	unsigned i, x;
 
+	(void)pad; (void)n_pad;
 	memset(r, 0, sizeof *r);
 	for (i = 0; i < n; i++) {
 		struct kgenome_func f = in[i];
-		uint64_t lim = 0, end;
 		int have = 0;
 
-		if (f.len && f.end_source != KGENOME_FN_E_NONE) { r->v[r->n++] = f; continue; }
+		if (f.len && (f.end_source == KGENOME_FN_E_SYMBOL || f.end_source == KGENOME_FN_E_UNWIND)) {
+			f.trust = KGENOME_FN_TRUST_HIGH;
+			r->v[r->n++] = f;
+			continue;
+		}
 		for (x = 0; x < n_ext; x++)
-			if (f.off >= ext[x].at && f.off < ext[x].at + ext[x].len) { lim = ext[x].at + ext[x].len; have = 1; break; }
+			if (f.off >= ext[x].at && f.off < ext[x].at + ext[x].len) { have = 1; break; }
 		if (!have) { r->n_extra++; continue; }
-		end = lim;
-		if (i + 1u < n && in[i + 1u].off < lim) end = in[i + 1u].off;
-		if (end <= f.off) { r->n_extra++; continue; }
-		f.end_source = KGENOME_FN_E_NEXT_START;
-		for (p = 0; pad && p < n_pad; p++)
-			if (pad[2u * p + 1u] == end && pad[2u * p] > f.off) { end = pad[2u * p]; f.end_source = KGENOME_FN_E_TRIMMED; break; }
-		f.len = end - f.off;
-		f.flags |= KGENOME_FN_F_END_OPEN;
-		r->partial |= KGENOME_FNTAB_P_ENDS;
-		r->v[r->n++] = f;
+		r->st_src[r->n_st] = f.source;
+		r->st[r->n_st++] = f.off;
 	}
 }
 
@@ -1779,15 +1827,20 @@ static void t_ends_oracle(void)
 		} else
 			for (i = 0; i < want.n; i++)
 				if (!func_eq(&s.v[i], &want.v[i])) { printf("  [ends iter %u entry %u] differs\n", iter, i); fails++; break; }
+		CK(s.n_st == want.n_st);
+		for (i = 0; i < want.n_st && i < s.n_st; i++)
+			CK(s.st[i].off == want.st[i] && s.st[i].source == want.st_src[i]);
 		/* IDEMPOTENCE: an entry that has an end is not closed again; the second run changes nothing */
 		if (s.n) {
 			struct kgenome_func_set again = s;
 			uint32_t nn = s.n;
 
 			again.v = malloc(nn * sizeof *again.v); memcpy(again.v, s.v, nn * sizeof *s.v);
+			again.st = NULL; again.n_st = 0;      /* (the starts are s's own) */
 			kgenome_fntab_ends(&again, ext, n_ext, use_pad ? pad : NULL, n_pad);
-			CK(again.n == nn && again.n_extra == s.n_extra && again.partial == s.partial && memcmp(again.v, s.v, nn * sizeof *s.v) == 0);
+			CK(again.n == nn && again.n_extra == s.n_extra && again.partial == s.partial && memcmp(again.v, s.v, nn * sizeof *s.v) == 0 && again.n_st == 0);
 			free(again.v);
+			free(again.st);
 		}
 		/* the end never passes the extent, never the next start */
 		for (i = 0; i < s.n; i++) CK(s.v[i].len > 0 || (s.v[i].end_source != KGENOME_FN_E_NEXT_START && s.v[i].end_source != KGENOME_FN_E_TRIMMED) || 1);
@@ -1826,36 +1879,36 @@ static void t_with_walk_cases(void)
 	in.dyn = 1; in.sym = dyn3; in.nsym = 3;
 	n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
 	with_walk_of(B, n, &o, NULL, &fs);
-	CK(fs.ccase == KGENOME_FNTAB_C_ELF_DYNSYM && fs.n == 4 && fs.status == KGENOME_OK);
-	CK(fs.v[0].len == 11 && fs.v[1].len == 6 && fs.v[2].len == 8);
-	CK(fs.v[1].source & KGENOME_FN_S_DYNSYM);
+	CK(fs.ccase == KGENOME_FNTAB_C_ELF_DYNSYM && n_decl(&fs) == 3 && fs.status == KGENOME_OK);    /* 2026-11-16 (metadata only): C, which nothing declares, is no start */
+	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->len == 11 && fn_at(&fs, TEXT_OFF + 0x10) && fn_at(&fs, TEXT_OFF + 0x10)->len == 6 && fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8);
+	CK(fn_at(&fs, TEXT_OFF + 0x10) && (fn_at(&fs, TEXT_OFF + 0x10)->source & KGENOME_FN_S_DYNSYM));
 	CK((fs.partial & KGENOME_FNTAB_P_STARTS) && fs.state == KGENOME_FNTAB_PARTIAL);
-	CK(fs.v[1].source == (KGENOME_FN_S_DYNSYM | KGENOME_FN_S_WALK) && fs.v[2].source == (KGENOME_FN_S_DYNSYM | KGENOME_FN_S_WALK));   /* the walk named A and B: one function, two sources */
+	CK(fn_at(&fs, TEXT_OFF + 0x10) && fn_at(&fs, TEXT_OFF + 0x10)->source == KGENOME_FN_S_DYNSYM && fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->source == KGENOME_FN_S_DYNSYM);     /* the walk's call targets are no source */
 	CK(fs.v[0].source == (KGENOME_FN_S_DYNSYM | KGENOME_FN_S_ENTRY));
-	CK(fs.v[3].off == TEXT_OFF + 0x30u && fs.v[3].len == 6 && fs.v[3].source == KGENOME_FN_S_WALK &&
-	   (fs.v[3].flags & KGENOME_FN_F_GAP) && fs.v[3].end_source == KGENOME_FN_E_REACH);     /* C, recovered by REACH's gap step */
+	CK((!fn_at(&fs, TEXT_OFF + 0x30u) || fn_at(&fs, TEXT_OFF + 0x30u)->trust == KGENOME_FN_TRUST_NONE) && fs.v[0].trust == KGENOME_FN_TRUST_HIGH);   /* C: undeclared code, no function */
 	kgenome_funcs_free(&fs);
 
 	/* the same file with a caller's walk: the same table, and the walk is the caller's afterwards (it is not freed) */
 	wk = kgenome_diag_walk_new();
 	CK(wk != NULL);
 	with_walk_of(B, n, &o, wk, &fs); with_walk_of(B, n, &o, wk, &fs2);
-	CK(fs.n == fs2.n && fs.n == 4 && kgenome_diag_walk_runs(wk) == 1);   /* one decode for two tables */
+	CK(n_decl(&fs) == n_decl(&fs2) && n_decl(&fs) == 3 && kgenome_diag_walk_runs(wk) == 0);   /* the table decodes nothing (2026-11-16) */
 	kgenome_funcs_free(&fs); kgenome_funcs_free(&fs2);
 	kgenome_diag_walk_free(wk);
 
-	/* .dynsym with no function, and a .symtab with none either: retry symtab -> dynsym -> the WALK case */
+	/* .dynsym with no function, and a .symtab with none either: retry symtab -> dynsym -> no exact source; nothing but the entry: no metadata */
 	{
 		struct sym only_obj[1] = { { "d", 0x400000u + 0x1000u, 4, 0x11, 1 } };
 		in.dyn = 0; in.sym = only_obj; in.nsym = 1;            /* .symtab with an OBJECT only */
 		n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
 		with_walk_of(B, n, &o, NULL, &fs);
-		CK(fs.ccase == KGENOME_FNTAB_C_ELF_WALK && (fs.partial & KGENOME_FNTAB_P_STARTS));
+		CK(fs.ccase == KGENOME_FNTAB_C_NO_META && (fs.partial & KGENOME_FNTAB_P_NO_META) && n_decl(&fs) == n_derived(&fs) && n_derived(&fs) >= 1u &&
+		   kgenome_funcs_start(&fs, o.entry_off) != KGENOME_FUNCS_NONE && fs.v[kgenome_funcs_start(&fs, o.entry_off)].trust == KGENOME_FN_TRUST_DERIVED);   /* phase 2: the entry's code is derived */
 		kgenome_funcs_free(&fs);
 		in.dyn = 1;                                            /* .dynsym with an OBJECT only */
 		n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
 		with_walk_of(B, n, &o, NULL, &fs);
-		CK(fs.ccase == KGENOME_FNTAB_C_ELF_WALK);
+		CK(fs.ccase == KGENOME_FNTAB_C_NO_META);
 		kgenome_funcs_free(&fs);
 	}
 	(void)nof;
@@ -1864,7 +1917,7 @@ static void t_with_walk_cases(void)
 	in.dyn = 0; in.sym = dyn3; in.nsym = 3;
 	n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
 	with_walk_of(B, n, &o, NULL, &fs);
-	CK(fs.ccase == KGENOME_FNTAB_C_ELF_SYMTAB && fs.n == 3 && fs.state == KGENOME_FNTAB_COMPLETE && fs.partial == 0);
+	CK(fs.ccase == KGENOME_FNTAB_C_ELF_SYMTAB && n_decl(&fs) == 3 && (fs.partial & ~(uint16_t)KGENOME_FNTAB_P_UNDECLARED) == 0);   /* the padding between the symbols is undeclared code (round 2) */
 	kgenome_funcs_free(&fs);
 
 	/* the table of the walk fails: the object is x86-64 but no code (entry_off broken): still a table */
@@ -1872,7 +1925,7 @@ static void t_with_walk_cases(void)
 	n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
 	o.entry_off = KGENOME_NA;
 	with_walk_of(B, n, &o, NULL, &fs);
-	CK(fs.ccase == KGENOME_FNTAB_C_ELF_WALK);
+	CK(fs.ccase == KGENOME_FNTAB_C_NO_META);
 	kgenome_funcs_free(&fs);
 	o.entry_off = KGENOME_BROKEN;
 	with_walk_of(B, n, &o, NULL, &fs);
@@ -1913,16 +1966,16 @@ static void t_with_walk_cases(void)
 			CK(fs.ccase == KGENOME_FNTAB_C_PE_NOCODE && fs.n == 0 && (fs.partial & KGENOME_FNTAB_P_NO_CODE) && fs.state == KGENOME_FNTAB_PARTIAL);
 			pe->nsec = 1; pe->sec[0].perm = KGENOME_PE_PERM_X; pe->sec[0].file_off = 0x40; pe->sec[0].file_size = 0x10;          /* one code section with bytes in the file */
 			memset(&fs, 0xaa, sizeof fs); kgenome_diag_funcs_with_walk(&po, B, n, NULL, &fs);
-			CK(fs.ccase == KGENOME_FNTAB_C_PE_WALK && fs.n == 0);               /* A2: PE x86 has no exception table; its row is the walk's (here the object has no x86 arch, so the walk holds nothing) */
+			CK(fs.ccase == KGENOME_FNTAB_C_NO_META && fs.n <= 1u && (fs.partial & KGENOME_FNTAB_P_NO_META));   /* PE x86 with no table and no entry: no metadata, the code extent is the unit */
 			pe->machine = 0x8664; pe->pe32_plus = 1; pe->dir[KGENOME_PE_DIR_EXCEPTION].rva = 0x7fff0000u; pe->dir[KGENOME_PE_DIR_EXCEPTION].size = 24;
 			memset(&fs, 0xaa, sizeof fs); kgenome_diag_funcs_with_walk(&po, B, n, NULL, &fs);
-			CK(fs.ccase == KGENOME_FNTAB_C_PE_WALK && fs.n == 0);               /* an x64 exception directory that points nowhere held no function: the one retry is the walk row (fntab_select.c) */
+			CK(fs.ccase == KGENOME_FNTAB_C_NO_META && fs.n <= 1u);           /* an x64 exception directory that points nowhere held no function: the retry names nothing either */
 			pe->machine = 0x1c0;                                           /* ARM (not Thumb-2): no strategy reads its exception table */
 			memset(&fs, 0xaa, sizeof fs); kgenome_diag_funcs_with_walk(&po, B, n, NULL, &fs);
-			CK(fs.ccase == KGENOME_FNTAB_C_PE_NONE && (fs.partial & KGENOME_FNTAB_P_NO_TABLE) && fs.state == KGENOME_FNTAB_PARTIAL && fs.n == 0);
+			CK(fs.ccase == KGENOME_FNTAB_C_NO_META && (fs.partial & KGENOME_FNTAB_P_NO_TABLE) && fs.state == KGENOME_FNTAB_PARTIAL && fs.n <= 1u);
 			pe->machine = 0x1c4;                                           /* Thumb-2: the packed exception table and the declared starts; an empty directory holds nothing, and the table says its starts are partial */
 			memset(&fs, 0xaa, sizeof fs); kgenome_diag_funcs_with_walk(&po, B, n, NULL, &fs);
-			CK(fs.ccase == KGENOME_FNTAB_C_PE_ARM && (fs.partial & KGENOME_FNTAB_P_STARTS) && fs.state == KGENOME_FNTAB_PARTIAL && fs.n == 0);
+			CK(fs.ccase == KGENOME_FNTAB_C_NO_META && (fs.partial & KGENOME_FNTAB_P_STARTS) && fs.state == KGENOME_FNTAB_PARTIAL && fs.n <= 1u);
 			pe->valid = 0;
 			memset(&fs, 0xaa, sizeof fs); kgenome_diag_funcs_with_walk(&po, B, n, NULL, &fs);
 			CK(fs.ccase == KGENOME_FNTAB_C_NONE && fs.n == 0);
@@ -1944,7 +1997,7 @@ static void t_with_walk_cases(void)
 			hit++;
 			CK(fs.status == KGENOME_NOMEM || fs.n <= 4);
 		} else {
-			CK(fs.status == KGENOME_OK && fs.n == 4);
+			CK(fs.status == KGENOME_OK && n_decl(&fs) == 3);
 			fail_at = 0;
 			kgenome_funcs_free(&fs);
 			break;
@@ -1952,7 +2005,7 @@ static void t_with_walk_cases(void)
 		fail_at = 0;
 		kgenome_funcs_free(&fs);
 	}
-	CK(hit >= 3 && k < 200);
+	CK(hit >= 1 && k < 200);                              /* (fewer allocations since the table decodes nothing) */
 	{                                                     /* the walk-only case: the walk's own allocations */
 		in.sym = NULL; in.nsym = 0; in.dyn = 0;
 		n = elf_build(&in, B); CK(parse(B, n, &ei, &o));
@@ -1973,6 +2026,8 @@ static void t_with_walk_cases(void)
 
 /* ---- the walk strategy ------------------------------------------------------------------------------------------------------------------------------------ */
 
+/* DISABLED by the owner 2026-11-16: the rows exercise the entry walk strategy (kgenome_fntab_walk: decoded call targets), which is in #if 0 (the table is made from metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 static void t_walk_strategy(void)
 {
 	static uint8_t TX[0x100];
@@ -2047,6 +2102,7 @@ static void t_walk_strategy(void)
 	kgenome_diag_walk_free(wk);
 	kgenome_diag_walk_free(NULL);
 }
+#endif
 
 
 /* ---- the code extent (kgenome_diag_walk_range through kgenome_diag_extent): sections x entry point, against the rule written out ------------------------------------ */
@@ -2223,9 +2279,9 @@ static void t_ends_dup(void)
 	s.v = malloc(3 * sizeof *s.v); s.n = 3;
 	s.v[0] = mkf(0x100, 0, S_WLK, 0); s.v[1] = mkf(0x100, 0, S_ENT, 0); s.v[2] = mkf(0x140, 0, S_WLK, 0);
 	kgenome_fntab_ends(&s, &ext, 1, NULL, 0);
-	/* the first of two equal starts has no room (the next start is its own), it is counted and dropped; the others close */
-	CK(s.n == 2 && s.n_extra == 1);
-	CK(s.v[0].off == 0x100 && s.v[0].len == 0x40 && s.v[1].off == 0x140 && s.v[1].len == 0xc0);
+	/* round 4 (the rule changed): entries with no end are declared starts, kept as given (the merge, not the ends, makes one per start); no unit */
+	CK(s.n == 0 && s.n_extra == 0 && s.n_st == 3);
+	CK(s.n_st == 3 && s.st[0].off == 0x100 && s.st[1].off == 0x100 && s.st[2].off == 0x140);
 	kgenome_funcs_free(&s);
 	/* nothing at all, and a set with no entries */
 	memset(&s, 0, sizeof s);
@@ -2246,14 +2302,13 @@ static void t_ends_dup(void)
 			memset(&s, 0, sizeof s);
 			s.v = malloc(sizeof *s.v); s.n = 1; s.v[0] = mkf(at[i], 0, S_WLK, 0);
 			kgenome_fntab_ends(&s, &ext, 1, pad, 1);
-			CK(s.n == in_ext[i]);
-			if (s.n) CK(s.v[0].off + s.v[0].len == 0x200);
+			CK(s.n == 0 && s.n_st == in_ext[i]);                  /* round 4: a declared start when the extent holds it */
 			kgenome_funcs_free(&s);
 		}
 		memset(&s, 0, sizeof s);
 		s.v = malloc(2 * sizeof *s.v); s.n = 2; s.v[0] = mkf(0x100, 0, S_WLK, 0); s.v[1] = mkf(0x140, 0, S_WLK, 0);
-		kgenome_fntab_ends(&s, &ext, 1, pad, 1);                      /* the first one's pad run [0x100,0x140) starts at its own start: no trim; flagged NEXT_START */
-		CK(s.n == 2 && s.v[0].len == 0x40 && s.v[0].end_source == KGENOME_FN_E_NEXT_START);
+		kgenome_fntab_ends(&s, &ext, 1, pad, 1);                      /* the padding runs are not read */
+		CK(s.n == 0 && s.n_st == 2);
 		kgenome_funcs_free(&s);
 	}
 }
@@ -2349,7 +2404,7 @@ static void t_walk_pads_nomem(void)
 		fail_at = 0;
 		kgenome_funcs_free(&fs);
 	}
-	CK(k < 400 && tab_hard >= 2);
+	CK(k < 400 && tab_hard >= 1);   /* the table itself allocates little since it decodes nothing (2026-11-16): one refusal at least reaches its status */
 }
 
 
@@ -2412,7 +2467,7 @@ static void t_walk_unknown_arch(void)
 		CK(kgenome_diag_walk_ensure(wk, &o, B, n, 1));
 		(void)kgenome_diag_walk_pads(wk, &np); (void)kgenome_diag_walk_entries(wk, &ne);
 		kgenome_diag_funcs_with_walk(&o, B, n, wk, &fs);
-		CK(fs.ccase == KGENOME_FNTAB_C_ELF_WALK);
+		CK(fs.ccase == KGENOME_FNTAB_C_NO_META);                 /* no metadata (2026-11-16): one unit, whatever the machine */
 		{ uint32_t k; for (k = 0; k < fs.n; k++) CK(fs.v[k].off >= TEXT_OFF && fs.v[k].off + fs.v[k].len <= TEXT_OFF + 0x40u && fs.v[k].len > 0); }
 		kgenome_funcs_free(&fs);
 	}
@@ -2830,7 +2885,7 @@ static void t_extent_round2(void)
 		pe2.seg[pe2.seg_count].file_off = 0x140; pe2.seg[pe2.seg_count].file_size = 0x30;
 		o2 = o; o2.file_header = &pe2;
 		kgenome_diag_funcs_with_walk(&o2, B, n, NULL, &fs);
-		CK(fs.ccase == KGENOME_FNTAB_C_ELF_SYMTAB && fs.n == 0 && fs.n_extra >= 1);        /* in no extent: the entry of nothing */
+		CK(fs.ccase == KGENOME_FNTAB_C_ELF_SYMTAB && n_decl(&fs) == n_derived(&fs) && fs.n_st == 1 && fs.st[0].source == KGENOME_FN_S_ENTRY && fs.n_extra >= 1);   /* phase 2: no HIGH unit; the entry's code may be derived */   /* round 4: the entry is a declared start of the NONE unit */   /* the symbol is in no extent: the entry of nothing, counted; the entry point beside it stands */
 		kgenome_funcs_free(&fs);
 		in.sym = NULL; in.nsym = 0;
 	}
@@ -2856,6 +2911,8 @@ static void t_code_bytes_pe_null(void)
 	CK(kgenome_diag_code_bytes(&po, 777) == 777);
 }
 
+/* DISABLED by the owner 2026-11-16: the rows exercise the entry walk strategy (kgenome_fntab_walk: decoded call targets), which is in #if 0 (the table is made from metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* fntab_walk.c: the largest value that is an offset is an entry point (only NA and BROKEN are not) */
 static void t_walk_entry_edge(void)
 {
@@ -2882,6 +2939,7 @@ static void t_walk_entry_edge(void)
 	kgenome_fntab_list_free(&l);
 	kgenome_diag_walk_free(wk);
 }
+#endif
 
 /* ---- pass_a: thunks and the boundary before them, delay slots, the zero word at the very end, 32-bit decode ---------------------------------------------------------- */
 
@@ -3104,22 +3162,26 @@ static void t_table_property(void)
 		/* the case the metadata names */
 		if (with_syms && !dyn && nx) want_case = KGENOME_FNTAB_C_ELF_SYMTAB;
 		else if (with_syms && dyn && nx) want_case = KGENOME_FNTAB_C_ELF_DYNSYM;
-		else if (with_fde) want_case = KGENOME_FNTAB_C_ELF_FDE;
-		else want_case = KGENOME_FNTAB_C_ELF_WALK;
+		else if (with_fde && fa.n) want_case = KGENOME_FNTAB_C_ELF_FDE;
+		else want_case = KGENOME_FNTAB_C_NO_META;     /* 2026-11-16: an unwind table with no record, or the entry alone, is no metadata */
 		if (fs.ccase != want_case) { printf("  [table iter %u] case %u want %u (syms %u dyn %u nx %u fde %u)\n", iter, fs.ccase, want_case, with_syms, dyn, nx, with_fde); fails++; }
-		n_sym_case += want_case == KGENOME_FNTAB_C_ELF_SYMTAB; n_dyn_case += want_case == KGENOME_FNTAB_C_ELF_DYNSYM; n_fde_case += want_case == KGENOME_FNTAB_C_ELF_FDE; n_walk_case += want_case == KGENOME_FNTAB_C_ELF_WALK;
+		n_sym_case += want_case == KGENOME_FNTAB_C_ELF_SYMTAB; n_dyn_case += want_case == KGENOME_FNTAB_C_ELF_DYNSYM; n_fde_case += want_case == KGENOME_FNTAB_C_ELF_FDE; n_walk_case += want_case == KGENOME_FNTAB_C_NO_META;
 		/* the invariants of ANY table */
-		CK(fs.state == (fs.partial & KGENOME_FNTAB_P_CAP ? KGENOME_FNTAB_OVER_BUDGET : fs.partial ? KGENOME_FNTAB_PARTIAL : KGENOME_FNTAB_COMPLETE));
+		CK(fs.state == (fs.partial & (KGENOME_FNTAB_P_CAP | KGENOME_FNTAB_P_DERIVE_CAP) ? KGENOME_FNTAB_OVER_BUDGET : fs.partial ? KGENOME_FNTAB_PARTIAL : KGENOME_FNTAB_COMPLETE));
 		for (i = 0; i < fs.n; i++) {
 			const struct kgenome_func *f = &fs.v[i];
-			const int exact = f->end_source == KGENOME_FN_E_SYMBOL || f->end_source == KGENOME_FN_E_UNWIND;
+			const int exact = (f->end_source == KGENOME_FN_E_SYMBOL || f->end_source == KGENOME_FN_E_UNWIND) && !(f->flags & KGENOME_FN_F_NOTYPE);
 
 			CK(f->len > 0 && f->off + f->len <= n);                                           /* inside the file, not empty */
-			CK(f->source != 0 && f->end_source != KGENOME_FN_E_NONE);                          /* named by something, ended by something */
+			CK((f->source != 0 || f->trust == KGENOME_FN_TRUST_NONE) && f->end_source != KGENOME_FN_E_NONE);   /* named by something (an unpartitioned unit by nothing), ended by something */
+			/* round 4: a unit is HIGH (declared extent) or NONE; phase 2 (2026-11-16): or DERIVED (the descent from a declared start in undeclared code), never exact by declaration */
+			CK(f->trust == (f->source == KGENOME_FN_S_UNDECLARED ? KGENOME_FN_TRUST_NONE :
+					(f->source & (KGENOME_FN_S_DERIVED_SEED | KGENOME_FN_S_DERIVED_CALL)) ? KGENOME_FN_TRUST_DERIVED : KGENOME_FN_TRUST_HIGH) &&
+			   (f->trust != KGENOME_FN_TRUST_HIGH || exact) && (f->trust != KGENOME_FN_TRUST_DERIVED || f->end_source == KGENOME_FN_E_REACH));
 			/* ELF-NO-REACH, fixed 2026-11-05: REACH (now running for every ELF row that runs WALK) closes an entry's end
 			 * without END_OPEN exactly like a declared-exact source does, but it is inferred, not declared (funcs.h), so
 			 * it joins `exact` here rather than being folded into it at line 3109 above (which other checks below key off). */
-			CK((!(f->flags & KGENOME_FN_F_END_OPEN)) == (exact || f->end_source == KGENOME_FN_E_REACH) || f->end_source == KGENOME_FN_E_NEXT_START || f->end_source == KGENOME_FN_E_TRIMMED);
+			CK((!(f->flags & KGENOME_FN_F_END_OPEN)) == (exact || f->end_source == KGENOME_FN_E_REACH) || (f->flags & KGENOME_FN_F_NOTYPE) || f->end_source == KGENOME_FN_E_NEXT_START || f->end_source == KGENOME_FN_E_TRIMMED);
 			if (i) {
 				const struct kgenome_func *q = &fs.v[i - 1u];
 				const int qexact = q->end_source == KGENOME_FN_E_SYMBOL || q->end_source == KGENOME_FN_E_UNWIND;
@@ -3135,23 +3197,32 @@ static void t_table_property(void)
 			if (!exact) {                                                                  /* a guessed end lies in a code extent that holds the start */
 				uint32_t k;
 				int inside = 0;
-				for (k = 0; k < kgenome_diag_extent_count(&o); k++) {
-					uint64_t at = 0, have = kgenome_diag_extent(&o, k, n, &at);
-					if (have && f->off >= at && f->off + f->len <= at + have) inside = 1;
-				}
+				/* the table's code extents (round 3, PMA-1/2): every executable section, or with none every executable PT_LOAD */
+				int any_x = 0;
+				for (k = 1; k < ei.sec_count; k++)
+					if ((ei.sec[k].flags & KGENOME_ELF_SHF_EXEC) && ei.sec[k].file_size) {
+						any_x = 1;
+						if (f->off >= ei.sec[k].file_off && f->off + f->len <= ei.sec[k].file_off + ei.sec[k].file_size) inside = 1;
+					}
+				for (k = 0; !any_x && k < ei.seg_count; k++)
+					if (kgenome_elf_seg_is_code(&ei.seg[k]) && f->off >= ei.seg[k].file_off && f->off + f->len <= ei.seg[k].file_off + ei.seg[k].file_size) inside = 1;
+				if (!inside) printf("  [inside iter %u] off %llx len %llu src %x trust %u es %u flags %x sec %u\n", iter, (unsigned long long)f->off, (unsigned long long)f->len, f->source, f->trust, f->end_source, f->flags, ei.sec_count);
 				CK(inside);
 			}
 			(void)j;
 		}
 		/* a symbol-table object with no unwind data: THE TABLE IS THE SYMBOL TABLE (by construction): every symbol start is an entry or inside a longer body; every entry is a symbol, with the longest length given there */
 		if (want_case == KGENOME_FNTAB_C_ELF_SYMTAB && !with_fde) {
-			CK(fs.partial == 0 && fs.status == KGENOME_OK);
+			/* (2026-11-16: the entry point is a start-only source beside the symbols; where no symbol body holds it, it is an entry of its own with an open end) */
+			CK((fs.partial & ~(uint16_t)(KGENOME_FNTAB_P_ENDS | KGENOME_FNTAB_P_UNDECLARED)) == 0 && fs.status == KGENOME_OK);
 			for (i = 0; i < fs.n; i++) {
 				uint64_t best = 0; int found = 0;
+				if (fs.v[i].source == KGENOME_FN_S_ENTRY || fs.v[i].source == KGENOME_FN_S_UNDECLARED || fs.v[i].trust == KGENOME_FN_TRUST_DERIVED)
+					continue;           /* the entry point beside the symbols; code no symbol declares (round 2), or derived in it (phase 2) */
 				for (j = 0; j < nx; j++) if (X[j].off == fs.v[i].off) { found = 1; if (X[j].len > best) best = X[j].len; }
 				CK(found);
 				/* a SIZE0 symbol is ended by the next start (a symbol above it), so its length is the oracle's; an exact length is the longest */
-				CK(fs.v[i].len == best || (fs.v[i].flags & KGENOME_FN_F_SIZE0));
+				CK(fs.v[i].len == best || (fs.v[i].flags & (KGENOME_FN_F_SIZE0 | KGENOME_FN_F_CLIPPED)));     /* a NOTYPE size is clipped to its code extent (round 3) */
 			}
 			for (j = 0; j < nx; j++) {
 				int in_table = 0;
@@ -3202,7 +3273,9 @@ int main(void)
 	t_merge_props();
 	t_ends_oracle();
 	t_with_walk_cases();
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_strategy */
 	t_walk_strategy();
+#endif
 	t_extent_matrix();
 	t_code_bytes_union();
 	t_extent_pe();
@@ -3220,7 +3293,9 @@ int main(void)
 	t_symtab_256();
 	t_extent_round2();
 	t_code_bytes_pe_null();
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_entry_edge */
 	t_walk_entry_edge();
+#endif
 	t_walk_thunk_boundary();
 	t_walk_delay_slots();
 	t_walk_zero_word_at_end();

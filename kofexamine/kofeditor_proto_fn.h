@@ -260,6 +260,19 @@ struct kof_dsrc;
 void draft_unit_items(const struct kof_editor *e, const char *stem, uint8_t utype,
 		      const char *tag, struct kof_dsrc *d);
 /*
+ * THE GATE OF THE SIGNATURE (kofeditor_gate.c; kof_draft.gate). draft_gate_offer: what the ENGINE reported for an object, in
+ * its result `res` (the explain run the viewer holds for it, view_explain), that the draft does not state yet, as conditions
+ * - KOF_FACT_ANOMALY, the anomalies of its word (kof_result.anomalies, named by kof_result.anomaly_fmt's parser);
+ * KOF_FACT_NUCLEO, the capabilities its analysis saw (kdet_nucleo_seen). out[0..cap); the answer is how many there are, more
+ * than `cap` when out was short. draft_gate_add puts one on the draft: 1, or 0 when the engine's tables do not name it
+ * (kof_diag_gate_valid), the draft has it, or the draft is full. draft_gate_text: one condition as a person reads it
+ * ("ELF SECTAB_MISSING", a capability's nucleo name), its length or 0.
+ */
+uint32_t draft_gate_offer(const struct kof_editor *e, uint16_t fact, const struct kof_result *res, struct kof_diag_when *out,
+			  uint32_t cap);
+int      draft_gate_add(struct kof_editor *e, uint16_t fact, uint64_t val);
+size_t   draft_gate_text(const struct kof_diag_when *w, char *out, size_t cap);
+/*
  * SAVE: what was ADDED is written and what was REMOVED is deleted, both by the LINK between a unit and the diagnose it was loaded
  * from (struct group.link, struct cond.link; the loaded list is kof_draft.loaded). A unit with no link is new; a loaded link that no
  * unit carries any more is removed (its file is deleted); a linked unit that still equals its file is untouched; a linked unit that no

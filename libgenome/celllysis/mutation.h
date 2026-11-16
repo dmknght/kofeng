@@ -153,10 +153,15 @@ void kgenome_mutation_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t
  * and the scanner that finds it, so it is made here and nowhere else.
  *
  * `ext` are the extents of ONE region, resolved by the caller. A region that is
- * offered a function at a time (kgenome_mutation_by_function) yields the functions of
+ * offered a function at a time (kgenome_mutation_by_function - an ELF/PE CODE region, or a
+ * script's one region ALL, once `funcs` was built by kgenome_script_funcs_build: a script the lib
+ * lexes has no separate BODY/HEADER/MARKUP here, see kof_obj_regionless) yields the functions of
  * `funcs` that lie in it, one unit each (no minimum, no grouping), except the library's - and, from the bytes alone, the clusters of
  * strings that such a region holds when .rodata shares its segment (by_bytes in
- * libgenome/celllysis/mutation_units.c). With `funcs` empty only the clusters remain. Any other region is cut by kgenome_mutation_cut at the fixed target
+ * libgenome/celllysis/mutation_units.c): an ELF/PE region with `funcs` empty keeps only the
+ * clusters (its leftover bytes are instructions the functions already cover), but a SCRIPT's
+ * leftover bytes are ordinary top-level code and keep the full content-defined cut instead
+ * (script_remainder, same file: the two formats differ here on purpose). Any other region is cut by kgenome_mutation_cut at the fixed target
  * KGENOME_MUTATION_SEG_AVG, split where it crosses a library boundary so that no unit
  * spans one. `lib` may be NULL.
  *
@@ -171,14 +176,31 @@ typedef int (*kgenome_mutation_unit_fn)(void *user, uint64_t off, uint64_t len,
 
 int kgenome_mutation_by_function(uint32_t format, uint32_t mask);
 
+/* DOES THIS FORMAT EVER CARVE A BLOCK AT ALL - the one place a tool asks before it
+ * draws a Blocks section, instead of listing formats itself (a viewer's own
+ * `fm == KGENOME_FMT_ELF || fm == KGENOME_FMT_PE` went stale the day a script
+ * started carving real blocks too: the table existed, the engine had filled it,
+ * and the viewer still said "no executable code to cut blocks from"). Every
+ * format `kgenome_mutation_by_function` ever answers yes for, for any mask,
+ * qualifies - one list, read by both. */
+int kgenome_mutation_has_blocks(uint32_t format);
+
 /*
  * WHETHER A UNIT HAS A SIGNATURE, AND OF WHAT KIND - the one switch.
  *
- * A unit that is FUNCTIONS (`first` is not NULL in the unit callback; a piece of bytes or a string cluster gets NULL) was sketched from
- * its raw 8-byte windows until 2026-10-30 (measured on same-family samples, exp_cfg/report.md: x86-64 recall 5 of 60 pairs, 0 on every
- * other architecture: a rebuild moves the instruction bytes without moving the function). Its signature is now the shape of the
- * function's control-flow graph (cfg.h), made by the engine's one signing function (kof_cfgsign_function), which also decides whether
- * the function has a reachable block (kgenome_cfg_anchor, floor one): this switch only says which KIND of sketch the unit has.
+ * A unit that is a MACHINE-CODE FUNCTION (`first` is not NULL and not kind KGENOME_FN_SCRIPT; a piece
+ * of bytes or a string cluster gets NULL) was sketched from its raw 8-byte windows until 2026-10-30
+ * (measured on same-family samples, exp_cfg/report.md: x86-64 recall 5 of 60 pairs, 0 on every
+ * other architecture: a rebuild moves the instruction bytes without moving the function), then by the shape of the function's
+ * control-flow graph (cfg.h, kof_cfgsign_function) until 2026-11-15, when the owner disabled every CFG feature. It now has NO
+ * signature (KGENOME_MUTATION_SIG_NONE): it is cut and listed, scores nothing, and every reader says why with the one spelling
+ * KGENOME_MUTATION_SIG_NONE_WHY. A CFG block a pack still carries is loaded (kgenome_mutation_block_min is unchanged) and holds 0.
+ * The CFG signing code is kept for re-enable, inside #if 0 (cfg_sign.c, analyzers/cfgsign.c and their callers).
+ *
+ * A unit that is a SCRIPT FUNCTION (`first` not NULL, kind KGENOME_FN_SCRIPT - kgenome_script_funcs_build,
+ * celllysis/script_funcs.c) is windows, not CFG: no script CFG exists (2026-11-05), so this is the same
+ * sketch the generic content-defined cut already gives any other unit, applied to the function's own byte
+ * span instead of an arbitrary window-hash boundary that may cross one.
  *
  * The answer is a state and never a zero hash that could collide with another unit's. Data units (strings, data sections, scripts,
  * documents, clusters inside a code region) keep their windows. Every reader of units - the scanner's feed, the report that locates a
@@ -186,13 +208,15 @@ int kgenome_mutation_by_function(uint32_t format, uint32_t mask);
  */
 enum kgenome_mutation_sig {
 	KGENOME_MUTATION_SIG_WINDOWS = 0,   /* the unit has a window sketch */
-	KGENOME_MUTATION_SIG_CFG     = 1    /* a function unit: the CFG sketch of its first function (kof_cfgsign_function) */
+	KGENOME_MUTATION_SIG_CFG     = 1,   /* DISABLED 2026-11-15, answered by nobody: a function unit's CFG sketch (kof_cfgsign_function, kept in #if 0) */
+	KGENOME_MUTATION_SIG_NONE    = 2    /* a machine-code function unit: no signature (CFG signing disabled by the owner 2026-11-15) */
 };
+/* Why a function unit has no signature: the one spelling the scan's notes, kofexaminer --blocks and the viewer's Blocks table print. */
+#define KGENOME_MUTATION_SIG_NONE_WHY "CFG signing disabled by the owner 2026-11-15"
 uint32_t kgenome_mutation_signature(const struct kgenome_func *first);
 
-/* kgenome_mutation_minhash for a unit that has a window sketch; 0 hashes (out untouched) for one that has none, so a caller cannot sketch a function
- * unit by windows by accident. A CFG sketch needs the decoder and the object (kof_cfgsign_function) and is a list of KGENOME_CFG_MIN_KEYS..KGENOME_CFG_KEYS u32
- * of another hash domain (KGENOME_CFG_KEY_SEED). */
+/* kgenome_mutation_minhash for a unit that has a window sketch; 0 hashes (out untouched) for one that has none (a function unit, SIG_NONE), so a caller
+ * cannot sketch a function unit by windows by accident. */
 uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const uint8_t *p,
 				       uint64_t n, uint32_t *out);
 
@@ -200,7 +224,8 @@ uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const u
  * The fewest hashes a block of this region may carry. A block cut from a function region is a CFG sketch or a window sketch of a cluster
  * of strings: the sketch of a signed function holds KGENOME_CFG_MIN_KEYS (one) or more distinct elements, so that is the floor
  * for a region that is cut a function at a time; every other region keeps KGENOME_MUTATION_MIN_HASH. ONE definition: the pack check, the
- * loader, the builder, the editor and the viewer all ask it.
+ * loader, the builder, the editor and the viewer all ask it. Kept as it was when CFG signing was disabled (2026-11-15): a pack that carries a
+ * CFG block still loads (the block then holds 0); refusing it is a pack-acceptance decision, not this change's.
  */
 uint32_t kgenome_mutation_block_min(uint32_t scan_mask);
 

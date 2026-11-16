@@ -33,6 +33,12 @@
 #include <celllysis/cfg.h>
 #include <celllysis/gview.h>
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out with the one in cfgview.c.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define KOF_CFGVIEW_NAME 64u
 #define KOF_CFGVIEW_MAX_BYTES (64ull << 20)     /* the allowance when the caller names none: ~560000 instructions (120 bytes each) */
 #define KOF_CFGVIEW_CALL_LINES 24u      /* calls listed in the text; the table holds every one */
@@ -95,4 +101,5 @@ struct kof_cfgview {
 int kof_cfgview_build(const struct kof_cfgview_req *rq, struct kof_cfgview *out);
 void kof_cfgview_free(struct kof_cfgview *v);
 
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 #endif /* KOFENG_CFGVIEW_H */

@@ -11,7 +11,7 @@
  * Microsoft.VisualBasic's CreateObject are the VBS table's.
  *
  * The evidence is the ASP.NET shells of the corpus (6 files: cmd shells in C# and VB.NET, one of them a web service) against
- * 4840 benign C# files of this machine (a decompiled Exchange server and Kaspersky's own sources). [Unverified: that is a
+ * 4840 benign C# files of this machine (a decompiled mail server and a security vendor's sources). [Unverified: that is a
  * handful of shells, so most rows are the documented API and have no malware occurrence; the benign count is large because
  * the corpus is server code and says what a server calls.]
  */

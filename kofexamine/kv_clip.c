@@ -410,6 +410,8 @@ void copy_selection(struct view *v, int as_hex)
 {
 	uint64_t lo, hi, k, n, bn = 0;
 	const uint8_t *bp;
+	struct object *ob;
+	int rendered;
 	struct out t = { 0 };
 
 	if (v->sel_a == KGENOME_BROKEN || v->sel_b == KGENOME_BROKEN)
@@ -417,10 +419,21 @@ void copy_selection(struct view *v, int as_hex)
 	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
 	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 	n = hi - lo + 1u;
-	bp = view_bytes(v, &bn);
+	/*
+	 * `sel_a`/`sel_b` are a position in whatever buffer the pane that made the selection drew -
+	 * for a rendered script pane (text_under, draw_text) that is `txt_pretty_view`'s longer, laid-
+	 * out buffer, addressed by IDENTITY (position IS the byte there), never the raw object through
+	 * `view_map` (which answers a valid-looking WRONG byte, not "no mapping", once indentation has
+	 * made the pane longer than the raw object - this read a copied "return$o" back as bytes from
+	 * an unrelated part of the file). Same split as `text_under`'s own `rendered` test.
+	 */
+	ob = text_pane(v) ? cur_obj(v) : NULL;
+	rendered = ob && txt_pretty_view(ob, &bp, &bn);
+	if (!rendered)
+		bp = view_bytes(v, &bn);
 
 	for (k = 0; k < n; k++) {
-		uint64_t bf = view_map(v, lo + k, 0);
+		uint64_t bf = rendered ? lo + k : view_map(v, lo + k, 0);
 		uint8_t c = (bp && bf < bn) ? bp[bf] : 0;
 
 		if (as_hex) {

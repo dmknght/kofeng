@@ -224,7 +224,7 @@ static uint32_t term_at(const uint8_t *cls, uint32_t first, uint32_t n_insn)
  *        `jmp reg` (a MOV/MOVZX/MOVSX/LEA that explicitly writes `reg` from an explicit MEM operand of the same
  *        shape). Not found in the block, or the producer's own base is a further register (a second hop): UNRESOLVED,
  *        and the block is left exactly as it was (a plain EXIT) - the fallback this whole feature must never regress.
- *   3    switch_find_bound_in(): a `cmp`/`sub index_reg, imm` in the SAME block, or - failing that - in the block's
+ *   3    switch_find_bound_in(): a `cmp index_reg, imm` (its guarding jump's condition read) in the SAME block, or - failing that - in the block's
  *        own SINGLE predecessor (switch_preds(): zero or more than one predecessor is not chased, cfg.h). Not found
  *        anywhere: KGENOME_CFG_SWITCH_MAX_CASES is the cost bound, and the block's `switch_capped` says so if every
  *        entry up to it still reads valid (rule 4: a cap is reported, never mistaken for the table's true end).
@@ -345,19 +345,47 @@ static int switch_find_table(const struct kgenome_cell_insn *in, uint32_t first,
 	return 0;        /* no producer in this block (cfg.h step 2: a chain across blocks is not chased) */
 }
 
-/* Step 3: a `cmp`/`sub index_reg, imm` in `in[lo, hi)`, nearest to `hi` first. 1 when found. */
-static int switch_find_bound_in(const struct kgenome_cell_insn *in, uint32_t lo, uint32_t hi, uint8_t index_reg, uint64_t *bound)
+/*
+ * Step 3: THE BOUND THE CODE STATES - the nearest `cmp index_reg, imm` in `in[lo, hi)`, read with the conditional jump after it in the range when there
+ * is one: the path into the table holds idx <= imm when it fell through `ja` or took `jbe`, idx < imm when it fell through `jae` or took `jb` (bound
+ * imm - 1); `taken`: the path reached the table through that jump taken. A guard of another kind (signed, equality, the default on the other side) states
+ * no bound (0: the cost bound applies, and says so). A cmp with no jump in the range (the guard is the predecessor's terminator, outside it) keeps imm.
+ * Before (audit AUD-7, 2026-11-16, M): the immediate of the nearest cmp OR `sub` was the bound and the jump was not read - `cmp idx, N; jae` read one
+ * entry past the table, and a `sub idx, k` (a rebase, no bound) was one. x86 condition codes (the tttn nibble: B 2, AE 3, BE 6, A 7).
+ */
+static int switch_find_bound_in(const struct kgenome_cell_insn *in, uint32_t lo, uint32_t hi, uint8_t index_reg, int taken, uint64_t *bound)
 {
-	uint32_t p = hi;
+	uint32_t p = hi, j = KGENOME_CFG_NONE;
 
 	while (p > lo) {
 		const struct kgenome_cell_insn *pi = &in[--p];
 
-		if ((pi->op == KGENOME_CELL_CMP || pi->op == KGENOME_CELL_SUB) && pi->n_op == 2u &&
-		    pi->o[0].kind == KGENOME_CELL_O_REG && pi->o[0].reg == index_reg && pi->o[1].kind == KGENOME_CELL_O_IMM) {
-			*bound = pi->o[1].imm;
-			return 1;
+		if (pi->op == KGENOME_CELL_JCC) {
+			j = p;
+			continue;
 		}
+		if (pi->op == KGENOME_CELL_CMP && pi->n_op == 2u && pi->o[0].kind == KGENOME_CELL_O_REG && pi->o[0].reg == index_reg &&
+		    pi->o[1].kind == KGENOME_CELL_O_IMM) {
+			const uint64_t imm = pi->o[1].imm;
+			unsigned cond;
+
+			if (j == KGENOME_CFG_NONE) {
+				*bound = imm;
+				return 1;
+			}
+			cond = in[j].cond ^ (taken ? 1u : 0u);  /* taken: the path holds the opposite of what falling through holds */
+			if (cond == 7u) {
+				*bound = imm;
+				return 1;
+			}
+			if (cond == 3u && imm) {
+				*bound = imm - 1u;
+				return 1;
+			}
+			return 0;
+		}
+		if (pi->wmask & (1ull << index_reg))
+			j = KGENOME_CFG_NONE;   /* the index written after a cmp further back: that cmp does not bound it */
 	}
 	return 0;
 }
@@ -447,7 +475,7 @@ static enum kgenome_status resolve_switches(const struct kgenome_cfg_req *r, con
 			continue;
 		if (!switch_find_table(r->in, b[k].first, ji, &base_va, &index_reg, &entry_size))
 			continue;        /* UNRESOLVED (step 1-2): left as a plain EXIT, exactly as before */
-		have_bound = switch_find_bound_in(r->in, b[k].first, ji, index_reg, &bound);
+		have_bound = switch_find_bound_in(r->in, b[k].first, ji, index_reg, 0, &bound);
 		if (!have_bound) {
 			if (!have_preds) {
 				if (kgenome_cfg_over(r->budget, (uint64_t)nb * sizeof *pred1)) {
@@ -466,7 +494,7 @@ static enum kgenome_status resolve_switches(const struct kgenome_cfg_req *r, con
 				const uint32_t pb = pred1[k];
 				const uint32_t pji = term_at(cls, b[pb].first, b[pb].n_insn);
 
-				have_bound = switch_find_bound_in(r->in, b[pb].first, pji, index_reg, &bound);
+				have_bound = switch_find_bound_in(r->in, b[pb].first, pji + 1u, index_reg, b[pb].succ[0] == k, &bound);
 			}
 		}
 		cap_cases = (have_bound && bound < (uint64_t)KGENOME_CFG_SWITCH_MAX_CASES - 1u) ? (uint32_t)bound + 1u : KGENOME_CFG_SWITCH_MAX_CASES;

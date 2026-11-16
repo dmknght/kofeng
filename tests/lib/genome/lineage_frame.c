@@ -16,6 +16,7 @@
  * routes to the same product; (c) no test counted builds.
  */
 #include "lineage_check.h"
+#include "lineage_raw.h"
 
 /* The allocators are wrapped at link time (UNIT_LIBS_lineage_frame in mk/tests.mk), armed only around the scan: the k-th allocation of the scan is refused, for every k. */
 void *__real_malloc(size_t n);
@@ -308,6 +309,159 @@ static int one(void *user, const struct lg_prog *p, const struct lg_cg *c, const
 	return 0;
 }
 
+/*
+ * THE POOLS UNDER PRESSURE (lineage3): a value of twenty producers (its chain in the solve's pool), a consumer of twenty (its pool), a node of
+ * twenty-two inputs (the scan's table past the view), a function that RETURNS the twenty to its caller (a summary published from the chain),
+ * scanned with the k-th allocation refused for every k and with every memory allowance from nothing up: the links that come back are a
+ * subset of the full answer, and fewer are said, never silent. (These are the lines of diag_lineage_solve.c, _state.c, _summ.c and
+ * diag_lineage.c that only a refusal reaches.)
+ */
+static void t_wide_hostile(void)
+{
+	static struct lg_img g;
+	static struct lg_cg c;
+	static struct lg_prog p;
+	static struct run_out a, m;
+	struct lg_rng rng = { 4747u };
+	unsigned long n, k;
+	uint64_t b;
+	int way, lab, lf1;
+	unsigned i;
+
+	memset(&p, 0, sizeof p);
+	p.nf = 2;
+	memset(&c, 0, sizeof c);
+	c.p = &p;
+	c.wide = 1;
+	c.word = 8;
+	c.target = LG_T_ELF64;
+	la_init(&c.a, 1);
+	lf1 = la_label(&c.a);
+	/* f0: the entry, calls f1 and hands what it returns to write */
+	c.fn_off[0] = 0;
+	la_call_label(&c.a, lf1);
+	la_mov(&c.a, LA_SI, LA_AX);
+	la_zero(&c.a, LA_DI);
+	la_call_sym(&c.a, LG_SYM_STUB(8));      /* write(0, what f1 returned) */
+	la_ret(&c.a);
+	c.fn_end[0] = c.a.n;
+	la_align(&c.a, 16);
+	/* f1: twenty mallocs, each kept in rbx on one path, read into it, and returned */
+	c.fn_off[1] = c.a.n;
+	la_bind(&c.a, lf1);
+	la_zero(&c.a, LA_BX);
+	for (i = 0; i < 20u; i++) {
+		lab = la_label(&c.a);
+		la_call_sym(&c.a, LG_SYM_STUB(3));
+		la_test(&c.a, LA_AX);
+		la_jcc_label(&c.a, 4u, lab);
+		la_mov(&c.a, LA_BX, LA_AX);
+		la_bind(&c.a, lab);
+	}
+	la_mov(&c.a, LA_SI, LA_BX);
+	la_zero(&c.a, LA_DI);
+	la_call_sym(&c.a, LG_SYM_STUB(7));      /* read(0, rbx) */
+	la_mov(&c.a, LA_AX, LA_BX);
+	la_ret(&c.a);
+	c.fn_end[1] = c.a.n;
+	CK(la_resolve_labels(&c.a));
+	CK(lg_build(&g, &c, &rng, 1));
+	if (!scan_one(&g, LG_T_ELF64, KGENOME_LINEAGE_S_ALL, 0, 0, &a))
+		return;
+	CK(a.status == KGENOME_OK && a.links.n >= 8);
+	for (way = 5; way <= 8; way++) {
+		if (way == 7)
+			continue;
+		fail_k = 0;
+		if (!scan_one(&g, LG_T_ELF64, KGENOME_LINEAGE_S_ALL, way, 0, &m))
+			continue;
+		n = alloc_seen;
+		for (k = 1; k <= n; k++) {
+			fail_k = k;
+			if (!scan_one(&g, LG_T_ELF64, KGENOME_LINEAGE_S_ALL, way, 0, &m)) {
+				n_oom_null++;
+				continue;
+			}
+			n_oom++;
+			CK(m.links.n <= a.links.n);
+			CK(m.links.n == a.links.n || m.status != KGENOME_OK);
+		}
+		fail_k = 0;
+	}
+	for (b = 0; b < (1u << 20); b = b ? b + b / 8u + 1u : 1u) {
+		if (!scan_one(&g, LG_T_ELF64, KGENOME_LINEAGE_S_ALL, 4, b, &m))
+			continue;
+		n_budget++;
+		CK(m.links.n <= a.links.n);
+		CK(m.links.n == a.links.n || m.status != KGENOME_OK);
+	}
+}
+
+/* THE STAGER UNDER PRESSURE: a system call whose NUMBER is connect's result (the node's number class and its NUMBER links: nr_write) and the
+ * inputs past the view, with the k-th allocation refused for every k: never more links than the full scan, and fewer only with a status. */
+static int raw_scan(const struct rawelf *e, uint32_t *links, enum kgenome_status *st)
+{
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_diag_inputs in;
+	struct kgenome_diag_scan *ds;
+	uint32_t i, n;
+
+	memset(&o, 0, sizeof o);
+	memset(&in, 0, sizeof in);
+	if (!kgenome_elf_image_parse(kof_buf_make(e->b, e->n), &ei, &o))
+		return 0;
+	o.file_header = &ei;
+	alloc_seen = 0;
+	armed = 1;
+	ds = kgenome_diag_scan_with_inputs(&o, e->b, e->n, KGENOME_DIAG_RUN_SYSCALL | KGENOME_DIAG_RUN_LINEAGE, &in);
+	armed = 0;
+	if (!ds)
+		return 0;
+	n = kgenome_diag_scan_count(ds);
+	*links = 0;
+	for (i = 0; i < n; i++)
+		*links += kgenome_diag_in_count(ds, i);
+	*st = kgenome_diag_scan_status(ds);
+	kgenome_diag_scan_free(ds);
+	return 1;
+}
+
+static void t_stager_hostile(void)
+{
+	static struct rawelf e;
+	uint32_t full, got, jok, jexit;
+	unsigned long n, k;
+	enum kgenome_status st;
+
+	re_init(&e, 1);
+	re_b(&e, "31 ff be 00 10 00 00 ba 07 00 00 00 41 ba 22 00 00 00 49 c7 c0 ff ff ff ff 45 31 c9 b8 09 00 00 00 0f 05");  /* mmap */
+	re_b(&e, "50");                                                         /* push rax */
+	re_b(&e, "bf 02 00 00 00 be 01 00 00 00 31 d2 b8 29 00 00 00 0f 05");  /* socket */
+	re_b(&e, "48 89 c7 6a 00 48 89 e6 ba 10 00 00 00 b8 2a 00 00 00 0f 05 59");   /* connect(socket, rsp, 16); pop rcx */
+	re_b(&e, "48 85 c0 79 00");                                             /* test; jns ok */
+	jok = re_here(&e) - 1u;
+	re_b(&e, "b8 3c 00 00 00 0f 05");                                       /* exit */
+	jexit = re_here(&e);
+	re_b(&e, "5e ba 00 01 00 00 0f 05 ff e6");                              /* ok: pop rsi; read (number: connect's 0); jmp rsi */
+	re_fix8(&e, jok, jexit);
+	re_finish(&e);
+	CK(raw_scan(&e, &full, &st));
+	CK(st == KGENOME_OK && full >= 4u);
+	n = alloc_seen;
+	for (k = 1; k <= n; k++) {
+		fail_k = k;
+		if (!raw_scan(&e, &got, &st)) {
+			n_oom_null++;
+			continue;
+		}
+		n_oom++;
+		CK(got <= full);
+		CK(got == full || st != KGENOME_OK);
+	}
+	fail_k = 0;
+}
+
 int main(int argc, char **argv)
 {
 	const unsigned feat = LG_F_CALL | LG_F_LOOP | LG_F_ICALL | LG_F_TAIL | LG_F_MEM;
@@ -316,6 +470,8 @@ int main(int argc, char **argv)
 
 	hk_args(argc, argv);
 	CK(lg_each(feat, (int)(40 * hk_scale()), 321, NULL, &programs, one, &stages) == 0);
+	t_wide_hostile();
+	t_stager_hostile();
 	CK(n_oom > 2000 && n_oom_null > 0 && n_badframe > 20);
 	{ int t; for (t = 0; t < 8; t++) if (worst_dec[t]) printf("  target %d: an offset decoded at most %u times in one scan\n", t, worst_dec[t]); }
 	CK(n_scans > 100 && n_links > 0 && n_hits > 0 && n_built_empty > 0 && n_bogus > 100 && n_budget > 300 && n_poison > 100);

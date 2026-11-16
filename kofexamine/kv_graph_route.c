@@ -327,14 +327,22 @@ static void tracks_plain(struct kv_graph_lay *L, uint32_t i, uint32_t j)
 }
 
 /* The tracks of one channel with the rule that keeps two lines from sharing a column: a run that starts at the top of the channel on column c lies ABOVE a run that ends at the
- * bottom of it on c (a line comes down to its track and stops, the other starts below it). Runs are taken in an order that respects that and each goes on the first track
- * below the ones it must be above and clear of the runs already there; a cycle of such demands (not satisfiable) is broken at the run that comes first in the sort. */
+ * bottom of it on c (a line comes down to its track and stops, the other starts below it). And the rule that keeps a line from CROSSING one it need not cross: the vertical
+ * line a run comes down from the top of the channel by (its top column) crosses every run ABOVE it whose span holds that column, and the line it goes on down by (its bottom
+ * column) every run BELOW it whose span holds that one - so a run whose top column is inside another's span lies above it, and a run whose span holds another's bottom column
+ * lies above that one too. Two edges leaving one box side by side for targets further right were drawn crossing (`└┼┼──┐`: the left one took the top track and every line
+ * on its right went down through it), which reads as a junction of links that do not meet (2026-11-14, the Lineage tab of msfvenom's Windows stager and of Mirai).
+ * Runs are taken in an order that respects these and each goes on the first track below the ones it must be above and clear of the runs already there; a cycle of such
+ * demands (two runs that cross whatever their order, an X) is broken at the run that comes first in the sort. */
+/* KNOWN DEFECT LV-D4 (2026-11-17, M) [sev L]: tracks_ordered and the ports can put the corner of one wire on the run of a wire of ANOTHER source: a T-junction the reader
+ * reads as a link that does not exist. Trigger: dense lineage DAGs (lin_truth drv/lgf rand SEED 3000 8|20|40 dag: 1/4/6 graphs); 0 in set356. Effect: a false link read off
+ * the picture. Not located further than the routing phase. Fix: refuse a corner on a cell another source's run holds (move the run to a new track). */
 static void tracks_ordered(struct kv_graph_lay *L, uint32_t i0, uint32_t j0)
 {
 	const uint32_t n = j0 - i0;
-	uint8_t after[PREC_MAX][PREC_MAX / 8u], placed[PREC_MAX];
-	uint16_t indeg[PREC_MAX], min_t[PREC_MAX];
-	uint32_t a, b, done = 0;
+	uint8_t after[2][PREC_MAX][PREC_MAX / 8u], placed[PREC_MAX];     /* [0] a line would share a column (kept), [1] a line would cross (kept when it can be) */
+	uint16_t indeg[2][PREC_MAX], min_t[PREC_MAX];
+	uint32_t a, b, done = 0, h;
 
 	memset(after, 0, sizeof after);
 	memset(placed, 0, sizeof placed);
@@ -343,24 +351,33 @@ static void tracks_ordered(struct kv_graph_lay *L, uint32_t i0, uint32_t j0)
 	for (a = 0; a < n; a++)
 		for (b = 0; b < n; b++) {
 			const struct kv_graph_hp *p = &L->hp[i0 + a], *q = &L->hp[i0 + b];
+			int share, top_in, bot_in;
 
-			if (a == b || p->wire == q->wire || q->bot == NOCOL || (p->top0 != q->bot && p->top1 != q->bot))
+			if (a == b || p->wire == q->wire)
 				continue;
-			if (!(after[a][b / 8u] & (1u << (b % 8u)))) {
-				after[a][b / 8u] |= (uint8_t)(1u << (b % 8u));
-				indeg[b]++;
-			}
+			share = q->bot != NOCOL && (p->top0 == q->bot || p->top1 == q->bot);
+			top_in = (p->top0 != NOCOL && p->top0 > q->lo && p->top0 < q->hi) || (p->top1 != NOCOL && p->top1 > q->lo && p->top1 < q->hi);
+			bot_in = q->bot != NOCOL && q->bot > p->lo && q->bot < p->hi;
+			h = share ? 0u : 1u;
+			if (!(share || top_in || bot_in) || (after[h][a][b / 8u] & (1u << (b % 8u))))
+				continue;
+			after[h][a][b / 8u] |= (uint8_t)(1u << (b % 8u));
+			indeg[h][b]++;
 		}
+	/* a run nothing must be above first; then one that only a crossing would be above (the crossing is drawn: a `+`, never a shared column); a cycle of the
+	 * column rule itself: the first run left */
 	while (done < n) {
 		uint32_t pick = n, t;
 
 		for (a = 0; a < n && pick == n; a++)
-			if (!placed[a] && !indeg[a])
+			if (!placed[a] && !indeg[0][a] && !indeg[1][a])
 				pick = a;
-		if (pick == n)                  /* a cycle: the first run left */
-			for (a = 0; a < n && pick == n; a++)
-				if (!placed[a])
-					pick = a;
+		for (a = 0; a < n && pick == n; a++)
+			if (!placed[a] && !indeg[0][a])
+				pick = a;
+		for (a = 0; a < n && pick == n; a++)
+			if (!placed[a])
+				pick = a;
 		for (t = min_t[pick];; t++) {
 			int clash = 0;
 
@@ -372,13 +389,14 @@ static void tracks_ordered(struct kv_graph_lay *L, uint32_t i0, uint32_t j0)
 		L->hp[i0 + pick].track = t;
 		placed[pick] = 1;
 		done++;
-		for (b = 0; b < n; b++)
-			if ((after[pick][b / 8u] & (1u << (b % 8u))) && !placed[b]) {
-				if (indeg[b])
-					indeg[b]--;
-				if (min_t[b] < t + 1u)
-					min_t[b] = (uint16_t)(t + 1u);
-			}
+		for (h = 0; h < 2u; h++)
+			for (b = 0; b < n; b++)
+				if ((after[h][pick][b / 8u] & (1u << (b % 8u))) && !placed[b]) {
+					if (indeg[h][b])
+						indeg[h][b]--;
+					if (min_t[b] < t + 1u)
+						min_t[b] = (uint16_t)(t + 1u);
+				}
 	}
 }
 

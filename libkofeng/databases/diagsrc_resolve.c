@@ -43,6 +43,46 @@ static int fmt_set(const char *words, uint64_t *set)
 }
 
 /*
+ * THE GATE OF A SIGNATURE (kofmod/kofdiagtree.h, scanners/objctx_diag_gate.c): one more condition of the record, under the
+ * record's own bound (KOF_DIAG_MAX_WHEN: refused past it, never cut), and the same condition twice is refused - it says
+ * nothing the first did not, and a list that holds it cannot be told from one that does not. The names were checked by the
+ * reader against the engine's tables (kof_diag_gate_valid).
+ */
+static void resolve_gate(const struct kof_dsrc_item *it, struct kof_dsrc_view *v, const struct kof_dsrc_report *r, int *errs)
+{
+	uint16_t fact = it->kind == KDS_ANOMALY ? (uint16_t)KOF_FACT_ANOMALY : (uint16_t)KOF_FACT_NUCLEO;
+	uint64_t val = it->kind == KDS_ANOMALY ? ((uint64_t)it->a << 32) | it->b : (uint64_t)it->a;
+	int k;
+
+	if (v->n_when >= (int)KOF_DIAG_MAX_WHEN) {
+		kof_dsrc_say_err(r, errs, (int)it->line, "too many conditions");
+		return;
+	}
+	for (k = 0; k < v->n_when; k++)
+		if (v->when[k].fact == fact && v->when[k].val == val) {
+			kof_dsrc_say_err(r, errs, (int)it->line, "the same condition twice");
+			return;
+		}
+	v->when[v->n_when].fact = fact;
+	v->when[v->n_when].val = val;
+	v->n_when++;
+}
+
+/* A NUCLEO CONDITION IS ASKED AFTER A FORM'S EXPRESSION (scanners/objctx_diag_gate.c); a graph names its capabilities as
+ * nodes, and its gate runs before the analysis that would answer one. */
+static void gate_of_graph(const struct kof_dsrc_view *v, const struct kof_dsrc_report *r, int *errs, int last)
+{
+	int i;
+
+	for (i = 0; i < v->n_when; i++)
+		if (v->when[i].fact == KOF_FACT_NUCLEO) {
+			kof_dsrc_say_err(r, errs, last, "KOF_DIAG_HAS_NUCLEO is a condition of a detection form, "
+				"not of a graph: a graph declares its capabilities as nodes");
+			return;
+		}
+}
+
+/*
  * THE RULES ABOUT WHAT A DIAGNOSE MAY SAY, in one place, in the order the file
  * says it - several are about order (a tail before the head, a sequence after
  * the head it makes) and an error names the line that broke it.
@@ -52,6 +92,10 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 {
 	struct { char label[32]; char name[KOF_DSRC_NAME_LEN]; int used; } sy[8];
 	int n_sym = 0, errs = 0, i, has_form = 0;
+	/* The heads read so far (at most two: KOF_DIAG_DECLARE_JOIN), the node index of the current one, and the joins
+	 * with the line each was written on. */
+	int n_head = 0, cur_head = 0, head2 = -1, n_join = 0;
+	struct { uint16_t cap; int line; } jn[8];
 	uint32_t q;
 	int last = (int)d->lines;
 
@@ -148,15 +192,43 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			v->when[v->n_when].val = it->v;
 			v->n_when++;
 			break;
+		case KDS_ANOMALY:
+		case KDS_NUCLEO:
+			resolve_gate(it, v, r, &errs);
+			break;
 		case KDS_HEAD:
-			if (v->n_nd) {
-				kof_dsrc_say_err(r, &errs, ln, "a diagnose has one head");
+			/*
+			 * ONE HEAD, OR TWO THAT MEET (owner, 2026-11-14): a second head starts a second block, whose
+			 * tails follow it, and the diagnose must say where the two meet (KOF_DIAG_DECLARE_JOIN, checked
+			 * after the list). A third is refused: the record names the second root as the join's, and a
+			 * shape with three origins has not been needed (msfvenom's read has two: the region and the socket).
+			 */
+			if (n_head >= 2) {
+				kof_dsrc_say_err(r, &errs, ln, "a diagnose has at most two heads");
 				break;
 			}
-			nd = &v->nd[0];
+			if (v->n_nd >= (int)KOF_DSRC_MAX_NODE) {
+				kof_dsrc_say_err(r, &errs, ln,
+					"too many nodes in one diagnose");
+				break;
+			}
+			cur_head = v->n_nd;
+			if (n_head == 1)
+				head2 = cur_head;
+			nd = &v->nd[v->n_nd++];
 			nd->cap = it->a;
 			nd->flags = it->b;
-			v->n_nd = 1;
+			nd->parent = (uint8_t)KOF_DIAG_NO_PARENT;
+			n_head++;
+			break;
+		case KDS_JOIN:
+			if (n_join >= (int)(sizeof jn / sizeof jn[0])) {
+				kof_dsrc_say_err(r, &errs, ln, "too many joins");
+				break;
+			}
+			jn[n_join].cap = it->a;
+			jn[n_join].line = ln;
+			n_join++;
 			break;
 		case KDS_TAIL:
 			if (v->n_nd >= (int)KOF_DSRC_MAX_NODE) {
@@ -172,6 +244,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			nd = &v->nd[v->n_nd++];
 			nd->cap = it->a;
 			nd->bits |= (uint8_t)it->b;
+			nd->parent = (uint8_t)cur_head;
 			break;
 		case KDS_ACTION:
 			if (v->n_nd >= (int)KOF_DSRC_MAX_NODE) {
@@ -180,8 +253,8 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 				break;
 			}
 			/* The first word restates the head, so the line reads on
-			 * its own; it must be the head this diagnose declared. */
-			if (!v->n_nd || it->a != v->nd[0].cap) {
+			 * its own; it must be the head of the block it is written in. */
+			if (!v->n_nd || it->a != v->nd[cur_head].cap) {
 				kof_dsrc_say_err(r, &errs, ln,
 					"KOF_DIAG_ACTION names a block that "
 					"is not this diagnose's head");
@@ -191,6 +264,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			nd->cap = it->b;
 			nd->val = it->v;
 			nd->bits |= KOF_DIAG_B_VAL;
+			nd->parent = (uint8_t)cur_head;
 			break;
 		case KDS_SYMBOL:
 			if (n_sym >= (int)(sizeof sy / sizeof sy[0])) {
@@ -292,6 +366,8 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 	if (has_form && (v->n_nd || v->analysis || v->n_ref || v->has_seq))
 		kof_dsrc_say_err(r, &errs, last, "a diagnose is a graph or a form: this one declares "
 			"both a head, an analysis or a symbol and the declarations of a form");
+	if (!has_form)
+		gate_of_graph(v, r, &errs, last);
 	if (!v->name[0])
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs KOF_DIAG_NAME");
 	/* The four catalog declarations go together: a diagnose with some of them has a
@@ -307,17 +383,53 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 	if (!v->n_nd)
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs a head");
 	/*
+	 * THE JOIN: the second block's node of that capability (exactly one there) is marked, and the engine binds it only
+	 * where it reaches what the first block bound (KOF_DIAG_B_JOIN). Two heads without a join are two diagnoses; a
+	 * join without a second head has nothing to meet; a sequence makes THE head, and there are two.
+	 */
+	if (n_head == 2 && !n_join)
+		kof_dsrc_say_err(r, &errs, last, "two heads need KOF_DIAG_DECLARE_JOIN(cap): "
+			"the node of the second block where the two blocks meet");
+	if (n_head == 2 && v->has_seq)
+		kof_dsrc_say_err(r, &errs, last, "a diagnose of two heads cannot declare a sequence: "
+			"the sequence makes THE head");
+	for (i = 0; i < n_join; i++) {
+		int k, hit = -1, hits = 0;
+
+		if (head2 < 0) {
+			kof_dsrc_say_err(r, &errs, jn[i].line, "KOF_DIAG_DECLARE_JOIN needs a second "
+				"KOF_DIAG_DECLARE_HEAD: it names where two blocks meet");
+			break;
+		}
+		for (k = head2; k < v->n_nd; k++)
+			if (v->nd[k].cap == jn[i].cap) {
+				hit = k;
+				hits++;
+			}
+		if (hits != 1) {
+			kof_dsrc_say_err(r, &errs, jn[i].line, hits
+				? "that capability is in the second block more than once"
+				: "no node of that capability in the second block");
+			continue;
+		}
+		if (v->nd[hit].bits & KOF_DIAG_B_JOIN)
+			kof_dsrc_say_err(r, &errs, jn[i].line, "declared twice");
+		v->nd[hit].bits |= KOF_DIAG_B_JOIN;
+	}
+	/*
 	 * AND THE ANCHOR MUST BE RARE, which is a cost statement and not a
 	 * correctness one - see the note on anchors in kofmod/kofdiagtree.h.
 	 * Matching starts by trying every node that could be the root, so a
 	 * root of READ costs one descent per read in the object; one 1.1 MB
 	 * sample here holds 447 indirect calls.
 	 */
-	if (v->n_nd && (v->nd[0].cap == KGENOME_NUCLEO_READ ||
-			v->nd[0].cap == KGENOME_NUCLEO_WRITE ||
-			v->nd[0].cap == KGENOME_NUCLEO_EXEC_REG))
-		kof_dsrc_say_warn(r, "anchoring on a common capability - every one in "
-			    "the object starts a descent");
+	for (i = 0; i < v->n_nd; i++)
+		if (v->nd[i].parent == KOF_DIAG_NO_PARENT &&
+		    (v->nd[i].cap == KGENOME_NUCLEO_READ ||
+		     v->nd[i].cap == KGENOME_NUCLEO_WRITE ||
+		     v->nd[i].cap == KGENOME_NUCLEO_EXEC_REG))
+			kof_dsrc_say_warn(r, "anchoring on a common capability - every one in "
+				    "the object starts a descent");
 	for (i = 0; i < n_sym; i++)
 		if (!sy[i].used)
 			kof_dsrc_say_err(r, &errs, last,
@@ -374,11 +486,18 @@ static uint64_t mix(uint64_t h, uint64_t x)
 uint64_t kof_dsrc_view_body_hash(const struct kof_dsrc_view *v)
 {
 	uint64_t h = 1469598103934665603ull;
-	int i;
+	int i, heads = 0;
 	const char *p;
 
+	for (i = 0; i < v->n_nd; i++)
+		heads += v->nd[i].parent == KOF_DIAG_NO_PARENT;
 	h = mix(h, v->analysis);
 	h = mix(h, (uint64_t)v->n_nd);
+	/* WHICH HEAD A NODE HANGS FROM, when there are two: the same nodes in two blocks cut differently are two
+	 * diagnoses. A one-block diagnose mixes nothing more, so every hash made before two blocks existed stands. */
+	if (heads > 1)
+		for (i = 0; i < v->n_nd; i++)
+			h = mix(h, v->nd[i].parent);
 	for (i = 0; i < v->n_nd; i++) {
 		h = mix(h, v->nd[i].cap);
 		h = mix(h, v->nd[i].flags);

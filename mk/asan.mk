@@ -31,6 +31,14 @@ define NL
 
 endef
 
+# Linux only. The halting run below asks for detect_leaks, which LeakSanitizer provides on
+# Linux alone (a Windows sanitizer runtime has no leak checker), and a test that links the
+# collectors or the wraps of mk/tests.mk is a Linux test anyway. Said, not left to fail.
+ifeq ($(NATIVE_OS),windows)
+unit-asan:
+	$(error unit-asan is a Linux target: the sanitised suite needs LeakSanitizer (detect_leaks), which Windows does not have)
+else
+
 #
 # The emulator goes in too. It is the newest code here and the one that owns the
 # most raw memory - a sparse page table, lazily committed mappings and the
@@ -40,8 +48,8 @@ endef
 $(ASAN_LIB): $(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(TX_SRC) $(UC_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
 	@$(call MKDIR,$(TEST)/asan-obj)
-	@# EMU_INC on every loop: libkofeng's own sources include the decoder's
-	@# header, and this target has no per-directory rules to supply the path.
+# EMU_INC on every loop: libkofeng's own sources include the decoder's
+# header, and this target has no per-directory rules to supply the path.
 	@$(foreach f,$(LIB_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(PH_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
@@ -106,5 +114,6 @@ $(ASAN_RUN): run-%: %
 unit-asan: fixtures test-sigs $(ASAN_RUN)
 	$(info all $(words $(ASAN_BIN) $(LIBTEST_ASAN_BIN)) sanitized test(s) passed)
 	@$(NOOP)
+endif
 
 #

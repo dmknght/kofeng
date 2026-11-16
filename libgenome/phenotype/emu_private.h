@@ -2,12 +2,14 @@
  * emu_private.h - what the interpreter's files share. NOT PART OF THE SURFACE.
  *
  * emu.h is what a caller reads. This is what the files that make up the
- * emulator read from each other: the structs the run state is built of, the
- * constants that bound a run, and the functions one file offers another. They
- * are in separate files for size and for meaning (memory, the Linux
- * environment, the Windows one, the x87 and vector instruction groups), and
- * the instruction dispatch stays in one file so the compiler can see all of
- * it. Private to libgenome/phenotype/.
+ * emulator's CORE read from each other: the structs the run state is built of,
+ * the constants that bound a run, the dispatch table an architecture is an
+ * entry of (struct kgenome_emu_arch), and the functions one file offers
+ * another. The core is memory (emu_mem.c), construction and the host's
+ * setters (emu_api.c), the run loop (emu_run_private.h, made once per entry),
+ * the Linux environment (emu_sys.c) and the Windows one (emu_win*.c, whose own
+ * header is emu_win_private.h). The x86 entry's files share emu_x86_private.h.
+ * Private to libgenome/phenotype/.
  */
 #ifndef KGENOME_EMU_PRIVATE_H
 #define KGENOME_EMU_PRIVATE_H
@@ -33,7 +35,9 @@
 
 /*
  * A DECODED INSTRUCTION WITH ITS OPERANDS BUILT, which is what the interpreter
- * executes and what the instruction cache keeps. genotype builds operands on
+ * executes and what the instruction cache keeps. The x86 entry's form (the one
+ * entry today); a second architecture's decoded form joins it here, because the
+ * cache the core keeps holds whichever the machine runs. genotype builds operands on
  * request; the interpreter asks for all of them once, at decode, so that the
  * execute switch reads plain fields and a cached instruction costs nothing to
  * run again.
@@ -186,7 +190,126 @@ static inline int kgenome_emu_wrange_has(const struct kgenome_emu_wrange *r, uin
 	return 0;
 }
 
+/*
+ * THE x86 ENTRY'S OWN REGISTER STATE BEYOND THE GENERAL REGISTERS: the vector, MMX and x87 files and
+ * their control words. Only the x86 entry of the dispatch table (emu_x86.c and the instruction groups
+ * of emu_x86_private.h) reads or writes it; the general registers, the program counter and the flags
+ * word stay in struct kgenome_emu because the core (the loop, the environments) reads them through the
+ * entry's register roles (struct kgenome_emu_arch).
+ */
+struct kgenome_emu_x86 {
+	/*
+	 * SSE, BECAUSE A GO RUNTIME CANNOT START WITHOUT IT.
+	 *
+	 * Not vector arithmetic - the moves, the bitwise ops and the byte
+	 * compare that memmove, memset and the string routines are built from.
+	 * That is what a packer's runtime executes before it ever reaches its
+	 * own unpacking code.
+	 */
+	uint8_t xmm[16][16];
+
+	/*
+	 * THE MMX REGISTERS, AND THEY ARE HERE BECAUSE A VIRUS HIDES IN THEM.
+	 *
+	 * Nothing that unpacks a payload needs MMX arithmetic, and this does
+	 * not have any. What it has is the eight registers, because they are
+	 * used as a PLACE TO PUT SOMETHING an emulator will not follow:
+	 * Sality's decryptor begins
+	 *
+	 *     call $+5 ; pop ebp      the address of itself
+	 *     movd mm2, ebp           put it somewhere unusual
+	 *     movd edi, mm2           take it back
+	 *     add edi, 0x20c ; push edi ; ret
+	 *
+	 * and an interpreter without these registers either stops at the movd
+	 * or reads back a zero and returns into nothing. Measured: the run
+	 * ended after THREE instructions, "MOVD mm2, ebp", on every Sality
+	 * sample here.
+	 *
+	 * SEPARATE FROM THE x87 STACK, which is a simplification and not the
+	 * hardware: on a real CPU mm0-mm7 ARE st(0)-st(7)'s mantissas, and
+	 * writing one is visible in the other. A program that deliberately
+	 * interleaved the two would see them as independent here. Nothing that
+	 * hides an address in an MMX register does that - the point of the
+	 * trick is that the value comes back unchanged - and modelling the
+	 * alias would mean modelling the x87 tag word for no reader's benefit.
+	 */
+	uint8_t mmx[8][8];
+
+	/*
+	 * ---- THE x87 REGISTER STACK, AND WHY IT IS HERE AT ALL -------------
+	 *
+	 * It used to not be. x87 was carried only far enough to answer "where
+	 * am I" - FNSTENV reports the address of the last x87 instruction, and
+	 * every Metasploit x86 encoder uses that to find itself - so the
+	 * instructions a GetPC sequence picks from were executed as no-ops that
+	 * set `fpu_rip`, and everything that COMPUTES was deliberately left to
+	 * the unsupported path. The argument was sound: an object that really
+	 * divides would otherwise run on with a wrong st0 and never say so.
+	 *
+	 * WHAT CHANGED IS THAT SOMETHING REALLY DIVIDED. A Sality sample
+	 * reaches `FDIV st0, dword ptr [edx]` seven million instructions in and
+	 * the run ends there. Polymorphic bodies use the FPU as filler, and
+	 * filler is still executed. So the choice is between stopping on it and
+	 * computing it, and computing it correctly is not a large thing.
+	 *
+	 * EIGHT DOUBLES AND A TOP POINTER. The hardware's registers are 80-bit
+	 * extended, and these are 64-bit doubles: eleven bits of mantissa and
+	 * some exponent range are lost. That is a real difference and it is the
+	 * right trade here - a guest whose control flow depends on the 64th
+	 * mantissa bit of an intermediate is not a thing that has been
+	 * measured, and modelling extended precision in software would cost far
+	 * more than every x87 instruction this has ever met.
+	 *
+	 * The memory formats ARE exact: m32, m64 and m80 are read and written
+	 * at their true widths, so a value stored and reloaded round-trips
+	 * through whatever the guest chose - it is only the register that is
+	 * narrower.
+	 *
+	 * ST(i) IS st[(top + i) & 7]. the decoder reports an x87 operand's `Reg`
+	 * as that relative index already, so a case here never computes it.
+	 */
+	double   st[8];
+	/* 0 empty; 1 in use, its tag read off the value (valid, zero or special); 2-4 in use with the tag a restore loaded
+	 * (FLDENV, FRSTOR): valid, zero, special - 2 + the architectural 2-bit tag. The next write of the register makes
+	 * it 1 again. */
+	uint8_t  st_tag[8];
+	uint8_t  st_top;
+	/*
+	 * The status word's condition codes. C0, C2 and C3 are what a compare
+	 * leaves and what FNSTSW hands to a guest that branches on it; C1 is
+	 * the stack-fault direction and nothing here reads it.
+	 */
+	uint16_t fsw;
+	/*
+	 * The control word (FLDCW sets it, FNSTCW, FNSTENV and FXSAVE report it, FINIT resets it to 037FH) and
+	 * the opcode of the last non-control x87 instruction (FOP, 11 bits). Only its RC field is acted on, by
+	 * FIST/FISTP and FRNDINT; every exception stays masked and the arithmetic rounds to nearest.
+	 */
+	uint16_t fcw;
+	uint16_t fop;
+
+	/* The address of the last x87 instruction that was not a control one.
+	 * FNSTENV reports it, and that report is the only reason x87 is here at
+	 * all - see the note on the FPU cases in the run loop. */
+	uint64_t fpu_rip;
+	/* The operand address of the last x87 instruction that had a memory operand (FDP). */
+	uint64_t fpu_dp;
+
+	/*
+	 * The SSE control word, remembered and otherwise ignored: scalar
+	 * arithmetic here runs on the host's own double, so a rounding mode
+	 * stored in it would change nothing. Kept so a caller that saves it and
+	 * restores it reads back what it wrote, which is all any of them check.
+	 */
+	uint32_t mxcsr;
+};
+
+struct kgenome_emu_arch;
+
 struct kgenome_emu {
+	/* The entry of the dispatch table this machine runs: see struct kgenome_emu_arch. */
+	const struct kgenome_emu_arch *arch;
 	struct kgenome_emu_page *tab;
 	uint32_t     tab_mask;        /* size - 1; size is a power of two */
 	uint32_t     n_pages, max_pages;
@@ -328,95 +451,10 @@ struct kgenome_emu {
 	struct kgenome_emu_syscall syslog[KGENOME_EMU_SYSLOG];
 	uint32_t n_syslog;
 
-	/*
-	 * SSE, BECAUSE A GO RUNTIME CANNOT START WITHOUT IT.
-	 *
-	 * Not vector arithmetic - the moves, the bitwise ops and the byte
-	 * compare that memmove, memset and the string routines are built from.
-	 * That is what a packer's runtime executes before it ever reaches its
-	 * own unpacking code.
-	 */
-	uint8_t xmm[16][16];
-	/*
-	 * THE MMX REGISTERS, AND THEY ARE HERE BECAUSE A VIRUS HIDES IN THEM.
-	 *
-	 * Nothing that unpacks a payload needs MMX arithmetic, and this does
-	 * not have any. What it has is the eight registers, because they are
-	 * used as a PLACE TO PUT SOMETHING an emulator will not follow:
-	 * Sality's decryptor begins
-	 *
-	 *     call $+5 ; pop ebp      the address of itself
-	 *     movd mm2, ebp           put it somewhere unusual
-	 *     movd edi, mm2           take it back
-	 *     add edi, 0x20c ; push edi ; ret
-	 *
-	 * and an interpreter without these registers either stops at the movd
-	 * or reads back a zero and returns into nothing. Measured: the run
-	 * ended after THREE instructions, "MOVD mm2, ebp", on every Sality
-	 * sample here.
-	 *
-	 * SEPARATE FROM THE x87 STACK, which is a simplification and not the
-	 * hardware: on a real CPU mm0-mm7 ARE st(0)-st(7)'s mantissas, and
-	 * writing one is visible in the other. A program that deliberately
-	 * interleaved the two would see them as independent here. Nothing that
-	 * hides an address in an MMX register does that - the point of the
-	 * trick is that the value comes back unchanged - and modelling the
-	 * alias would mean modelling the x87 tag word for no reader's benefit.
-	 */
-	uint8_t mmx[8][8];
+	/* The x86 entry's vector and FPU state - see struct kgenome_emu_x86. */
+	struct kgenome_emu_x86 x86;
 
-	/*
-	 * ---- THE x87 REGISTER STACK, AND WHY IT IS HERE AT ALL -------------
-	 *
-	 * It used to not be. x87 was carried only far enough to answer "where
-	 * am I" - FNSTENV reports the address of the last x87 instruction, and
-	 * every Metasploit x86 encoder uses that to find itself - so the
-	 * instructions a GetPC sequence picks from were executed as no-ops that
-	 * set `fpu_rip`, and everything that COMPUTES was deliberately left to
-	 * the unsupported path. The argument was sound: an object that really
-	 * divides would otherwise run on with a wrong st0 and never say so.
-	 *
-	 * WHAT CHANGED IS THAT SOMETHING REALLY DIVIDED. A Sality sample
-	 * reaches `FDIV st0, dword ptr [edx]` seven million instructions in and
-	 * the run ends there. Polymorphic bodies use the FPU as filler, and
-	 * filler is still executed. So the choice is between stopping on it and
-	 * computing it, and computing it correctly is not a large thing.
-	 *
-	 * EIGHT DOUBLES AND A TOP POINTER. The hardware's registers are 80-bit
-	 * extended, and these are 64-bit doubles: eleven bits of mantissa and
-	 * some exponent range are lost. That is a real difference and it is the
-	 * right trade here - a guest whose control flow depends on the 64th
-	 * mantissa bit of an intermediate is not a thing that has been
-	 * measured, and modelling extended precision in software would cost far
-	 * more than every x87 instruction this has ever met.
-	 *
-	 * The memory formats ARE exact: m32, m64 and m80 are read and written
-	 * at their true widths, so a value stored and reloaded round-trips
-	 * through whatever the guest chose - it is only the register that is
-	 * narrower.
-	 *
-	 * ST(i) IS st[(top + i) & 7]. the decoder reports an x87 operand's `Reg`
-	 * as that relative index already, so a case here never computes it.
-	 */
-	double   st[8];
-	/* 0 empty; 1 in use, its tag read off the value (valid, zero or special); 2-4 in use with the tag a restore loaded
-	 * (FLDENV, FRSTOR): valid, zero, special - 2 + the architectural 2-bit tag. The next write of the register makes
-	 * it 1 again. */
-	uint8_t  st_tag[8];
-	uint8_t  st_top;
-	/*
-	 * The status word's condition codes. C0, C2 and C3 are what a compare
-	 * leaves and what FNSTSW hands to a guest that branches on it; C1 is
-	 * the stack-fault direction and nothing here reads it.
-	 */
-	uint16_t fsw;
-	/*
-	 * The control word (FLDCW sets it, FNSTCW, FNSTENV and FXSAVE report it, FINIT resets it to 037FH) and
-	 * the opcode of the last non-control x87 instruction (FOP, 11 bits). Only its RC field is acted on, by
-	 * FIST/FISTP and FRNDINT; every exception stays masked and the arithmetic rounds to nearest.
-	 */
-	uint16_t fcw;
-	uint16_t fop;
+
 
 	/* The thread pointer, as arch_prctl set it - or, for a Windows guest,
 	 * as emu_unpack_pe_teb.c's thread block builder set it. */
@@ -615,12 +653,6 @@ struct kgenome_emu {
 	 * row. See EMU_SYS_READ: a prompt that ignores EOF asks forever. */
 	uint32_t stdin_eof;
 
-	/* The address of the last x87 instruction that was not a control one.
-	 * FNSTENV reports it, and that report is the only reason x87 is here at
-	 * all - see the note on the FPU cases in the run loop. */
-	uint64_t fpu_rip;
-	/* The operand address of the last x87 instruction that had a memory operand (FDP). */
-	uint64_t fpu_dp;
 
 	/* When a page was last written to for the first time - the clock the
 	 * idle test below runs on. */
@@ -628,13 +660,6 @@ struct kgenome_emu {
 	uint64_t last_wr_line;     /* the cache line of the last store that earned an idle credit */
 	uint32_t idle_credit;      /* credits earned since the last new page - see mem_wr */
 
-	/*
-	 * The SSE control word, remembered and otherwise ignored: scalar
-	 * arithmetic here runs on the host's own double, so a rounding mode
-	 * stored in it would change nothing. Kept so a caller that saves it and
-	 * restores it reads back what it wrote, which is all any of them check.
-	 */
-	uint32_t mxcsr;
 
 	/* The opening bytes of whatever the guest wrote to stdout or stderr. */
 	char     say[KGENOME_EMU_SAY];
@@ -669,184 +694,9 @@ struct kgenome_emu {
 	uint64_t  runs_bytes;
 };
 
-#define KGENOME_EMU_FL_CF  (1u << 0)
-#define KGENOME_EMU_FL_PF  (1u << 2)
-#define KGENOME_EMU_FL_AF  (1u << 4)
-#define KGENOME_EMU_FL_ZF  (1u << 6)
-#define KGENOME_EMU_FL_SF  (1u << 7)
-#define KGENOME_EMU_FL_DF  (1u << 10)
-#define KGENOME_EMU_FL_OF  (1u << 11)
 
-/* ---- the Windows API ids, shared by the table and the dispatch ---- */
+/* The Windows environment's ids and functions: emu_win_private.h. */
 
-#define KGENOME_EMU_WIN_API_BASE   0x57494e00u      /* 'W','I','N',0 */
-
-enum {
-	KGENOME_EMU_WIN_GetModuleHandleA = 0,
-	KGENOME_EMU_WIN_GetModuleHandleW,
-	KGENOME_EMU_WIN_GetProcAddress,
-	KGENOME_EMU_WIN_LoadLibraryA,
-	KGENOME_EMU_WIN_LoadLibraryW,
-	KGENOME_EMU_WIN_VirtualAlloc,
-	KGENOME_EMU_WIN_VirtualFree,
-	KGENOME_EMU_WIN_VirtualProtect,
-	KGENOME_EMU_WIN_ExitProcess,
-	KGENOME_EMU_WIN_GetCurrentProcess,
-	KGENOME_EMU_WIN_IsDebuggerPresent,
-	KGENOME_EMU_WIN_GetLastError,
-	KGENOME_EMU_WIN_SetLastError,
-	KGENOME_EMU_WIN_GetVersion,
-	KGENOME_EMU_WIN_GetCurrentProcessId,
-	KGENOME_EMU_WIN_GetTickCount,
-	KGENOME_EMU_WIN_AddVectoredExceptionHandler,
-	KGENOME_EMU_WIN_RemoveVectoredExceptionHandler,
-	KGENOME_EMU_WIN_GetProcessHeap,
-	KGENOME_EMU_WIN_HeapAlloc,
-	KGENOME_EMU_WIN_HeapFree,
-	KGENOME_EMU_WIN_HeapReAlloc,
-	KGENOME_EMU_WIN_HeapSize,
-	KGENOME_EMU_WIN_VirtualQuery,
-	KGENOME_EMU_WIN_GetSystemInfo,
-	KGENOME_EMU_WIN_Sleep,
-	KGENOME_EMU_WIN_QueryPerformanceCounter,
-	KGENOME_EMU_WIN_QueryPerformanceFrequency,
-	KGENOME_EMU_WIN_GetSystemTimeAsFileTime,
-	KGENOME_EMU_WIN_GetCurrentThreadId,
-	KGENOME_EMU_WIN_GetCurrentThread,
-	KGENOME_EMU_WIN_TlsAlloc,
-	KGENOME_EMU_WIN_TlsGetValue,
-	KGENOME_EMU_WIN_TlsSetValue,
-	KGENOME_EMU_WIN_TlsFree,
-	KGENOME_EMU_WIN_InitializeCriticalSection,
-	KGENOME_EMU_WIN_EnterCriticalSection,
-	KGENOME_EMU_WIN_LeaveCriticalSection,
-	KGENOME_EMU_WIN_DeleteCriticalSection,
-	KGENOME_EMU_WIN_FlushInstructionCache,
-	KGENOME_EMU_WIN_GetStdHandle,
-	KGENOME_EMU_WIN_CloseHandle,
-	KGENOME_EMU_WIN_SetUnhandledExceptionFilter,
-	KGENOME_EMU_WIN_GetModuleFileNameA,
-	KGENOME_EMU_WIN_GetModuleFileNameW,
-	KGENOME_EMU_WIN_GetCommandLineA,
-	KGENOME_EMU_WIN_GetCommandLineW,
-	KGENOME_EMU_WIN_lstrlenA,
-	KGENOME_EMU_WIN_RtlAddFunctionTable,
-	KGENOME_EMU_WIN_RtlAllocateHeap,
-	KGENOME_EMU_WIN_RtlFreeHeap,
-	KGENOME_EMU_WIN_NtQueryInformationProcess,
-	KGENOME_EMU_WIN_FreeLibrary,
-	KGENOME_EMU_WIN_LocalAlloc,
-	KGENOME_EMU_WIN_LocalFree,
-	KGENOME_EMU_WIN_GlobalAlloc,
-	KGENOME_EMU_WIN_GlobalFree,
-	KGENOME_EMU_WIN_lstrcmpA,
-	KGENOME_EMU_WIN_lstrcmpiA,
-	KGENOME_EMU_WIN_lstrcpyA,
-	KGENOME_EMU_WIN_lstrcatA,
-	KGENOME_EMU_WIN_lstrlenW,
-	KGENOME_EMU_WIN_MultiByteToWideChar,
-	KGENOME_EMU_WIN_WideCharToMultiByte,
-	KGENOME_EMU_WIN_OutputDebugStringA,
-	KGENOME_EMU_WIN_SetErrorMode,
-	KGENOME_EMU_WIN_GetStartupInfoA,
-	KGENOME_EMU_WIN_GetStartupInfoW,
-	KGENOME_EMU_WIN_GetSystemDirectoryA,
-	KGENOME_EMU_WIN_GetWindowsDirectoryA,
-	KGENOME_EMU_WIN_GetTempPathA,
-	KGENOME_EMU_WIN_GetFileAttributesA,
-	KGENOME_EMU_WIN_CreateFileA,
-	KGENOME_EMU_WIN_ReadFile,
-	KGENOME_EMU_WIN_WriteFile,
-	KGENOME_EMU_WIN_SetFilePointer,
-	KGENOME_EMU_WIN_GetFileSize,
-	KGENOME_EMU_WIN_CreateThread,
-	KGENOME_EMU_WIN_ResumeThread,
-	KGENOME_EMU_WIN_WaitForSingleObject,
-	KGENOME_EMU_WIN_TerminateProcess,
-	KGENOME_EMU_WIN_RaiseException,
-	KGENOME_EMU_WIN_UnhandledExceptionFilter,
-	KGENOME_EMU_WIN_InterlockedIncrement,
-	KGENOME_EMU_WIN_InterlockedDecrement,
-	KGENOME_EMU_WIN_NtProtectVirtualMemory,
-	KGENOME_EMU_WIN_NtAllocateVirtualMemory,
-	KGENOME_EMU_WIN_RtlGetVersion,
-	KGENOME_EMU_WIN_LdrLoadDll,
-	KGENOME_EMU_WIN_LdrGetProcedureAddress,
-	KGENOME_EMU_WIN_InitializeCriticalSectionAndSpinCount,
-	KGENOME_EMU_WIN_IsProcessorFeaturePresent,
-	KGENOME_EMU_WIN_IsValidCodePage,
-	KGENOME_EMU_WIN_IsBadReadPtr,
-	KGENOME_EMU_WIN_IsBadWritePtr,
-	KGENOME_EMU_WIN_InterlockedExchange,
-	KGENOME_EMU_WIN_InterlockedCompareExchange,
-	KGENOME_EMU_WIN_SetHandleCount,
-	KGENOME_EMU_WIN_SetStdHandle,
-	KGENOME_EMU_WIN_SetEnvironmentVariableA,
-	KGENOME_EMU_WIN_SetEnvironmentVariableW,
-	KGENOME_EMU_WIN_SetConsoleCtrlHandler,
-	KGENOME_EMU_WIN_FreeEnvironmentStringsA,
-	KGENOME_EMU_WIN_FreeEnvironmentStringsW,
-	KGENOME_EMU_WIN_FlushFileBuffers,
-	KGENOME_EMU_WIN_FindClose,
-	KGENOME_EMU_WIN_DecodePointer,
-	KGENOME_EMU_WIN_EncodePointer,
-	KGENOME_EMU_WIN_DeleteFileA,
-	KGENOME_EMU_WIN_DisableThreadLibraryCalls,
-	KGENOME_EMU_WIN_HeapCreate,
-	KGENOME_EMU_WIN_HeapDestroy,
-	KGENOME_EMU_WIN_GetCPInfo,
-	KGENOME_EMU_WIN_GetACP,
-	KGENOME_EMU_WIN_GetOEMCP,
-	KGENOME_EMU_WIN_IsUserAnAdmin,
-	KGENOME_EMU_WIN_SHGetFolderPathA,
-	KGENOME_EMU_WIN_CoInitialize,
-	KGENOME_EMU_WIN_CoUninitialize,
-	/* ws2_32. The environment is a SCRIPTED PEER - see winapi_do. */
-	KGENOME_EMU_WIN_WSAStartup,
-	KGENOME_EMU_WIN_WSACleanup,
-	KGENOME_EMU_WIN_WSASocketA,
-	KGENOME_EMU_WIN_WSASocketW,
-	KGENOME_EMU_WIN_socket,
-	KGENOME_EMU_WIN_connect,
-	KGENOME_EMU_WIN_recv,
-	KGENOME_EMU_WIN_send,
-	KGENOME_EMU_WIN_sendto,
-	KGENOME_EMU_WIN_recvfrom,
-	KGENOME_EMU_WIN_closesocket,
-	KGENOME_EMU_WIN_bind,
-	KGENOME_EMU_WIN_listen,
-	KGENOME_EMU_WIN_accept,
-	KGENOME_EMU_WIN_shutdown,
-	KGENOME_EMU_WIN_setsockopt,
-	KGENOME_EMU_WIN_ioctlsocket,
-	/* mscoree: the runtime's two entry points - see KGENOME_EMU_WIN_MOD_MSCOREE. */
-	KGENOME_EMU_WIN_RtlAddVectoredExceptionHandler,
-	KGENOME_EMU_WIN_RtlRemoveVectoredExceptionHandler,
-
-	KGENOME_EMU_WIN_CorExeMain,
-	KGENOME_EMU_WIN_CorDllMain,
-
-	/*
-	 * THE COUNT COMES FROM THE ENUM AND THE ENUM IS CHECKED AGAINST THE
-	 * TABLE, because writing it by hand is how this broke.
-	 *
-	 * KGENOME_EMU_WIN_API_COUNT was a literal, the table grew by 34 entries and the
-	 * literal was set to 53 for 52 of them, and the one-past read crashed
-	 * the scanner in win_eq_nocase against a name pointer that was never
-	 * written. The header already says of the table that "a table in each
-	 * place is a table that disagrees after the first edit"; a hand
-	 * written length is the same mistake one step smaller.
-	 */
-	KGENOME_EMU_WIN_API__LAST
-};
-
-#define KGENOME_EMU_WIN_API_COUNT ((unsigned)KGENOME_EMU_WIN_API__LAST)
-
-/* The x87 status word's condition codes. */
-#define KGENOME_EMU_FSW_C0 (1u << 8)
-#define KGENOME_EMU_FSW_C1 (1u << 9)
-#define KGENOME_EMU_FSW_C2 (1u << 10)
-#define KGENOME_EMU_FSW_C3 (1u << 14)
 
 /* ---- what one file offers another ---- */
 
@@ -862,10 +712,6 @@ int kgenome_emu_vma_add(struct kgenome_emu *e, uint64_t base, uint64_t len,
 		uint64_t off, unsigned prot, int backed);
 int kgenome_emu_mem_rd(struct kgenome_emu *e, uint64_t va, void *dst, unsigned n);
 
-/* A backward branch (at, `at_len` long) to `top` was taken for the Nth time running:
- * skip the rest of the loop when it is a counted delay. See emu_loop.c. */
-#define KGENOME_EMU_DELAY_PROBE 16u
-void kgenome_emu_delay_note(struct kgenome_emu *e, uint64_t top, uint64_t at, unsigned at_len);
 int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsigned n);
 uint64_t kgenome_emu_now_ms(void);
 void kgenome_emu_hop_bounds(struct kgenome_emu *e);
@@ -873,66 +719,18 @@ void kgenome_emu_snap_take(struct kgenome_emu *e, uint64_t va, uint64_t len);
 unsigned kgenome_emu_written_run_pages(struct kgenome_emu *e, uint64_t va, unsigned cap);
 uint64_t kgenome_emu_tsc_read(struct kgenome_emu *e);
 uint64_t kgenome_emu_do_syscall(struct kgenome_emu *e, int *stop_out);
-uint64_t kgenome_emu_win_miss_thunk(struct kgenome_emu *e);
-uint64_t kgenome_emu_win_fake_lib(struct kgenome_emu *e, const char *name);
-uint64_t kgenome_emu_win_fake_find(const struct kgenome_emu *e, const char *name);
-#define KGENOME_EMU_HBLK_FREED (~(uint64_t)0)
-int kgenome_emu_win_heap_note(struct kgenome_emu *e, uint64_t va, uint64_t size);
-struct kgenome_emu_hblk *kgenome_emu_win_heap_find(const struct kgenome_emu *e, uint64_t va);
-int kgenome_emu_win_is_fake(const struct kgenome_emu *e, uint64_t h);
-uint64_t kgenome_emu_win_mod_of(struct kgenome_emu *e, const char *name);
-uint64_t kgenome_emu_win_mod_load(struct kgenome_emu *e, const char *name);
-
-uint64_t kgenome_emu_win_arg(struct kgenome_emu *e, unsigned i);
-void kgenome_emu_win_str(struct kgenome_emu *e, uint64_t va, char *out, unsigned cap,
-		int wide);
-uint64_t kgenome_emu_win_alloc(struct kgenome_emu *e, uint64_t want, unsigned prot);
-uint64_t kgenome_emu_win_alloc32(struct kgenome_emu *e, uint64_t want, unsigned prot);
-unsigned kgenome_emu_win_prot(uint64_t p);
-uint64_t kgenome_emu_win_ret_magic(const struct kgenome_emu *e);
-int kgenome_emu_win_exc_begin(struct kgenome_emu *e);
-int kgenome_emu_win_exc_return(struct kgenome_emu *e);
-void kgenome_emu_win_trace(struct kgenome_emu *e, const char *api, const char *arg,
-		uint64_t ret);
-void kgenome_emu_win_event_note(struct kgenome_emu *e, unsigned api, uint64_t ret);
-uint64_t kgenome_emu_win_sock_new(struct kgenome_emu *e);
-int kgenome_emu_win_sock_first_read(struct kgenome_emu *e, uint64_t s);
-uint64_t kgenome_emu_winapi_do(struct kgenome_emu *e, unsigned id, int *stop_out);
-uint64_t kgenome_emu_mask_of(unsigned bytes);
-uint64_t kgenome_emu_sext(uint64_t v, unsigned bytes);
-uint64_t kgenome_emu_reg_rd(const struct kgenome_emu *e, unsigned r, unsigned bytes,
-		int high8);
-void kgenome_emu_reg_wr(struct kgenome_emu *e, unsigned r, unsigned bytes, int high8,
-		uint64_t v);
-uint16_t kgenome_emu_host_dshift16(uint16_t dst, uint16_t src, uint8_t cnt,
-		int left, uint64_t *fl);
-void kgenome_emu_fl_logic(struct kgenome_emu *e, uint64_t r, unsigned bytes);
-void kgenome_emu_fl_add(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t cin,
-		unsigned bytes);
-void kgenome_emu_fl_sub(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t bin,
-		unsigned bytes);
-void kgenome_emu_op_keep(struct kgenome_emu *e, const struct kgenome_x86_op *op, uint64_t v);
-void kgenome_emu_fl_cfof(struct kgenome_emu *e, int on);
-int kgenome_emu_div(unsigned sz, int sgn, uint64_t hi, uint64_t lo, uint64_t d, uint64_t *q, uint64_t *r);
-void kgenome_emu_fault_de(struct kgenome_emu *e, int overflow);
-void kgenome_emu_fault_priv(struct kgenome_emu *e);
-uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *op);
-int kgenome_emu_ea_of(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
-		uint64_t *out);
-int kgenome_emu_op_rd(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
-		uint64_t *out);
-int kgenome_emu_vec_rd(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
-		uint8_t *buf, unsigned *sz);
-int kgenome_emu_vec_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
-		const uint8_t *buf, unsigned sz);
-int kgenome_emu_op_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
-		uint64_t v);
-int kgenome_emu_push(struct kgenome_emu *e, uint64_t v);
+/* The i386 Linux numbering translated to the amd64 one the environment is written in (emu_sys.c): the
+ * canon of the x86 entry's 32-bit convention. */
+uint64_t kgenome_emu_sys_i386_nr(uint64_t nr);
 
 /*
- * The instruction groups moved out of the loop, one function each. They return one of these: OK is
- * the end of the switch, the others are the labels the loop would have jumped to, and NOT_MINE says
- * the id is not the group's own.
+ * What an entry's execution of ONE instruction answers the loop (struct kgenome_emu_arch.exec), and
+ * what each of the x86 entry's instruction groups answers its switch: OK is the end of the
+ * instruction (the loop steps on, or follows the transfer), UNSUPPORTED is an instruction or operand
+ * this build cannot carry out (or an operand it could not reach: the loop tells the two apart by
+ * `fault_kind`), FAULT a guest fault, DONE a stop the instruction itself set in `stop`, REDIRECT an
+ * instruction that started a guest handler and left rip at its entry (the loop must not step to
+ * `next`), and NOT_MINE says the id is not a group's own.
  */
 enum {
 	KGENOME_EMU_RUN_OK = 0,
@@ -940,31 +738,107 @@ enum {
 	KGENOME_EMU_RUN_FAULT,
 	KGENOME_EMU_RUN_DONE,
 	KGENOME_EMU_RUN_NOT_MINE,
-	/* the instruction started a guest handler and left rip at its entry: the loop must not step to `next` */
 	KGENOME_EMU_RUN_REDIRECT
 };
-int kgenome_emu_run_str(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_shift(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_sys(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_vec(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_vec_int(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_vec_fp(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 
-/* One lane of SSE floating point (emu_vec_fp.c): the operation, the operands as bits, MXCSR.RC. The answers
- * are the architecture's for NaN, infinity, zero and the rounding; see that file. */
-enum { KGENOME_EMU_FP_ADD, KGENOME_EMU_FP_SUB, KGENOME_EMU_FP_MUL, KGENOME_EMU_FP_DIV, KGENOME_EMU_FP_MIN,
-       KGENOME_EMU_FP_MAX, KGENOME_EMU_FP_SQRT };
-uint64_t kgenome_emu_fpd(unsigned op, uint64_t ub, uint64_t vb, unsigned rc);
-uint32_t kgenome_emu_fps(unsigned op, uint32_t ub, uint32_t vb, unsigned rc);
-uint64_t kgenome_emu_f2d(uint32_t b);
-uint32_t kgenome_emu_d2f(uint64_t b, unsigned rc);
-uint32_t kgenome_emu_i2f(int64_t n, unsigned rc);
-uint64_t kgenome_emu_i2d(int64_t n, unsigned rc);
-uint64_t kgenome_emu_f2i(double d, unsigned w, int trunc_to_zero, unsigned rc);
-int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_bcd(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
-int kgenome_emu_run_ext(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
+/* The instruction about to run, as the loop hands it to an entry: emu_run_private.h. */
+struct kgenome_emu_run_step;
+
+/*
+ * A SYSTEM CALL CONVENTION, as the registers that carry it. The environment (emu_sys.c) reads the
+ * number and the arguments through it and never names a register, so a second architecture is a
+ * second row and not a second environment. The answer is -errno in `ret` on failure, as x86 has it
+ * (and ARM and AArch64); a convention that flags an error elsewhere (MIPS a3, PowerPC CR0.SO) adds
+ * that to its row when its entry is made. `mask` is the guest word: a 32-bit convention reads the
+ * low half of each register. `canon` turns the guest's number into the numbering the Linux
+ * environment is written in (amd64's), or is NULL when they are the same; a number with no
+ * counterpart comes back with bit 32 set, so it cannot collide with one.
+ */
+struct kgenome_emu_sysabi {
+	uint8_t  nr;                      /* the register holding the number     */
+	uint8_t  ret;                     /* the register the answer goes to     */
+	uint8_t  arg[6];                  /* the argument registers, in order    */
+	uint64_t mask;
+	uint64_t (*canon)(uint64_t nr);
+};
+
+/*
+ * ONE ENTRY OF THE DISPATCH TABLE: everything about an architecture the core has to ask.
+ *
+ * The core (memory and pages, budgets and their accounting, the run loop and its stops, the Linux and
+ * Windows environments) is written once; an entry supplies the decode, the execution of a decoded
+ * instruction by its id, its register roles, its syscall conventions and what its loader assumes.
+ * The loop itself is emu_run_private.h, made once per entry INSIDE the entry's own file
+ * (kgenome_emu_run_core with the entry's table), so the questions below that the loop asks of every
+ * instruction - decode, len, inert, exec - are direct calls the compiler inlines, not a call through
+ * a pointer per instruction; `run` is that instance and the one pointer the core follows
+ * (kgenome_emu_run). x86 and x86-64 are the first entry (emu_x86.c), one entry for both widths because
+ * the decoder and the handlers take the width from the mode (kgenome_emu.bits).
+ */
+/* How many times in a row one backward branch is taken before the loop asks the entry whether it is a
+ * counted delay (struct kgenome_emu_arch.delay, emu_loop.c). */
+#define KGENOME_EMU_DELAY_PROBE 16u
+
+struct kgenome_emu_arch {
+	const char *name;
+	enum kgenome_emu_stop (*run)(struct kgenome_emu *e);
+	/* Decode the instruction at e->rip from `code` (`n` bytes, zero-padded past what is mapped) into
+	 * *ix: 1 when it decoded, 0 when the bytes are no instruction. */
+	int      (*decode)(struct kgenome_emu *e, const uint8_t *code, unsigned n, struct kgenome_emu_insn *ix);
+	unsigned (*len)(const struct kgenome_emu_insn *ix);
+	/* 1 when the instruction provably changes nothing: decided once, when the cache keeps it. */
+	int      (*inert)(const struct kgenome_emu_insn *ix);
+	/* Carry out the instruction in *st (e->rip is its address). *next is the fall-through address on
+	 * entry and may be moved (a counted branch); *jumped is set when the instruction moved e->rip
+	 * itself. Answers a KGENOME_EMU_RUN_* value. */
+	int      (*exec)(struct kgenome_emu *e, const struct kgenome_emu_run_step *st, uint64_t *next, int *jumped);
+	/* The text of the instruction, for a refusal and the instruction trace: 1 when written. */
+	int      (*text)(const struct kgenome_emu_insn *ix, uint64_t va, char *buf, size_t n);
+	/* 1 when the transfer that just ran (its `len` bytes at `b`) has one of the shapes a loader ends
+	 * with - the handover test of the loop. */
+	int      (*tail)(const uint8_t *b, unsigned len);
+	/* A backward branch at `at` to `top` was taken KGENOME_EMU_DELAY_PROBE times in a row: skip the
+	 * rest of the loop when the entry recognises a counted delay. */
+	void     (*delay)(struct kgenome_emu *e, uint64_t top, uint64_t at, unsigned at_len);
+	/* A call reached an address nothing maps below the first page (an import the environment does not
+	 * have): take the return address the call left, as the convention leaves it. 1 when one was read
+	 * (the stack has moved past it), 0 when it could not be. */
+	int      (*ret_pop)(struct kgenome_emu *e, uint64_t *ret);
+	/* Reset the entry's own state and map what its loader assumes is always there (x86: the MXCSR and
+	 * x87 control words, the vsyscall page). Called once by kgenome_emu_new. */
+	void     (*init)(struct kgenome_emu *e);
+	unsigned text_max;                /* the longest `text` writes, with its NUL       */
+	/* The register roles: the stack pointer, the register a call's answer comes back in. */
+	uint8_t  sp, acc;
+	/* The registers a loader points at the entry before the run - see kgenome_emu_arch_seed. */
+	const uint8_t *seed;
+	uint8_t  n_seed;
+	/* The system call conventions, by guest word: [0] for 32 bits, [1] for 64. */
+	struct kgenome_emu_sysabi sys[2];
+};
+
+/* The entry an emulator is made with (emu_interp.c), and the x86 entry itself (emu_x86.c). */
+const struct kgenome_emu_arch *kgenome_emu_arch_of(const struct kgenome_emu_cfg *cfg);
+const struct kgenome_emu_arch *kgenome_emu_arch_x86(void);
+
+/* The system call convention in force for the call being made: the entry's row for the guest word. */
+static inline const struct kgenome_emu_sysabi *kgenome_emu_sysabi_of(const struct kgenome_emu *e)
+{
+	return &e->arch->sys[e->bits == 32 ? 0 : 1];
+}
+
+/* Argument `i` (0-5) of the system call being made, as the convention passes it. */
+static inline uint64_t kgenome_emu_sys_arg(const struct kgenome_emu *e, unsigned i)
+{
+	const struct kgenome_emu_sysabi *a = kgenome_emu_sysabi_of(e);
+
+	return i < 6u ? e->gpr[a->arg[i]] & a->mask : 0;
+}
+
+/* Point the entry's seed registers at `entry`: the loader's assumption about the general registers at
+ * the first instruction (see emu_unpack_elf.c for why it is the entry and not zero). */
+void kgenome_emu_arch_seed(struct kgenome_emu *e, uint64_t entry);
+
 
 static inline struct kgenome_emu_page *kgenome_emu_page_lookup(struct kgenome_emu *e, uint64_t va)
 {

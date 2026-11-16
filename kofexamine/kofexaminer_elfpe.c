@@ -41,7 +41,7 @@ uint32_t       kex_g_decl_fixed_n;
  */
 struct kof_scan_region kex_g_decl_rgn[KOF_MAX_REGIONS];
 /* What the engine said this object's language is - see kof_result.lang_known. */
-uint8_t                kex_g_decl_lang, kex_g_decl_subtype, kex_g_decl_subfam;
+uint8_t                kex_g_decl_lang, kex_g_decl_subtype, kex_g_decl_subfam, kex_g_decl_code;
 uint32_t               kex_g_decl_rgn_n;
 
 uint32_t kex_declared_regions(const struct kof_obj_ctx *ctx,

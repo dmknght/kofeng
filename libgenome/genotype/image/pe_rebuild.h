@@ -11,9 +11,9 @@
  * This puts the file back together. It is host code and not a module's job for the
  * same reason the decompressors are: it is one implementation shared by every
  * packer that leaves an image behind, and it works over whole buffers rather than
- * through the module ABI's byte accessors. Kaspersky drew the line in the same
- * place - their unpacker kernel carries _pe_rte.c beside _nrv.c and _lzma.c, and
- * the per-packer modules call into it.
+ * through the module ABI's byte accessors. Other unpacking engines draw the line in
+ * the same place - the PE rebuild beside the decompressors in the unpacker kernel,
+ * and the per-packer modules call into it.
  *
  * It lives here rather than with the collectors because it is not a parse. A
  * collector READS structure out of bytes and changes nothing; this WRITES bytes,

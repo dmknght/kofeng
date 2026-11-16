@@ -32,6 +32,23 @@
 #define KGENOME_MUTATION_MIN_HASH  16u
 
 /*
+ * IMPROVE mutation-floor-edit-stability-1 (owner, 2026-11-06; NOTE ONLY, nothing built, not
+ * measured): a block right AT this floor keeps 16 of its windows, and one edited byte disturbs up
+ * to KGENOME_MUTATION_NG (8) of them - up to half the kept sketch, from a SINGLE byte. A block
+ * safely above the floor is unaffected in the same proportion; the risk is only at or just past it,
+ * and today there is no signal for "signed, but thin" - a block either has >= MIN_HASH windows and
+ * is scored at full confidence, or it has fewer and is refused outright (the same binary choice
+ * kv_decl_blocks.c's "a span that cannot be scored is not a block" makes). Candidates, none chosen:
+ * raise MIN_HASH so the floor's own edit-disturbance ratio is bounded by design, not just "enough to
+ * exist"; or keep the floor and add a researcher-facing WARNING tier between refused and
+ * full-confidence (kv_decl_blocks.c's block table already distinguishes refused via `nosig`-like
+ * exclusion - a third state would sit beside it). Needs a measurement first: how much a block's pct
+ * actually moves per edited byte near the floor, on real near-duplicate pairs (the same kind of A/B
+ * this session already ran once by hand for a script block - see STATUS.md). Mirrors cfg_anchor.c's
+ * IMPROVE anchor-floor-1 for the CFG side of this same question.
+ */
+
+/*
  * What a rule hashes: the bytes. There is no other form.
  *
  * A form that hashed the difference between neighbouring bytes (so that a constant XOR or

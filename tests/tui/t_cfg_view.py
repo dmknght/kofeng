@@ -1,4 +1,8 @@
-"""The name of a function row in the blocks table opens the CFG of that function (hit_plg_cfg, kofexamine/kv_decl.c): a dialog in the frame of the Syndromes and Pathogens dialogs
+"""DISABLED IN PART by the owner 2026-11-15 (CFG): the dialog lost its Graph tab and the Overview's CFG facts (kof_cfgview_build, kv_cfgbody.c, inside #if 0),
+and a function row has no signature (its hash cell is `-`). The cases that drive the disabled parts SKIP with cfg_disabled(); the strip, keys, Disasm, Lineage and
+blocks-table cases run, flipped where they pinned a CFG answer. To re-enable: drop the cfg_disabled() lines when the code is out of #if 0.
+
+The name of a function row in the blocks table opens the CFG of that function (hit_plg_cfg, kofexamine/kv_decl.c): a dialog in the frame of the Syndromes and Pathogens dialogs
 (kv_cfgdlg.c) with THREE TABS in its top rule - Overview (the engine's facts and the calls as a table), Disasm (the disassembly panel's own rows of the function) and Graph (the graph
 drawn as boxes in ranks by kofexamine/kv_graph.c) - switched by a press on the tab's title and by nothing else; draggable by its top rule, a scrollbar in its right wall, the wheel scrolls it down and the shift or ctrl wheel sideways.
 
@@ -105,12 +109,19 @@ def inner(v):
     return [v.row(y)[x0 + 1:x1 - 2].rstrip() for y in range(y0 + 1, y1)], x1 - x0 - 3, title
 
 
-TABS = ('Overview', 'Disasm', 'Graph')
+TABS = ('Overview', 'Disasm', 'Lineage')      # 'Graph' between Disasm and Lineage: DISABLED by the owner 2026-11-15 (CFG)
+
+
+def cfg_disabled(what):
+    """A case that drives what the owner disabled on 2026-11-15 (the CFG graph, its hash, the Overview's CFG facts and their oracle in the helper)."""
+    raise Skip('DISABLED by the owner 2026-11-15 (CFG): ' + what)
+DB = os.path.join(REPO, 'build', 'release', 'databases')
 
 
 def body_rows(path, off, tab='Overview'):
-    """The rows of one tab of the dialog body as the engine side makes them (kv_cfgbody.c; the Disasm tab has no such rows): (n_row, n_col, rows)."""
-    r = subprocess.run([helper(), path, '%x' % off, '--body', tab.lower()], capture_output=True, text=True)
+    """The rows of one tab of the dialog body as the engine side makes them (kv_cfgbody.c; the Disasm tab has no such rows): (n_row, n_col, rows).
+    The Overview's last rows are the engine's head of the function's lineage, which a scan with the database makes (the helper's --body overview <db>)."""
+    r = subprocess.run([helper(), path, '%x' % off, '--body', tab.lower()] + ([DB] if tab == 'Overview' else []), capture_output=True, text=True)
     check(r.returncode == 0, 'the helper failed on %s' % path)
     lines = r.stdout.split('\n')
     n_row, n_col = [int(x) for x in lines[0].split()]
@@ -134,19 +145,17 @@ def same_window(v, rows, off, hoff, what):
 
 
 def func_off(v, row):
-    """The function's own offset, from the dialog's extent line (the row's offset is the unit's)."""
+    """The function's own offset, opening its dialog. It was read from the dialog's extent line (DISABLED by the owner 2026-11-15 with the Overview's CFG facts);
+    a function unit is ONE function of the table (no grouping since 2026-11-03), so the row's offset is the function's."""
     click_name(v, row)
-    for l in inner(v)[0]:
-        m = re.match(r' extent  0x([0-9a-f]+) \+', l)
-        if m:
-            return int(m.group(1), 16)
-    raise Fail('no extent line in the dialog')
+    box(v)
+    return row[1]
 
 
 def handle_x(v):
     """A column of the top rule that is neither a tab title nor [ Close ]: where a press takes hold of the box."""
     x0, y0, x1, y1, _ = box(v)
-    return v.row(y0).index('Graph') + len('Graph') + 6
+    return v.row(y0).index('Lineage') + len('Lineage') + 6
 
 
 def show_tab(v, name):
@@ -196,6 +205,7 @@ def function_rows_are_named_by_the_engine_and_nothing_says_show_cfg():
 
 @case(A)
 def pressing_a_function_name_opens_the_dialog_and_it_shows_the_body_the_engine_side_makes():
+    cfg_disabled('the Overview and Graph bodies (kv_cfgbody.c) and their oracle')
     p = scene()
     with blocks(p) as v:
         for name in ('cv_small', 'cv_loop', 'cv_switch', 'cv_big', 'fcn_'):
@@ -251,6 +261,7 @@ def only_the_name_of_a_function_row_opens_it_and_the_offset_lights():
 
 @case(A)
 def the_unit_line_is_the_blocks_table_id_and_no_canon_anchor_or_repeated_count_is_said():
+    cfg_disabled('the unit id and the CFG lines of the Overview')
     p = scene()
     with blocks(p) as v:
         for name in ('cv_small', 'cv_loop', 'cv_switch', 'cv_big'):
@@ -337,6 +348,7 @@ def closing_works_and_it_opens_again():
 
 @case(A)
 def the_wheel_scrolls_the_dialog_down_and_it_has_a_scrollbar():
+    cfg_disabled('the case scrolls the Graph and Overview bodies against their oracle (--body)')
     p = scene()
     with blocks(p, rows=40) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -369,6 +381,7 @@ def the_wheel_scrolls_the_dialog_down_and_it_has_a_scrollbar():
 
 @case(A)
 def the_shift_and_ctrl_wheel_scroll_it_sideways():
+    cfg_disabled('the case scrolls the Graph body against its oracle (--body)')
     p = scene()
     with blocks(p, rows=50, cols=100) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -406,6 +419,7 @@ def the_shift_and_ctrl_wheel_scroll_it_sideways():
 
 @case(A)
 def the_title_bar_drags_the_dialog_and_it_stays_on_the_screen():
+    cfg_disabled('the case compares the Overview body with its oracle (--body)')
     p = scene()
     with blocks(p, rows=60, cols=160) as v:
         off = func_off(v, row_named(v, 'cv_small'))
@@ -438,6 +452,7 @@ def the_title_bar_drags_the_dialog_and_it_stays_on_the_screen():
 
 @case(A)
 def a_big_function_has_every_block_as_a_box_and_a_say_for_what_it_leaves_out():
+    cfg_disabled('the Graph tab')
     p = scene()
     with blocks(p) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -456,6 +471,7 @@ def a_big_function_has_every_block_as_a_box_and_a_say_for_what_it_leaves_out():
 
 @case(A)
 def a_damaged_function_says_so_and_the_viewer_lives():
+    cfg_disabled('the engine text of kof_cfgview_build (the facts mode of the helper)')
     # Eight undecodable bytes (0x06 is not an instruction in 64-bit mode) inside cv_loop: the engine steps over them and says so.
     base = scene('cfg_probe.elf')
     with blocks(base) as v:
@@ -525,7 +541,7 @@ def the_strip_names_three_tabs_and_a_press_on_a_title_switches():
     with blocks(p) as v:
         off = func_off(v, row_named(v, 'cv_small'))
         x0, y0, x1, y1, title = box(v)
-        eq(re.findall(r'[A-Za-z]+', title)[:3], list(TABS), 'the titles of the strip, in order')
+        eq(re.findall(r'[A-Za-z]+', title)[:3], list(TABS), 'the titles of the strip, in order (three: Graph DISABLED by the owner 2026-11-15)')
         eq(current_tab(v), 'Overview', 'the tab it opens on')
         top = [v.row(y) for y in range(y0, y1 + 1)]
         show_tab(v, 'Disasm')
@@ -535,8 +551,7 @@ def the_strip_names_three_tabs_and_a_press_on_a_title_switches():
         again = [v.row(y) for y in range(y0, y1 + 1)]
         show_tab(v, 'Disasm')
         eq([v.row(y) for y in range(y0, y1 + 1)], again, 'a press on the tab already shown changed the screen')
-        show_tab(v, 'Graph')
-        eq(current_tab(v), 'Graph', 'after a press on Graph')
+        check('Graph' not in v.row(y0), 'the Graph tab is in the strip (DISABLED by the owner 2026-11-15): %r' % v.row(y0))    # FLIPPED: it was pressed here
         show_tab(v, 'Overview')
         eq(current_tab(v), 'Overview', 'after a press on Overview')
         eq([v.row(y) for y in range(y0, y1 + 1)], top, 'back on the Overview the screen is as it was')
@@ -562,16 +577,17 @@ def no_key_switches_a_tab():
             check(v.dialog(), 'the key %r closed the dialog' % k)
             eq(current_tab(v), 'Overview', 'the key %r switched the tab' % k)
         eq([v.row(y) for y in range(y0, y1 + 1)], before, 'a key changed the dialog')
-        show_tab(v, 'Graph')
+        show_tab(v, 'Lineage')      # was 'Graph': DISABLED by the owner 2026-11-15 (CFG)
         for k in ('tab', 'backtab', 'right', 'left', '1', 'ctrl+n'):
             v.key(k)
             v.pump_quiet(0.15, maxt=3)
-            eq(current_tab(v), 'Graph', 'the key %r switched the tab away from the Graph' % k)
+            eq(current_tab(v), 'Lineage', 'the key %r switched the tab away from the Lineage' % k)
         close(v)
 
 
 @case(A)
 def overview_calls_table_cells_are_the_engines_fields():
+    cfg_disabled('the calls table of the Overview (kof_cfgview_build) and its oracle (--calls); KNOWN DEFECT CFGTAB-1 is pinned here')
     p = scene()
     with blocks(p, rows=60, cols=200) as v:
         off = func_off(v, row_named(v, 'cv_small'))
@@ -706,6 +722,7 @@ def dialog_cells(v):
 
 @case(A)
 def graph_tab_colours_its_edges_and_marks_from_the_engines_values():
+    cfg_disabled('the Graph tab')
     # The attribute of an edge is a function of the engine's (cond, loop) and is asserted exhaustively on data in tests/unit/cfg_view_scene.c; this is the smoke on the real screen:
     # T green, F red, a loop head's first row yellow, the entry's border cyan, the call rows of a block blue; the Overview and the Disasm tabs are not touched.
     p = scene()
@@ -802,6 +819,7 @@ def disasm_tab_keeps_the_panels_colours_row_for_row():
 
 @case(A)
 def each_tab_keeps_the_scroll_it_was_left_at():
+    cfg_disabled('the case scrolls the Graph and Overview bodies against their oracle (--body)')
     p = scene()
     with blocks(p, rows=40) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -857,29 +875,33 @@ def examiner_blocks(path):
 
 @case(A)
 def a_function_row_shows_the_engines_unit_id_and_a_dash_below_the_floor():
+    # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): every function row has no signature - a dash in the hash cell, the examiner's block_id `-` with the one
+    # reason; it pinned an id on every function row before.
     p = scene()
     want = examiner_blocks(p)
     check(len(want) == 5, 'the examiner lists %d function units: %r' % (len(want), want))
+    check(all(x == '-' for x in want.values()), 'the examiner prints a block_id for a function unit: %r' % want)
+    exe = os.path.join(REPO, 'build', 'release', 'bin', 'kofexaminer')
+    out = subprocess.run([exe, '--blocks', p], capture_output=True, text=True).stdout
+    check('cfg_blocks=' not in out and out.count('(function unit: not signed: CFG signing disabled by the owner 2026-11-15)') == 5,
+          'the examiner says why each function unit has no block_id:\n%s' % out[:600])
     with blocks(p) as v:
         fn = function_rows(v)
+        check(len(fn) == 5, 'function rows: %r' % [r[3] for r in fn])
         for r in fn:
-            eq(r[2], want[r[1]], 'the hash cell of %s (0x%x) is the id the engine prints' % (r[3], r[1]))
-        # the floor of 12 reachable blocks is gone: cv_small (4 blocks) and fcn_00000700 (1 block) are signed and show an id too
-        eq(sorted(r[3] for r in fn if r[2] == '-'), [], 'no function of the scene keeps a dash')
-        check(all(re.fullmatch('[0-9a-f]{8}', r[2]) for r in fn), 'every function shows an id')
+            eq(r[2], '-', 'the hash cell of %s (0x%x) is a dash: no signature' % (r[3], r[1]))
 
 
 @case(A)
 def a_signed_function_row_is_ticked_like_a_data_row_and_an_unsigned_one_says_why():
+    # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): no function row is signed; its tick does not take and the status line says the engine's one reason.
     with blocks() as v:
-        loop = row_named(v, 'cv_loop')
-        v.click(v.row(loop[0]).index('[ ]') + 1, loop[0])
-        v.pump_quiet(0.2, maxt=4)
-        check(v.row(loop[0]).lstrip().startswith('[x]'), 'the tick of a signed function row did not take: %r' % v.row(loop[0])[:30])
-        small = row_named(v, 'cv_small')
-        v.click(v.row(small[0]).index('[ ]') + 1, small[0])
-        v.pump_quiet(0.2, maxt=4)
-        check(v.row(small[0]).lstrip().startswith('[x]'), 'the tick of a small signed function did not take: %r' % v.row(small[0])[:30])
+        for name in ('cv_loop', 'cv_small'):
+            r = row_named(v, name)
+            v.click(v.row(r[0]).index('[ ]') + 1, r[0])
+            v.pump_quiet(0.2, maxt=4)
+            check(v.row(r[0]).lstrip().startswith('[ ]'), 'the tick of an unsigned function row took: %r' % v.row(r[0])[:30])
+            check(v.find('CFG signing disabled by the owner 2026-11-15'), 'no reason said for %s:\n%s' % (name, v.show()))
 
 
 def sign_diagnose_db(p, off, pct=70):
@@ -923,6 +945,7 @@ def examiner_keys(path):
 
 @case(A)
 def a_function_block_that_decided_a_diagnose_is_ticked_on_arrival_with_the_diagnoses_threshold():
+    cfg_disabled('a CFG block deciding a diagnose (function units are not signed)')
     """The engine matched a diagnose whose block is the CFG sketch of cv_loop: the viewer ticks that row on arrival (mtn_from_match), the matcher takes the diagnose's
     threshold (70, not the editor's 60), the header takes the family and variant, and the row's id is the id the engine's report names as the place's unit."""
     p = scene()
@@ -949,6 +972,147 @@ def a_function_block_that_decided_a_diagnose_is_ticked_on_arrival_with_the_diagn
         check('find_sim' not in v.row(ys[0]), 'the word find_sim is printed: %r' % v.row(ys[0]))
         check('#' not in v.row(ys[0]), 'a # in the matcher row: %r' % v.row(ys[0]))
         check(re.match(r'^ {7}Type: Botnet {3}Tag: \S+', v.row(ys[0] + 1)), 'Type/Tag are not on the row under it: %r' % v.row(ys[0] + 1))
+
+
+
+# ---- the Lineage tab (owner, 2026-11-14): the drawing on top, scrolled on its own; under a rule, the engine's rows of the links with a tick box each; a ticked link is
+# ---- lit in the drawing; the counts are the Overview's. The scene: one function of a stager's system calls (cfg_view_scene.c, build_lineage_code), written at run time.
+
+def lineage_scene():
+    d = os.path.join(VT, 'cfgview')
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, 'lineage_scene.elf')
+    if os.path.exists(p):
+        os.chmod(p, 0o644)
+    r = subprocess.run([helper(), '--write-lineage', p], capture_output=True)
+    check(r.returncode == 0, 'the lineage writer failed')
+    os.chmod(p, 0o444)
+    return p
+
+
+def lineage_rows(path, off):
+    """The Lineage tab's two panes whole, as kv_lineagebody.c makes them from a scan (the helper's --lineage <db>): (drawing rows, link rows)."""
+    r = subprocess.run([helper(), path, '%x' % off, '--lineage', DB], capture_output=True, text=True)
+    check(r.returncode == 0, 'the helper failed on %s: %s' % (path, r.stderr[-200:]))
+    lines = r.stdout.split('\n')
+    ng = int(lines[0].split()[1])
+    nl = int(lines[1 + ng].split()[1])
+    return lines[1:1 + ng], lines[2 + ng:2 + ng + nl]
+
+
+def lineage_open(v):
+    off = func_off(v, row_named(v, 'lg_stager'))
+    show_tab(v, 'Lineage')
+    eq(current_tab(v), 'Lineage', 'after a press on Lineage')
+    return off
+
+
+def rule_at(rows):
+    r = [i for i, l in enumerate(rows) if re.match(r'^ -- links: \d+', l)]
+    check(len(r) == 1, 'no one rule between the panes: %r' % rows)
+    return r[0]
+
+
+@case(A)
+def lineage_tab_draws_the_engines_links_on_top_and_lists_every_one_below():
+    p = lineage_scene()
+    with blocks(p, rows=60) as v:
+        off = lineage_open(v)
+        graph, links = lineage_rows(p, off)
+        rows, w, _ = inner(v)
+        r = rule_at(rows)
+        # the top pane is the drawing from its first row (nothing above it: the counts are the Overview's), all of it here
+        eq([x.rstrip() for x in rows[:len(graph)]], [(' ' + g[1:][:w - 1]).rstrip() for g in graph], 'the drawing differs from the engine side')
+        check(not any('lineage  nodes=' in x for x in rows), 'the Lineage tab repeats the counts: %r' % rows[:3])
+        # the rule, then one row per link: the engine's words, a tick box each
+        eq(rows[r].strip(), '-- links: %d --' % len(links), 'the rule')
+        eq([x.rstrip() for x in rows[r + 1:r + 1 + len(links)]], [(' ' + l[1:][:w - 1]).rstrip() for l in links], 'the link rows differ from the engine side')
+        txt = '\n'.join(links)
+        # every role the scene's stager gives, the system call's number among them (the tab drew the view without it before 2026-11-14)
+        for want in ('-> L2     fd', '-> L4     target', '-> L5     fd', '-> L5     buffer', 'L2 net-connect 0x13f               -> L5     number'):
+            check(want in txt, 'no link row %r in %r' % (want, txt))
+        check(all(l.startswith(' [ ] ') for l in links), 'a drawn link without a tick box: %r' % links)
+        close(v)
+
+
+@case(A)
+def the_overview_ends_with_the_engines_head_of_the_lineage():
+    cfg_disabled('the oracle of the Overview (--body overview), kv_cfgbody.c')
+    p = lineage_scene()
+    with blocks(p, rows=60) as v:
+        off = func_off(v, row_named(v, 'lg_stager'))
+        n_row, n_col, want = body_rows(p, off)
+        check(want[-1].strip().startswith('lineage  nodes=6  links=5  proven=5'), 'the engine side has no lineage head: %r' % want[-3:])
+        same_window(v, want, 0, 0, 'overview with the lineage head')
+        close(v)
+
+
+def lit_cells(v, y0, y1, x0, x1):
+    return [(x, y) for y in range(y0, y1) for x in range(x0, x1) if v.cell(x, y).reverse and v.row(y)[x - 1] != ' ']
+
+
+@case(A)
+def a_press_on_a_tick_box_lights_its_link_and_a_second_puts_it_out():
+    p = lineage_scene()
+    with blocks(p, rows=60) as v:
+        off = lineage_open(v)
+        x0, y0, x1, y1, _ = box(v)
+        rows, w, _ = inner(v)
+        r = rule_at(rows)
+        graph_y = (y0 + 1, y0 + 1 + r)
+        check(not lit_cells(v, graph_y[0], graph_y[1], x0 + 1, x1), 'a link is lit before any press')
+        num = [i for i, l in enumerate(rows) if 'number' in l and '[ ]' in l]
+        check(len(num) == 1, 'no number row: %r' % rows)
+        y = y0 + 1 + num[0]
+        # a press on the row's text, not its box, ticks nothing
+        v.click(x0 + 1 + v.row(y)[x0:].index('net-connect'), y)
+        v.pump_quiet(0.2, maxt=4)
+        check('[ ]' in v.row(y), 'a press on the text ticked the row')
+        bx = x0 + 1 + v.row(y)[x0:].index('[ ]') + 1
+        v.click(bx + 1, y)
+        v.pump_quiet(0.2, maxt=4)
+        check('[x]' in v.row(y), 'the box did not tick: %r' % v.row(y))
+        lit = lit_cells(v, graph_y[0], graph_y[1], x0 + 1, x1)
+        check(lit, 'the ticked link is not lit in the drawing')
+        # the lit cells are a line between the connect's box and the read's (a column under L2, ending in the arrowhead over L5)
+        ys = sorted(set(yy for _, yy in lit))
+        l2 = [yy for yy in range(*graph_y) if 'L2 net-connect' in v.row(yy)][0]
+        l5 = [yy for yy in range(*graph_y) if 'L5 mem-read' in v.row(yy)][0]
+        check(ys[0] > l2 and ys[-1] < l5, 'the lit cells %r are not between L2 (row %d) and L5 (row %d)' % (ys, l2, l5))
+        check(any(v.row(yy)[xx - 1] == 'v' for xx, yy in lit), 'the arrowhead of the lit link is not lit')
+        v.click(bx + 1, y)
+        v.pump_quiet(0.2, maxt=4)
+        check('[ ]' in v.row(y) and not lit_cells(v, graph_y[0], graph_y[1], x0 + 1, x1), 'a second press did not put it out')
+        close(v)
+
+
+@case(A)
+def the_wheel_scrolls_the_pane_it_is_over_and_no_key_ticks():
+    p = lineage_scene()
+    with blocks(p, rows=24) as v:
+        off = lineage_open(v)
+        graph, links = lineage_rows(p, off)
+        x0, y0, x1, y1, _ = box(v)
+        rows, w, _ = inner(v)
+        r = rule_at(rows)
+        check(r < len(graph), 'the drawing fits a 24-row screen; the case needs it not to (%d rows, pane %d)' % (len(graph), r))
+        v.wheel((x0 + x1) // 2, y0 + 2, n=1)
+        v.pump_quiet(0.2, maxt=4)
+        after, _, _ = inner(v)
+        eq([x.rstrip() for x in after[:r]], [(' ' + g[1:][:w - 1]).rstrip() for g in graph[3:3 + r]], 'the drawing did not scroll by the wheel over it')
+        eq(after[r:], rows[r:], 'the wheel over the drawing moved the rule or the links')
+        v.wheel((x0 + x1) // 2, y0 + 2, up=True, n=1)
+        v.pump_quiet(0.2, maxt=4)
+        eq(inner(v)[0], rows, 'the wheel up did not bring the drawing back')
+        # the wheel over the links scrolls nothing of the drawing
+        v.wheel((x0 + x1) // 2, y0 + 1 + r + 2, n=1)
+        v.pump_quiet(0.2, maxt=4)
+        eq(inner(v)[0][:r], rows[:r], 'the wheel over the links scrolled the drawing')
+        for k in ('tab', 'down', 'up', 'right', 'left', 'x', 't', '1', 'ctrl+a', 'pgdn'):
+            v.key(k)
+            v.pump_quiet(0.15, maxt=3)
+            check(v.dialog() and '[x]' not in '\n'.join(inner(v)[0]), 'the key %r ticked a link or closed the dialog' % k)
+        close(v)
 
 
 if __name__ == '__main__':

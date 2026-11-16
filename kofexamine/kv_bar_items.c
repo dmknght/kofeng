@@ -5,9 +5,11 @@
 #include "kv_bar_private.h"
 
 const struct bar_item_def bar_item[BI_COUNT] = {
+	{ "Open...",        BM_FILE, -1, 0 },
 	{ "Next File",      BM_FILE, -1, 0 },
 	{ "Previous File",  BM_FILE, -1, 0 },
-	{ "Quit",           BM_FILE, -1, 1 },
+	{ "Close",          BM_FILE, -1, 1 },
+	{ "Quit",           BM_FILE, -1, 0 },
 	{ "Find...",        BM_EDIT, -1, 0 },
 	{ "Go to...",       BM_EDIT, -1, 0 },
 	{ "Dashboard",         BM_ANALYSIS, -1, 0 },

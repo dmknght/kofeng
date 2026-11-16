@@ -12,7 +12,7 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	/* POSIX */
 	{ .name = "mmap", .cap = KGENOME_NUCLEO_ALLOC },
 	{ .name = "mmap64", .cap = KGENOME_NUCLEO_ALLOC },
-	{ .name = "mprotect", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "mprotect", .cap = KGENOME_NUCLEO_ALLOC, KGENOME_SHAPE("res=status0") },
 	/* Not a finding on its own - see KGENOME_NUCLEO_HEAP - and here so that a
 	 * buffer two transfers share has a name. posix_memalign is left
 	 * out: it hands the pointer back THROUGH one, and nothing here
@@ -27,17 +27,22 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	{ .name = "_Znwm", .cap = KGENOME_NUCLEO_HEAP },  /* new    */
 	{ .name = "_Znam", .cap = KGENOME_NUCLEO_HEAP },  /* new[]  */
 	{ .name = "socket", .cap = KGENOME_NUCLEO_NET_OPEN, .refine = KGENOME_NUCLEO_REFINE_SOCK },
-	{ .name = "socketpair", .cap = KGENOME_NUCLEO_NET_OPEN },
+	/* socketpair(domain, type, protocol, int sv[2]) returns 0 and writes the two
+	 * descriptors through argument 3: the status is not the socket (ROWS-ELF-1,
+	 * the ELF twin of the PE rows' D1/D3/D6; it had the capability's res=handle). */
+	{ .name = "socketpair", .cap = KGENOME_NUCLEO_NET_OPEN, KGENOME_SHAPE("out3 res=status0") },
 	/* Not a finding on its own - see KGENOME_NUCLEO_PIPE_OPEN - and here so
 	 * the step has a name and so a dynamically linked object calling
-	 * pipe@plt reaches the same word as a static one. */
-	{ .name = "pipe", .cap = KGENOME_NUCLEO_PIPE_OPEN },
-	{ .name = "pipe2", .cap = KGENOME_NUCLEO_PIPE_OPEN },
-	{ .name = "connect", .cap = KGENOME_NUCLEO_NET_CONNECT },
+	 * pipe@plt reaches the same word as a static one. pipe(int fd[2]) and
+	 * pipe2(int fd[2], flags) return 0 and write the pair through argument 0
+	 * (ROWS-ELF-1: the status was handed on as the pipe). */
+	{ .name = "pipe", .cap = KGENOME_NUCLEO_PIPE_OPEN, KGENOME_SHAPE("out0 res=status0") },
+	{ .name = "pipe2", .cap = KGENOME_NUCLEO_PIPE_OPEN, KGENOME_SHAPE("out0 res=status0") },
+	{ .name = "connect", .cap = KGENOME_NUCLEO_NET_CONNECT, KGENOME_SHAPE("fd0 src1 res=status0") },  /* src1: the address (ROWS-ELF-CONNECT) */
 	{ .name = "accept", .cap = KGENOME_NUCLEO_NET_ACCEPT },
 	{ .name = "accept4", .cap = KGENOME_NUCLEO_NET_ACCEPT },
-	{ .name = "bind", .cap = KGENOME_NUCLEO_NET_BIND },
-	{ .name = "listen", .cap = KGENOME_NUCLEO_NET_LISTEN },
+	{ .name = "bind", .cap = KGENOME_NUCLEO_NET_BIND, KGENOME_SHAPE("fd0 res=status0") },
+	{ .name = "listen", .cap = KGENOME_NUCLEO_NET_LISTEN, KGENOME_SHAPE("fd0 res=status0") },
 	{ .name = "recv", .cap = KGENOME_NUCLEO_NET_READ },
 	{ .name = "recvfrom", .cap = KGENOME_NUCLEO_NET_READ },
 	{ .name = "recvmsg", .cap = KGENOME_NUCLEO_NET_READ },
@@ -71,7 +76,7 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	{ .name = "usleep", .cap = KGENOME_NUCLEO_SLEEP },
 	{ .name = "nanosleep", .cap = KGENOME_NUCLEO_SLEEP },
 	{ .name = "ptrace", .cap = KGENOME_NUCLEO_PTRACE },
-	{ .name = "closesocket", .cap = KGENOME_NUCLEO_NET_OPEN },
+	{ .name = "closesocket", .cap = KGENOME_NUCLEO_NET_OPEN, KGENOME_SHAPE("fd0 rel0 res=status0") },
 	{ .name = "dlopen", .cap = KGENOME_NUCLEO_LIB_OPEN },
 	{ .name = "dlsym", .cap = KGENOME_NUCLEO_RESOLVE },
 
@@ -324,23 +329,43 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	{ .name = "vfs_read", .cap = KGENOME_NUCLEO_READ },
 	{ .name = "vfs_write", .cap = KGENOME_NUCLEO_WRITE },
 	{ .name = "filp_open", .cap = KGENOME_NUCLEO_FILE_OPEN },
-	{ .name = "filp_close", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	/* filp_close(struct file *, fl_owner_t) ends the file it is handed and returns an int status (0 success): it was handed on as
+	 * a new file (ROWS-ELF-1). The shape of closesocket; the word stays the file's - see TODO(owner) Q1 at VirtualFree. */
+	{ .name = "filp_close", .cap = KGENOME_NUCLEO_FILE_OPEN, KGENOME_SHAPE("fd0 rel0 res=status0") },
 	{ .name = "call_usermodehelper", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
 	{ .name = "call_usermodehelper_exec", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
 	{ .name = "kthread_create_on_node", .cap = KGENOME_NUCLEO_THREAD },
 	{ .name = "kthread_run", .cap = KGENOME_NUCLEO_THREAD },
 	{ .name = "wake_up_process", .cap = KGENOME_NUCLEO_THREAD },
-	{ .name = "sock_create", .cap = KGENOME_NUCLEO_NET_OPEN },
-	{ .name = "sock_create_kern", .cap = KGENOME_NUCLEO_NET_OPEN },
+	/* sock_create(family, type, protocol, struct socket **res) and sock_create_kern(net, family, type, protocol, res) return 0
+	 * and write the socket through their last argument (ROWS-ELF-1: the status was handed on as the socket). */
+	{ .name = "sock_create", .cap = KGENOME_NUCLEO_NET_OPEN, KGENOME_SHAPE("out3 res=status0") },
+	{ .name = "sock_create_kern", .cap = KGENOME_NUCLEO_NET_OPEN, KGENOME_SHAPE("out4 res=status0") },
 	{ .name = "kernel_connect", .cap = KGENOME_NUCLEO_NET_CONNECT },
 	{ .name = "kernel_accept", .cap = KGENOME_NUCLEO_NET_ACCEPT },
 	{ .name = "kernel_sendmsg", .cap = KGENOME_NUCLEO_NET_WRITE },
 	{ .name = "kernel_recvmsg", .cap = KGENOME_NUCLEO_NET_READ },
 	{ .name = "crypto_secretbox_easy", .cap = KGENOME_NUCLEO_CRYPTO },
+	/*
+	 * OpenSSL (libcrypto), which is what a Linux program links for its ciphers. These rows stood in the PE table only, which an
+	 * ELF object is never read against, so an ELF importing them had no crypto node (2026-11-15). The same API on both systems:
+	 * the rows are the PE table's, shape for shape (the manual and include/openssl/aes.h), and tests/lib/genome/nucleo_rows.c
+	 * (openssl_elf) holds the two tables equal on every one of these names.
+	 */
+	{ .name = "EVP_EncryptInit_ex", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("fd0 src3 res=value") },
+	{ .name = "EVP_EncryptUpdate", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("fd0 buf1 src3 res=value") },
+	{ .name = "EVP_DecryptInit_ex", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("fd0 src3 res=value") },
+	{ .name = "EVP_DecryptUpdate", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("fd0 buf1 src3 res=value") },
+	{ .name = "EVP_CipherInit_ex", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("fd0 src3 res=value") },
+	{ .name = "AES_set_encrypt_key", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("src0 buf2 res=value") },
+	{ .name = "AES_cbc_encrypt", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("src0 buf1 res=void") },
+	{ .name = "AES_encrypt", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("src0 buf1 res=void") },
+	{ .name = "RSA_public_encrypt", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("src1 buf2 res=value") },
+	{ .name = "RSA_private_decrypt", .cap = KGENOME_NUCLEO_CRYPTO, KGENOME_SHAPE("src1 buf2 res=value") },
 	/* Code into the kernel. */
-	{ .name = "init_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
-	{ .name = "finit_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
-	{ .name = "delete_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "init_module", .cap = KGENOME_NUCLEO_MOD_LOAD, KGENOME_SHAPE("res=status0") },
+	{ .name = "finit_module", .cap = KGENOME_NUCLEO_MOD_LOAD, KGENOME_SHAPE("res=status0") },
+	{ .name = "delete_module", .cap = KGENOME_NUCLEO_MOD_LOAD, KGENOME_SHAPE("res=status0") },
 	{ .name = "bpf", .cap = KGENOME_NUCLEO_MOD_LOAD },
 	{ .name = "bpf_load_program", .cap = KGENOME_NUCLEO_MOD_LOAD },
 	{ .name = "bpf_prog_load", .cap = KGENOME_NUCLEO_MOD_LOAD },
@@ -378,20 +403,20 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	 * these two did not, so the page went on saying `file-delete` with
 	 * MoveFileExW beside it - the exact contradiction that split was
 	 * made to end. They are with the other MoveFile rows now. */
-	{ .name = "unlink", .cap = KGENOME_NUCLEO_FILE_DELETE },
-	{ .name = "unlinkat", .cap = KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "unlink", .cap = KGENOME_NUCLEO_FILE_DELETE, KGENOME_SHAPE("res=status0") },
+	{ .name = "unlinkat", .cap = KGENOME_NUCLEO_FILE_DELETE, KGENOME_SHAPE("res=status0") },
 	{ .name = "remove", .cap = KGENOME_NUCLEO_FILE_DELETE },
-	{ .name = "rename", .cap = KGENOME_NUCLEO_FILE_RENAME },
-	{ .name = "renameat", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "rename", .cap = KGENOME_NUCLEO_FILE_RENAME, KGENOME_SHAPE("res=status0") },
+	{ .name = "renameat", .cap = KGENOME_NUCLEO_FILE_RENAME, KGENOME_SHAPE("res=status0") },
 	/* Making a dropped file runnable. */
-	{ .name = "chmod", .cap = KGENOME_NUCLEO_PERM_SET },
-	{ .name = "fchmod", .cap = KGENOME_NUCLEO_PERM_SET },
-	{ .name = "fchmodat", .cap = KGENOME_NUCLEO_PERM_SET },
+	{ .name = "chmod", .cap = KGENOME_NUCLEO_PERM_SET, KGENOME_SHAPE("res=status0") },
+	{ .name = "fchmod", .cap = KGENOME_NUCLEO_PERM_SET, KGENOME_SHAPE("res=status0") },
+	{ .name = "fchmodat", .cap = KGENOME_NUCLEO_PERM_SET, KGENOME_SHAPE("res=status0") },
 	/* Moving the boundary of what it can see. */
-	{ .name = "chroot", .cap = KGENOME_NUCLEO_JAIL },
-	{ .name = "pivot_root", .cap = KGENOME_NUCLEO_JAIL },
-	{ .name = "setns", .cap = KGENOME_NUCLEO_JAIL },
-	{ .name = "unshare", .cap = KGENOME_NUCLEO_JAIL },
+	{ .name = "chroot", .cap = KGENOME_NUCLEO_JAIL, KGENOME_SHAPE("res=status0") },
+	{ .name = "pivot_root", .cap = KGENOME_NUCLEO_JAIL, KGENOME_SHAPE("res=status0") },
+	{ .name = "setns", .cap = KGENOME_NUCLEO_JAIL, KGENOME_SHAPE("res=status0") },
+	{ .name = "unshare", .cap = KGENOME_NUCLEO_JAIL, KGENOME_SHAPE("res=status0") },
 	/*
 	 * AND WORDS FOR CAPABILITIES THAT ALREADY EXISTED, where only the
 	 * spelling was missing. Changing one's own privileges is CRED_SET
@@ -399,21 +424,74 @@ static const struct kgenome_nucleo_namerow rows[] = {
 	 * setuid; reaching into another process is PROC_MEM whether it is
 	 * WriteProcessMemory or process_vm_writev.
 	 */
-	{ .name = "setuid", .cap = KGENOME_NUCLEO_CRED_SET },
-	{ .name = "setgid", .cap = KGENOME_NUCLEO_CRED_SET },
-	{ .name = "seteuid", .cap = KGENOME_NUCLEO_CRED_SET },
-	{ .name = "setreuid", .cap = KGENOME_NUCLEO_CRED_SET },
-	{ .name = "setresuid", .cap = KGENOME_NUCLEO_CRED_SET },
+	/* The argument is a uid or gid, a number (VALUE), not a credential that was built (BUFFER is commit_creds' input, the
+	 * capability's shape, which these rows had). setreuid and setresuid take two and three ids and a role stands once in a
+	 * shape, so the first is the one named. seteuid had no shape of its own: the capability's buf0 and res=status. */
+	{ .name = "setuid", .cap = KGENOME_NUCLEO_CRED_SET, KGENOME_SHAPE("val0 res=status0") },
+	{ .name = "setgid", .cap = KGENOME_NUCLEO_CRED_SET, KGENOME_SHAPE("val0 res=status0") },
+	{ .name = "seteuid", .cap = KGENOME_NUCLEO_CRED_SET, KGENOME_SHAPE("val0 res=status0") },
+	{ .name = "setreuid", .cap = KGENOME_NUCLEO_CRED_SET, KGENOME_SHAPE("val0 res=status0") },
+	{ .name = "setresuid", .cap = KGENOME_NUCLEO_CRED_SET, KGENOME_SHAPE("val0 res=status0") },
 	{ .name = "process_vm_readv", .cap = KGENOME_NUCLEO_PROC_MEM },
 	{ .name = "process_vm_writev", .cap = KGENOME_NUCLEO_PROC_MEM },
 	{ .name = "posix_spawn", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
 	/* The three measured ones. */
 	{ .name = "dup2", .cap = KGENOME_NUCLEO_FD_REDIR },
 	{ .name = "dup3", .cap = KGENOME_NUCLEO_FD_REDIR },
-	{ .name = "utime", .cap = KGENOME_NUCLEO_TIMESTOMP },
-	{ .name = "utimes", .cap = KGENOME_NUCLEO_TIMESTOMP },
-	{ .name = "utimensat", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "utime", .cap = KGENOME_NUCLEO_TIMESTOMP, KGENOME_SHAPE("res=status0") },
+	{ .name = "utimes", .cap = KGENOME_NUCLEO_TIMESTOMP, KGENOME_SHAPE("res=status0") },
+	{ .name = "utimensat", .cap = KGENOME_NUCLEO_TIMESTOMP, KGENOME_SHAPE("res=status0") },
 	{ .name = "futimens", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	/*
+	 * Taking what the user is doing, on X11. These two stood in the PE table, which an ELF object is never read against, so an ELF
+	 * importing them got no node (moved 2026-11-15; the rows are what they were).
+	 */
+	{ .name = "XQueryKeymap", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "XGrabKeyboard", .cap = KGENOME_NUCLEO_CAPTURE },
+	/*
+	 * NO CAPABILITY, A FACT: the system calls whose success value is zero and which no word names (kgenome_nucleo_sys_zero_on_success
+	 * reads the rows' res=status0; it was a list of names in nucleo.c). A row without a capability makes no node.
+	 */
+	{ .name = "shutdown", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=status0") },
+	{ .name = "close", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=status0") },
+	{ .name = "munmap", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=status0") },
+	{ .name = "chdir", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=status0") },
+	/*
+	 * NO CAPABILITY, A FACT: THE CALLS THAT DO NOT RETURN (res=noret). They make no node; a call to one ends its block
+	 * (kgenome_diag_noret_add, read by the lineage: diag_lineage_chain.c, kgenome_diag_name_is_noreturn). The functions declared
+	 * noreturn by C11 and glibc's headers [Inference: from the declarations]; `exit_group` is the system call by the name of its
+	 * number (diag_site.c, noret_note: the ELF table is asked first), `exit` and `_exit` are both a function and a system call.
+	 * These were the list noreturn_names[] in diag_lineage_chain.c, one fact in a second carrier (moved 2026-11-15, fix_linrow).
+	 */
+	{ .name = "exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "_exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "_Exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "abort", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "quick_exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__stack_chk_fail", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__stack_chk_fail_local", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__assert_fail", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__assert", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__assert_perror_fail", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__chk_fail", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__fortify_fail", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__libc_fatal", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "longjmp", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "_longjmp", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "siglongjmp", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__longjmp_chk", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "pthread_exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__cxa_throw", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__cxa_rethrow", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__cxa_bad_cast", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "__cxa_bad_typeid", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "_Unwind_Resume", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "err", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "errx", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "verr", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "verrx", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "thrd_exit", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
+	{ .name = "exit_group", .cap = KGENOME_NUCLEO_NONE, KGENOME_SHAPE("res=noret") },
 };
 
 const struct kgenome_nucleo_names kgenome_nucleo_names_elf = {

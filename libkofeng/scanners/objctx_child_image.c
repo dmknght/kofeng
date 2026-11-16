@@ -8,6 +8,7 @@
 #include <genotype/image/elf_rebuild.h>
 
 #include "objctx_int.h"
+#include "../kofcore/kofdebug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,7 @@ int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
 		if (!tab || !pool) {
 			free(tab);
 			free(pool);
+			KOF_TRACE("[child] import: refused, the declaration table could not be allocated\n");
 			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 			return 0;
 		}
@@ -148,11 +150,13 @@ int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
 	 * does not fit gets 0 back and the child would otherwise be written with
 	 * the entries it did not know were missing. */
 	if (sc->pend.n_imp >= DECL_IMP_MAX) {
+		KOF_TRACE("[child] import: refused, %u entries is the table's cap\n", DECL_IMP_MAX);
 		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	if (!imp_intern(sc, dll, &dll_off) ||
 	    (!ordinal && !imp_intern(sc, fn, &fn_off))) {
+		KOF_TRACE("[child] import: refused, the name pool is spent\n");
 		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
@@ -254,6 +258,8 @@ int oc_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
 		if (end > sc->ledger.obj_cap || add > sc->ledger.budget ||
 		    sc->ledger.resident > sc->ledger.resident_max ||
 		    add > sc->ledger.resident_max - sc->ledger.resident) {
+			KOF_TRACE("[child] import table at rva=%llu: refused, growing by %llu byte(s) is over a ceiling\n",
+				  (unsigned long long)rva, (unsigned long long)add);
 			oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 			return 0;
 		}
@@ -355,6 +361,7 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 		/* A table that is full is a cap, and a cap is reported: the imports say so when theirs is
 		 * (oc_import), and a module that ignores the -1 would otherwise build a child without
 		 * the sections it declared and call it whole (engine_defect2 E6). */
+		KOF_TRACE("[child] section: refused, %u section(s) is the table's cap\n", DECL_SEC_MAX);
 		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 		return -1;
 	}
@@ -440,8 +447,14 @@ uint64_t oc_layout_of_produced(const struct kof_obj_ctx *ctx)
 			for (z = (size_t)end; z < sc->sink.len; z++)
 				if (sc->sink.mem[z])
 					break;
-			if (z == sc->sink.len)
+			if (z == sc->sink.len) {
+				KOF_TRACE("[child] layout: %llu padding byte(s) past the last section dropped\n",
+					  (unsigned long long)(sc->sink.len - (size_t)end));
 				sc->sink.len = (size_t)end;
+			} else {
+				KOF_TRACE("[child] layout: %llu byte(s) past the last section kept as an overlay\n",
+					  (unsigned long long)(sc->sink.len - (size_t)end));
+			}
 		}
 		sc->pend.n_sec = n;
 		sc->pend.entry_rva = entry;
@@ -521,6 +534,8 @@ int oc_image(const struct kof_obj_ctx *ctx)
 	if (!span || span > sc->ledger.budget || span > sc->ledger.obj_cap ||
 	    sc->ledger.resident > sc->ledger.resident_max ||
 	    span > sc->ledger.resident_max - sc->ledger.resident) {
+		KOF_TRACE("[child] image: refused, %llu byte(s) of declared sections is over a ceiling (or none declared)\n",
+			  (unsigned long long)span);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
@@ -529,6 +544,8 @@ int oc_image(const struct kof_obj_ctx *ctx)
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
+	KOF_TRACE("[child] image: %llu byte(s) laid out from %u section(s)\n",
+		  (unsigned long long)span, sc->pend.n_sec);
 	free(sc->sink.mem);
 	sc->sink.mem = mem;
 	sc->sink.cap = (size_t)span;
@@ -570,6 +587,7 @@ int oc_derive(const struct kof_obj_ctx *ctx)
 	    b.n > sc->ledger.obj_cap ||
 	    sc->ledger.resident > sc->ledger.resident_max ||
 	    b.n > sc->ledger.resident_max - sc->ledger.resident) {
+		KOF_TRACE("[child] derive: refused, %llu byte(s) is over a ceiling\n", (unsigned long long)b.n);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
@@ -607,5 +625,7 @@ int oc_derive(const struct kof_obj_ctx *ctx)
 	/* And the fact that makes it safe to offer this child to everyone
 	 * else: the module that derived it does not see it again. */
 	sc->pend.derived_by = sc->mod.cur;
+	KOF_TRACE("[child] derive: %llu byte(s) copied from the parent as the child's start\n",
+		  (unsigned long long)b.n);
 	return 1;
 }

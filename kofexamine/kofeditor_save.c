@@ -143,7 +143,7 @@ static void unit_head(struct kof_editor *e, struct kofeditor_unit_out *u)
 		m.name = kof_path_base(name);
 		m.sha256 = ob->sha256[0] ? ob->sha256 : NULL;
 	}
-	if (localtime_r(&now, &tmv) == NULL || !strftime(today, sizeof today, "%Y-%m-%d", &tmv))
+	if (kof_localtime(&now, &tmv) == NULL || !strftime(today, sizeof today, "%Y-%m-%d", &tmv))
 		return;
 	m.date = today;
 	t = kof_dsrc_head(u->text, u->n, &m, NULL, &hn);
@@ -386,7 +386,7 @@ int draft_generate_fs(struct kof_editor *e, const char *dir, char *msg, size_t c
 			continue;
 		snprintf(path, sizeof path, "%s/%s.c", dir, dp[i].name);
 		/* The exact file, and only if it is still a regular file (not a link put there since the plan). */
-		if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || fs->unlink(fs->ud, path) != 0) {
+		if (kof_path_kind(path, &st) != KOF_PATH_REGULAR || fs->unlink(fs->ud, path) != 0) {
 			uint32_t z;
 
 			snprintf(msg, cap, "Not written: cannot delete %s.c from %s; nothing was changed", dp[i].name, dir);

@@ -190,7 +190,14 @@ static void tiny_budget(void)
 	b.max_nodes = 8;
 	s = scan_budget(100, &b);
 	CK(s != NULL);
-	CK(kgenome_diag_scan_count(s) == 8u);
+	/* (the table of eight refused the rest, then the keep rule - fix_lgtab, kgenome_diag_nodes_keep - kept what is on a link, the drops
+	 * counted by class) */
+	{
+		struct kgenome_diag_drops dr;
+
+		kgenome_diag_scan_drops(s, &dr);
+		CK(dr.refused > 0u && kgenome_diag_scan_count(s) + dr.unlinked + dr.nocap == 8u);
+	}
 	CK(kgenome_diag_scan_status(s) == KGENOME_TRUNCATED);
 	CK(cf_match_rwx(s) == 0);       /* the stager is past the limit: not matched... */
 	CK(kgenome_diag_scan_status(s) != KGENOME_OK);  /* ...and the answer is not "clean" */
@@ -214,7 +221,12 @@ static void tiny_budget(void)
 	b.max_bytes = 64u * sizeof(struct kgenome_diag_hit);
 	s = scan_budget(300, &b);
 	CK(s != NULL);
-	CK(kgenome_diag_scan_count(s) == 64u);
+	{
+		struct kgenome_diag_drops dr;
+
+		kgenome_diag_scan_drops(s, &dr);
+		CK(dr.refused > 0u && kgenome_diag_scan_count(s) + dr.unlinked + dr.nocap == 64u);
+	}
 	CK(kgenome_diag_scan_status(s) == KGENOME_OVER_BUDGET);
 	{
 		uint64_t peak = 0, used = kgenome_diag_scan_bytes(s, &peak);

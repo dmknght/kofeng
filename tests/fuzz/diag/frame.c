@@ -11,6 +11,7 @@
  *   CACHE     every function of the table asked twice: one build each, the second ask the same pointer; the extent of an entry is the cache's, a shifted extent is made
  *             and given back; the bytes the cache holds are what it reports
  *   AT        kgenome_funcs_at and kgenome_funcs_start against a linear scan of the table, at every function's start, end and one byte on each side
+ *   RANGES    the further ranges of a function (kgenome_funcs_set_ranges / _n_ranges / _range): each part answered by its function, in offset order, by kgenome_funcs_at too
  */
 #include "diag_seed.h"
 
@@ -188,11 +189,67 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 			FZ_CHECK(c, kgenome_funcs_start(&fs, p[q]) == (p[q] == v[i].off ? i : kgenome_funcs_start(&fs, p[q])), "kgenome_funcs_start missed a start");
 		}
 	}
+	/* RANGES: parts past the code, given to functions the bytes pick, in reverse order (the set sorts them): every part is answered by its function's ranges in offset order,
+	 * kgenome_funcs_at answers a part's function, a range that does not exist is {0,0,NONE}, the total over the functions is the table plus the parts */
+	{
+		struct kgenome_func_range pr[8];
+		uint32_t np = n > 12 ? (uint32_t)(in[2] % 8u) + 1u : 1u, k, tot = 0;
+
+		for (k = 0; k < np; k++) {
+			pr[np - 1u - k].off = len + 16u * (uint64_t)k;
+			pr[np - 1u - k].len = 8u;
+			pr[np - 1u - k].fn = (uint32_t)(in[3u + k % 7u]) % fs.n;
+		}
+		FZ_CHECK(c, kgenome_funcs_set_ranges(&fs, pr, np) || fs.status == KGENOME_NOMEM, "set_ranges refused with memory to spare");
+		if (fs.n_rng == np) {
+			for (i = 0; i < fs.n; i++) {
+				const uint32_t nr = kgenome_funcs_n_ranges(&fs, i);
+				uint64_t last = 0;
+
+				tot += nr;
+				for (k = 1; k < nr; k++) {
+					const struct kgenome_func_range r = kgenome_funcs_range(&fs, i, k);
+
+					FZ_CHECK(c, r.fn == i && r.len == 8u && r.off >= len && r.off > last, "a part is not its function's, or out of order");
+					FZ_CHECK(c, kgenome_funcs_at(&fs, r.off + 7u) == i && kgenome_funcs_at(&fs, r.off + 8u) != i, "kgenome_funcs_at does not answer a part's function");
+					last = r.off;
+				}
+				FZ_CHECK(c, kgenome_funcs_range(&fs, i, nr).fn == KGENOME_FUNCS_NONE, "a range past the last exists");
+			}
+			FZ_CHECK(c, tot == fs.n + np, "the ranges do not add up to the table and its parts");
+		}
+		(void)kgenome_funcs_set_ranges(&fs, NULL, 0);   /* frees the parts; v[] is the stack's */
+		/* STARTS: declared starts at every function's start and middle (sorted): each function holds exactly its own, the total is every start */
+		{
+			struct kgenome_func_start st[32];
+			uint32_t m = 0, tot2 = 0, fst;
+
+			memset(st, 0, sizeof st);
+			for (i = 0; i < fs.n && m + 2u <= 32u; i++) {
+				st[m++].off = v[i].off;
+				if (v[i].len > 2u)
+					st[m++].off = v[i].off + v[i].len / 2u;
+			}
+			fs.st = st;
+			fs.n_st = m;
+			for (i = 0; i < fs.n; i++) {
+				const uint32_t c2 = kgenome_funcs_starts_in(&fs, i, &fst);
+
+				tot2 += c2;
+				FZ_CHECK(c, !c2 || (st[fst].off >= v[i].off && st[fst + c2 - 1u].off < v[i].off + v[i].len), "a start counted in a function that does not hold it");
+			}
+			FZ_CHECK(c, tot2 == m && kgenome_funcs_starts_in(&fs, fs.n, NULL) == 0u, "the starts do not add up");
+			fs.st = NULL;
+			fs.n_st = 0;
+		}
+		FZ_CHECK(c, kgenome_fn_trust_name((uint8_t)in[2])[0] == (in[2] < 4u ? "-nmh"[in[2]] : '?'), "a trust name that is not the enum's");
+	}
 	return 0;
 }
 
 FZ_ADAPTER(frame, .name = "kgenome/diag_frame",
 	   .covers = "kgenome_frame_make kgenome_frame_release kgenome_frame_state_name kgenome_frame_cache_new kgenome_frame_get kgenome_frame_of_extent "
-		     "kgenome_frame_facts kgenome_frame_facts_of kgenome_cfg_alloc kgenome_cfg_release kgenome_frame_cache_built kgenome_frame_cache_hits kgenome_frame_cache_refused kgenome_frame_cache_bytes kgenome_frame_cache_free kgenome_funcs_at kgenome_funcs_start",
+		     "kgenome_frame_facts kgenome_frame_facts_of kgenome_cfg_alloc kgenome_cfg_release kgenome_frame_cache_built kgenome_frame_cache_hits kgenome_frame_cache_refused kgenome_frame_cache_bytes kgenome_frame_cache_free kgenome_funcs_at kgenome_funcs_start "
+		     "kgenome_funcs_n_ranges kgenome_funcs_range kgenome_funcs_set_ranges kgenome_fn_trust_name kgenome_funcs_starts_in",
 	   .flags = 0, .backstop_s = 300, .steps_base = 100000u, .steps_per_byte = 64,
 	   .shape = FZ_REQ, .seeds = seeds, .run = run);

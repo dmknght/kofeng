@@ -31,19 +31,37 @@
 #include "frame.h"
 
 /*
- * HOW MANY TOKENS A VALUE HOLDS. Sixteen. The research prototype's eight overflowed on 14 of the 300 corpus files (a large switch
- * or state machine joins the results of many allocations into one register), which the scan says as KGENOME_TRUNCATED and
- * the file as "Limit reached"; sixteen overflows on 2 of them, 32 on 1, 64 on none, at a cost in the size of every value and every
- * state copy (about 8% of the stages' instructions from 8 to 16 [M]). A further producer does not vanish silently: the value widens
- * to `other` (so its links are MAY, never a wrong MUST) and the scan says it - a bound on the width of one value, not on how many
- * links an object may hold.
+ * HOW MANY TOKENS A VALUE HOLDS: as many as reach it. The first KGENOME_LINEAGE_VAL_INLINE are in the value itself (t[]), the rest in the
+ * stage's token pool (L->vx), as an immutable chain the value names by its head (`more`): a value copied shares the chain, and a token added
+ * to one copy makes a new head that points at the old one, so no copy changes another (kgenome_lineage_val_add). The pool is the solve's: it
+ * is emptied when the next function's solve starts, and charged to the ledger; a refusal is the one bound left (B_VALUE: the value widens to
+ * `other` with W_LIMIT, the scan says TRUNCATED).
+ *
+ * Sixteen tokens and no more was the bound before (LG-12): the research prototype's eight overflowed on 14 of the 300 corpus files, sixteen
+ * on 2 - MEASURED again on the 356-file A/B set before the fix: B_VALUE fired 69 times in 2 files (corp300 030: 8, 080: 61), both said
+ * TRUNCATED, and every token past sixteen was a producer the value lost. Fourteen inline keep the value at 48 bytes with the chain's head.
+ * MEASURED after the fix: B_VALUE fires on none of the 356 files, corp300 080 is no longer TRUNCATED, the links of the set are the same
+ * 7611 (the lost producers reached no consumer there; tests/lib/genome/lineage_sites.c t_wide_value is one where they do), lineage Ir on
+ * the 30-file callgrind set 10.82 G -> 10.97 G (+1.4%: the values of 15 and 16 tokens now walk a chain).
+ *
+ * KGENOME_LINEAGE_SET is the inline width of a CONSUMER's producers (struct kgenome_lineage_agg), which spill to their own pool (LG-11).
  */
 #define KGENOME_LINEAGE_SET 16u
+#define KGENOME_LINEAGE_VAL_INLINE 14u
 
-/* A token is a producer's node index (below this bit: a link names its producer in 16 bits, so a node past it is not tracked and the value
- * says so - the same bound as the summary's `node`), or this bit and a parameter number. A token is 16 bits: a value is 16 of them, and a state
- * is 16 values, copied and compared at every join. */
-#define KGENOME_LINEAGE_PARAM 0x8000u
+/* A token is a producer's node index (below KGENOME_LINEAGE_STATUS: a node past it is not tracked and the value says so - kgenome_lineage_bound
+ * B_VALUE), or the PARAM bit and a parameter number, or the STATUS bit and a node index. A token is 16 bits: a value is 16 of them, and a state
+ * is 16 values, copied and compared at every join.
+ *
+ * A STATUS TOKEN is the result of a node whose capability hands no handle on (connect's 0, a byte count): a value, not an object, so it is no
+ * producer of a descriptor, a buffer or a path - at those inputs it reads as `other` with the reason W_STATUS, exactly as before it was a token -
+ * and it never names a heap object (place_resolve). It is a token so that ONE input can say whose result it is: the NUMBER of a system call
+ * (KGENOME_DIAG_ROLE_NUMBER), where msfvenom's stagers leave connect's zero in rax and the next syscall reads it as `read`. The node bound
+ * moved from 32768 to 16384 to make the bit: an object past it says so (B_VALUE), it does not lose a link silently. */
+#define KGENOME_LINEAGE_PARAM  0x8000u
+#define KGENOME_LINEAGE_STATUS 0x4000u
+#define KGENOME_LINEAGE_NODE_MAX KGENOME_LINEAGE_STATUS     /* a node index a token can hold */
+#define KGENOME_LINEAGE_TOK_NODE(t) ((uint32_t)(t) & (KGENOME_LINEAGE_STATUS - 1u))
 
 /* How many parameters a summary names: the six an x86-64 call passes in registers, and for a
  * stack ABI the first six words above the return address. */
@@ -60,13 +78,16 @@ struct kgenome_lineage_val {
 	uint8_t  other;                 /* may also be a value no token names */
 	uint8_t  _pad;
 	uint32_t why;                   /* KGENOME_LINEAGE_W_*: why the part no token names is unknown (zero when `other` is clear) */
-	uint16_t t[KGENOME_LINEAGE_SET];
+	uint16_t t[KGENOME_LINEAGE_VAL_INLINE];
+	uint32_t more;                  /* the head cell + 1 of the tokens past t[] in the solve's pool (L->vx), 0: none */
 };
+_Static_assert(sizeof(struct kgenome_lineage_val) == 48, "a value is 48 bytes: every state copies sixteen of them at every join");
 
 /* A place a value is kept, keyed by what it is: the key's top nibble says which space. */
 #define KGENOME_LINEAGE_KEY_STACK 1u
 #define KGENOME_LINEAGE_KEY_GLOB  2u
 #define KGENOME_LINEAGE_KEY_HEAP  3u
+#define KGENOME_LINEAGE_KEY_LSTK  4u   /* a word pushed while the stack pointer is not known, by its depth from where it was lost */
 
 struct kgenome_lineage_slot {
 	uint64_t key;
@@ -83,18 +104,59 @@ struct kgenome_lineage_state {
 	uint8_t  pshs;                  /* words pushed since the stack pointer last changed otherwise (i386 callee-pops) */
 	uint8_t  valid;                 /* this point is reached */
 	uint8_t  seeded;                /* ... only through a seeded entry (diag_lineage_seed.c) */
+	int16_t  ld;                    /* when sp is not known: the words pushed since it was lost and not popped (their values are the slots
+					 * of space KGENOME_LINEAGE_KEY_LSTK, by depth); -1 when not known either (diag_lineage_state.c, sp_lost) */
 };
 
-/* The calling convention the object's code is read under. */
+struct kgenome_lineage;
+struct kgenome_lineage_state;
+
+/*
+ * THE ARCHITECTURE ROW (diag_lineage_arch.c): everything the stages ask a machine and an ABI, in ONE place, the way the emulator is a
+ * core plus a row per architecture (emu_private.h, struct kgenome_emu_arch). The core - the lattice, the join, the slots, the fixpoint,
+ * the summaries, the chain - asks the row and never the architecture: what a register is for, how a call passes its arguments and what
+ * it destroys, how a system call passes its number and arguments and what it destroys, and what one instruction does to the provenance
+ * state (`step`). An object whose (arch, format) has no row is not read (kgenome_lineage_arch_of answers NULL), and the reason each missing
+ * architecture has none is written at the table.
+ */
 struct kgenome_lineage_abi {
+	const char *name;
+	unsigned arch, fmt;             /* KGENOME_ARCH_*; KGENOME_FMT_* or 0 for any format */
+	/* the registers with a role */
+	uint8_t  sp, fp, ret;           /* the stack pointer, the frame pointer, where a call's answer comes back */
+	/* the CALL convention */
 	const uint8_t *arg;             /* the registers arguments 0.. are passed in */
 	const uint8_t *clob;            /* the registers a call destroys */
 	uint8_t  n_arg, n_clob;
-	uint8_t  wide;                  /* x86-64 */
+	uint8_t  wide;                  /* 64-bit: an absolute address is not truncated to 32 bits */
 	uint8_t  w;                     /* the machine word: 4 or 8 */
 	uint8_t  stack_first;           /* index of the first argument passed on the stack (words above the return address); 0 on i386 */
 	int32_t  stack_off;             /* where it is, from the stack pointer at the call (Windows x64 skips 32 bytes of shadow space) */
 	uint8_t  callee_pops;           /* a call to a site pops what was pushed for it unless an `add esp` follows (PE x86) */
+	/* the SYSTEM CALL convention: the number's register, the argument registers (kgenome_diag_arg_regs: the one table the routes read
+	 * them from, filled in by kgenome_lineage_arch_of), what the kernel entry destroys besides the result */
+	uint8_t  sys_nr;
+	const uint8_t *sys_arg;
+	uint8_t  n_sys_arg;
+	const uint8_t *sys_clob;
+	uint8_t  n_sys_clob;
+	/* what one instruction that is no call, jump, return or kernel entry does to the state */
+	void (*step)(struct kgenome_lineage *L, struct kgenome_lineage_state *st, const struct kgenome_cell_insn *in);
+};
+
+/* The row of the object's architecture and format, filled in (the argument registers of its system calls); 0 when none exists. */
+int kgenome_lineage_arch_of(const struct kgenome_obj *obj, struct kgenome_lineage_abi *out);
+
+/*
+ * HOW A SITE TAKES ITS INPUTS: decided once per site from the instruction it is and the node's capability (kgenome_lineage_site_conv), and
+ * the one switch that reads an input (kgenome_lineage_site_input). Before, a site was always a call and its inputs the call convention's
+ * arguments - so a node at a `syscall` had no input at all in this stage, and a branch through a register (EXEC_REG: `jmp rsi` into a
+ * region a node made) had none either (its capability names no argument role): its TARGET was only the linear sweep's.
+ */
+enum kgenome_lineage_conv {
+	KGENOME_LINEAGE_C_CALL = 0,     /* a call or a tail jump to an API or a function: the call convention's arguments */
+	KGENOME_LINEAGE_C_SYS,          /* a kernel entry: the system call convention's arguments, and its NUMBER */
+	KGENOME_LINEAGE_C_BRANCH        /* a branch through a register or memory the node is about: its TARGET is the branch's operand */
 };
 
 /* One function of the object as the stage reads it (kgenome_lineage_fn_get): the table's entry with its extent clamped to the object, and the address of its entry. */
@@ -105,19 +167,34 @@ struct kgenome_lineage_fn {
 /* The consumer (site, role) a value reaches, as the sum of every context that reaches it. */
 struct kgenome_lineage_agg {
 	uint32_t key;                   /* (node + 1) << 8 | role; 0 is a free cell */
-	uint8_t  n, other;
+	uint32_t n;                     /* the producers: the first KGENOME_LINEAGE_SET in t[], the rest in the table's pool from `more` */
+	uint8_t  other;
 	uint8_t  param;                 /* a parameter reached it: what the callers supply is not known here */
-	uint8_t  _pad;
+	uint16_t _pad;
 	uint32_t why;                   /* the reasons of the unknown part (W_*), ORed over the contexts */
+	uint32_t more;                  /* the first pool cell + 1 of the producers past t[], 0: none */
 	uint16_t t[KGENOME_LINEAGE_SET];
 };
 
+/* A producer of a consumer past its first KGENOME_LINEAGE_SET: a cell of the table's pool, chained. */
+struct kgenome_lineage_aggx {
+	uint32_t next;                  /* the next cell + 1, 0: the last */
+	uint16_t tok;
+};
+
 /* A table of them, open-addressed. One is the object's (what every function solved adds to); one is the run's of the
- * function in hand, which the next run of the same function replaces and the last one is merged into the object's. */
+ * function in hand, which the next run of the same function replaces and the last one is merged into the object's. A consumer
+ * holds as many producers as reach it (the pool, charged to the ledger): sixteen a consumer was a cap that deleted evidence -
+ * MEASURED, it fired 25 times on corp300 057 once the system call sites were read, and the file said TRUNCATED for it. */
 struct kgenome_lineage_aggtab {
 	struct kgenome_lineage_agg *v;
 	uint32_t n, cap;
+	struct kgenome_lineage_aggx *x;
+	uint32_t nx, capx;
 };
+
+/* Every producer of `a` (a->n of them) into `out`. */
+void kgenome_lineage_agg_toks(const struct kgenome_lineage_aggtab *t, const struct kgenome_lineage_agg *a, uint16_t *out);
 
 /*
  * WHAT A BLOCK HOLDS, as bits read off the decode of its function once (diag_lineage_chain.c, one loop over the
@@ -186,6 +263,9 @@ struct kgenome_lineage {
 	struct kgenome_diag_wrapper_ctx sums;
 	/* what reaches each consumer: the object's table, the function-in-hand's, and the one adds go to */
 	struct kgenome_lineage_aggtab glob, loc, *ag;
+	/* the tokens of values past their inline ones: an immutable chain per value (struct kgenome_lineage_val.more), the solve's */
+	struct kgenome_lineage_aggx *vx;
+	uint32_t nvx, capvx;
 	uint32_t nseeded;               /* blocks the last run entered as seeds */
 	uint32_t pend;                  /* the reasons of the unknown parts that reached a consumer, a sink or the return in this run */
 	const uint8_t *rel;             /* per function: it reaches a node (diag_lineage_summ.c), or NULL before the graph is built */
@@ -225,6 +305,8 @@ struct kgenome_lineage {
 /* A value no token names and the reason it is unknown (KGENOME_LINEAGE_W_*). _other is the one with no better reason. */
 void kgenome_lineage_val_unknown(struct kgenome_lineage_val *v, unsigned why);
 void kgenome_lineage_val_other(struct kgenome_lineage_val *v);
+/* Every token of a value into `out` (at most `cap`); answers how many the value has. */
+uint32_t kgenome_lineage_val_toks(const struct kgenome_lineage *L, const struct kgenome_lineage_val *v, uint16_t *out, uint32_t cap);
 /* Add a token to a value; 1 when it changed. */
 int  kgenome_lineage_val_add(struct kgenome_lineage *L, struct kgenome_lineage_val *v, uint32_t t);
 /* Join `b` into `a`; 1 when `a` changed. A value that no longer fits widens to `other` and notes the scan. */
@@ -241,6 +323,12 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 /* The value of argument `i` of a call, as the caller holds it at the call. */
 struct kgenome_lineage_val kgenome_lineage_arg(const struct kgenome_lineage *L,
 					       const struct kgenome_lineage_state *st, unsigned i);
+/* The value an operand holds (a register, an immediate, a place). */
+void kgenome_lineage_read_op(const struct kgenome_lineage *L, const struct kgenome_lineage_state *st,
+			     const struct kgenome_cell_insn *in, const struct kgenome_cell_operand *o,
+			     struct kgenome_lineage_val *out);
+/* The x86 and x86-64 transfer function: the `step` of their rows. */
+void kgenome_lineage_step_x86(struct kgenome_lineage *L, struct kgenome_lineage_state *st, const struct kgenome_cell_insn *in);
 /* A call has returned: the registers it destroys are `other`, `ret` is what rax holds and `pop` the words an
  * i386 stdcall callee popped (-1 when not known) - see the note in diag_lineage_state.c. */
 void kgenome_lineage_state_call(struct kgenome_lineage *L, struct kgenome_lineage_state *st,
@@ -287,6 +375,10 @@ void kgenome_lineage_seed(struct kgenome_lineage *L, struct kgenome_lineage_cfg 
 int  kgenome_lineage_call_noreturn(struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
 /* Has function `fi` no way to return: read from its FRAME's reachable blocks, once (a memo in `noret_fn`). */
 int  kgenome_lineage_noret(struct kgenome_lineage *L, uint32_t fi);
+/* How the site at instruction `in` (node `node`) takes its inputs. */
+enum kgenome_lineage_conv kgenome_lineage_site_conv(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in, uint32_t node);
+/* Is `in` an entry to the kernel under the object's architecture (the routes' own test, kgenome_diag_kernel_entry). */
+int  kgenome_lineage_is_kentry(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
 /* The node of an instruction (see diag_lineage_solve.c). */
 int  kgenome_lineage_site_in(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in, uint32_t *node);
 int  kgenome_lineage_site_of(const struct kgenome_lineage *L, uint64_t at, uint32_t *node);
@@ -303,8 +395,8 @@ static inline uint32_t kgenome_lineage_bend(const struct kgenome_lineage_cfg *g,
 {
 	return g->cfg.b[b].first + g->cfg.b[b].n_insn;
 }
-/* Does the node's capability hand a handle on in its result. */
-int  kgenome_lineage_hands_on(const struct kgenome_lineage *L, const struct kgenome_diag_hit *h);
+/* Does the node's result hand an object on: its row's answer, its capability's when it has no row (diag_lineage_solve.c). */
+int  kgenome_lineage_hands_on(const struct kgenome_diag_hit *h);
 /* The function whose entry is the target of the call or jump `in`, or UINT32_MAX. */
 uint32_t kgenome_lineage_fn_of_insn(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in);
 /* The function `fi` as the stage reads it; 0 when it has no code the stage can read (outside the object, no length, no address). */
@@ -313,6 +405,8 @@ int kgenome_lineage_fn_get(const struct kgenome_lineage *L, uint32_t fi, struct 
 void kgenome_lineage_frame_src(struct kgenome_lineage *L, const struct kgenome_func_set *table);
 /* The function of each end of every reference of `cm`, decided once (L->ref_from, L->ref_to); 0 when memory or the ledger refused. Idempotent. */
 int kgenome_lineage_refs(struct kgenome_lineage *L, const struct kgenome_codemap *cm);
+/* The cell of `key` ((node + 1) << 8 | role) in a table of what reaches the consumers, or NULL: a lookup, nothing inserted. */
+const struct kgenome_lineage_agg *kgenome_lineage_agg_get(const struct kgenome_lineage_aggtab *t, uint32_t key);
 void kgenome_lineage_agg_add(struct kgenome_lineage *L, uint32_t node, uint8_t role,
 			     const struct kgenome_lineage_val *v, int uncertain);
 /* The words an i386 stdcall callee pops, for a call through the import slot at `slot` - or -1. */

@@ -49,8 +49,12 @@
  * The route runs when a diagnose that passed its gate declared it.
  *
  * Anything else serves none, so no diagnose is asked.
+ *
+ * Exported (not static) because oc_diag_ready's explain path (kof_scan_set_explain)
+ * calls it directly: a caller authoring a diagnose wants every route the FORMAT
+ * can serve, not only the ones a loaded diagnose's gate happens to open.
  */
-static unsigned diag_servable(const struct kof_obj_ctx *ctx)
+unsigned oc_diag_servable(const struct kof_obj_ctx *ctx)
 {
 	if (oc_text_served(ctx))                /* a script whose language has a table of names */
 		return KGENOME_DIAG_RUN_TEXT;
@@ -70,6 +74,21 @@ static unsigned diag_servable(const struct kof_obj_ctx *ctx)
 		return KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_SYSCALL;
 	}
 	return 0;
+}
+
+/*
+ * THE ROUTES AN AUTHOR'S LIST IS MADE BY: every route the format serves, and EMULATE for a binary (not for a script).
+ * One rule for its two askers - the explain run a researcher picks nucleo from (kof_scan_set_explain) and a signature's
+ * nucleo gate that asks about what was picked (objctx_diag_gate.c) - so the gate's graph is made the way the list was.
+ * It was written inside oc_diag_ready for the first asker alone.
+ */
+unsigned oc_diag_author_routes(const struct kof_obj_ctx *ctx)
+{
+	unsigned servable = oc_diag_servable(ctx);
+
+	if (servable & ~(unsigned)KGENOME_DIAG_RUN_TEXT)
+		servable |= KGENOME_DIAG_RUN_EMULATE;
+	return servable;
 }
 
 /* The analyses a diagnose DECLARED, as the routines the scan runs. */
@@ -92,5 +111,5 @@ static unsigned analysis_runs(unsigned analysis)
  * file offers it. Zero means the file has nothing for this diagnose. */
 unsigned oc_diag_routes(const struct kof_diag *d, const struct kof_obj_ctx *ctx)
 {
-	return analysis_runs(d->analysis) & diag_servable(ctx);
+	return analysis_runs(d->analysis) & oc_diag_servable(ctx);
 }

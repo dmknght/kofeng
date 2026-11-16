@@ -345,7 +345,7 @@ static void note_users(struct kof_engine *e, const uint8_t *rec, uint64_t rl,
 /* KNOWN DEFECT MEM-6 (2026-10-29, R) [sev L]: the store is "record length + 1" for EVERY record, and a detection form (no node, no symbol) uses none of it: the whole
  * record is mostly the form's hashes. Trigger: any pack of form diagnoses. Effect: the engine holds the pack's bytes a second time for its life (780 KB of 700 forms in
  * tests/unit/mem_diag_forms.c; at most the pack's size, 256 MiB, and it counts in keng_memory_db). Reproducer: tests/unit/mem_diag_forms.c (growth pack, 779 KB, needs 0).
- * Fix: a kof_diag_needs_bound() beside kof_diag_load (the bytes of the record outside its KDIG_SEC_FORM sections) sizes each slice; the section walk stays in kofdiag.c. */
+ * Fix: a kof_diag_needs_bound() beside kof_diag_load (the bytes of the record outside its KDIG_SEC_FORM sections) sizes each slice; the section walk stays in kofdiag_load.c. */
 static char *diag_arena_new(struct kof_engine *e, const uint8_t *buf, size_t got,
 			    size_t n_rec)
 {

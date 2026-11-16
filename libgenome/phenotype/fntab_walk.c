@@ -5,6 +5,8 @@
  * object's entry point. What it cannot see (CN-5): what is called through a register, address-taken functions, Thumb. Entries only: it gives no end (the ends step
  * of the table does: the next start less the padding the decode saw). It decodes nothing itself: the walk is built by the caller, once.
  */
+/* DISABLED by the owner 2026-11-16: the entry walk's direct call targets are found by a linear decode that reads data as code: disassembly analysis the owner ruled out for the partition (error-prone, lacks coverage); the entry point it also gave is now genotype/image/fntab_entry.c. To re-enable: take the #if 0 out, set KGENOME_FNTAB_X_WALK in the selector rows (fntab_select.c, fntab_pe_select.c) and kgenome_fntab_run_walk (fntab_build.c) back in. */
+#if 0
 #include "diag_scan_private.h"
 #include <genotype/image/fntab.h>
 #include <genotype/image/fntab_private.h>
@@ -33,3 +35,4 @@ void kgenome_fntab_walk(const struct kgenome_obj *obj, const struct kgenome_diag
 		(void)kgenome_fntab_list_add(out, &f);
 	}
 }
+#endif

@@ -54,6 +54,27 @@ static const char *hit_sym(const struct kgenome_diag_scan *s,
 	return NULL;
 }
 
+/*
+ * THE WORD THE RULE NAMED, OR ANY KIND OF IT. A rule saying mem-read is
+ * satisfied by net-recv, because net-recv IS a mem-read whose descriptor
+ * turned out to be a socket - see kgenome_nucleo_cap_generic. Comparing for
+ * equality made a rule stop matching whenever the engine learned something
+ * more about the program it described. The ONE test of it: the matcher's spec
+ * and the join's capability both ask here (the join compared for equality and
+ * missed a socket read named by mem-read: DL-2).
+ */
+static int cap_is(uint16_t have, uint16_t want)
+{
+	uint16_t g = have;
+
+	if (have == want)
+		return 1;
+	while ((g = kgenome_nucleo_cap_generic(g)) != KGENOME_NUCLEO_NONE)
+		if (g == want)
+			return 1;
+	return 0;
+}
+
 /* A node satisfies a spec when it has the capability, carries every flag the
  * spec demands, and is not one whose meaning the walk could not read. The
  * last is the point of KGENOME_DIAG_H_ARG_UNKNOWN: a `mmap` whose prot could not
@@ -62,22 +83,8 @@ static int spec_ok(const struct kgenome_diag_scan *s,
 		   const struct kgenome_diag_hit *h,
 		   const struct kof_diag_node *sp)
 {
-	/*
-	 * THE WORD THE RULE NAMED, OR ANY KIND OF IT. A rule saying mem-read
-	 * is satisfied by net-recv, because net-recv IS a mem-read whose
-	 * descriptor turned out to be a socket - see kgenome_nucleo_cap_generic.
-	 * Comparing for equality made a rule stop matching whenever the
-	 * engine learned something more about the program it described.
-	 */
-	if (h->cap != sp->cap) {
-		uint16_t g = h->cap;
-		int kind = 0;
-
-		while ((g = kgenome_nucleo_cap_generic(g)) != KGENOME_NUCLEO_NONE)
-			if (g == sp->cap) { kind = 1; break; }
-		if (!kind)
-			return 0;
-	}
+	if (!cap_is(h->cap, sp->cap))
+		return 0;
 	if ((h->flags & sp->flags) != sp->flags)
 		return 0;
 	if (h->bits & (KGENOME_DIAG_H_ARG_UNKNOWN | KGENOME_DIAG_H_SUPERSEDED))
@@ -128,34 +135,46 @@ static int spec_ok(const struct kgenome_diag_scan *s,
  * the viewer, kgenome_diag_in.how). tests/unit/diag_linked_how.c pins this: if the decision changes, that test
  * changes with it and the corpus identity counts move.
  */
-static int linked(const struct kgenome_diag_hit *child, uint16_t parent_idx,
-		  const struct kgenome_diag_hit *parent, uint8_t role,
-		  uint8_t want)
+/*
+ * DOES THIS INPUT OF THE CHILD SAY WHAT THE DIAGNOSE ASKED OF THE LINK: its
+ * role, and its kind. The one filter of an input, for a direct link and a
+ * reached one alike (the kind is the child's own input - the last hop; what
+ * a reached link asks of the hops before it is in reach_mode).
+ */
+static int in_takes(const struct kgenome_diag_in *in, uint8_t role, uint8_t want)
 {
-	uint8_t i;
-
+	/* A node that names no role takes the link whatever the role: the
+	 * role is the child's own argument, which the engine derived from
+	 * the capability (kgenome_diag_role_of_arg) and the diagnose need not
+	 * restate. */
+	if (role != KGENOME_DIAG_ROLE_NONE && in->role != role)
+		return 0;
 	/*
 	 * AND OF WHICH KIND, where the diagnose says - see KOF_DIAG_B_SHARED.
 	 * Neither bit is "either", which is what a diagnose written before
 	 * the kinds existed asked for and still asks for.
 	 */
 	want &= (uint8_t)(KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED);
+	if (want) {
+		uint8_t is = in->kind == KGENOME_DIAG_KIND_SHARED
+			     ? (uint8_t)KOF_DIAG_B_SHARED
+			     : (uint8_t)KOF_DIAG_B_PRODUCED;
+
+		if (!(want & is))
+			return 0;
+	}
+	return 1;
+}
+
+static int linked(const struct kgenome_diag_hit *child, uint16_t parent_idx,
+		  const struct kgenome_diag_hit *parent, uint8_t role,
+		  uint8_t want)
+{
+	uint8_t i;
 
 	for (i = 0; i < child->n_in; i++) {
-		/* A node that names no role takes the link whatever the role: the
-		 * role is the child's own argument, which the engine derived from
-		 * the capability (kgenome_diag_role_of_arg) and the diagnose need not
-		 * restate. */
-		if (role != KGENOME_DIAG_ROLE_NONE && child->in[i].role != role)
+		if (!in_takes(&child->in[i], role, want))
 			continue;
-		if (want) {
-			uint8_t is = child->in[i].kind == KGENOME_DIAG_KIND_SHARED
-				     ? (uint8_t)KOF_DIAG_B_SHARED
-				     : (uint8_t)KOF_DIAG_B_PRODUCED;
-
-			if (!(want & is))
-				continue;
-		}
 		if (child->in[i].from == parent_idx)
 			return 1;
 		if (child->in[i].from == KGENOME_DIAG_FROM_STACK &&
@@ -326,44 +345,6 @@ static uint32_t cand_next(struct cand *c)
 	return c->b < c->be ? *c->b++ : c->n;
 }
 
-struct bind_ctx {
-	const struct kgenome_diag_scan *s;
-	const struct kof_diag *d;
-	struct succ_idx idx;
-};
-
-/* Bind spec[k] and everything under it. `bound` holds the node index chosen
- * for each spec so far. Depth is the diagnose's own, which is a handful. */
-static int bind_from(struct bind_ctx *m, uint8_t k, uint16_t *bound)
-{
-	const struct kgenome_diag_scan *s = m->s;
-	const struct kof_diag *d = m->d;
-	uint8_t c;
-
-	for (c = 0; c < d->n_node; c++) {
-		struct cand cd;
-		uint32_t i;
-
-		if (d->node[c].parent != k)
-			continue;
-		cand_begin(&cd, s, &m->idx, bound[k]);
-		for (i = cand_next(&cd); i < s->n_hit; i = cand_next(&cd)) {
-			if (!spec_ok(s, &s->hit[i], &d->node[c]))
-				continue;
-			if (!linked(&s->hit[i], bound[k], &s->hit[bound[k]],
-				    d->node[c].role, d->node[c].bits))
-				continue;
-			bound[c] = (uint16_t)i;
-			if (bind_from(m, c, bound))
-				goto next;
-		}
-		return 0;               /* a branch of the tree has no match */
-next:
-		;
-	}
-	return 1;
-}
-
 /*
  * ---- THE VALUE-FLOW GRAPH, AND REACHING ACROSS IT -----------------------
  *
@@ -444,34 +425,126 @@ static int diag_flow_build(struct kgenome_diag_scan *s)
 }
 
 /*
- * Does the value at `start` reach any node whose bit is set in `tgt`,
- * following value-flow edges. One O(V+E) walk over a reused frontier - the
- * visited set means a node is expanded once however many starts share it.
+ * WHICH EDGES A WALK MAY TAKE. Zero is every value-flow edge (the join between two diagnoses, and a matcher link
+ * whose last hop consumes what it is handed). FLOW_VALUE keeps only the edges along which the VALUE ITSELF travels -
+ * a node took the previous node's value in an input that is not BUFFER - and drops the edges where a call wrote into
+ * a region (BUFFER, reversed): a pointer handed on through a wrapper is a value edge, the bytes a read put into a
+ * region are not the region's pointer. FLOW_SHARED keeps only the edges whose link is SHARED (the same object).
+ *
+ * Decided per edge from the nodes' own inputs (at most four each), so the graph carries no second edge table: the
+ * filter costs at most eight compares an edge, and a walk with mode zero pays none.
  */
-static int diag_flow_reach(struct kgenome_diag_scan *s, uint16_t start,
-			   const uint8_t *tgt, uint8_t *seen, uint16_t *stk)
-{
-	uint32_t sp = 0;
+#define FLOW_VALUE  1u
+#define FLOW_SHARED 2u
+/*
+ * ONLY THROUGH AN INPUT THAT CARRIES DATA: a walk goes on from a node it entered through an input of role VALUE, SOURCE,
+ * FD or TARGET (and through a write into a region, BUFFER reversed), never one it entered through a PATH or through an
+ * input the route did not classify (role NONE). A path NAMES a resource and the node hands back a NEW object (a handle,
+ * a module), not the path's value: `$h = fopen($_GET['p'], 'w'); fwrite($h, 'x');` writes a constant into a file the
+ * request named, not the request's data - tests/unit/diag_text_golden.c pins that php_request_write does not fire on it,
+ * and it did when the matcher walked through the open (measured 2026-11-14; the text route records that argument with
+ * role NONE, the binary routes record no NONE link at all - kgenome_diag_role_of_arg). The last hop may be any role (the
+ * child's own input: request -> decode -> include(it) is linked). A descriptor is walked: what a read takes through it
+ * is what the socket or file carries (socket -> read -> region -> jump). The join between two diagnoses
+ * (kof_diag_flow_join) walks with mode zero, as it always did.
+ */
+#define FLOW_DATA   4u
 
-	if (start >= s->n_hit || (seen[start >> 3] & (1u << (start & 7u))))
+static int flow_edge_ok(const struct kgenome_diag_scan *s, uint16_t u, uint16_t v, unsigned mode)
+{
+	const struct kgenome_diag_hit *hu = &s->hit[u], *hv = &s->hit[v];
+	uint8_t k;
+
+	/* v took u's value: an input of v from u that is not a write into u */
+	for (k = 0; k < hv->n_in && k < 4u; k++)
+		if (hv->in[k].from == u && hv->in[k].role != KGENOME_DIAG_ROLE_BUFFER &&
+		    (!(mode & FLOW_DATA) || (hv->in[k].role != KGENOME_DIAG_ROLE_PATH &&
+					       hv->in[k].role != KGENOME_DIAG_ROLE_NONE)) &&
+		    (!(mode & FLOW_SHARED) || hv->in[k].kind == KGENOME_DIAG_KIND_SHARED))
+			return 1;
+	if (mode & FLOW_VALUE)
 		return 0;
-	if (tgt[start >> 3] & (1u << (start & 7u)))
+	/* u wrote into v (u's BUFFER input names v): what u produced lands in v */
+	for (k = 0; k < hu->n_in && k < 4u; k++)
+		if (hu->in[k].from == v && hu->in[k].role == KGENOME_DIAG_ROLE_BUFFER &&
+		    (!(mode & FLOW_SHARED) || hu->in[k].kind == KGENOME_DIAG_KIND_SHARED))
+			return 1;
+	return 0;
+}
+
+/*
+ * ONE WALK'S STATE: the set it reached (a bit a node) and the same nodes in the order it reached them, which is the
+ * walk's queue and also the list a caller clears the set by (flow_walk_reset touches only what was set, not n_hit / 8
+ * bytes). `work` counts the edges examined against `cap`, shared by every walk of one match; NULL is no bound (the
+ * join between two diagnoses: one walk of at most V + E over a visited set shared by its starts).
+ */
+struct flow_walk {
+	uint8_t  *seen;
+	uint16_t *q;
+	uint32_t  n;
+	uint64_t *work;
+	uint64_t  cap;
+};
+
+static int bit_has(const uint8_t *b, uint32_t i)
+{
+	return (b[i >> 3] >> (i & 7u)) & 1u;
+}
+
+static void bit_set(uint8_t *b, uint32_t i)
+{
+	b[i >> 3] |= (uint8_t)(1u << (i & 7u));
+}
+
+static void flow_walk_reset(struct flow_walk *w)
+{
+	uint32_t i;
+
+	for (i = 0; i < w->n; i++)
+		w->seen[w->q[i] >> 3] = 0;
+	w->n = 0;
+}
+
+/*
+ * THE ONE REACHABILITY ROUTINE of the engine over a diagnose graph: the join between two diagnoses
+ * (kof_diag_flow_join), a link through nodes in between (the matcher's reached tier) and the meeting of a diagnose's
+ * two blocks (KOF_DIAG_B_JOIN) all walk here.
+ *
+ * Does the value at `start` reach a node whose bit is set in `tgt`, following value-flow edges `mode` allows. 1 yes,
+ * 0 no, -1 the work bound ran out first (the walk could not say: the caller answers UNKNOWN, never no). With `tgt`
+ * NULL it reaches everything it can and answers 0: w->seen and w->q are then the set. Breadth first, each node
+ * expanded once; a start the set already holds answers 0 at once (a start an earlier start reached found no target).
+ * The graph must be built (diag_flow_build).
+ */
+static int diag_flow_reach(const struct kgenome_diag_scan *s, uint16_t start, const uint8_t *tgt,
+			   unsigned mode, struct flow_walk *w)
+{
+	uint32_t h;
+
+	if (start >= s->n_hit || bit_has(w->seen, start))
+		return 0;
+	if (tgt && bit_has(tgt, start))
 		return 1;
-	seen[start >> 3] |= (uint8_t)(1u << (start & 7u));
-	stk[sp++] = start;
-	while (sp) {
-		uint16_t u = stk[--sp];
+	bit_set(w->seen, start);
+	h = w->n;
+	w->q[w->n++] = start;
+	while (h < w->n) {
+		uint16_t u = w->q[h++];
 		uint32_t j;
 
 		for (j = s->adj_head[u]; j < s->adj_head[u + 1u]; j++) {
 			uint16_t v = s->adj_edge[j];
 
-			if (seen[v >> 3] & (1u << (v & 7u)))
+			if (w->work && ++*w->work > w->cap)
+				return -1;
+			if (bit_has(w->seen, v))
 				continue;
-			if (tgt[v >> 3] & (1u << (v & 7u)))
+			if (mode && !flow_edge_ok(s, u, v, mode))
+				continue;
+			if (tgt && bit_has(tgt, v))
 				return 1;
-			seen[v >> 3] |= (uint8_t)(1u << (v & 7u));
-			stk[sp++] = v;
+			bit_set(w->seen, v);
+			w->q[w->n++] = v;
 		}
 	}
 	return 0;
@@ -484,7 +557,9 @@ static int diag_flow_reach(struct kgenome_diag_scan *s, uint16_t start,
  * bytes a socket read produced (a node of `cap`, bound by the net diagnose
  * `b`) flow - directly or through a copy - into the region the exec
  * diagnose `a` is about. `a_bind`/`b_bind` are the node sets the match
- * returned for each.
+ * returned for each. A node of `cap` is one of that word or of a kind of it
+ * (cap_is), as the matcher reads a spec: a socket read is net-recv, and a
+ * join named mem-read must see it.
  */
 int kof_diag_flow_join(struct kgenome_diag_scan *s, uint16_t cap,
 		       const uint16_t *a_bind, uint8_t na,
@@ -492,7 +567,8 @@ int kof_diag_flow_join(struct kgenome_diag_scan *s, uint16_t cap,
 {
 	uint8_t tgt[(KGENOME_MAX_INDEX + 7u) / 8u];
 	uint8_t seen[(KGENOME_MAX_INDEX + 7u) / 8u];
-	uint16_t *stk;
+	struct flow_walk w;
+	uint16_t *q;
 	uint8_t x;
 	int hit = 0;
 
@@ -502,25 +578,384 @@ int kof_diag_flow_join(struct kgenome_diag_scan *s, uint16_t cap,
 	memset(seen, 0, sizeof seen);
 	for (x = 0; x < na; x++)
 		if (a_bind[x] < s->n_hit)
-			tgt[a_bind[x] >> 3] |= (uint8_t)(1u << (a_bind[x] & 7u));
-	/* The walk's frontier is scratch for this call, charged while it is held. */
-	if (!kgenome_ledger_charge(&s->led, (uint64_t)s->n_hit * sizeof *stk))
+			bit_set(tgt, a_bind[x]);
+	/* The walk's queue is scratch for this call, charged while it is held. */
+	if (!kgenome_ledger_charge(&s->led, (uint64_t)s->n_hit * sizeof *q))
 		return 0;
-	stk = malloc((size_t)s->n_hit * sizeof *stk);
-	if (!stk) {
-		kgenome_ledger_release(&s->led, (uint64_t)s->n_hit * sizeof *stk);
+	q = malloc((size_t)s->n_hit * sizeof *q);
+	if (!q) {
+		kgenome_ledger_release(&s->led, (uint64_t)s->n_hit * sizeof *q);
 		kgenome_diag_note(s, KGENOME_NOMEM);
 		return 0;
 	}
+	w.seen = seen;
+	w.q = q;
+	w.n = 0;
+	w.work = NULL;
+	w.cap = 0;
 	for (x = 0; x < nb && !hit; x++) {
 		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, b_bind[x]);
 
-		if (h && h->cap == cap)
-			hit = diag_flow_reach(s, b_bind[x], tgt, seen, stk);
+		if (h && cap_is(h->cap, cap))
+			hit = diag_flow_reach(s, b_bind[x], tgt, 0u, &w) > 0;
 	}
-	free(stk);
-	kgenome_ledger_release(&s->led, (uint64_t)s->n_hit * sizeof *stk);
+	free(q);
+	kgenome_ledger_release(&s->led, (uint64_t)s->n_hit * sizeof *q);
 	return hit;
+}
+
+/*
+ * ==== A LINK THROUGH NODES IN BETWEEN (owner, 2026-11-14) ====================
+ *
+ * "A link must survive an intermediate wrapper and an intermediate call node" - an earlier rule, which the matcher
+ * broke: a child was linked to its parent only when one of its inputs named the parent's node DIRECTLY (DL-1). A
+ * pointer handed through a wrapper (mmap -> my_alloc returns it -> read into it), a value passed through a call node
+ * (decode -> a call that hands it on -> eval) or bytes copied through a scratch buffer (read -> scratch -> copy ->
+ * region -> jump) put one node between the two, and the diagnose did not match.
+ *
+ * SO A CHILD IS LINKED IN TWO TIERS, the direct one first:
+ *
+ *   direct   an input names the parent (or the stack region the parent made) - exactly what `linked` always
+ *            answered, tried first and in the same order, so every match the direct rule found is found with the
+ *            same nodes bound.
+ *   reached  only when no direct candidate binds: an input of the child (its role and kind as the diagnose asks,
+ *            in_takes) names a node x that the parent's value REACHES over the value-flow graph (diag_flow_reach, the
+ *            one walk). Which edges the path may take is the decision below.
+ *
+ * DECIDED: AN INTERMEDIATE NODE NEED NOT BE OF A "PASS-THROUGH" KIND, and no table of such kinds exists. The edge
+ * says it: a node whose input took the previous node's value carries that value on (it is the node's own input,
+ * found by the route that read the program), and a node that wrote into a region put its bytes there. A list of
+ * pass-through capabilities would be a second statement of what the links already record, and a wrapper the list
+ * did not name would break the link again. What the path may take depends on what the CHILD does with x:
+ *
+ *   the child's input is BUFFER (it writes through x's pointer): the POINTER must be the parent's - every hop a
+ *            value edge (FLOW_VALUE). A region that a read wrote into is not the read's pointer.
+ *   any other role (it consumes x: runs it, reads from it, uses it as a descriptor, a path or a value): any
+ *            value-flow edge - bytes read into a scratch buffer and copied into the region the child jumps to
+ *            are the bytes it runs.
+ *   and on every path: only through an input that carries data (FLOW_DATA, above) - not through a PATH, which names a
+ *            resource the node makes a new object of, nor through an input the route did not classify. That is the
+ *            whole of the "pass-through" decision: by the ROLE of the input, not by the capability of the node.
+ *
+ * THE KIND (KOF_DIAG_B_PRODUCED / _SHARED): the child's own input carries it, as before (the last hop). A kind is a
+ * statement about the OBJECT - the child holds what the parent made, or the same object - and an object travels only
+ * along value edges: a call that wrote into a region did not hand the region its object. So a tail that names a kind
+ * walks value edges only (FLOW_VALUE), and SHARED ("the same object", which a produced hop breaks) SHARED value edges
+ * only (FLOW_SHARED); a tail that names neither walks every edge. Pinned by tests/unit/diag_kind.c: copy_to_user
+ * reads the buffer copy_from_user filled, and that is NOT copy_from_user's produced object (the content hop through
+ * the allocation is not taken for PRODUCED). MAY counts as PROVEN on every hop (audit R4, see `linked`).
+ *
+ * THE BOUND (a cap bounds cost and is reported, never a silent no): the walks of one match share
+ * KOF_DIAG_REACH_WALKS whole-graph walks of work (edges examined, candidates tried), at least KOF_DIAG_REACH_FLOOR.
+ * A parent's reached set is walked once and kept for all its children (a level of the tree holds one), so a star
+ * costs two walks a head candidate whose direct tier failed. When the bound runs out, or the scratch the reached
+ * tier needs is refused by the scan's ledger, the reached tier stops for the rest of that match and a "no" becomes
+ * KOF_DIAG_MATCH_UNKNOWN (kof_diag_match_known), which the scanner reports as the diagnose's unknown bit.
+ */
+#define KOF_DIAG_REACH_WALKS 32u
+#define KOF_DIAG_REACH_FLOOR 65536u
+
+/* What one bound parent reaches, kept while its children are bound: the set over every edge, the set over value
+ * edges only, and the nodes that take an input from a reached node (the candidates), ascending. */
+struct reach_lvl {
+	struct flow_walk all, val;
+	uint8_t  *cand;
+	uint16_t *cl;
+	uint32_t  ncl;
+	uint16_t  from;
+	unsigned  kmode;
+	int       made;
+	uint8_t  *mem;
+};
+
+struct bind_ctx {
+	struct kgenome_diag_scan *s;
+	const struct kof_diag *d;
+	struct succ_idx idx;
+	int       flow;         /* 0 not asked yet, 1 the value-flow graph is built, -1 it could not be */
+	uint64_t  work, cap;    /* the reached tier's work, one bound for the whole match */
+	int       limited;      /* the bound or the scratch ran out: a "no" from this match is a "cannot say" */
+	uint64_t  charged;      /* scratch bytes charged to the scan's ledger (kgenome_ledger_try) */
+	struct reach_lvl *lvl;  /* one a depth of the tree, made on first use */
+	uint8_t   blk[256];     /* the block of each node: 0 the first root's, 1 the second root's */
+	uint8_t  *tgt;          /* while the second block is bound: the nodes the first block bound */
+	struct flow_walk jw;    /* the walk a KOF_DIAG_B_JOIN node asks */
+	uint8_t  *jmem;
+};
+
+/* Scratch for the match, charged to the scan's ledger while it is held. NULL, and the match is limited, when the
+ * ledger or the allocator refuses: the reached tier then answers "cannot say", never "no". */
+static void *bc_alloc(struct bind_ctx *m, size_t n)
+{
+	void *p;
+
+	if (!kgenome_ledger_try(&m->s->led, n)) {
+		m->limited = 1;
+		return NULL;
+	}
+	p = calloc(1, n);
+	if (!p) {
+		kgenome_ledger_release(&m->s->led, n);
+		m->limited = 1;
+		return NULL;
+	}
+	m->charged += n;
+	return p;
+}
+
+static void bc_free(struct bind_ctx *m)
+{
+	uint8_t k;
+
+	if (m->lvl)
+		for (k = 0; k < m->d->n_node; k++)
+			free(m->lvl[k].mem);
+	free(m->lvl);
+	free(m->tgt);
+	free(m->jmem);
+	kgenome_ledger_release(&m->s->led, m->charged);
+	m->charged = 0;
+}
+
+/* The value-flow graph for the reached tier, built once a scan, and the match's work bound sized from it. */
+static int bc_flow(struct bind_ctx *m)
+{
+	if (!m->flow) {
+		m->flow = diag_flow_build(m->s) ? 1 : -1;
+		if (m->flow > 0) {
+			uint64_t ve = (uint64_t)m->s->n_hit + m->s->adj_head[m->s->n_hit];
+
+			m->cap = (uint64_t)KOF_DIAG_REACH_WALKS * ve;
+			if (m->cap < KOF_DIAG_REACH_FLOOR)
+				m->cap = KOF_DIAG_REACH_FLOOR;
+		} else if (m->s->n_hit) {
+			m->limited = 1;         /* refused by the ledger (the scan says OVER_BUDGET) or memory */
+		}
+	}
+	return m->flow > 0;
+}
+
+/* The bytes of a set of n bits, rounded to two so the node lists placed after it stay aligned for uint16_t. */
+static size_t set_bytes(uint32_t n)
+{
+	return ((size_t)n + 15u) / 16u * 2u;
+}
+
+/* A walk's two arrays out of one block. */
+static void walk_place(struct flow_walk *w, uint8_t **at, uint32_t n, uint64_t *work, uint64_t cap)
+{
+	w->seen = *at;
+	*at += set_bytes(n);
+	w->q = (uint16_t *)(void *)*at;
+	*at += (size_t)n * sizeof *w->q;
+	w->n = 0;
+	w->work = work;
+	w->cap = cap;
+}
+
+static int u16_cmp(const void *a, const void *b)
+{
+	uint16_t x = *(const uint16_t *)a, y = *(const uint16_t *)b;
+
+	return (x > y) - (x < y);
+}
+
+/*
+ * THE REACHED SETS OF `from` AT THIS DEPTH, and the candidates they give: kept until the depth binds another parent
+ * or asks another kind. 0 when the work bound or the scratch ran out (the match is then limited).
+ */
+static int lvl_make(struct bind_ctx *m, uint8_t depth, uint16_t from, unsigned kmode)
+{
+	const struct kgenome_diag_scan *s = m->s;
+	const uint32_t n = s->n_hit;
+	struct reach_lvl *L;
+	uint32_t i;
+
+	if (!m->lvl) {
+		m->lvl = calloc(m->d->n_node, sizeof *m->lvl);
+		if (!m->lvl) {
+			m->limited = 1;
+			return 0;
+		}
+	}
+	L = &m->lvl[depth];
+	if (!L->mem) {
+		/* three sets of n bits and three lists of n nodes */
+		uint8_t *at = L->mem = bc_alloc(m, 3u * (set_bytes(n) + (size_t)n * sizeof(uint16_t)));
+
+		if (!at)
+			return 0;
+		walk_place(&L->all, &at, n, &m->work, m->cap);
+		walk_place(&L->val, &at, n, &m->work, m->cap);
+		L->cand = at;
+		at += set_bytes(n);
+		L->cl = (uint16_t *)(void *)at;
+	}
+	if (L->made && L->from == from && L->kmode == kmode)
+		return 1;
+	L->made = 0;
+	flow_walk_reset(&L->all);
+	flow_walk_reset(&L->val);
+	if (diag_flow_reach(s, from, NULL, kmode, &L->all) < 0 ||
+	    diag_flow_reach(s, from, NULL, kmode | FLOW_VALUE, &L->val) < 0) {
+		m->limited = 1;
+		return 0;
+	}
+	/* The candidates: every node with an input from a reached node other than the parent itself (those are the
+	 * direct tier's). Through the successor index when it was built, else every node. */
+	L->ncl = 0;
+	if (m->idx.head) {
+		for (i = 1; i < L->all.n; i++) {
+			uint16_t x = L->all.q[i];
+			uint32_t j;
+
+			for (j = m->idx.head[x]; j < m->idx.head[x + 1u]; j++) {
+				uint16_t c = m->idx.edge[j];
+
+				if (!bit_has(L->cand, c)) {
+					bit_set(L->cand, c);
+					L->cl[L->ncl++] = c;
+				}
+			}
+		}
+		for (i = 0; i < L->ncl; i++)
+			L->cand[L->cl[i] >> 3] = 0;
+		/* ascending, as the direct tier walks its candidates: the first that binds is the lowest node */
+		qsort(L->cl, L->ncl, sizeof *L->cl, u16_cmp);
+	} else if (L->all.n > 1u) {
+		for (i = 0; i < n; i++)
+			L->cl[L->ncl++] = (uint16_t)i;
+	}
+	L->from = from;
+	L->kmode = kmode;
+	L->made = 1;
+	return 1;
+}
+
+/* Is the child linked to `from` through nodes in between: an input it takes (in_takes) names a node the parent
+ * reached - over value edges only when the child writes through it (BUFFER), over every edge otherwise. */
+static int linked_reach(const struct reach_lvl *L, const struct kgenome_diag_hit *child, uint16_t from,
+			uint32_t n_hit, uint8_t role, uint8_t want)
+{
+	uint8_t k;
+
+	for (k = 0; k < child->n_in && k < 4u; k++) {
+		uint16_t x = child->in[k].from;
+
+		if (x >= n_hit || x == from || !in_takes(&child->in[k], role, want))
+			continue;
+		if (bit_has(child->in[k].role == KGENOME_DIAG_ROLE_BUFFER ? L->val.seen : L->all.seen, x))
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * A NODE MARKED KOF_DIAG_B_JOIN binds only a node that reaches what the first block bound (zero hops: the same node).
+ * Every other node passes. A walk that ran out of work, or a graph that could not be built, is a refusal and limits
+ * the match.
+ */
+static int join_ok(struct bind_ctx *m, uint8_t c, uint16_t i)
+{
+	int r;
+
+	if (!(m->d->node[c].bits & KOF_DIAG_B_JOIN))
+		return 1;
+	if (!m->tgt)
+		return 0;
+	if (bit_has(m->tgt, i))
+		return 1;
+	if (!bc_flow(m))
+		return 0;
+	if (!m->jmem) {
+		uint8_t *at = m->jmem = bc_alloc(m, set_bytes(m->s->n_hit) + (size_t)m->s->n_hit * sizeof(uint16_t));
+
+		if (!at)
+			return 0;
+		walk_place(&m->jw, &at, m->s->n_hit, &m->work, m->cap);
+	}
+	r = diag_flow_reach(m->s, i, m->tgt, 0u, &m->jw);
+	flow_walk_reset(&m->jw);
+	if (r < 0)
+		m->limited = 1;
+	return r > 0;
+}
+
+static int bind_from(struct bind_ctx *m, uint8_t k, uint16_t *bound, uint8_t depth);
+
+/* The reached tier for child spec c of bound node k: see the note above. */
+static int bind_reached(struct bind_ctx *m, uint8_t k, uint8_t c, uint16_t *bound, uint8_t depth)
+{
+	const struct kgenome_diag_scan *s = m->s;
+	const struct kof_diag_node *sp = &m->d->node[c];
+	const unsigned kb = sp->bits & (KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED);
+	const unsigned kmode = FLOW_DATA | (kb == KOF_DIAG_B_SHARED ? FLOW_VALUE | FLOW_SHARED
+					       : kb == KOF_DIAG_B_PRODUCED ? FLOW_VALUE : 0u);
+	struct reach_lvl *L;
+	uint32_t q;
+
+	if (m->limited || !bc_flow(m) || !lvl_make(m, depth, bound[k], kmode))
+		return 0;
+	L = &m->lvl[depth];
+	for (q = 0; q < L->ncl; q++) {
+		uint16_t i = L->cl[q];
+		const struct kgenome_diag_hit *h = &s->hit[i];
+
+		if (++m->work > m->cap) {
+			m->limited = 1;
+			return 0;
+		}
+		/* tried by the direct tier, with the same subtree to bind */
+		if (linked(h, bound[k], &s->hit[bound[k]], sp->role, sp->bits))
+			continue;
+		if (!spec_ok(s, h, sp) || !linked_reach(L, h, bound[k], s->n_hit, sp->role, sp->bits))
+			continue;
+		bound[c] = i;
+		if (!join_ok(m, c, i))
+			continue;
+		if (bind_from(m, c, bound, (uint8_t)(depth + 1u)))
+			return 1;
+		if (m->limited)
+			return 0;
+		/* the deeper level may have walked from another parent; this level's sets are its own */
+	}
+	return 0;
+}
+
+/* Bind spec[k] and everything under it. `bound` holds the node index chosen
+ * for each spec so far. Depth is the diagnose's own, which is a handful. */
+static int bind_from(struct bind_ctx *m, uint8_t k, uint16_t *bound, uint8_t depth)
+{
+	const struct kgenome_diag_scan *s = m->s;
+	const struct kof_diag *d = m->d;
+	uint8_t c;
+
+	for (c = 0; c < d->n_node; c++) {
+		struct cand cd;
+		uint32_t i;
+
+		if (d->node[c].parent != k)
+			continue;
+		cand_begin(&cd, s, &m->idx, bound[k]);
+		for (i = cand_next(&cd); i < s->n_hit; i = cand_next(&cd)) {
+			if (!spec_ok(s, &s->hit[i], &d->node[c]))
+				continue;
+			if (!linked(&s->hit[i], bound[k], &s->hit[bound[k]],
+				    d->node[c].role, d->node[c].bits))
+				continue;
+			bound[c] = (uint16_t)i;
+			if (!join_ok(m, c, (uint16_t)i))
+				continue;
+			if (bind_from(m, c, bound, (uint8_t)(depth + 1u)))
+				goto next;
+		}
+		if (bind_reached(m, k, c, bound, depth))
+			goto next;
+		return 0;               /* a branch of the tree has no match */
+next:
+		;
+	}
+	return 1;
 }
 
 /*
@@ -533,41 +968,96 @@ int kof_diag_flow_join(struct kgenome_diag_scan *s, uint16_t cap,
  * that one place. A module with two probes on two symbols has two matches of
  * the same tree, and a diagnose "carrying" a name from the second was a
  * diagnose the engine had never looked at.
+ *
+ * TWO BLOCKS (KOF_DIAG_DECLARE_JOIN): for each instance of the first block, every instance of the second whose
+ * KOF_DIAG_B_JOIN nodes reach what that first instance bound. The join is checked WHILE the second block binds, so
+ * a candidate that fails it gives way to the next one (a socket's first read may be the length read and its second
+ * the stage). The first block is bound as a single block always was: its first instance per root candidate. Each
+ * second-block root tried costs one unit of the match's work bound.
+ *
+ * Answers 1 when a bound ran out (the reached tier, a join, the scratch): a "no" is then a "cannot say".
  */
 typedef int (*diag_inst_fn)(void *user, const uint16_t *bound, uint8_t n_node);
 
-static void match_each(const struct kgenome_diag_scan *s, const struct kof_diag *d,
-		       diag_inst_fn fn, void *user)
+static int match_each(struct kgenome_diag_scan *s, const struct kof_diag *d,
+		      diag_inst_fn fn, void *user)
 {
 	uint16_t bound[256];
-	uint32_t i;
-	uint8_t root;
-	struct bind_ctx m = { s, d, { NULL, NULL, 0 } };
+	uint32_t i, j;
+	uint8_t root = KOF_DIAG_NO_PARENT, root2 = KOF_DIAG_NO_PARENT, k;
+	struct bind_ctx m;
+	int lim;
 
 	/* n_node is a uint8_t, so 255 is its ceiling already - the bound that
 	 * matters is `bound[]` below holding one slot per node, and 256 is
 	 * more than a uint8_t can index past. */
 	if (!s || !d || !d->n_node)
-		return;
-	for (root = 0; root < d->n_node; root++)
-		if (d->node[root].parent == KOF_DIAG_NO_PARENT)
-			break;
-	if (root == d->n_node)
-		return;                 /* no root: not a tree */
+		return 0;
+	memset(&m, 0, sizeof m);
+	m.s = s;
+	m.d = d;
+	for (k = 0; k < d->n_node; k++)
+		if (d->node[k].parent == KOF_DIAG_NO_PARENT) {
+			if (root == KOF_DIAG_NO_PARENT)
+				root = k;
+			else if (root2 == KOF_DIAG_NO_PARENT)
+				root2 = k;
+		}
+	if (root == KOF_DIAG_NO_PARENT)
+		return 0;               /* no root: not a tree */
+	/* The block of each node: the root its parents lead to (the loader refused a cycle; the step bound is the node count). */
+	for (k = 0; k < d->n_node; k++) {
+		uint8_t p = k, steps = 0;
+
+		while (d->node[p].parent != KOF_DIAG_NO_PARENT && d->node[p].parent < d->n_node && steps++ < d->n_node)
+			p = d->node[p].parent;
+		m.blk[k] = (uint8_t)(p == root2);
+	}
 
 	for (i = 0; i < s->n_hit; i++) {
 		if (!spec_ok(s, &s->hit[i], &d->node[root]))
 			continue;
 		memset(bound, 0xff, sizeof bound);
 		bound[root] = (uint16_t)i;
-		if (!bind_from(&m, root, bound))
+		if (!bind_from(&m, root, bound, 0))
 			continue;
-		if (!fn(user, bound, d->n_node)) {
-			succ_free(&m.idx);
-			return;
+		if (root2 == KOF_DIAG_NO_PARENT) {
+			if (!fn(user, bound, d->n_node))
+				goto out;
+			continue;
 		}
+		/* The second block, against what this instance of the first bound. */
+		if (!bc_flow(&m))
+			break;
+		if (!m.tgt && !(m.tgt = bc_alloc(&m, set_bytes(s->n_hit))))
+			break;
+		for (k = 0; k < d->n_node; k++)
+			if (!m.blk[k] && bound[k] < s->n_hit)
+				bit_set(m.tgt, bound[k]);
+		for (j = 0; j < s->n_hit; j++) {
+			if (!spec_ok(s, &s->hit[j], &d->node[root2]))
+				continue;
+			if (++m.work > m.cap) {
+				m.limited = 1;
+				break;
+			}
+			bound[root2] = (uint16_t)j;
+			if (!join_ok(&m, root2, (uint16_t)j) || !bind_from(&m, root2, bound, 0))
+				continue;
+			if (!fn(user, bound, d->n_node))
+				goto out;
+		}
+		for (k = 0; k < d->n_node; k++)
+			if (!m.blk[k] && bound[k] < s->n_hit)
+				m.tgt[bound[k] >> 3] = 0;
+		if (m.limited)
+			break;
 	}
+out:
+	lim = m.limited;
 	succ_free(&m.idx);
+	bc_free(&m);
+	return lim;
 }
 
 struct first_match {
@@ -600,18 +1090,28 @@ static int first_cb(void *user, const uint16_t *bound, uint8_t n_node)
 	return 0;                       /* the first instance is the answer */
 }
 
-int kof_diag_match(const struct kgenome_diag_scan *s, const struct kof_diag *d,
-		   uint16_t *bind_out, uint8_t *n_bind)
+/* The first instance, and whether a bound of the match ran out (match_each). */
+static int match_first(struct kgenome_diag_scan *s, const struct kof_diag *d,
+		       uint16_t *bind_out, uint8_t *n_bind, int *limited)
 {
 	struct first_match f;
+	int lim;
 
 	if (n_bind)
 		*n_bind = 0;
 	f.out = bind_out;
 	f.n_out = n_bind;
 	f.found = 0;
-	match_each(s, d, first_cb, &f);
+	lim = match_each(s, d, first_cb, &f);
+	if (limited)
+		*limited = lim;
 	return f.found;
+}
+
+int kof_diag_match(struct kgenome_diag_scan *s, const struct kof_diag *d,
+		   uint16_t *bind_out, uint8_t *n_bind)
+{
+	return match_first(s, d, bind_out, n_bind, NULL);
 }
 
 /*
@@ -626,12 +1126,16 @@ static int scan_limited(const struct kgenome_diag_scan *s)
 	return kgenome_diag_scan_status(s) != KGENOME_OK;
 }
 
-int kof_diag_match_known(const struct kgenome_diag_scan *s, const struct kof_diag *d,
+/* A "no" is UNKNOWN when the scan stopped short OR the match itself did (the reached tier's work bound, a join's
+ * walk, the scratch the ledger refused): either way the relation may be there and was not looked at. */
+int kof_diag_match_known(struct kgenome_diag_scan *s, const struct kof_diag *d,
 			 uint16_t *bind_out, uint8_t *n_bind)
 {
-	if (kof_diag_match(s, d, bind_out, n_bind))
+	int limited = 0;
+
+	if (match_first(s, d, bind_out, n_bind, &limited))
 		return KOF_DIAG_MATCH_YES;
-	return scan_limited(s) ? KOF_DIAG_MATCH_UNKNOWN : KOF_DIAG_MATCH_NO;
+	return limited || scan_limited(s) ? KOF_DIAG_MATCH_UNKNOWN : KOF_DIAG_MATCH_NO;
 }
 
 struct name_probe {
@@ -658,7 +1162,7 @@ static int name_cb(void *user, const uint16_t *bound, uint8_t n_node)
 	return 1;
 }
 
-int kof_diag_scan_name(const struct kgenome_diag_scan *s, const struct kof_diag *d,
+int kof_diag_scan_name(struct kgenome_diag_scan *s, const struct kof_diag *d,
 		       const char *name)
 {
 	struct name_probe np;
@@ -670,389 +1174,6 @@ int kof_diag_scan_name(const struct kgenome_diag_scan *s, const struct kof_diag 
 	np.found = 0;
 	match_each(s, d, name_cb, &np);
 	return np.found;
-}
-
-/* ---- loading -------------------------------------------------------------
- *
- * A RECORD IS ONE DIAGNOSE and nothing else - no module, no pattern, no blob.
- * The records of a database are carried in diag-<kind>.kdig packs (see
- * load_diagnoses in dbloader.c), which is a file beside the packs rather than a
- * section inside one: the pack header carries a fixed-size section table, so
- * one more section is a format change every database in existence has to be
- * rebuilt for, and none of what a pack exists to carry applies here.
- *
- * EVERYTHING IS BOUNDS CHECKED AGAINST THE RECORD'S OWN LENGTH, and a record
- * that does not add up is refused whole rather than loaded in part. A diagnose
- * half read is a diagnose that matches something its author did not write.
- */
-
-/* The bodies of a record's KDIG_SEC_FORM sections, concatenated: one stream (see diagform.h). Heap, because a stream is
- * up to KOF_FORM_MAX_WIRE bytes and this runs once per record at load. */
-struct formacc {
-	uint8_t *p;
-	size_t   n, cap;
-};
-
-static int formacc_add(struct formacc *fa, const uint8_t *b, size_t len)
-{
-	/* A section of no bytes adds none (and the first one has no buffer yet: memcpy(NULL, p, 0) is undefined). */
-	if (!len)
-		return 1;
-	if (fa->n + len > KOF_FORM_MAX_WIRE)
-		return 0;               /* refused whole, not cut: a stream cut in the middle is another form */
-	if (fa->n + len > fa->cap) {
-		size_t nc = fa->cap ? fa->cap : 1024u;
-		uint8_t *g;
-
-		while (nc < fa->n + len)
-			nc *= 2u;
-		g = realloc(fa->p, nc);
-		if (!g)
-			return 0;
-		fa->p = g;
-		fa->cap = nc;
-	}
-	memcpy(fa->p + fa->n, b, len);
-	fa->n += len;
-	return 1;
-}
-
-static int diag_load_(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st, struct formacc *fa)
-{
-	const uint8_t *b = rec.p;
-	const uint64_t n = rec.n;
-	struct kof_diag_node *node = st->node;
-	char *name = st->name, *needs = st->needs;
-	const uint32_t name_cap = st->name_cap, needs_cap = st->needs_cap;
-	const uint8_t max_node = st->max_node;
-	uint32_t n_node, nlen, i;
-	/* How much of the string store a node attribute has taken - the
-	 * signs below continue from here, because both are words this
-	 * diagnose carries and one buffer is one thing to bound. */
-	uint32_t nused = 0;
-	uint64_t at;
-
-	if (!b || !out || !node || !name || n < 4u)
-		return 0;
-	n_node = (uint32_t)b[0] | ((uint32_t)b[1] << 8);
-	nlen   = b[3];
-	/* NO NODE IS A FORM'S RECORD (KDIG_SEC_FORM); kof_diag_load below says whether it had one. */
-	if (n_node > max_node || nlen + 1u > name_cap)
-		return 0;
-	at = 4u + nlen;
-	if (n < at || (n - at) / 8u < n_node)
-		return 0;
-
-	memcpy(name, b + 4, nlen);
-	name[nlen] = 0;
-	memset(out, 0, sizeof *out);
-	out->analysis = b[2];
-	out->n_node = (uint8_t)n_node;
-	out->name = name;
-	out->node = node;
-
-	for (i = 0; i < n_node; i++) {
-		const uint8_t *r = b + at;
-		uint32_t alen;
-
-		if ((uint64_t)(r - b) + 8u > n)
-			return 0;
-		/* Every field, so a node array that held a value and a symbol before is clean after a record
-		 * with neither (WP9-F13: val and sym were left, a pointer into a string store that may be gone). */
-		memset(&node[i], 0, sizeof node[i]);
-		node[i].cap    = (uint16_t)(r[0] | (r[1] << 8));
-		node[i].flags  = (uint16_t)(r[2] | (r[3] << 8));
-		node[i].parent = r[4];
-		node[i].role   = r[5];
-		node[i].bits   = r[6];
-		node[i].attr_len = r[7];
-		alen = r[7];
-		at += 8u;
-		if (at + alen > n)
-			return 0;
-		/*
-		 * (kind, length, payload)*, and an unknown kind is skipped by
-		 * its length rather than refused - that is what the length is
-		 * for. A length that runs past the run refuses the record,
-		 * like everything else here.
-		 */
-		{
-			uint32_t k = 0;
-
-			while (k + 2u <= alen) {
-				uint32_t kind = b[at + k];
-				uint32_t klen = b[at + k + 1u];
-
-				k += 2u;
-				if (k + klen > alen)
-					return 0;
-				/*
-				 * THE NAME GOES IN THE DIAGNOSE'S OWN
-				 * STRING STORE, beside the signs - it is the
-				 * same kind of thing, a word this diagnose
-				 * carries, and a second buffer would be a
-				 * second thing to bound.
-				 */
-				if (kind == KDIG_ATTR_SYM && klen &&
-				    needs && needs_cap) {
-					if (nused + klen + 1u > needs_cap)
-						return 0;
-					memcpy(needs + nused, b + at + k, klen);
-					needs[nused + klen] = 0;
-					node[i].sym = needs + nused;
-					nused += klen + 1u;
-				}
-				if (kind == KDIG_ATTR_VALUE && klen == 8u) {
-					uint64_t v = 0;
-					unsigned q;
-
-					for (q = 0; q < 8u; q++)
-						v |= (uint64_t)b[at + k + q]
-						     << (q * 8u);
-					node[i].val = v;
-				}
-				k += klen;
-			}
-		}
-		at += alen;
-		/*
-		 * A PARENT THAT IS NOT A NODE HERE, or a node that is its own
-		 * parent, is a file this build did not write. Refuse rather
-		 * than clamp: a clamped index points at a real node, and the
-		 * diagnose then quietly means something else.
-		 */
-		if (node[i].parent != KOF_DIAG_NO_PARENT &&
-		    (node[i].parent >= n_node || node[i].parent == i))
-			return 0;
-		if (node[i].role >= KGENOME_DIAG_ROLE_COUNT)
-			return 0;
-	}
-	/*
-	 * ---- THE SIGNS, IF THE PACK CARRIES ANY -------------------------
-	 *
-	 * A trailing section, so a pack written before they existed simply
-	 * ends after its nodes and answers none. Refused WHOLE on anything
-	 * that does not add up, like the rest of the record: a diagnose with
-	 * half its signs read would be filtered by a condition nobody wrote.
-	 */
-	if (needs && needs_cap && at < n) {
-		uint32_t cnt = b[at++], k, used = nused;
-
-		/*
-		 * THE NAMES AN OLDER PACK WROTE HERE ARE SKIPPED, not read: the
-		 * sign is now a capability (KDIG_SEC_NEEDS), and a diagnose
-		 * built before that simply has no sign, which is the cheaper
-		 * kind of wrong - it runs where it could have been spared.
-		 */
-		if (cnt > KOF_DIAG_MAX_NEED)
-			return 0;
-		for (k = 0; k < cnt; k++) {
-			uint32_t L;
-
-			if (at >= n)
-				return 0;
-			L = b[at++];
-			if (!L || L >= KOF_DIAG_NEED_LEN || at + L > n)
-				return 0;
-			at += L;
-		}
-		/*
-		 * ---- AND THE TAGGED SECTIONS AFTER THEM ----------------
-		 *
-		 * An unknown tag is SKIPPED and not refused: the length is
-		 * there so a later build can add a section without every
-		 * reader having to be taught it first. A length that runs
-		 * past the end is a different matter and refuses the whole
-		 * record, like everything else here.
-		 */
-		while (at + 2u <= n) {
-			uint32_t tag = b[at], len = b[at + 1u];
-
-			at += 2u;
-			if (at + len > n)
-				return 0;
-			/*
-			 * (fact u16, value u64) pairs - see KOF_DIAG_HAS_ATTRB.
-			 * A FACT THIS BUILD DOES NOT KNOW REFUSES THE WHOLE
-			 * RECORD: a condition silently dropped is a diagnose
-			 * that runs on the files its author excluded, and it
-			 * would do so quietly.
-			 */
-			/* The capabilities the object must import - u16 each. */
-			if (tag == KDIG_SEC_NEEDS) {
-				uint32_t q;
-
-				if ((len & 1u) || len / 2u > KOF_DIAG_MAX_NEED)
-					return 0;
-				for (q = 0; q < len / 2u; q++)
-					out->needcap[q] = (uint16_t)(b[at + 2u * q] |
-							(b[at + 2u * q + 1u] << 8));
-				out->n_needcap = (uint8_t)(len / 2u);
-			}
-			/* The two calls the head is built from - see
-			 * KOF_DIAG_DECLARE_SEQUENCE. A length that is not two caps
-			 * refuses the record: half a sequence would be a head built
-			 * from something nobody wrote. */
-			if (tag == KDIG_SEC_SEQUENCE) {
-				if (len != 4u)
-					return 0;
-				out->seq_first = (uint16_t)(b[at] | (b[at + 1] << 8));
-				out->seq_then  = (uint16_t)(b[at + 2] | (b[at + 3] << 8));
-				if (!out->seq_first || !out->seq_then)
-					return 0;
-			}
-			if (tag == KDIG_SEC_USERS && len >= 1u) {
-				out->users_known = 1;
-				out->n_users = b[at];
-				out->users_off = (uint32_t)at;
-				out->users_len = len;
-			}
-			/*
-			 * THE SYMBOLS THE CODE MUST REFER INTO - see
-			 * KOF_DIAG_DECLARE_SYMBOL. Same shape and the same string store as
-			 * the signs, and refused whole on anything that does not
-			 * add up, for the same reason: a diagnose with half its
-			 * references read would be gated by a condition nobody
-			 * wrote.
-			 */
-			if (tag == KDIG_SEC_REFS && len >= 1u && needs && needs_cap) {
-				uint32_t cnt2 = b[at], z, p2 = (uint32_t)(at + 1u);
-
-				if (cnt2 > KOF_DIAG_MAX_NEED)
-					return 0;
-				for (z = 0; z < cnt2; z++) {
-					uint32_t L2;
-
-					if (p2 >= at + len)
-						return 0;
-					L2 = b[p2++];
-					if (!L2 || L2 >= KOF_DIAG_NEED_LEN ||
-					    p2 + L2 > at + len ||
-					    used + L2 + 1u > needs_cap)
-						return 0;
-					memcpy(needs + used, b + p2, L2);
-					needs[used + L2] = 0;
-					out->ref[z] = needs + used;
-					used += L2 + 1u;
-					p2 += L2;
-				}
-				out->n_ref = (uint8_t)cnt2;
-			}
-			/* The disease: an id and its type, nothing else. A length that is
-			 * not five refuses the record like the rest - half an id is a
-			 * different behaviour - and so does a type that is no maltype. */
-			if (tag == KDIG_SEC_DISEASE) {
-				if (len != 5u || b[at + 4u] >= KOF_MALTYPE_COUNT)
-					return 0;
-				out->disease = (uint32_t)b[at] | ((uint32_t)b[at + 1u] << 8) |
-					       ((uint32_t)b[at + 2u] << 16) |
-					       ((uint32_t)b[at + 3u] << 24);
-				out->disease_type = b[at + 4u];
-				if (!out->disease)
-					return 0;
-			}
-			/* The catalog facts: three ids and the type, fixed layout (KDIG_SEC_META). A length
-			 * that is not 25, an id of zero, a type that is no maltype or is Packer, or a second
-			 * section refuses the record, like the disease: half an identity names another one. */
-			if (tag == KDIG_SEC_META) {
-				uint64_t id[3] = { 0, 0, 0 };
-				unsigned q, z;
-
-				if (len != KDIG_META_LEN || out->family_id ||
-				    b[at + 24u] >= KOF_MALTYPE_COUNT ||
-				    b[at + 24u] == KOF_MALTYPE_PACKER)
-					return 0;
-				for (z = 0; z < 3u; z++)
-					for (q = 0; q < 8u; q++)
-						id[z] |= (uint64_t)b[at + z * 8u + q] << (q * 8u);
-				if (!id[0] || !id[1] || !id[2])
-					return 0;
-				out->family_id = id[0];
-				out->variant_id = id[1];
-				out->tag_id = id[2];
-				out->type = b[at + 24u];
-			}
-			/* The detection form: a piece of one stream, put together after the loop. */
-			if (tag == KDIG_SEC_FORM && !formacc_add(fa, b + at, len))
-				return 0;
-			if (tag == KDIG_SEC_WHEN) {
-				uint32_t q;
-
-				if (len % 10u)
-					return 0;
-				if (len / 10u > KOF_DIAG_MAX_WHEN)
-					return 0;
-				for (q = 0; q + 10u <= len; q += 10u) {
-					const uint8_t *w = b + at + q;
-					uint64_t v = 0;
-					unsigned t;
-					uint16_t fc = (uint16_t)(w[0] |
-							 (w[1] << 8));
-
-					if (!fc || fc >= KOF_FACT_COUNT)
-						return 0;
-					for (t = 0; t < 8u; t++)
-						v |= (uint64_t)w[2 + t]
-						     << (t * 8u);
-					/* The bound is on the RUNNING count: a record may carry several WHEN
-					 * sections, and each is only checked against the array on its own. A
-					 * record that does not fit is refused whole, not cut (rule 4). */
-					if (out->n_when >= KOF_DIAG_MAX_WHEN)
-						return 0;
-					out->when[out->n_when].fact = fc;
-					out->when[out->n_when].val = v;
-					out->n_when++;
-				}
-			}
-			at += len;
-		}
-	}
-
-	/* Exactly one root, because the matcher descends from one. */
-	{
-		uint32_t roots = 0;
-
-		for (i = 0; i < n_node; i++)
-			if (node[i].parent == KOF_DIAG_NO_PARENT)
-				roots++;
-		if (n_node && roots != 1u)
-			return 0;
-	}
-	return 1;
-}
-
-/*
- * THE RECORD'S DETECTION FORM, if it has one. A diagnose is a graph or a form: a record with nodes and a form, with
- * neither, or whose form does not decode (a stream cut, an index outside its table, an expression that is not a tree, a
- * hex program that is not one) is refused whole, like every other section.
- */
-int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st)
-{
-	struct formacc fa = { NULL, 0, 0 };
-	int ok = diag_load_(rec, out, st, &fa);
-
-	if (ok) {
-		if (fa.n && out->n_node)
-			ok = 0;
-		else if (!fa.n && !out->n_node)
-			ok = 0;
-		else if (fa.n) {
-			out->form = kof_form_decode(fa.p, fa.n, NULL);
-			ok = out->form != NULL;
-		}
-	}
-	free(fa.p);
-	if (!ok && out)
-		out->form = NULL;
-	return ok;
-}
-
-void kof_diag_form_free(struct kof_diag *d)
-{
-	if (!d)
-		return;
-	kof_form_free((struct kof_form *)(uintptr_t)d->form);
-	d->form = NULL;
 }
 
 uint32_t kof_diag_graph_build(struct kgenome_diag_scan *s, uint8_t *out,

@@ -1,9 +1,12 @@
 /*
  * objctx_diag_text.c - the diagnose stage for a script: whether the TEXT route can read it, and its scan.
  *
- * A script is read by its lexer, so it has no relocation table, no functions, no walk and no emulator to hand the scan: the
- * route needs the text and the language, and what it may cost is the object's size. The rest of the stage (the gate, the
- * match, the charge) is the one objctx_diag.c does for every object.
+ * A script is read by its lexer, so it has no relocation table, no walk and no emulator to hand the scan: the
+ * route needs the text and the language, and what it may cost is the object's size. Its FUNCTIONS (2026-11-05)
+ * are not a symbol table either - they come from the same lexer's classification of the text, read by
+ * kof_script_funcs_build (script_route.h) when a mutation block asks for a function-cut unit of the BODY
+ * region (objctx_diag.c's funcs_of); nothing here asks for them, so this stage is unchanged. The rest of the
+ * stage (the gate, the match, the charge) is the one objctx_diag.c does for every object.
  */
 
 #define _GNU_SOURCE

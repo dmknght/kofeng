@@ -8,10 +8,11 @@
  *                  against the regions it is given, a region that runs past the
  *                  object, one that starts past it, and one whose end wraps
  *   KEEP           what a real parse of the objects of normalizer_fx.h keeps:
- *                  headers, and of code only the executable SECTIONS (an ELF with
- *                  a section table) or the whole segment (stripped), and of a PE
- *                  the sections that are not writable. The regions come out of the
- *                  parser as a partition of the object (sx_norm_gather).
+ *                  headers, and of code only the executable SECTIONS that are not
+ *                  ALSO writable (an ELF with a section table, or a PE) or the
+ *                  whole segment (an ELF stripped of its section table). The
+ *                  regions come out of the parser as a partition of the object
+ *                  (sx_norm_gather).
  *   WHAT A SOURCE  declares: a description, regions, symbols, functions, a kind, a
  *   CARRIES        language, a label - copied (the caller's buffer is free to move),
  *                  replaced by a second declaration, refused for a NULL
@@ -298,6 +299,24 @@ static void keep_exec_edges(void)
 		sx_norm_keep_exec(keep, n, &hs, r, 1);
 		for (i = 0; i < n; i++)
 			NCK(bit(keep, i) == (i >= at.code_off));
+	}
+
+	/* E-RWX (fixed): a code section that is ALSO writable (RWX) is left OUT of the restore -
+	 * the same exclusion the PE half already makes below for a writable .text (a section the
+	 * program rewrites at run time is not an instruction stream only, so it is narrowed like
+	 * any other data instead of kept whole). */
+	{
+		struct kgenome_elf_info hs = ei;
+		unsigned k;
+
+		for (k = 0; k < hs.sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++)
+			if (kgenome_elf_sec_is_code(&hs.sec[k]))
+				hs.sec[k].flags |= KGENOME_ELF_SHF_WRITE;
+		memset(keep, 0, sizeof keep);
+		r[0].mask = (uint32_t)KGENOME_SCAN_ELF_CODE; r[0].off = 0; r[0].len = n;
+		sx_norm_keep_exec(keep, n, &hs, r, 1);
+		for (i = at.code_off; i < at.code_off + at.code_n; i++)
+			NCKF(!bit(keep, i), "byte %u of a writable (RWX) code section must not be restored", i);
 	}
 
 	/* the PE half */

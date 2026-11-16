@@ -9,9 +9,17 @@
 #include "kv_graph.h"
 #include "../libkofeng/analyzers/cfgview.h"
 
-/* The tabs of the dialog, in the order of the strip. */
-enum kv_cfg_tab { KV_CFG_TAB_OVERVIEW = 0, KV_CFG_TAB_DISASM, KV_CFG_TAB_GRAPH, KV_CFG_TABS };
+/* The tabs of the dialog, in the order of the strip. Lineage is kv_lineagebody.c's own body, held by the dialog beside this one (kv_cfgdlg.h), the same split Disasm already has.
+ * DISABLED by the owner 2026-11-15: the Graph tab (KV_CFG_TAB_GRAPH, between Disasm and Lineage: the function's CFG drawn). To re-enable: put KV_CFG_TAB_GRAPH back
+ * here, its title in kv_cfgdlg.c's cfg_tab_title, and take out the #if 0 blocks of kv_cfgbody.[ch] and kv_cfgdlg.[ch]. */
+enum kv_cfg_tab { KV_CFG_TAB_OVERVIEW = 0, KV_CFG_TAB_DISASM, KV_CFG_TAB_LINEAGE, KV_CFG_TABS };
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out (and the one below) with analyzers/cfgview.[ch] (kof_cfgview_build) and kv_cfgbody.c's.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 struct kv_cfg_body {
 	struct kof_cfgview cf;          /* the engine's answer; its graph (cf.gv) and its facts text (cf.text, cut into lines in place) */
 	struct kv_graph g;              /* the drawing of cf.gv */
@@ -27,6 +35,7 @@ struct kv_cfg_body {
 	char scratch[64];               /* the text of a box row that is made on the spot (`+N more calls`) */
 };
 
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 /*
  * THE COLOURS OF THE GRAPH TAB, each chosen from what the engine's graph (struct kgenome_gv) already says, with the viewer's own palette (kofview.h):
  *   an edge, by its cond and loop:  T green (A_SIZE), F red (A_BAD); an unconditional loop link yellow (A_WARN), an unconditional retreating edge magenta (A_HEUR), any other
@@ -46,6 +55,12 @@ const char *kv_cfgbody_mark_attr(unsigned mark);
 struct kv_graph_style kv_cfgbody_style(void);
 
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out (and the one above) with analyzers/cfgview.[ch] (kof_cfgview_build) and kv_cfgbody.c's.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * THE COLOURS OF THE OVERVIEW: the attribute of the character `at` of one Overview row (the engine's plain line, as the viewer knows its label), or NULL for the terminal's own.
  * A label is dim (A_DIM); a value takes the colour its kind has in the Properties dialog and the Blocks table: a name and the unit id and the keys A_ID, an offset or an
  * address A_LOC, a status that is not ok A_WARN; a number is plain. Nothing is derived: the class is the word's spelling and its row's first word.
@@ -60,4 +75,5 @@ void kv_cfgbody_size(const struct kv_cfg_body *b, unsigned tab, uint32_t *n_row,
 /* Row `row` of tab `b->tab` from column `hoff`, `ncols` columns wide, as the dialog draws it: a margin column, then the text or the cells of the drawing (plain set: no escapes). */
 void kv_cfgbody_row(const void *body, uint32_t row, uint32_t hoff, uint32_t ncols, char *out, size_t cap);
 
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 #endif /* KV_CFGBODY_H */

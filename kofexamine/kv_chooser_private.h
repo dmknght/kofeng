@@ -45,6 +45,16 @@ void ch_fmt_swap(struct view *v, uint32_t which, uint8_t pick);
 /* One predicate for the list that offers an optional declaration and the taker that walks it. */
 int ch_opt_offerable(struct view *v, int k);
 
+/*
+ * THE GATE OF THE SIGNATURE (owner, 2026-11-17): the [+ Options] rows "Anomaly" and "Nucleo" carry these verbs and open
+ * CH_GATE_ANOM / CH_GATE_NUC beside them. ch_gate_offers is the one walk of the engine's offers for the object in hand
+ * (draft_gate_offer over its explain run, view_explain: the anomaly word and the nucleo list), asked by the row that offers
+ * a list, the list and the taker alike, so the three cannot disagree.
+ */
+#define CH_OPT_V_ANOM 1u
+#define CH_OPT_V_NUC  2u
+uint32_t ch_gate_offers(struct view *v, uint16_t fact, struct kof_diag_when *out, uint32_t cap);
+
 /* Which regions the selected object has, as a mask. */
 uint32_t ch_rng_regions(struct view *v);
 

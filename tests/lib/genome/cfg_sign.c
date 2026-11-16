@@ -1,4 +1,10 @@
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from LIBTEST_CFG_DISABLED (mk/tests.mk) when cfg_sign.c, cfg_anchor.c and cfg_view.c are out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * genome / cfg_sign - the signature of a function's shape (celllysis/cfg.h: labels, one WL round, canonical hash,
  * bottom-32 sketch, pct, anchor, view), through <kgenome.h> alone.
  *
@@ -842,15 +848,16 @@ static void anchor(void)
 		for (b = nb; b < nb + 5u; b++) { g.kind[b] = G_EXIT; }
 		CK(gspec_sign(&ISAS[0], &g, 0x1000, 0, &s, &c));
 		CKM(c.n_blk == nb && c.n_all == nb + 5u, "chain %u: n_blk %u n_all %u", nb, c.n_blk, c.n_all);
-		CKM(kgenome_cfg_anchor(&c, &r) == 1, "%u reachable blocks: anchor %d (the floor of 12 is gone: one block is enough)", nb, kgenome_cfg_anchor(&c, &r));
-		CKM(kgenome_cfg_anchor(&c, NULL) == 1, "NULL request is the default");
+		CKM(kgenome_cfg_anchor(&c, &r) == (nb >= KGENOME_CFG_ANCHOR_MIN), "%u reachable blocks: anchor %d (the default floor is %u, anchor-floor-1, measured)",
+		    nb, kgenome_cfg_anchor(&c, &r), KGENOME_CFG_ANCHOR_MIN);
+		CKM(kgenome_cfg_anchor(&c, NULL) == (nb >= KGENOME_CFG_ANCHOR_MIN), "NULL request is the default");
 		r.min_blk = 5;
 		CKM(kgenome_cfg_anchor(&c, &r) == (nb >= 5u), "min 5, %u blocks", nb);
 		r.min_blk = 13;
 		CKM(kgenome_cfg_anchor(&c, &r) == (nb >= 13u), "min 13, %u blocks", nb);
 		kgenome_cfg_free(&c, NULL);
 	}
-	CK(KGENOME_CFG_ANCHOR_MIN == 1u && KGENOME_CFG_MIN_KEYS == 1u);
+	CK(KGENOME_CFG_ANCHOR_MIN == 5u && KGENOME_CFG_MIN_KEYS == 5u);
 	CK(!kgenome_cfg_anchor(NULL, NULL));
 	{
 		/* syscall and site flags: a 3-block function with a syscall and a marked instruction */
@@ -1034,3 +1041,4 @@ int main(void)
 		printf("cfg_sign: ok\n");
 	return fails != 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

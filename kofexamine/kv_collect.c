@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "kv.h"
 #include "kofscfind.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 
 /*
@@ -177,13 +178,37 @@ static void diag_keep(struct object *o, const struct kof_result *res)
 	o->n_diag = 0;
 	o->heur.diag = NULL;
 	o->heur.n_diag = 0;
-	if (!res->diag || !res->n_diag)
-		return;
-	o->diag = malloc(res->n_diag * sizeof *o->diag);
-	if (!o->diag)
-		return;
-	memcpy(o->diag, res->diag, res->n_diag * sizeof *o->diag);
-	o->n_diag = res->n_diag;
+	free(o->lineage);
+	o->lineage = NULL;
+	o->n_lineage = 0;
+	o->heur.lineage = NULL;
+	o->heur.n_lineage = 0;
+	free(o->lineage_in);
+	o->lineage_in = NULL;
+	o->n_lineage_in = 0;
+	o->heur.lineage_in = NULL;      /* borrowed for the callback like lineage: it was left in the kept copy, pointing at the scanner's buffer */
+	o->heur.n_lineage_in = 0;
+	if (res->diag && res->n_diag) {
+		o->diag = malloc(res->n_diag * sizeof *o->diag);
+		if (o->diag) {
+			memcpy(o->diag, res->diag, res->n_diag * sizeof *o->diag);
+			o->n_diag = res->n_diag;
+		}
+	}
+	if (res->lineage && res->n_lineage) {
+		o->lineage = malloc(res->n_lineage * sizeof *o->lineage);
+		if (o->lineage) {
+			memcpy(o->lineage, res->lineage, res->n_lineage * sizeof *o->lineage);
+			o->n_lineage = res->n_lineage;
+		}
+	}
+	if (o->lineage && res->lineage_in && res->n_lineage_in) {
+		o->lineage_in = malloc(res->n_lineage_in * sizeof *o->lineage_in);
+		if (o->lineage_in) {
+			memcpy(o->lineage_in, res->lineage_in, res->n_lineage_in * sizeof *o->lineage_in);
+			o->n_lineage_in = res->n_lineage_in;
+		}
+	}
 }
 
 int on_object(const char *name, const void *bytes, uint64_t len,
@@ -263,9 +288,13 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 	 * one owns. */
 	free(o->carve);
 	free(o->diag);
+	free(o->lineage);
+	free(o->lineage_in);
+	free(o->pretty_p);
 	kgenome_funcs_free(&o->funcs);
 	kof_codenotes_free(&o->notes);
 	kgenome_callnames_free(&o->calls, NULL);
+	dash_drop(o);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->broken = res->broken;
@@ -385,6 +414,8 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 		o->subtype = res->subtype;
 		o->subfamily = res->subfamily;
 	}
+	/* See struct object.evidence_only. */
+	o->evidence_only = res ? res->evidence_only : 0;
 
 	/*
 	 * The top level is already mapped; anything else exists only inside
@@ -1204,6 +1235,21 @@ static int examine_one(struct view *v, uint32_t i)
 		} else {
 			o->fmt = kof_inspect_identify(o->buf, &o->ctx,
 						      &o->info);
+			/*
+			 * AND THE ENGINE'S ANSWER BEATS A SNIFF THAT FOUND NOTHING AT ALL
+			 * (owner, 2026-11-10 - the same fix kofexaminer.c's kex_g_decl_lang
+			 * already has, for the same reason): a code island's own bytes carry
+			 * no tag of their own to sniff (objctx_script.c's script_island_declare),
+			 * so a plain identify answers Raw and the pane defaulted to a hex dump
+			 * of what is, by format, a script - kv_text.c's text_pane reads ob->fmt
+			 * and kv_cap(ob->ctx.format, KV_CAP_TEXT), neither true for Raw. The
+			 * engine already said what this object is (o->lang_known, set earlier
+			 * from the scan result that produced it - see struct object.lang_known)
+			 * whenever a sniff could not.
+			 */
+			if (!o->fmt && o->lang_known)
+				o->fmt = kof_inspect_declare(o->buf, KOF_FMT_SCRIPT,
+							     &o->ctx, &o->info);
 		}
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
@@ -1232,6 +1278,10 @@ static int examine_one(struct view *v, uint32_t i)
 		if (o->lang_known) {
 			o->ctx.subtype = o->subtype;
 			o->ctx.subfamily = o->subfamily;
+			/* and that it is code from its first byte when the engine said so (an eval island: the engine's rule,
+			 * kof_script_entry_is_code, read from the entry kind it reported; the parse of the bytes says KOF_NA) */
+			if (kof_script_entry_is_code(o->entry_kind))
+				kof_script_mark_code(&o->ctx);
 		}
 
 		/*

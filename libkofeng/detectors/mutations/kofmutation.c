@@ -1451,6 +1451,12 @@ void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask,
 }
 
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and the one at its declaration in kofmutation.h; its caller is scan_feed.c mutation_feed_func (kept in #if 0). While disabled no unit votes: mtn_credit_vote and the second scoring kind in kof_mutation_counts (cfg_taken) are never reached.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * THE SECOND SCORING KIND: A FUNCTION UNIT'S CFG SKETCH against the blocks. One matcher, one index: the unit's keys (the bottom-32 of the
  * shape of its function, cfg.h) are looked up in the very index the windows are, through the same filters, the same sorted batch and the same
  * reads, but what a hit means is different. A window block is held by CONTAINMENT over the whole object (each hash anywhere in it); a CFG
@@ -1531,6 +1537,7 @@ void kof_mutation_cfg_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint3
 	}
 	c->status |= mtn_io_status(c->io.err);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /*
  * Probe what waits. Called by anything that reads the state - a count, the stats, the held bytes, the

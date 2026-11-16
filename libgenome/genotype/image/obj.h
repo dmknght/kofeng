@@ -35,9 +35,10 @@
  * an engine format are the same number.
  */
 enum kgenome_fmt {
-	KGENOME_FMT_NONE = 0,
-	KGENOME_FMT_ELF  = 1,
-	KGENOME_FMT_PE   = 2
+	KGENOME_FMT_NONE   = 0,
+	KGENOME_FMT_ELF    = 1,
+	KGENOME_FMT_PE     = 2,
+	KGENOME_FMT_SCRIPT = 4         /* KOF_FMT_SCRIPT; `file_header` is then the engine's opaque struct kof_script_info, not a type kgenome defines - see celllysis/script_funcs.h for the one place inside the lib that reads a script's bytes */
 };
 
 struct kgenome_obj {

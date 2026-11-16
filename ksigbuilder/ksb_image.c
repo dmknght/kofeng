@@ -6,6 +6,7 @@
 #include "ksb.h"
 
 #include <analyzers/parsers/binaries/elf/elf_parse.h>
+#include <analyzers/parsers/binaries/pe/pe_parse.h>   /* kof_pe_parse, for the Windows block below */
 
 /*
  * ---------------------------------------------------------------------------

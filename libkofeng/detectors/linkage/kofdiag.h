@@ -43,7 +43,7 @@
  * kgenome_diag_str_at and _count are the ones that walk the list by capability,
  * for a caller that wants the list itself; THIS is the one a verdict reaches.
  */
-int         kof_diag_scan_name(const struct kgenome_diag_scan *,
+int         kof_diag_scan_name(struct kgenome_diag_scan *,
 			       const struct kof_diag *, const char *name);
 /*
  * DOES THIS OBJECT CARRY THIS DIAGNOSE. 1 or 0, and on 1 the node each of
@@ -54,6 +54,11 @@ int         kof_diag_scan_name(const struct kgenome_diag_scan *,
  *
  * `bind_out` must have room for the diagnose's node count; NULL asks for the
  * bit alone, which is what kof_diag() costs.
+ *
+ * THE SCAN IS NOT const (2026-11-14): a child linked to its parent through nodes
+ * in between is found over the value-flow graph, which is built on the first
+ * ask and kept by the scan (charged to its ledger, like the join's), and the
+ * matcher's scratch is charged there while it runs.
  */
 /*
  * DOES A NODE OF `cap` BOUND BY `b` REACH ANY NODE BOUND BY `a`, following
@@ -64,7 +69,7 @@ int kof_diag_flow_join(struct kgenome_diag_scan *, uint16_t cap,
 		       const uint16_t *a_bind, uint8_t na,
 		       const uint16_t *b_bind, uint8_t nb);
 
-int kof_diag_match(const struct kgenome_diag_scan *, const struct kof_diag *,
+int kof_diag_match(struct kgenome_diag_scan *, const struct kof_diag *,
 		   uint16_t *bind_out, uint8_t *n_bind);
 
 /*
@@ -76,13 +81,16 @@ int kof_diag_match(const struct kgenome_diag_scan *, const struct kof_diag *,
  *   KOF_DIAG_MATCH_YES      1   it matched (a match is evidence however full the scan)
  *   KOF_DIAG_MATCH_NO       0   it did not, and the scan was whole
  *   KOF_DIAG_MATCH_UNKNOWN -1   it did not match, and a limit was reached: cannot say
+ *                               (a limit of the scan, or of this match: the work
+ *                               bound of a link through nodes in between, a join's
+ *                               walk, scratch the ledger refused - see kofdiag.c)
  *
  * kof_diag_match stays the plain boolean for a caller that only asks "found".
  */
 #define KOF_DIAG_MATCH_NO       0
 #define KOF_DIAG_MATCH_YES      1
 #define KOF_DIAG_MATCH_UNKNOWN (-1)
-int kof_diag_match_known(const struct kgenome_diag_scan *, const struct kof_diag *,
+int kof_diag_match_known(struct kgenome_diag_scan *, const struct kof_diag *,
 			 uint16_t *bind_out, uint8_t *n_bind);
 
 /*
@@ -127,5 +135,13 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 /* Give back the detection form a loaded record holds (KDIG_SEC_FORM); a graph record holds none. The engine does this
  * for every diagnose it loaded when it is freed; a caller that loads a record itself does it when it is done. */
 void kof_diag_form_free(struct kof_diag *d);
+
+/*
+ * IS THIS GATE CONDITION ONE THE ENGINE'S OWN TABLES NAME (KOF_FACT_ANOMALY, KOF_FACT_NUCLEO): an anomaly is a format the
+ * parser table has and a bit its parser names (kof_parser_anomaly_bit); a capability is one nucleo names, never NONE. 1 or
+ * 0; a fact that is not a gate condition answers 1 (its value is the fact's own business). The ONE check, asked by the
+ * source reader (databases/diagsrc_resolve.c) and by the loader for every record: a file can say anything.
+ */
+int kof_diag_gate_valid(uint16_t fact, uint64_t val);
 
 #endif /* KOFENG_KOFDIAG_H */

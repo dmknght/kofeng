@@ -34,6 +34,7 @@
 #include <celllysis/nucleo.h>
 #include <celllysis/mutation_window.h>
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
 
 static int failures;
 
@@ -1369,6 +1370,280 @@ static void edges(void)
 	}
 }
 
+/* ---- the gate of a signature: KOF_DIAG_HAS_ANOMALY / KOF_DIAG_HAS_NUCLEO -----------------------------------------------
+ *
+ * Why the old tests missed it: (a) the declarations did not exist - the old reader warns "unknown declaration" and resolves a
+ * form without them, so every assertion below fails on the old tree (RED).
+ *
+ *   EXHAUSTIVE   every anomaly name of every format the parser table has, and every capability nucleo names, as a line: read,
+ *                printed, read back identical, resolved to the record's value; kof_diag_gate_valid over every (format, bit) and
+ *                every 16-bit capability agrees with the names (the reader's check and the loader's are one)
+ *   COMBINATIONS every sequence of 0..3 conditions over four (two anomalies, two capabilities): a sequence with a repeat is
+ *                refused "the same condition twice", every other resolves to the same conditions in the same order, and the
+ *                whole text written by the shared printer reads back to the same list; on a graph an anomaly resolves and a
+ *                nucleo condition is refused
+ *   HOSTILE      an unknown name, another format's name, "?", an empty name, a name of 700 characters, an unknown format word,
+ *                two formats, a number for the format or the name, three arguments, one argument, an unclosed call, an unknown
+ *                or a NONE capability, the gate's facts written as a number through KOF_DIAG_HAS_ATTRB, a declaration in a
+ *                comment (not read)
+ *   CAP          sixteen conditions resolve, the seventeenth is refused "too many conditions" (refused, never cut)
+ */
+static int gate_line(const char *line, struct kof_dsrc_item *out)
+{
+	struct kof_dsrc *r = calloc(1, sizeof *r);
+	int ok1;
+
+	if (!r)
+		return 0;
+	ok1 = kof_dsrc_parse(line, strlen(line), r, NULL) == 0 && r->n == 1u;
+	if (ok1 && out)
+		*out = r->item[0];
+	free(r);
+	return ok1;
+}
+
+static void gate_src(void)
+{
+	char t[8000], ln[300], back[300];
+	struct kof_dsrc_view v;
+	struct said s;
+	uint32_t n_parser = 0, i, f, b, names = 0, bad = 0, caps = 0, cbad = 0, valid = 0;
+	const struct kof_parser *pl = kof_parser_list(&n_parser);
+	const struct kof_parser *ep = kof_parser_of(KOF_FMT_ELF), *pp = kof_parser_of(KOF_FMT_PE);
+	static const char *const form = "KOF_TARGET_RANGE(whole, KOF_SCAN_ALL);\n"
+		"KOF_DEFINE_STR(s0, \"abc\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);\nKOF_DIAG_FIND(m0, KOF_FIND_ANY, whole, s0);\n";
+	static const char *const graph = "KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\nKOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, 0);\n";
+
+	/* EXHAUSTIVE: every anomaly name of every format, as a line, both ways */
+	for (i = 0; i < n_parser; i++) {
+		const struct kof_parser *p = &pl[i];
+		char fw[64];
+
+		if (p->format >= KOF_FMT_COUNT || !kof_format_ident(p->format))
+			continue;
+		snprintf(fw, sizeof fw, "%s", kof_format_ident(p->format));
+		for (b = 0; b < 64u; b++) {
+			const char *an = p->anomaly_name ? p->anomaly_name(b) : NULL;
+			struct kof_dsrc_item it, it2;
+
+			if (!an || strcmp(an, "?") == 0 || kof_parser_anomaly_bit(p, an) != (int)b)
+				continue;
+			names++;
+			snprintf(ln, sizeof ln, "KOF_DIAG_HAS_ANOMALY(%s, %s);", fw, an);
+			back[0] = 0;
+			if (!gate_line(ln, &it) || it.kind != KDS_ANOMALY || it.a != p->format || it.b != b ||
+			    !kof_dsrc_print(&it, back, sizeof back) || strcmp(back, ln) || !gate_line(back, &it2) || !kof_dsrc_same(&it, &it2)) {
+				if (bad++ < 3)
+					printf("    anomaly line %s: printed %s\n", ln, back);
+			}
+		}
+	}
+	OKF(names > 100u && bad == 0, "every anomaly name of every format reads, prints and reads back: %u names, %u bad", names, bad);
+	/* the engine's one check, over every (format, bit), agrees with the parser's names; a value with any other bit is refused */
+	for (f = 0; f < 256u; f++)
+		for (b = 0; b < 64u; b++) {
+			const struct kof_parser *p = kof_parser_of((uint8_t)f);
+			const char *an = p && p->anomaly_name ? p->anomaly_name(b) : NULL;
+			int want = an && strcmp(an, "?") && kof_parser_anomaly_bit(p, an) == (int)b;
+
+			valid += (uint32_t)want;
+			if (kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, ((uint64_t)f << 32) | b) != want)
+				bad++;
+			if (kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, ((uint64_t)f << 32) | b | 0x40u) ||
+			    kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, ((uint64_t)(f + 256u) << 32) | b))
+				bad++;
+		}
+	OKF(bad == 0 && valid == names, "kof_diag_gate_valid names exactly the parser's anomalies: %u valid, %u names, %u bad", valid,
+	    names, bad);
+	/* EXHAUSTIVE: every capability nucleo names */
+	for (i = 1u; i < 0x10000u; i++) {
+		const char *nm = kgenome_nucleo_cap_name((uint16_t)i);
+		int want = KGENOME_NUCLEO_VALID(i) && nm && strcmp(nm, "?");
+		const char *w = kof_dsrc_cap_word((uint16_t)i);
+
+		if (kof_diag_gate_valid((uint16_t)KOF_FACT_NUCLEO, i) != want)
+			cbad++;
+		if (!want)
+			continue;
+		caps++;
+		{
+			struct kof_dsrc_item it, it2;
+
+			snprintf(ln, sizeof ln, "KOF_DIAG_HAS_NUCLEO(%s);", w ? w : "?");
+			if (!w || !gate_line(ln, &it) || it.kind != KDS_NUCLEO || it.a != i || !kof_dsrc_print(&it, back, sizeof back) ||
+			    strcmp(back, ln) || !gate_line(back, &it2) || !kof_dsrc_same(&it, &it2))
+				cbad++;
+		}
+	}
+	OKF(caps > 50u && cbad == 0, "every capability nucleo names reads, prints and reads back: %u, %u bad", caps, cbad);
+	OKF(!kof_diag_gate_valid((uint16_t)KOF_FACT_NUCLEO, 0) && !kof_diag_gate_valid((uint16_t)KOF_FACT_NUCLEO, 0x10000u),
+	    "NONE and a value past 16 bits are no capability");
+
+	/* COMBINATIONS: every sequence of 0..3 over two anomalies and two capabilities */
+	{
+		char cond[4][160];
+		uint16_t fact[4];
+		uint64_t val[4];
+		uint32_t seq, len, dups = 0, okk = 0, rt = 0, fails = 0;
+
+		snprintf(cond[0], sizeof cond[0], "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\n", ep->anomaly_name(0));
+		snprintf(cond[1], sizeof cond[1], "KOF_DIAG_HAS_ANOMALY(KOF_FMT_PE, %s);\n", pp->anomaly_name(1));
+		snprintf(cond[2], sizeof cond[2], "KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_ALLOC_EXEC);\n");
+		snprintf(cond[3], sizeof cond[3], "KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_NET_RAW);\n");
+		fact[0] = fact[1] = (uint16_t)KOF_FACT_ANOMALY;
+		fact[2] = fact[3] = (uint16_t)KOF_FACT_NUCLEO;
+		val[0] = (uint64_t)KOF_FMT_ELF << 32;
+		val[1] = ((uint64_t)KOF_FMT_PE << 32) | 1u;
+		val[2] = KOF_NUCLEO_ALLOC_EXEC;
+		val[3] = KOF_NUCLEO_NET_RAW;
+		for (len = 0; len <= 3u; len++) {
+			uint32_t total = 1u;
+
+			for (i = 0; i < len; i++)
+				total *= 4u;
+			for (seq = 0; seq < total; seq++) {
+				uint32_t pick[3] = { 0, 0, 0 }, x = seq, j, rep = 0;
+				int e;
+
+				for (i = 0; i < len; i++) {
+					pick[i] = x % 4u;
+					x /= 4u;
+					for (j = 0; j < i; j++)
+						rep |= pick[j] == pick[i];
+				}
+				snprintf(t, sizeof t, HEAD "%s", form);
+				for (i = 0; i < len; i++)
+					strcat(t, cond[pick[i]]);
+				e = load(t, &v, &s);
+				if (rep) {
+					dups++;
+					if (!(e > 0 && strstr(s.first, "the same condition twice")))
+						fails++;
+					kof_dsrc_view_free(&v);
+					continue;
+				}
+				if (e || v.n_when != (int)len) {
+					fails++;
+					kof_dsrc_view_free(&v);
+					continue;
+				}
+				for (i = 0; i < len; i++)
+					if (v.when[i].fact != fact[pick[i]] || v.when[i].val != val[pick[i]])
+						fails++;
+				okk++;
+				kof_dsrc_view_free(&v);
+				/* the whole text, written by the shared printer, reads back to the same list */
+				{
+					size_t on = 0;
+					struct kof_dsrc *nw = malloc(sizeof *nw);
+					char *w = NULL;
+					struct kof_dsrc *r = calloc(1, sizeof *r);
+					uint32_t q, same = 1;
+
+					/* as the editor writes a new file: every item a new line (line 0), through kof_dsrc_patch */
+					if (nw) {
+						memcpy(nw, D, sizeof *nw);
+						for (q = 0; q < nw->n; q++)
+							nw->item[q].line = 0;
+						w = kof_dsrc_patch("", 0, nw, &on);
+					}
+					free(nw);
+					if (w && r && kof_dsrc_parse(w, on, r, NULL) == 0 && r->n == D->n) {
+						for (q = 0; q < D->n; q++)
+							same &= (uint32_t)kof_dsrc_same(&D->item[q], &r->item[q]);
+						rt += same;
+					}
+					free(w);
+					free(r);
+				}
+			}
+		}
+		OKF(fails == 0 && dups == 85u - 1u - 4u - 12u - 24u && okk == 1u + 4u + 12u + 24u && rt == okk,
+		    "the 85 sequences: %u failures, %u refused as repeats, %u resolved, %u read back whole", fails, dups, okk, rt);
+		snprintf(t, sizeof t, HEAD "%s%s", graph, cond[0]);
+		ok("on a graph an anomaly condition resolves", load(t, &v, &s) == 0 && v.n_when == 1 && v.when[0].fact == KOF_FACT_ANOMALY);
+		kof_dsrc_view_free(&v);
+		snprintf(t, sizeof t, HEAD "%s%s", graph, cond[2]);
+		ok("on a graph a nucleo condition is refused", load(t, &v, &s) > 0 && strstr(s.first, "condition of a detection form"));
+		kof_dsrc_view_free(&v);
+	}
+
+	/* HOSTILE */
+	{
+		static char longname[760];
+		struct { const char *line; const char *why; } h[] = {
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, NOT_AN_ANOMALY);", "has no anomaly named" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, ?);", "has no anomaly named" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, );", "KOF_DIAG_HAS_ANOMALY(format, name)" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_NOPE, SEG_PAST_EOF);", "one KOF_FMT_* word" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF | KOF_FMT_PE, SEG_PAST_EOF);", "one KOF_FMT_* word" },
+			{ "KOF_DIAG_HAS_ANOMALY(1, SEG_PAST_EOF);", "one KOF_FMT_* word" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, 10);", "has no anomaly named" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, SEG_PAST_EOF, X);", "KOF_DIAG_HAS_ANOMALY(format, name)" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF);", "KOF_DIAG_HAS_ANOMALY(format, name)" },
+			{ "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, SEG_PAST_EOF", "KOF_DIAG_HAS_ANOMALY(format, name)" },
+			{ "KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_NOPE);", "wants a capability" },
+			{ "KOF_DIAG_HAS_NUCLEO(0);", "wants a capability" },
+			{ "KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_NET_RAW, 1);", "KOF_DIAG_HAS_NUCLEO(cap)" },
+			{ "KOF_DIAG_HAS_NUCLEO();", "KOF_DIAG_HAS_NUCLEO(cap)" },
+			{ "KOF_DIAG_HAS_ATTRB(9, 0x10000000a);", "KOF_DIAG_HAS_ANOMALY(format, name) or" },
+			{ "KOF_DIAG_HAS_ATTRB(10, 5);", "KOF_DIAG_HAS_ANOMALY(format, name) or" },
+			{ longname, "KOF_DIAG_HAS_ANOMALY(format, name)" }
+		};
+		size_t k;
+		char an_pe[80];
+
+		/* the gate's fact numbers as the ATTRB rows above write them: they are the enum's, checked */
+		OKF(KOF_FACT_ANOMALY == 9 && KOF_FACT_NUCLEO == 10, "the gate facts are 9 and 10 (the hostile rows write the numbers)");
+		memcpy(longname, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, ", 34);
+		memset(longname + 34, 'A', 700);
+		memcpy(longname + 734, ");", 3);
+		for (k = 0; k < sizeof h / sizeof h[0]; k++) {
+			snprintf(t, sizeof t, HEAD "%s%s\n", form, h[k].line);
+			OKF(load(t, &v, &s) > 0 && strstr(s.first, h[k].why), "hostile %.60s: wanted \"%s\", got \"%s\"", h[k].line, h[k].why,
+			    s.first);
+			kof_dsrc_view_free(&v);
+		}
+		/* another format's name under ELF: refused unless ELF names it too */
+		snprintf(an_pe, sizeof an_pe, "%s", pp->anomaly_name(0));
+		snprintf(t, sizeof t, HEAD "%sKOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\n", form, an_pe);
+		OKF((load(t, &v, &s) > 0) == (kof_parser_anomaly_bit(ep, an_pe) < 0), "a PE name under ELF (%s) is refused unless ELF has it",
+		    an_pe);
+		kof_dsrc_view_free(&v);
+		snprintf(t, sizeof t, HEAD "%s/* KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_NOPE); */\n// KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, NOPE);\n", form);
+		ok("a declaration inside a comment is not read", load(t, &v, &s) == 0 && v.n_when == 0);
+		kof_dsrc_view_free(&v);
+		snprintf(t, sizeof t, HEAD "%s", form);
+		ok("no condition at all: an empty gate", load(t, &v, &s) == 0 && v.n_when == 0);
+		kof_dsrc_view_free(&v);
+	}
+
+	/* CAP: the record's sixteen conditions, the seventeenth refused */
+	{
+		uint32_t c, added;
+
+		for (c = 16u; c <= 17u; c++) {
+			snprintf(t, sizeof t, HEAD "%sKOF_TARGET_FORMAT(KOF_FMT_ELF);\n", form);
+			added = 1;
+			for (b = 0; b < 64u && added < c; b++) {
+				const char *an = ep->anomaly_name(b);
+
+				if (!an || kof_parser_anomaly_bit(ep, an) != (int)b)
+					continue;
+				snprintf(ln, sizeof ln, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\n", an);
+				strcat(t, ln);
+				added++;
+			}
+			if (c == 16u)
+				OKF(added == 16u && load(t, &v, &s) == 0 && v.n_when == 16, "sixteen conditions resolve (%u)", added);
+			else
+				OKF(added == 17u && load(t, &v, &s) > 0 && strstr(s.first, "too many conditions"),
+				    "the seventeenth is refused: \"%s\"", s.first);
+			kof_dsrc_view_free(&v);
+		}
+	}
+}
+
 int main(void)
 {
 	D = calloc(1, sizeof *D);
@@ -1386,6 +1661,7 @@ int main(void)
 	facts();
 	words();
 	edges();
+	gate_src();
 	free(big_text);
 	free(D);
 	if (failures) {

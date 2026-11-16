@@ -7,8 +7,8 @@
  * call (kgenome_emu_step) and goes on. A call it does not pause on is a call
  * the diagnose never sees.
  *
- * THE DEFECT THIS GUARDS AGAINST (it was a KNOWN-MISS here until fixed; see run_step in
- * emu_interp.c): kgenome_emu_run's watch compared a fetch buffer that only an instruction-cache
+ * THE DEFECT THIS GUARDS AGAINST (it was a KNOWN-MISS here until fixed; see struct
+ * kgenome_emu_run_step in emu_run_private.h): kgenome_emu_run's watch compared a fetch buffer that only an instruction-cache
  * MISS filled. A cached instruction was matched against the bytes of whatever was last DECODED,
  * so a polled `syscall` was paused on once (the first visit) and not again, and a cached
  * instruction that is NOT a syscall was paused on as one when the last decode was a `0f 05`. The
@@ -248,7 +248,7 @@ static uint8_t code[1u << 18];
 #define ELF_CODE_VA 0x400078ull
 #define DECODER_LEN 20u
 
-/* The instruction cache's slot of an address - emu_interp.c run_fetch: a
+/* The instruction cache's slot of an address - emu_run_private.h kgenome_emu_run_fetch: a
  * multiplicative hash into KGENOME_EMU_ICACHE (2048) slots. The fixture needs a
  * `syscall` and another instruction that share one, so every visit to the
  * syscall is a decode;

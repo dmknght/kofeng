@@ -174,11 +174,18 @@ void diag_check_graph(struct fz_ctx *c, const struct kgenome_diag_scan *s, unsig
 	uint32_t i, k, cnt = kgenome_diag_scan_count(s);
 	uint64_t used, peak;
 	unsigned ran = kgenome_diag_scan_ran(s);
+	{
+		struct kgenome_diag_drops dr;
+
+		/* the keep rule only drops from a table that refused a node */
+		kgenome_diag_scan_drops(s, &dr);
+		FZ_CHECK(c, (!dr.unlinked && !dr.nocap) || dr.refused, "the keep rule dropped nodes from a table that never refused one");
+	}
 
 	FZ_CHECK(c, (unsigned)kgenome_diag_scan_status(s) <= (unsigned)KGENOME_NOMEM, "scan status outside the enum");
 	FZ_CHECK(c, ran <= 0x3fu, "a routine bit that does not exist is set in ran");
 	FZ_CHECK(c, (ran & ~run) == 0, "a routine ran that the caller did not ask for");
-	FZ_CHECK(c, kgenome_diag_scan_own(s) <= 0x1fu, "an ownership bit that does not exist");
+	FZ_CHECK(c, kgenome_diag_scan_own(s) <= 0x3fu, "an ownership bit that does not exist");
 	used = kgenome_diag_scan_bytes(s, &peak);
 	FZ_CHECK(c, used <= peak, "bytes charged exceed the peak");
 	FZ_CHECK(c, kgenome_diag_scan_full(s) == (kgenome_diag_scan_status(s) != KGENOME_OK), "full disagrees with status");
@@ -189,9 +196,14 @@ void diag_check_graph(struct fz_ctx *c, const struct kgenome_diag_scan *s, unsig
 		FZ_CHECK(c, h != NULL, "a node below the count is NULL");
 		if (!h)
 			return;
-		FZ_CHECK(c, h->n_in <= 4, "a node with more than four inputs");
-		for (k = 0; k < h->n_in && k < 4u; k++) {
-			const struct kgenome_diag_in *x = &h->in[k];
+		FZ_CHECK(c, h->n_in <= 4, "a node's view with more than four inputs");
+		/* every input, the view's and those past it (kgenome_diag_in_at) */
+		for (k = 0; k < kgenome_diag_in_count(s, i); k++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, k);
+
+			FZ_CHECK(c, x != NULL, "an input below the count is NULL");
+			if (!x)
+				return;
 
 			FZ_CHECK(c, x->from < cnt || x->from == KGENOME_DIAG_FROM_STACK, "an input names a node that does not exist");
 			FZ_CHECK(c, x->role < KGENOME_DIAG_ROLE_COUNT, "a role outside the enum");
@@ -419,6 +431,29 @@ void diag_exercise_ex(struct fz_ctx *c, const struct kgenome_obj *obj, const uin
 			kgenome_diag_apihash_free(a);
 		}
 		{
+			/* The same analysis with its machine kept for the unpack run (EA8): a machine is kept only
+			 * for a program that was run, and it takes its new owner when the account is the one it was
+			 * built with. */
+			struct kgenome_emu_unp_kept k;
+			struct kgenome_diag_apihash_set *a2;
+
+			memset(&k, 0, sizeof k);
+			a2 = kgenome_diag_apihash_make(&(const struct kgenome_diag_apihash_req){
+					.obj = obj, .base = in, .size = n, .budget = &bud, .keep = &k });
+			FZ_CHECK(c, !k.em || (a2 && a2->n_ldr), "a machine kept for a program that was not run");
+			if (k.em) {
+				struct kgenome_emu_cfg cf;
+
+				memset(&cf, 0, sizeof cf);
+				cf.account = bud.account;
+				cf.account_user = bud.account_user;
+				fz_digest(c, (uint64_t)kgenome_emu_last_stop(k.em));
+				FZ_CHECK(c, kgenome_emu_adopt(k.em, &cf) >= 0, "the machine refused the account it was built with");
+				kgenome_emu_free(k.em);
+			}
+			kgenome_diag_apihash_free(a2);
+		}
+		{
 			struct kgenome_diag_scan *sh = kgenome_diag_scan_with(obj, in, n, KGENOME_DIAG_RUN_APIHASH);
 
 			if (sh) {
@@ -442,13 +477,14 @@ void diag_walk_bin(struct fz_ctx *c, void *h, const uint8_t *in, size_t n)
 }
 
 FZ_ADAPTER(scan_bin, .name = "kgenome/diag_scan_bin",
-	   .covers = "kgenome_diag_scan kgenome_diag_scan_with kgenome_diag_scan_with_inputs kgenome_diag_scan_at kgenome_diag_scan_count "
+	   .covers = "kgenome_diag_scan kgenome_diag_scan_with kgenome_diag_scan_with_inputs kgenome_diag_scan_at kgenome_diag_scan_count kgenome_diag_in_count kgenome_diag_in_at kgenome_diag_scan_drops "
 		     "kgenome_diag_scan_status kgenome_diag_scan_free kgenome_diag_scan_own kgenome_diag_scan_ran kgenome_diag_scan_full "
 		     "kgenome_diag_scan_bytes kgenome_diag_scan_eval_cut kgenome_diag_scan_refused kgenome_diag_str_at kgenome_diag_str_count "
 		     "kgenome_diag_str_at_node kgenome_diag_note_at kgenome_diag_code_bytes kgenome_diag_funcs_of kgenome_diag_funcs_with_walk "
 		     "kgenome_diag_funcs_of_view kgenome_diag_walk_new kgenome_diag_walk_free kgenome_diag_walk_runs kgenome_diag_walk_trim "
 		     "kgenome_diag_walk_set_cap kgenome_diag_walk_capped kgenome_diag_walk_hold kgenome_diag_walk_held_count "
-		     "kgenome_diag_code_run kgenome_diag_code_range kgenome_diag_apihash_run kgenome_diag_apihash_free kgenome_diag_apihash_distinct "
+		     "kgenome_diag_code_run kgenome_diag_code_range kgenome_diag_apihash_run kgenome_diag_apihash_make kgenome_diag_apihash_free kgenome_diag_apihash_distinct "
+		     "kgenome_emu_adopt kgenome_emu_last_stop "
 		     "kgenome_diag_oblig_count kgenome_diag_oblig_at kgenome_diag_lineage_stats_of kgenome_diag_apihash kgenome_diag_class_of "
 		     "kgenome_diag_lineage_plan",
 	   .flags = FZ_MAY_HIT_CAP, .steps_base = 4000000u, .steps_per_byte = 256,

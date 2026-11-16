@@ -48,6 +48,21 @@ static inline int kgenome_cfg_op_is_flow(unsigned op)
 enum kgenome_cfg_x kgenome_cfg_isa_class(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, int be,
 					 const uint8_t *bytes, uint64_t n, int *degraded);
 
+/* FU-ARM-PAIR: is the jump `in` a CALL because the instruction right before it, `prev`, put the return address in the link register (ARMv4 has no
+ * `blx rN`: uClibc built for armv4, Mirai/Gafgyt ARM call through `mov lr, pc; mov pc, rN`)? `prev` NULL: no. Read one instruction at a time the jump
+ * leaves the function and the code behind it is reached by nothing. The block layer (cfg_obj.c) asks; the graph of one function (cfg_build.c) does
+ * not yet, because its shape signs a function and every ARM pack's CFG hashes would move (STEP B 2 measures and moves them, TODO(owner) re-signing). */
+/* Is the exit `in` a RETURN, though the decoder gives it as a jump through a register: MIPS `jr $ra` (the o32/n64 return; the decoder keeps it JMP because
+ * `jr` names any register). A RET of the decoder is one by itself. The block layer asks (a return is not an unresolved indirect jump). */
+int kgenome_cfg_isa_returns(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in);
+/* Does the direct call `in` go into the OTHER instruction set, so its target cannot be read with the caller's decoder? ARM: `blx label` (the encoding's condition
+ * field is 0b1111, the unconditional space; the target is Thumb code). The decoder gives it as a CALL like `bl` and its trace record keeps only four flag bits, so
+ * the word is read back from `bytes` (`n` of them, `code_be`: the code is big-endian). Every other row: no. The block layer asks before it follows a call. */
+int kgenome_cfg_isa_interworks(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, const uint8_t *bytes, uint64_t n, int code_be);
+int kgenome_cfg_isa_linked(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *prev, const struct kgenome_cell_insn *in);
+/* The trap a compiler puts behind a call that does not return: ud2 / udf on every row, x86 `hlt` and `int3` (cfg_isa.c). */
+int kgenome_cfg_isa_trap(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, const uint8_t *bytes, uint64_t n);
+
 /* Is this a syscall instruction (the SYSCALL class, or `int N` where the row says so)? Asked of every instruction twice by the builder: inline, the
  * common answer is one compare (measured: 29.4 M Ir of 245 M in kgenome_cfg_build as a call, over 1.85 M instructions). */
 static inline int kgenome_cfg_isa_is_syscall(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in)

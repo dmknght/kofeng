@@ -5,8 +5,9 @@
  * WHY A GENERIC TYPE. The control-flow graph of a function is the first thing a researcher looks at to CHOOSE what a rule is made of; the
  * lineage graph (the sites of a program and the links between them) is the next, and the two must not need two data types (CLAUDE.md rule 2). So
  * the type knows nothing of a function or of a link: it holds NODES, EDGES, NOTES, ASIDE entries and a HEAD, and the filler of each kind says what
- * they are. A node is a box of two text rows and a few more lines the filler composed; an edge carries its two kind properties (cond and loop, below: a
- * lineage's MUST / MAY would be a cond of their own); a note is one line of annotation about a node; the head is
+ * they are. A node is a box of two text rows and a few more lines the filler composed; an edge carries its kind properties (cond and loop, below, and
+ * a lineage's PROVEN / MAY / UNKNOWN / BROKEN as `sure`); a note is one line of annotation about a node (a lineage: one row per link, `link` the edge it is drawn
+ * as); the head is
  * the lines of facts about the whole graph (a title, hashes, a status, the anchor's numbers); an aside is what the graph holds and does not draw (the
  * CFG's unreachable blocks). The filler decides the words.
  *
@@ -14,9 +15,9 @@
  * lays it out from these nodes and edges; this unit has no layout and no text renderer. The edges are sorted by `from` (a node's edges in the order
  * they should stand left to right), which is all the viewer asks of them.
  *
- * WHERE A LINEAGE FILLER PLUGS IN (not written here): nodes = the sites (kgenome_lineage_* product: its node array, `at` for the offset), edges =
- * the links in the order each node lists them, the kind its state (MUST, MAY, none), status = the lineage's own three states carried in `status` and
- * in a head line, notes = what the node reads or writes. It fills `struct kgenome_gv`; the dialog and the engine's API shape (a request, a graph, a
+ * THE LINEAGE FILLER is the engine's (libkofeng/analyzers/lineageview.c, it fills from the engine's snapshot of the lineage): nodes = the sites of one
+ * function, edges = every input whose producer is one of them (its `sure` the link's certainty), notes = one row per input (drawn or not: a producer
+ * outside the function or the stack has no box), `link` the edge a row is drawn as. The dialog and the engine's API shape (a request, a graph, a
  * status, caller-owned memory) are the CFG's.
  *
  * BOUNDS. The text of one row is at most KGENOME_GV_LINE - 1 characters, the head KGENOME_GV_HEAD_MAX lines. What a filler holds fewer of than it has
@@ -49,6 +50,12 @@
  *                  the dominators were not computed (a graph past KGENOME_GV_DOM_MAX nodes, or a work bound): the status says so.
  */
 enum kgenome_gv_cond { KGENOME_GV_COND_NONE = 0, KGENOME_GV_COND_T, KGENOME_GV_COND_F };
+/*
+ * A THIRD property, of a lineage's link: how sure the filler is that the value went this way. A CFG edge is a fact of the code and is always SURE (0, the zeroed
+ * default, so the CFG filler names none of it). A lineage link is PROVEN (on every path: SURE), MAY (on some path), UNKNOWN (the value was lost on the way) or
+ * BROKEN (it demonstrably came from somewhere else) - kgenome_diag_link's four answers, kept apart for a reader (diag_vocab.h says why the last two are two).
+ */
+enum kgenome_gv_sure { KGENOME_GV_SURE = 0, KGENOME_GV_SURE_MAY, KGENOME_GV_SURE_UNKNOWN, KGENOME_GV_SURE_BROKEN };
 enum kgenome_gv_loop { KGENOME_GV_LOOP_NONE = 0, KGENOME_GV_LOOP_LINK, KGENOME_GV_LOOP_RETREAT };
 #define KGENOME_GV_NF_LOOP_HEAD 1u      /* node flag: the target of at least one loop link */
 #define KGENOME_GV_DOM_MAX 200000u      /* nodes the dominators are computed for; the iterative algorithm is also bounded in passes and says so when cut */
@@ -67,6 +74,7 @@ struct kgenome_gv_edge {
 	uint32_t from, to;              /* node indices */
 	uint8_t  cond;                  /* enum kgenome_gv_cond */
 	uint8_t  loop;                  /* enum kgenome_gv_loop */
+	uint8_t  sure;                  /* enum kgenome_gv_sure (appended) */
 };
 
 /* One extra row of the box of `node` (the CFG: `call <name>`); the entries are sorted by node, a node's rows in the order they are drawn. */
@@ -78,6 +86,7 @@ struct kgenome_gv_xline {
 struct kgenome_gv_note {
 	uint32_t node;
 	char     text[KGENOME_GV_NOTE];
+	uint32_t link;                  /* 1 + the index in edge[] of the edge this note is the row of (a lineage's link), 0: none (appended: a zeroed note names none) */
 };
 
 struct kgenome_gv_aside {

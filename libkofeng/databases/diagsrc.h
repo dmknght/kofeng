@@ -62,6 +62,11 @@ enum kof_dsrc_kind {
 	KDS_VARIANT,    /* s1 = the variant's LETTERS ("A", "AB"), no family */
 	KDS_TYPE,       /* a  = kof_maltype: the diagnose's ONE type          */
 	KDS_TAG,        /* s1 = the tag's catalog name                        */
+	KDS_JOIN,       /* a  = the capability of the second block's node where the two blocks meet */
+	/* THE GATE OF A SIGNATURE (kofmod/kofdiagtree.h, KOF_FACT_ANOMALY / KOF_FACT_NUCLEO), a condition a line. Before
+	 * KDS_RANGE: every kind from KDS_RANGE on is a declaration of the form (diagsrc_form_resolve.c), and these are not. */
+	KDS_ANOMALY,    /* KOF_DIAG_HAS_ANOMALY(format, name): a = the KOF_FMT_* value, b = the bit its parser names `name` at */
+	KDS_NUCLEO,     /* KOF_DIAG_HAS_NUCLEO(cap): a = the capability */
 	/*
 	 * THE DETECTION FORM (see pack/diagform.h): the declarations a signature used to make, spelled as it spelled them.
 	 * A line each, read by the same reader and printed by the same printer; text too long for s1 / s2 is in t1 / t2.
@@ -149,6 +154,9 @@ struct kof_dsrc_node {
 	uint16_t flags;
 	uint8_t  role;          /* derived by the engine; always 0 here */
 	uint8_t  bits;          /* KOF_DIAG_B_* */
+	/* The node's parent: the head of its block, or KOF_DIAG_NO_PARENT for a head. A diagnose has one block (a star)
+	 * or two (a second KOF_DIAG_DECLARE_HEAD and a KOF_DIAG_DECLARE_JOIN), so a tail's parent is the head before it. */
+	uint8_t  parent;
 	uint64_t val;           /* when KOF_DIAG_B_VAL */
 	char     sym[KOF_DSRC_NAME_LEN];   /* when KOF_DIAG_B_FIELD_OF */
 };

@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <kofcmp.h>
 #include "diag_lineage_private.h"
+#include "diag_oatab.h"
 
 /* ---- the decoded body ---- */
 
@@ -96,52 +97,68 @@ int kgenome_lineage_site_in(const struct kgenome_lineage *L, const struct kgenom
 	return 0;
 }
 
-/* KNOWN DEFECT REV-D7a (2026-10-24, Inference) [sev L]: agg_hash (the lineage aggregate table) is a hand-rolled open-addressing table with an unseeded multiplicative
- * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
- * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
- * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
+/*
+ * THE TABLES OF WHAT REACHES A CONSUMER are the diagnose family's one open-addressing table (diag_oatab.h: when it grows, how its entries
+ * move), keyed by (node + 1) << 8 | role. The probe is here once, for the insert and for the lookup the unresolved set asks
+ * (kgenome_lineage_agg_get): it was written twice, in this file and in diag_lineage_chain.c, each with its own unseeded multiplicative hash
+ * (REV-D7a, REV-D7b). The key is no name a file chooses - a node index the scan assigned in order and a role - so the hash needs no seed of
+ * the text: it is the table's own finaliser (kgenome_oatab_fold), which spreads the dense indices over every slot bit.
+ */
 static uint32_t agg_hash(uint32_t k)
 {
-	return (k * 0x9e3779b1u) >> 7;
+	return kgenome_oatab_fold((uint64_t)k * KGENOME_OATAB_K);
+}
+
+static uint32_t agg_slot_hash(void *ctx, const void *slot)
+{
+	(void)ctx;
+	return agg_hash(((const struct kgenome_lineage_agg *)slot)->key);
+}
+
+/* The cell of `key`: the occupied one, or (insert) the empty one it goes in; NULL when absent and not inserting, or when memory or the
+ * ledger refused the table's growth. */
+static struct kgenome_lineage_agg *agg_slot(struct kgenome_lineage *L, struct kgenome_lineage_aggtab *t, uint32_t key, int insert)
+{
+	uint32_t i;
+
+	if (insert) {
+		const uint32_t nc = kgenome_oatab_want(t->n, t->cap, 256u);
+
+		if (nc) {
+			const uint32_t oc = t->cap;
+
+			if (!kgenome_lineage_charge(L, (uint64_t)nc * sizeof *t->v))
+				return NULL;
+			if (!kgenome_oatab_rehash((void **)&t->v, &t->cap, nc, sizeof *t->v, agg_slot_hash, NULL, NULL)) {
+				kgenome_lineage_uncharge(L, (uint64_t)nc * sizeof *t->v);
+				kgenome_diag_note(L->s, KGENOME_NOMEM);
+				L->halt = 1;
+				return NULL;
+			}
+			if (oc)
+				kgenome_lineage_uncharge(L, (uint64_t)oc * sizeof *t->v);
+		}
+	}
+	if (!t->cap)
+		return NULL;
+	for (i = agg_hash(key) & (t->cap - 1u); t->v[i].key; i = kgenome_oatab_next(i, t->cap))
+		if (t->v[i].key == key)
+			return &t->v[i];
+	if (!insert)
+		return NULL;
+	t->v[i].key = key;
+	t->n++;
+	return &t->v[i];
 }
 
 static struct kgenome_lineage_agg *agg_find(struct kgenome_lineage *L, struct kgenome_lineage_aggtab *t, uint32_t key)
 {
-	uint32_t m = t->cap - 1u, i;
+	return agg_slot(L, t, key, 1);
+}
 
-	if (t->n * 2u >= t->cap) {
-		struct kgenome_lineage_agg *old = t->v, *na;
-		uint32_t oc = t->cap, nc = oc ? oc * 2u : 256u, k;
-
-		if (!kgenome_lineage_charge(L, (uint64_t)nc * sizeof *na))
-			return NULL;
-		na = calloc(nc, sizeof *na);
-		if (!na) {
-			kgenome_lineage_uncharge(L, (uint64_t)nc * sizeof *na);
-			kgenome_diag_note(L->s, KGENOME_NOMEM);
-			L->halt = 1;
-			return NULL;
-		}
-		t->v = na;
-		t->cap = nc;
-		for (k = 0; k < oc; k++) {
-			if (!old[k].key)
-				continue;
-			for (i = agg_hash(old[k].key) & (nc - 1u); na[i].key; i = (i + 1u) & (nc - 1u))
-				;
-			na[i] = old[k];
-		}
-		if (oc)
-			kgenome_lineage_uncharge(L, (uint64_t)oc * sizeof *old);
-		free(old);
-		m = t->cap - 1u;
-	}
-	for (i = agg_hash(key) & m; t->v[i].key; i = (i + 1u) & m)
-		if (t->v[i].key == key)
-			return &t->v[i];
-	t->v[i].key = key;
-	t->n++;
-	return &t->v[i];
+const struct kgenome_lineage_agg *kgenome_lineage_agg_get(const struct kgenome_lineage_aggtab *t, uint32_t key)
+{
+	return agg_slot(NULL, (struct kgenome_lineage_aggtab *)(uintptr_t)t, key, 0);
 }
 
 /* The table of the function in hand is emptied for its next run. A table a big function grew is let go rather than
@@ -159,6 +176,69 @@ static void tab_reset(struct kgenome_lineage *L, struct kgenome_lineage_aggtab *
 		memset(t->v, 0, (size_t)t->cap * sizeof *t->v);
 	}
 	t->n = 0;
+	t->nx = 0;                      /* (its pool is the table's: emptied with it, kept for the next run) */
+}
+
+/* ---- the producers of a consumer: sixteen in the cell, the rest in the table's pool ---- */
+
+void kgenome_lineage_agg_toks(const struct kgenome_lineage_aggtab *t, const struct kgenome_lineage_agg *a, uint16_t *out)
+{
+	uint32_t k, c;
+
+	for (k = 0; k < a->n && k < KGENOME_LINEAGE_SET; k++)
+		out[k] = a->t[k];
+	for (c = a->more; c && k < a->n; c = t->x[c - 1u].next)
+		out[k++] = t->x[c - 1u].tok;
+}
+
+static int agg_has(const struct kgenome_lineage_aggtab *t, const struct kgenome_lineage_agg *a, uint16_t tok)
+{
+	uint32_t k, c;
+
+	for (k = 0; k < a->n && k < KGENOME_LINEAGE_SET; k++)
+		if (a->t[k] == tok)
+			return 1;
+	for (c = a->more; c; c = t->x[c - 1u].next)
+		if (t->x[c - 1u].tok == tok)
+			return 1;
+	return 0;
+}
+
+/* One more producer of `a`. The pool is charged to the ledger; when it refuses, the producer is lost and that is said (W_LIMIT, the bound
+ * counted, the scan KGENOME_TRUNCATED) - the one bound left is the budget's. The test for a repeat walks the producers: a consumer of n
+ * producers costs n per add (measured: the most any consumer of the 356-file A/B set held was below a hundred). */
+static void agg_tok_add(struct kgenome_lineage *L, struct kgenome_lineage_aggtab *t, struct kgenome_lineage_agg *a, uint16_t tok)
+{
+	if (agg_has(t, a, tok))
+		return;
+	if (a->n < KGENOME_LINEAGE_SET) {
+		a->t[a->n++] = tok;
+		return;
+	}
+	if (t->nx == t->capx) {
+		const uint32_t nc = kgenome_grow_cap(t->capx, 64u);
+		struct kgenome_lineage_aggx *nx;
+
+		if (!nc || !kgenome_lineage_charge(L, (uint64_t)(nc - t->capx) * sizeof *nx))
+			goto lost;
+		nx = realloc(t->x, (size_t)nc * sizeof *nx);
+		if (!nx) {
+			kgenome_lineage_uncharge(L, (uint64_t)(nc - t->capx) * sizeof *nx);
+			kgenome_diag_note(L->s, KGENOME_NOMEM);
+			goto lost;
+		}
+		t->x = nx;
+		t->capx = nc;
+	}
+	t->x[t->nx].tok = tok;
+	t->x[t->nx].next = a->more;
+	a->more = ++t->nx;
+	a->n++;
+	return;
+lost:
+	a->other = 1;
+	a->why |= KGENOME_LINEAGE_W_LIMIT;
+	kgenome_lineage_bound(L, KGENOME_LINEAGE_B_CONSUMER);
 }
 
 /* What the last run of a function found goes into the object's table: the union of every context's value. */
@@ -169,25 +249,20 @@ static void merge_loc(struct kgenome_lineage *L)
 	for (k = 0; k < L->loc.cap; k++) {
 		const struct kgenome_lineage_agg *x = &L->loc.v[k];
 		struct kgenome_lineage_agg *a;
-		uint8_t j, i;
+		uint32_t i;
 
 		if (!x->key)
 			continue;
 		a = agg_find(L, &L->glob, x->key);
 		if (!a)
 			return;
-		for (i = 0; i < x->n; i++) {
-			for (j = 0; j < a->n && a->t[j] != x->t[i]; j++)
-				;
-			if (j < a->n)
-				continue;
-			if (a->n < KGENOME_LINEAGE_SET) {
-				a->t[a->n++] = x->t[i];
-			} else {
-				a->other = 1;
-				a->why |= KGENOME_LINEAGE_W_LIMIT;
-				kgenome_lineage_bound(L, KGENOME_LINEAGE_B_CONSUMER);
-			}
+		{
+			uint32_t c;
+
+			for (i = 0; i < x->n && i < KGENOME_LINEAGE_SET; i++)
+				agg_tok_add(L, &L->glob, a, x->t[i]);
+			for (c = x->more; c; c = L->loc.x[c - 1u].next)
+				agg_tok_add(L, &L->glob, a, L->loc.x[c - 1u].tok);
 		}
 		a->other |= x->other;
 		a->param |= x->param;
@@ -246,7 +321,7 @@ void kgenome_lineage_agg_add(struct kgenome_lineage *L, uint32_t node, uint8_t r
 			     const struct kgenome_lineage_val *v, int uncertain)
 {
 	struct kgenome_lineage_agg *a = NULL;
-	uint8_t i;
+	uint32_t i;
 
 	/* what is unknown of the value is what the run's obligations are made of (a constant is not one) */
 	if (v->other)
@@ -257,28 +332,42 @@ void kgenome_lineage_agg_add(struct kgenome_lineage *L, uint32_t node, uint8_t r
 		if (!a)
 			return;
 	}
-	for (i = 0; i < v->n; i++) {
-		uint8_t j;
+	{
+		uint16_t tk0[KGENOME_LINEAGE_VAL_INLINE], *tk = tk0;
+		const uint32_t nt = kgenome_lineage_val_toks(L, v, tk0, KGENOME_LINEAGE_VAL_INLINE);
 
-		if (v->t[i] & KGENOME_LINEAGE_PARAM) {
-			out_sink(L, node, role, (uint8_t)(v->t[i] & 0xffu));
-			if (a)
-				a->param = 1;
-			continue;
+		if (nt > KGENOME_LINEAGE_VAL_INLINE) {
+			tk = malloc((size_t)nt * sizeof *tk);
+			if (!tk) {
+				kgenome_diag_note(L->s, KGENOME_NOMEM);
+				L->halt = 1;
+				return;
+			}
+			(void)kgenome_lineage_val_toks(L, v, tk, nt);
 		}
-		if (!a || v->t[i] == node)      /* a node's own result coming round a loop is not a link to itself */
-			continue;
-		for (j = 0; j < a->n && a->t[j] != v->t[i]; j++)
-			;
-		if (j < a->n)
-			continue;
-		if (a->n < KGENOME_LINEAGE_SET) {
-			a->t[a->n++] = v->t[i];
-		} else {
-			a->other = 1;           /* more producers than fit: MAY, and said */
-			a->why |= KGENOME_LINEAGE_W_LIMIT;
-			kgenome_lineage_bound(L, KGENOME_LINEAGE_B_CONSUMER);
+		for (i = 0; i < nt; i++) {
+			if (tk[i] & KGENOME_LINEAGE_PARAM) {
+				out_sink(L, node, role, (uint8_t)(tk[i] & 0xffu));
+				if (a)
+					a->param = 1;
+				continue;
+			}
+			/* A STATUS token (a node's result that is no handle) is a producer of a system call's NUMBER only; at any other input it is
+			 * what it was before it was a token, a value no producer names, for the reason W_STATUS. */
+			if ((tk[i] & KGENOME_LINEAGE_STATUS) && role != KGENOME_DIAG_ROLE_NUMBER) {
+				L->pend |= KGENOME_LINEAGE_W_STATUS;
+				if (a) {
+					a->other = 1;
+					a->why |= KGENOME_LINEAGE_W_STATUS;
+				}
+				continue;
+			}
+			if (!a || KGENOME_LINEAGE_TOK_NODE(tk[i]) == node)      /* a node's own result coming round a loop is not a link to itself */
+				continue;
+			agg_tok_add(L, L->ag, a, tk[i]);
 		}
+		if (tk != tk0)
+			free(tk);
 	}
 	if (a && (v->other || uncertain)) {
 		a->other = 1;
@@ -370,28 +459,29 @@ void kgenome_lineage_cfg_enter(struct kgenome_lineage_cfg *g, uint32_t b, struct
 	}
 }
 
-/* The value of the node's result, when the capability hands one on. */
-int kgenome_lineage_hands_on(const struct kgenome_lineage *L, const struct kgenome_diag_hit *h)
+/*
+ * THE NODE'S RESULT IS AN OBJECT a later call is handed: the answer of the node's ROW (the import it is, kgenome_diag_hit.row), its
+ * capability's when the route that made it knew no row. It read the node's `symref` as the callee's name, which is the symbol an
+ * ARGUMENT named on a kernel module's node (KGENOME_DIAG_H_SYMREF): the row of that symbol answered for the call.
+ */
+int kgenome_lineage_hands_on(const struct kgenome_diag_hit *h)
 {
-	const char *nm = NULL;
-
-	if ((h->bits & KGENOME_DIAG_H_SYMREF) && h->symref < L->size)
-		nm = (const char *)L->base + h->symref;
-	return kgenome_nucleo_hands_on(h->cap, nm);
+	return kgenome_nucleo_call_hands_on(h->cap, h->row);
 }
 
-/* The words an i386 stdcall callee pops for this node, from the name it was reached by; -1 when the name is not
- * in the table (or the node has none). Asked once per node. */
+/* The words an i386 stdcall callee pops for this node, from the name of its row (an import by ordinal has one too); -1 when the
+ * name is not in the table (or the node has no row). Asked once per node. */
 static int site_pop(struct kgenome_lineage *L, uint32_t node)
 {
 	const struct kgenome_diag_hit *h = &L->s->hit[node];
+	const char *nm;
 	unsigned c;
 
 	if (!L->argc)
 		return -1;
 	if (L->argc[node] == -2) {
-		c = (h->bits & KGENOME_DIAG_H_SYMREF) && h->symref < L->size
-		    ? kgenome_emu_win_argc_of_name((const char *)L->base + h->symref) : KGENOME_EMU_WIN_ARGC_UNKNOWN;
+		nm = kgenome_nucleo_name_of(h->row);
+		c = nm ? kgenome_emu_win_argc_of_name(nm) : KGENOME_EMU_WIN_ARGC_UNKNOWN;
 		L->argc[node] = c == KGENOME_EMU_WIN_ARGC_UNKNOWN ? (int16_t)-1 : (int16_t)c;
 	}
 	return L->argc[node];
@@ -411,6 +501,106 @@ int kgenome_lineage_call_noreturn(struct kgenome_lineage *L, const struct kgenom
 	return f != UINT32_MAX && kgenome_lineage_noret(L, f);
 }
 
+/* ---- THE SITE DISPATCHER: how a node takes its inputs ---- */
+
+int kgenome_lineage_is_kentry(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in)
+{
+	if (in->op != KGENOME_CELL_SYSCALL && in->op != KGENOME_CELL_INT)
+		return 0;
+	if (in->at + 2u > L->size)
+		return 0;
+	/* the routes' own test, so a node the sweep made at a kernel entry is one this stage reads as one */
+	return kgenome_diag_kernel_entry(L->obj, in->op, in->op == KGENOME_CELL_INT && in->n_op && in->o[0].kind == KGENOME_CELL_O_IMM &&
+					 in->o[0].imm == 0x80u, L->base + in->at);
+}
+
+enum kgenome_lineage_conv kgenome_lineage_site_conv(const struct kgenome_lineage *L, const struct kgenome_cell_insn *in, uint32_t node)
+{
+	if (kgenome_lineage_is_kentry(L, in))
+		return KGENOME_LINEAGE_C_SYS;
+	/* a branch into memory a node made: what it runs is its operand, it passes no argument */
+	if (L->s->hit[node].cap == KGENOME_NUCLEO_EXEC_REG && (in->flags & KGENOME_CELL_F_INDIRECT) && in->n_op)
+		return KGENOME_LINEAGE_C_BRANCH;
+	return KGENOME_LINEAGE_C_CALL;
+}
+
+/* The value input `q` of a site holds under its convention. */
+static struct kgenome_lineage_val site_input(const struct kgenome_lineage *L, const struct kgenome_lineage_state *w, enum kgenome_lineage_conv conv,
+					     unsigned q)
+{
+	struct kgenome_lineage_val v;
+
+	if (conv != KGENOME_LINEAGE_C_SYS)
+		return kgenome_lineage_arg(L, w, q);
+	if (q < L->abi.n_sys_arg && L->abi.sys_arg[q] < 16u)
+		return w->r[L->abi.sys_arg[q]];
+	kgenome_lineage_val_other(&v);
+	return v;
+}
+
+/*
+ * A NODE IS REACHED: its inputs are added to what reaches it, and the value it hands back is answered. Every input the node has is
+ * read, under the site's convention: the arguments its capability's roles name (a call's, or a system call's), the TARGET of a branch
+ * node, and the NUMBER of a system call - the register that chose which call it is. The number is an input like any other: what reaches
+ * it says whether it was a constant, a parameter of the function, or the RESULT of an earlier node (msfvenom's stager reads `read`'s
+ * number out of connect's zero): its producers are links of role NUMBER, and the node's number class (kgenome_diag_hit.nr) is written
+ * with them. The result: a handle is its node's token, any other answer is the node's STATUS token (diag_lineage_private.h).
+ */
+static void site_take(struct kgenome_lineage *L, struct kgenome_lineage_state *w, const struct kgenome_cell_insn *in, uint32_t node,
+		      int emit, struct kgenome_lineage_val *ret)
+{
+	const struct kgenome_diag_hit *h = &L->s->hit[node];
+	const enum kgenome_lineage_conv conv = kgenome_lineage_site_conv(L, in, node);
+	struct kgenome_lineage_val a;
+	unsigned q;
+
+	if (emit) {
+		if (conv == KGENOME_LINEAGE_C_BRANCH) {
+			kgenome_lineage_read_op(L, w, in, &in->o[0], &a);
+			kgenome_lineage_agg_add(L, node, KGENOME_DIAG_ROLE_TARGET, &a, w->seeded);
+		} else {
+			for (q = 0; q < 6u; q++) {
+				const uint8_t role = kgenome_nucleo_call_role(h->cap, h->row, q);
+
+				if (role == KGENOME_DIAG_ROLE_NONE)
+					continue;
+				a = site_input(L, w, conv, q);
+				kgenome_lineage_agg_add(L, node, role, &a, w->seeded);
+			}
+		}
+		if (conv == KGENOME_LINEAGE_C_SYS && L->abi.sys_nr < 16u)
+			kgenome_lineage_agg_add(L, node, KGENOME_DIAG_ROLE_NUMBER, &w->r[L->abi.sys_nr], w->seeded);
+	}
+	if (node >= KGENOME_LINEAGE_NODE_MAX) {
+		/* a node past what a token holds: its result is not followed, and the scan says so */
+		kgenome_lineage_val_unknown(ret, kgenome_lineage_hands_on(h) ? KGENOME_LINEAGE_W_LIMIT : KGENOME_LINEAGE_W_STATUS);
+		if (kgenome_lineage_hands_on(h))
+			kgenome_lineage_bound(L, KGENOME_LINEAGE_B_VALUE);
+		return;
+	}
+	memset(ret, 0, sizeof *ret);
+	ret->n = 1;
+	ret->t[0] = (uint16_t)(kgenome_lineage_hands_on(h) ? node : node | KGENOME_LINEAGE_STATUS);
+}
+
+/* A kernel entry: a node's inputs and answer when the scan has one here; what the kernel destroys either way. */
+static void do_sys(struct kgenome_lineage *L, struct kgenome_lineage_state *w, const struct kgenome_cell_insn *in, int emit)
+{
+	struct kgenome_lineage_val ret;
+	uint32_t node;
+	unsigned i;
+
+	if (!kgenome_lineage_site_in(L, in, &node)) {
+		/* no node (a number the vocabulary has no word for, or one that could not be read): what it was before the dispatcher */
+		kgenome_lineage_state_step(L, w, in);
+		return;
+	}
+	site_take(L, w, in, node, emit, &ret);
+	for (i = 0; i < L->abi.n_sys_clob; i++)
+		kgenome_lineage_val_unknown(&w->r[L->abi.sys_clob[i]], KGENOME_LINEAGE_W_CLOBBER);
+	w->r[L->abi.ret] = ret;
+}
+
 /* One call, or a tail jump: `tail` leaves the function. */
 static void do_call(struct kgenome_lineage *L, struct kgenome_lineage_state *w,
 		    const struct kgenome_cell_insn *in, const struct kgenome_cell_insn *next,
@@ -421,36 +611,12 @@ static void do_call(struct kgenome_lineage *L, struct kgenome_lineage_state *w,
 	const int32_t sp0 = w->sp;
 	int pop = -1;
 
-	kgenome_lineage_val_unknown(&ret, KGENOME_LINEAGE_W_STATUS);       /* (what a node that hands no handle on returns) */
 	/* A jump leaves the return address where it was, so on a stack-passed ABI the callee's arguments
 	 * are one word further up than they are for a call. */
 	if (tail && w->spok)
 		w->sp += L->abi.w;
 	if (kgenome_lineage_site_in(L, in, &node)) {
-		const struct kgenome_diag_hit *h = &L->s->hit[node];
-		unsigned q;
-
-		for (q = 0; q < 6u && emit; q++) {
-			uint8_t role = kgenome_diag_role_of_arg(h->cap, q);
-			struct kgenome_lineage_val a;
-
-			if (role == KGENOME_DIAG_ROLE_NONE)
-				continue;
-			a = kgenome_lineage_arg(L, w, q);
-			kgenome_lineage_agg_add(L, node, role, &a, w->seeded);
-		}
-		if (kgenome_lineage_hands_on(L, h)) {
-			if (node < KGENOME_LINEAGE_PARAM) {
-				kgenome_lineage_val_other(&ret);
-				ret.other = 0;
-				ret.why = 0;
-				ret.t[0] = (uint16_t)node;
-				ret.n = 1;
-			} else {        /* a node past the 15 bits a token holds: its result is not followed, and the scan says so */
-				kgenome_lineage_val_unknown(&ret, KGENOME_LINEAGE_W_LIMIT);
-				kgenome_lineage_bound(L, KGENOME_LINEAGE_B_VALUE);
-			}
-		}
+		site_take(L, w, in, node, emit, &ret);
 		pop = L->abi.callee_pops ? site_pop(L, node) : -1;
 	} else {
 		/* (a call to the next instruction is no call of a function: the get-pc idiom, and in a relocatable object the hole a
@@ -529,10 +695,35 @@ static void block_run(struct kgenome_lineage *L, struct kgenome_lineage_cfg *g, 
 		case KGENOME_CELL_LOOP:
 		case KGENOME_CELL_UD:
 			break;
+		case KGENOME_CELL_SYSCALL:
+		case KGENOME_CELL_INT:
+			if (!kgenome_lineage_is_kentry(L, in)) {
+				kgenome_lineage_state_step(L, &w, in);
+				break;
+			}
+			{
+				/*
+				 * EXIT AND EXIT_GROUP do not return: the routes list them with the imports that never do (kgenome_diag_noret_add) - by
+				 * the number the SWEEP read, in address order, which can be wrong where the paths into the site disagree (`push rax;
+				 * ...; pop rax` after an exit block hands the sweep the exit's 60 at a `read`). So the stage takes the word only where
+				 * its own state agrees that the number is a constant on every path into this instruction; it computes no value, so
+				 * two paths that load two different constants are not told apart (a limit, said; the next algorithm is a value set
+				 * per register, which the stage does not keep by design).
+				 */
+				const struct kgenome_lineage_val *nr = &w.r[L->abi.sys_nr];
+				const int nr_const = nr->n == 0u && nr->other && nr->why == KGENOME_LINEAGE_W_CONST;
+
+				do_sys(L, &w, in, emit);
+				if (nr_const && kgenome_diag_site_noreturn(L->s, in->at)) {
+					exits = 1;
+					i = end - 1u;
+				}
+			}
+			break;
 		case KGENOME_CELL_RET:
 			/* where the flow goes after it is the block's successors: none, or - an ARM conditional return - the fall-through */
 			if (emit && !w.seeded) {
-				struct kgenome_lineage_val r = w.r[KGENOME_CELL_REG_AX];
+				struct kgenome_lineage_val r = w.r[L->abi.ret];
 
 				out_ret(L, &r);
 			}
@@ -683,6 +874,7 @@ void kgenome_lineage_solve(struct kgenome_lineage *L, uint32_t fi, struct kgenom
 	L->out = out;
 	L->cur_fn = fi;
 	L->ag = &L->loc;
+	L->nvx = 0;                     /* the token chains of the last solve's values: its summary is published, nothing names them now */
 	if (!kgenome_lineage_fn_get(L, fi, &fn) || !kgenome_lineage_decode(L, &fn) || !L->n_in)
 		return;
 	memset(&own_fr, 0, sizeof own_fr);

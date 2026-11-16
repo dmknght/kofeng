@@ -185,8 +185,10 @@ struct kof_scan_cut {
 	const struct kgenome_true_all *lib;
 	const struct kof_range        *fixed;
 	uint32_t                       n_fixed;
-	/* The caller's ledger for the CFG signature of a function unit (cfgsign.h): the allocator that charges the scan. NULL = malloc (a tool). */
+	/* DISABLED by the owner 2026-11-15 (CFG): the caller's ledger for the CFG signature of a function unit (cfgsign.h). To re-enable: take this #if 0 out with scan_feed.c's. */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	const struct kof_cfgsign_host *cfg;
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 };
 void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b, uint32_t present,
 			   const struct kof_scan_cut *cut, struct kof_ext_buf *eb,

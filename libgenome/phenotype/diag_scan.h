@@ -227,9 +227,39 @@ struct kgenome_diag_hit {
 	uint8_t  bits;          /* KOF_DIAG_H_*                             */
 	uint8_t  n_in;
 	struct kgenome_diag_in in[4];
+	/* A SYSTEM CALL'S NUMBER (diag_vocab.h, enum kgenome_diag_nr): its class; when RESULT, the node whose result it is (the lowest index of
+	 * those that reached it), how sure (KGENOME_DIAG_LINK_PROVEN: that one on every path; MAY) and how many producers reached it. Last, in
+	 * the struct's tail padding: every member above keeps its offset. */
+	uint8_t  nr, nr_n;
+	uint16_t nr_from;
+	uint8_t  nr_how;
+	/*
+	 * THE ROW OF THE CALL this node is (kgenome_nucleo_row_of: the spelling of the import it goes through, by name or by an ordinal the
+	 * library's ABI fixes, kgenome_nucleo_ordinal_name), 0 when the route that made the node knows only a capability (a system call, a
+	 * value the emulator compared). Decided ONCE, by the route that read the name, and read by everyone that asks which argument is
+	 * which input or whether the result is an object (kgenome_nucleo_call_role / kgenome_nucleo_call_hands_on with h->cap, h->row).
+	 * It is not `symref`: that is the symbol an ARGUMENT named (a kernel module's operand), and reading it as the callee's name was a
+	 * second carrier of this fact with another meaning. Appended after the members above, so none of them moves (72 -> 80 bytes a node).
+	 */
+	uint16_t row;
 };
 
 struct kgenome_diag_scan;
+
+/*
+ * EVERY INPUT OF A NODE. `in[]` above is a VIEW: the first four inputs of the roles a diagnose pack can name, which the graph block and its
+ * matcher read (kofdiag.c). A node has as many inputs as the program gives it - a read has its descriptor and its buffer, MAY producers on
+ * both, and its system call NUMBER (KGENOME_DIAG_ROLE_NUMBER) - and the rest are kept by the scan, as many as there are, charged to the
+ * scan's ledger: a fixed four per node dropped what did not fit (MEASURED on 356 files: 98 links in 21 files, and four files said
+ * TRUNCATED for it). Only the ledger bounds them; a refusal is KGENOME_OVER_BUDGET and the input is said lost (KGENOME_TRUNCATED).
+ * kgenome_diag_in_count / kgenome_diag_in_at read all of them, the view first.
+ */
+struct kgenome_diag_xin {
+	uint32_t hit;           /* the node the input is of */
+	struct kgenome_diag_in in;
+};
+uint32_t kgenome_diag_in_count(const struct kgenome_diag_scan *s, uint32_t node);
+const struct kgenome_diag_in *kgenome_diag_in_at(const struct kgenome_diag_scan *s, uint32_t node, uint32_t k);
 
 /*
  * ---- THE ANALYSIS ROUTINES, ONE BIT EACH ----------------------------------
@@ -454,7 +484,26 @@ struct kgenome_diag_inputs {
 	 */
 	const struct kgenome_func_set *(*funcs_fn)(void *user);
 	void                         *funcs_user;
+	/*
+	 * THE CAPABILITIES A LOADED DIAGNOSE NAMES (a node's cap, exact or its group, and the two calls of a sequence): a node of one of them is
+	 * kept by the table's management even when nothing links it (kgenome_diag_nodes_keep, diag_hit.c) - a one-node diagnose needs exactly
+	 * that node. NULL / 0: none is named.
+	 */
+	const uint16_t               *keep_caps;
+	uint32_t                      n_keep_caps;
 };
+
+/*
+ * WHAT THE NODE TABLE'S MANAGEMENT DID (kgenome_diag_scan_drops): nodes refused a slot when the table or the ledger was full, and, of the
+ * nodes the table held, those the keep rule dropped afterwards - with no link, or with no capability. Zero in all when the table never
+ * refused (the ordinary case: the fullest of 348 executables was 26.8% of the 65534 index space).
+ */
+struct kgenome_diag_drops {
+	uint32_t refused;               /* refused a slot: the table or the ledger was full when the node was made */
+	uint32_t unlinked;              /* dropped by the keep rule: a capability, no link, no diagnose names it */
+	uint32_t nocap;                 /* dropped by the keep rule: no capability (the cap-0 nodes), no diagnose names it */
+};
+void kgenome_diag_scan_drops(const struct kgenome_diag_scan *s, struct kgenome_diag_drops *out);
 /*
  * THE SAME SCAN OF A SCRIPT: its nodes are the calls whose names its language's table (nucleo_names_<lang>.c) has, its links are
  * a value flowing into an argument - see diag_text.c. `lang` is an enum kgenome_textual_lang_id; a language the table does
@@ -465,6 +514,11 @@ struct kgenome_diag_text_work {
 	uint64_t edges;         /* the edges the summaries kept (a function's parameter or return slot and a producer that flowed into it) */
 	uint64_t steps;         /* tokens the constant evaluator spent */
 	uint64_t listed;        /* tokens the scope pass read for the names of `global` and `Dim` lists (each token of a list once: a list is not read again by the one after it) */
+};
+struct kgenome_diag_text_island_set;
+/* One island of a text the caller names for the obfuscation measure: its bytes [off, off + len) in the file. */
+struct kgenome_diag_text_place {
+	uint64_t off, len;
 };
 struct kgenome_diag_text_req {
 	const uint8_t                 *base;
@@ -499,8 +553,127 @@ struct kgenome_diag_text_req {
 	/* WHAT THE SCAN COST, when set (APPENDED: a caller built before it leaves it NULL): the work counters of the route, written when the scan ends. A bound of work is
 	 * asserted on these and not on a clock - a table whose entries share a hash is quadratic in a count and invisible to a timer on a small input. */
 	struct kgenome_diag_text_work *work;
+	/*
+	 * ISLANDS, APPENDED (2026-11-10): a call's argument the evaluator followed through a variable, a wrapper or a concatenation - never a bare
+	 * literal, which has a file offset already and is Merge 167's own domain (celllysis/script_funcs.c's find_eval_islands) - to a constant text
+	 * that an eval()/create_function() RUNS (kgenome_dtx_target_node/layer_of_call, diag_text_walk.c: the SAME following the capability graph
+	 * already does, kept instead of freed). NULL is the ordinary answer: the 3 existing capability-graph call sites are unchanged: this is
+	 * collected only when a caller hands over a set to fill (kgenome_diag_text_islands). See struct kgenome_diag_text_island below for why it
+	 * carries no file offset of its own.
+	 */
+	struct kgenome_diag_text_island_set *islands;
+	/* THE OBFUSCATION MEASURE, APPENDED (2026-11-13): one record per text the walk reads (the file, and each layer of code it computes), filled when a caller hands
+	 * a set over (kgenome_diag_text_obf). NULL: not measured, and the walk is what it was. See struct kgenome_diag_text_obf_rec. */
+	struct kgenome_diag_text_obf_set *obf;
+	/* THE ISLANDS OF THE FILE, for the measure (APPENDED 2026-11-14): the caller's own table of where code is in the file - the engine's is its parse's
+	 * (kof_script_info.island) - in file order, none overlapping. Each is one ISLAND record; an effect outside every one is the TEXT record's. NULL / 0:
+	 * the file is one TEXT record. A place out of order, overlapping the one before or reaching past the text is not taken, and the set's status says
+	 * KGENOME_TRUNCATED. Read only with `obf`; a layer is a record of its own whatever this holds. */
+	const struct kgenome_diag_text_place *obf_isl;
+	uint32_t                       n_obf_isl;
 };
 struct kgenome_diag_scan *kgenome_diag_scan_text(const struct kgenome_diag_text_req *rq);
+
+/*
+ * HOW HIDDEN WHAT A SCRIPT DOES IS: an entropy-like number of a text, in bits per effect (EXPERIMENTAL, owner 2026-11-13; diag_text_obf.c).
+ *
+ * An EFFECT is a call site or a code run (eval, create_function: what runs is its code argument). Its IDENTITY is the name it calls, or the code it runs. k(e) is
+ * the number of transforms the route's own constant evaluator applied to make that identity out of what the text writes - joins, appends, rows of the function
+ * table (str_replace, strrev, chr, base64_decode, a method, a cast), an element picked out of an array literal - and the measure of the text is
+ *
+ *     O = (1 / |E|) * sum over E of log2(1 + k(e))
+ *
+ * A name written at the call is k = 0, and so is a variable that holds one literal (`$f = 'strlen'; $f()`: a callback). ONLY A CONSTANT IDENTITY COUNTS: a value
+ * with any leaf the program reads at run time (a parameter, the request, `$m = 'get_' . $field`) is DYNAMIC dispatch, not hiding - k = 0, counted in `n_dynamic`.
+ * A constant identity the evaluator could not finish (a row the hook refuses, gzinflate; a function of the program handed constants, a string-array decoder) is
+ * counted with the steps it took plus one, a LOWER BOUND, in `n_refused`. Processing of DATA is never counted: `str_replace('a', 'b', $text)` is a call whose name
+ * is written, whatever its arguments are.
+ */
+/* What a record covers (owner 2026-11-14: one row per island): an island of the file as the CALLER's table names it (kgenome_diag_text_req.obf_isl), code the
+ * program computes (a layer), or the TEXT of the file that no island holds (the whole file when the caller names no island). */
+#define KGENOME_DIAG_TEXT_OBF_TEXT   0u
+#define KGENOME_DIAG_TEXT_OBF_ISLAND 1u
+#define KGENOME_DIAG_TEXT_OBF_LAYER  2u
+struct kgenome_diag_text_obf_rec {
+	uint64_t at;            /* ISLAND: its file offset, as the caller gave it; TEXT: 0; LAYER: the file offset of the call that ran it (the outermost call, for a nested layer) */
+	uint64_t len;           /* ISLAND: its length, as the caller gave it; TEXT: the text's length; LAYER: the length of the code the program computed */
+	uint8_t  kind;          /* KGENOME_DIAG_TEXT_OBF_* */
+	uint32_t layer;         /* 0 the file, 1.. code it computes */
+	uint32_t n_eff;         /* effects */
+	uint32_t n_built;       /* of them, identity a constant made by >= 1 transform */
+	uint32_t n_bound;       /* identity read through a variable or a subscript, no transform */
+	uint32_t n_refused;     /* constant identity the evaluator could not finish (lower bound counted) */
+	uint32_t n_dynamic;     /* identity with a run-time leaf: dispatch, not counted */
+	uint32_t k_max;         /* the most transforms one identity took */
+	uint64_t bits_milli;    /* sum of log2(1 + k), in thousandths of a bit */
+	/* THE CAPABILITIES IT USES: the distinct KGENOME_NUCLEO_* of the nodes the route made inside it, ascending - the same nodes the capability graph and the
+	 * diagnoses read, so this list and the route cannot differ. Heap, freed by kgenome_diag_text_obf_free. A list the measure could not grow is said by the
+	 * set's status (KGENOME_NOMEM), never cut silently. */
+	uint16_t *cap;
+	uint32_t  n_cap;
+};
+struct kgenome_diag_text_obf_set {
+	struct kgenome_diag_text_obf_rec *v;
+	uint32_t n, cap;
+	enum kgenome_status status;     /* KGENOME_OK, or the limit that dropped a record (rule 4) */
+};
+/* The measure of one record, thousandths of a bit per effect (0 for a text with no effect). */
+uint32_t kgenome_diag_text_obf_milli(const struct kgenome_diag_text_obf_rec *r);
+/* The measure of a script: the highest of its records (an island or a layer is one place of what it hides; a mean over them would let a big clean part drown a
+ * small loader). The records come in this order: the file's (islands by offset, or its one TEXT record), then the layers in the order the walk reached them. */
+uint32_t kgenome_diag_text_obf_value(const struct kgenome_diag_text_obf_set *s);
+/* Scanner-free, like kgenome_diag_text_islands: the same walk, asked only for the measure: `rq->obf` is the set filled (zeroed first), the scan is made and
+ * freed. A request with no `obf` does nothing. */
+void kgenome_diag_text_obf(const struct kgenome_diag_text_req *rq);
+void kgenome_diag_text_obf_free(struct kgenome_diag_text_obf_set *s);
+
+/*
+ * ONE ISLAND: the bytes of a value the evaluator resolved to a constant that a call RUNS (eval's text, create_function's body) - NOT a bare
+ * literal (Merge 167's find_eval_islands already turns that case into real kgenome_func entries, because a literal's bytes sit at a real file
+ * offset). hoho.php's `create_function('', $U)` is the case this answers: `$U` is joined out of seven variables at seven different file offsets,
+ * so there is no single (off, len) into the object for its value - inventing one would be exactly the "bent kgenome_func_set entry" funcs.h's own
+ * PLACE contract (genotype/image/funcs.h: "off is a FILE offset") warns against. An island is an ANSWER (objprod.h's own distinction: "what is an
+ * answer... has no offset to move"), not a PLACE: `at` is the call site's OWN file offset - honest provenance, where the value came FROM, never a
+ * fabricated offset for the value itself - and `data`/`len` is a fresh, self-contained buffer a caller can hand to the same lexical machinery any
+ * other script buffer already goes through (kgenome_script_funcs_build, kgenome_mutation_pool, kof_func_name all take a plain (data, len) and do
+ * not care where it came from), so a function found inside one is a real, nameable unit without widening kgenome_func_set's own contract at all.
+ */
+struct kgenome_diag_text_island {
+	uint64_t at;            /* the call's own file offset, honestly labelled provenance - not the value's (it has none) */
+	uint8_t *data;
+	uint32_t len;
+	/*
+	 * THE ARGUMENT EXPRESSION'S OWN SOURCE TEXT (2026-11-10), for a caller that names the island for a reader rather
+	 * than for the matcher: `name_off`/`name_len` are the token span kgenome_dtx_arg_range already found for this
+	 * call's argument - `$U` in hoho.php's `create_function('', $U)` - read from the OBJECT's own bytes (the same
+	 * domain as `at`, never the resolved value: a label is provenance, not an answer). Zero `name_len` only when the
+	 * object was too short to charge the walk at all (the island itself was still collected; naming is best effort).
+	 */
+	uint64_t name_off;
+	uint32_t name_len;
+};
+
+struct kgenome_diag_text_island_set {
+	struct kgenome_diag_text_island *v;
+	uint32_t n, cap;
+	/*
+	 * KGENOME_OK, or the worst limit the collection hit - the SAME layering room every layer of the scan already shares (diag_text_walk.c's
+	 * LAYER_DEPTH / kgenome_dtx_layers.room), no second cap invented: a cap bounds cost, never deletes evidence silently (rule 4), so a caller
+	 * that wants to know reads this.
+	 */
+	enum kgenome_status status;
+};
+
+/*
+ * EVERY ISLAND of a script's text, collected: the SAME capability-graph walk (kgenome_diag_run_text) that already follows an eval()/
+ * create_function() argument through variables and string functions to a constant, this time keeping what it resolves instead of freeing it the
+ * moment one C call returns (diag_text_walk.c's layer_of_call). Scanner-free, like kgenome_diag_text_names beside it: a tool with no live scan
+ * (kofexaminer) asks the same question a real scan would. `out` is the caller's, zeroed by this call; `kgenome_diag_text_islands_free` returns
+ * what it holds.
+ */
+void kgenome_diag_text_islands(const uint8_t *base, uint64_t size, uint32_t lang, kgenome_textual_apply_fn apply,
+			       struct kgenome_diag_text_island_set *out);
+void kgenome_diag_text_islands_free(struct kgenome_diag_text_island_set *out);
 
 /*
  * CAN THE TEXT ROUTE READ THIS LANGUAGE, and against which table of names (an enum kgenome_nucleo_target; 0 for a language that is not served).
@@ -574,6 +747,25 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 				    const uint8_t *base, uint64_t size,
 				    const struct kgenome_pe_imptab *imports,
 				    const struct kgenome_budget *budget);
+/*
+ * THE SAME ANALYSIS, AS ONE REQUEST, WITH THE MACHINE KEPT (EA8). kgenome_diag_apihash_run is this
+ * with `keep` NULL. When `keep` is set and the program is run, the machine is not freed: it is left in
+ * `*keep` (emu_unpack.h, struct kgenome_emu_unp_kept) for the object's unpack run to carry on, so a PE
+ * is run from its entry once. The run is then built with the budget's `max_bytes` and `account` (the
+ * pages of a machine that outlives the analysis are the caller's to charge), and the instructions it
+ * executed are added to `*budget->insn_spent` before it is handed over (the machine counts nothing
+ * more to it). A `keep` that already holds a machine is freed first.
+ */
+struct kgenome_emu_unp_kept;
+struct kgenome_diag_apihash_req {
+	const struct kgenome_obj       *obj;
+	const uint8_t                  *base;
+	uint64_t                        size;
+	const struct kgenome_pe_imptab *imports;
+	const struct kgenome_budget    *budget;
+	struct kgenome_emu_unp_kept    *keep;
+};
+struct kgenome_diag_apihash_set *kgenome_diag_apihash_make(const struct kgenome_diag_apihash_req *rq);
 void kgenome_diag_apihash_free(struct kgenome_diag_apihash_set *a);
 /*
  * The DISTINCT APIs of a product - once each however many places call it - as

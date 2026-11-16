@@ -272,6 +272,9 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
 	 */
 	res->entry_of = kof_src_entry_of(src);
 	res->entry_kind = kof_src_kind_of(src);
+	/* And whether it is evidence rather than a scan target of its own - see
+	 * kof_result.evidence_only. */
+	res->evidence_only = (uint8_t)kof_src_evidence_only_of(src);
 	w->sc->cur.src = src;
 	/*
 	 * And the regions, if the producer named any - the one object

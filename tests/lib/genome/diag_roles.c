@@ -99,6 +99,41 @@ int main(void)
 	}
 
 	/*
+	 * AND EVERY ROW (2026-11-15): a call's roles come from its row when it has one (kgenome_nucleo_call_role), and a row's shape is
+	 * the same invariant - eight argument slots, not six, because a row may name a role past the six the stages read.
+	 */
+	{
+		uint32_t row, rows = 0, rows_roles = 0;
+
+		for (row = 1u; row < 0x10000u && kgenome_nucleo_name_of((uint16_t)row); row++) {
+			uint8_t seen[KGENOME_DIAG_ROLE_COUNT];
+			unsigned i, any = 0;
+
+			rows++;
+			memset(seen, 0, sizeof seen);
+			for (i = 0; i < 8u; i++) {
+				uint8_t r = kgenome_nucleo_row_role((uint16_t)row, i);
+
+				if (r == KGENOME_DIAG_ROLE_NONE)
+					continue;
+				any = 1;
+				if (r >= KGENOME_DIAG_ROLE_COUNT || seen[r]) {
+					printf("  FAIL row %s: argument %u role %u is not a role or is worn twice\n",
+					       kgenome_nucleo_name_of((uint16_t)row), i, r);
+					fails++;
+					continue;
+				}
+				seen[r] = (uint8_t)(i + 1u);
+			}
+			rows_roles += any;
+		}
+		if (rows < 1000u || rows_roles < 200u) {
+			printf("  FAIL the row walk read %u rows, %u with roles: the table is not being read\n", rows, rows_roles);
+			fails++;
+		}
+	}
+
+	/*
 	 * AND THE WALK ITSELF HAS TO HAVE HAPPENED. A test that silently
 	 * examined nothing passes for the wrong reason - it has been written
 	 * twice in this tree already.

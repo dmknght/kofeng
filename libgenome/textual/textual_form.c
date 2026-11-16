@@ -134,6 +134,7 @@ static int settle(struct kgenome_tform *f, uint8_t next, int heredoc)
 				 * line break that ends the terminator's line (written as "\r" the terminator was "EOF\r\rid": L15 of the lexer audit) */
 				put(f, (f->lit_end & 1u) && f->out[f->w - 1u] == '\r' && (f->lang->universal_eol || f->lang->vb_lines) ? '\r' : '\n');
 				broke = 1;
+				f->n_stmt += f->stmt_synth;
 			}
 		} else if ((last != '\n' || f->joined) &&
 			   (f->lang->ws_significant || heredoc ||
@@ -143,6 +144,7 @@ static int settle(struct kgenome_tform *f, uint8_t next, int heredoc)
 		}
 	}
 	f->pend = 0;
+	f->stmt_synth = 0;
 	f->joined = 0;
 	return broke;
 }
@@ -280,6 +282,25 @@ static void code_token_byte(struct kgenome_tform *f, uint8_t c)
 	else if (c == ';' && f->depth == f->echo_depth)
 		echo_close(f);
 	code_byte(f, c);
+	/* A STATEMENT'S OWN END, GIVEN THE LINE BREAK ONE ALWAYS GETS (textual_lang.h's `stmt_semi`, above): `code_byte`
+	 * just settled and wrote this ";", which reset `f->pend` to 0, so setting it to 2 here is exactly what a source
+	 * line break right behind this ";" would have left behind - the one difference being that the source need not
+	 * have had one. Depth 0 only (not inside the "(" of a call or a `for`, not inside a block's "{"), and only where
+	 * depth is tracked at all (`f->track`, set below from `stmt_semi` the same way it already is from `echo_call`).
+	 * `stmt_synth` says THIS is why pend is 2 right now - settle's own n_stmt count (textual_form_private.h) reads
+	 * it, and clears with the rest of `pend` the moment settle next runs; a real line break in the text (below)
+	 * clears it first, because then the break is no longer only this mechanism's.
+	 *
+	 * An "any block depth" widening of this trigger (ignore "{"/"}" nesting, stop only on "("/"[") was tried and
+	 * reverted the same session it was added (2026-11-11, STATUS.md "DESIGN DECISION... byte-reentry indentation
+	 * abandoned": the indentation it was feeding, kgenome_textual_form's own re-entrant output, is what turned out
+	 * unsafe - JavaScript's Annex B "-->" is the one byte-for-byte example measured). Indentation for a reader now
+	 * lives in kgenome_textual_pretty (textual.h), a one-pass renderer that is never re-lexed, so this depth-0 rule
+	 * is Merge 172's own again - not a stopgap, the proven-safe shape. */
+	if (c == ';' && !f->depth && f->lang->stmt_semi) {
+		f->pend = 2u;
+		f->stmt_synth = 1u;
+	}
 }
 
 /* The line break a continuation backslash takes, at `k` in the span: "\n", and where the language reads every
@@ -355,6 +376,7 @@ static inline __attribute__((always_inline)) void code_span_body(struct kgenome_
 			/* (the last alternative: a one-line string that did not close ended at this CR, so it is a line break to the form as well; written as a blank the next
 			 * literal was closed up against the string - `"` CR `"` became `""`, a string that the next pass read as closed: L23) */
 			f->pend = 2u;
+			f->stmt_synth = 0;      /* a REAL line break: the break is no longer only stmt_semi's doing */
 			prev_name = 0;
 		} else if (kgenome_textual_blank_in(c, f->lang->word_vt_ff)) {
 			f->pend = f->pend ? f->pend : 1u;
@@ -1030,9 +1052,11 @@ static int form_sink(void *u, const struct kgenome_textual_span *s)
 					while (f->w && f->out[f->w - 1u] == '\r')
 						f->w--;
 				f->pend = 2u;
+				f->stmt_synth = 0;
 			}
 		} else if (f->lang->comment_break && f->lang->comment_break(f->in + s->off, s->len)) {
 			f->pend = 2u;           /* one that holds a line terminator is a line break (js) */
+			f->stmt_synth = 0;
 		} else if (!f->pend) {
 			f->pend = 1u;           /* a comment is a gap */
 		}
@@ -1081,14 +1105,14 @@ enum kgenome_textual_status kgenome_textual_form(const struct kgenome_textual_fo
 					!(rq->flags & KGENOME_TEXTUAL_KEEP_JOINS) && rq->cap <= 0xffffffffu,
 			  .keep_joins = (rq->flags & KGENOME_TEXTUAL_KEEP_JOINS) != 0,
 			  .py = lang && lang->continuation && lang->universal_eol,
-			  .track = lang && ((lang->continuation && lang->universal_eol) || lang->echo_call) };
+			  .track = lang && ((lang->continuation && lang->universal_eol) || lang->echo_call || lang->stmt_semi) };
 	struct kgenome_textual_lex_req lq = { rq->in, rq->n, rq->lang, rq->flags, form_sink, &f };
 	struct kgenome_textual_lex_res lr;
 	enum kgenome_textual_status st;
 
 	if (f.fold_calls)
 		kgenome_tform_call_table(&f);
-	res->n_out = res->n_open = res->n_decoded = res->n_refused = res->n_folded = res->n_calls = res->n_bound = 0;
+	res->n_out = res->n_open = res->n_decoded = res->n_refused = res->n_folded = res->n_calls = res->n_bound = res->n_stmt = 0;
 	memset(res->n_fn, 0, sizeof res->n_fn);
 	if (!lang)
 		return KGENOME_TEXTUAL_NO_LANG;
@@ -1125,6 +1149,7 @@ enum kgenome_textual_status kgenome_textual_form(const struct kgenome_textual_fo
 	res->n_refused = f.n_refused;
 	res->n_calls = f.n_calls;
 	res->n_bound = lr.n_bound;
+	res->n_stmt = f.n_stmt;
 	memcpy(res->n_fn, f.n_fn, sizeof res->n_fn);
 	return lr.n_open ? KGENOME_TEXTUAL_OPEN : KGENOME_TEXTUAL_OK;
 }

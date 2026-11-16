@@ -175,6 +175,49 @@ static void prop_event(struct view *v)
 			 v->evt_wide ? " (utf-16)" : "");
 }
 
+/* What the islands table's cell callback walks: the data function and the row (kv_dashdata.c's dash_islands_cell). */
+struct prop_isltab {
+	struct object *ob;
+	char row[DASH_ISL_COLS - 1u][DASH_CELL];
+	char caps[400];
+};
+
+static void isl_cell(void *user, uint32_t row, const char **out)
+{
+	struct prop_isltab *T = user;
+	uint32_t k;
+
+	dash_islands_cell(T->ob, row, T->row, T->caps, sizeof T->caps);
+	for (k = 0; k < KV_TAB_COLS; k++)
+		out[k] = k < DASH_ISL_COLS - 1u ? T->row[k] : k == DASH_ISL_COLS - 1u ? T->caps : "";
+}
+
+/* A script's islands as a table of the page: measured widths, the offset sticky, the nucleo column takes the room the dialog leaves; the rows are page
+ * lines, so the page's own scroll moves them down and its sideways offset across, like every table on it. */
+static void islands_table(struct view *v, struct object *ob)
+{
+	static struct prop_isltab T;
+	struct prop_col col[KV_TAB_COLS];
+	struct kv_tab_spec t;
+	struct dash_table d;
+	uint32_t k;
+
+	dash_islands_table(ob, &d);
+	if (!d.n_col)
+		return;
+	memset(&T, 0, sizeof T);
+	T.ob = ob;
+	for (k = 0; k < d.n_col; k++) {
+		col[k].name = d.head[k];
+		col[k].width = 0;
+		col[k].right = 0;
+		col[k].attr = prop_tone_sgr(d.tone[k]);
+	}
+	prop_spec(&t, col, d.n_col, d.n_row, d.lead, (int)d.n_col - 1, isl_cell, &T);
+	kv_tab_measure(&t);
+	prop_table(v, &t);
+}
+
 void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -305,10 +348,17 @@ void prop_build(struct view *v)
 
 		dash_header(ob, &blk);
 		prop_block(&blk);
-		dash_regions(v, ob, &blk);
-		prop_block(&blk);
-		dash_anomalies(ob, &blk);
-		prop_block(&blk);
+		if (dash_is_script(ob)) {
+			/* a script: its islands in place of the regions, and no anomalies (none is defined for a script yet) */
+			dash_islands(ob, &blk);
+			prop_block(&blk);
+			islands_table(v, ob);
+		} else {
+			dash_regions(v, ob, &blk);
+			prop_block(&blk);
+			dash_anomalies(ob, &blk);
+			prop_block(&blk);
+		}
 	}
 
 

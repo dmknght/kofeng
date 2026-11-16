@@ -49,9 +49,8 @@
  *     control-flow graph, which this does not build.
  *   - DISTANCE. A count of instructions between two nodes is the one part
  *     of a rule an author can evade by inserting one instruction.
- *   - A JOIN. Two trees sharing a node is not expressible here and is not
- *     meant to be: that is verdict logic and lives in a signature, over the
- *     nodes a match bound - see kof_diag_share.
+ *   - A JOIN OF TWO DIAGNOSES: the verdict's (kof_diag_share). One diagnose's own two blocks
+ *     meeting at a node is KOF_DIAG_DECLARE_JOIN (owner, 2026-11-14).
  */
 
 #ifndef KOFMOD_KOFDIAGTREE_H
@@ -209,6 +208,10 @@ struct kof_form;          /* databases/pack/diagform.h: the detection form of a 
  * name is in the relocation beside it.
  */
 #define KOF_DIAG_B_FIELD_OF (1u << 4)
+/* The node of the SECOND block (second root) that must reach what the first bound - KOF_DIAG_DECLARE_JOIN;
+ * a record carrying it has two roots, which an older loader refuses whole (kofdiag_load.c blocks_ok). Bit 0
+ * (the retired KOF_DIAG_B_TOUCH) is not reused. */
+#define KOF_DIAG_B_JOIN     (1u << 5)
 
 /*
  * ONE NODE. Eight bytes and then its attributes.
@@ -370,6 +373,7 @@ enum kof_diag_fact {
 	KOF_FACT_SIZE_MIN,
 	/* THE ARCHITECTURE IS ONE OF A SET (KOF_TARGET_ARCH): a bit per KOF_ARCH_* value; one past bit 63 is in no set. */
 	KOF_FACT_ARCH_SET,
+	KOF_FACT_ANOMALY, KOF_FACT_NUCLEO,   /* THE GATE OF A SIGNATURE: YES, NO or UNKNOWN - scanners/objctx_diag_gate.c */
 	KOF_FACT_COUNT
 };
 
@@ -561,6 +565,9 @@ struct kof_diag {
  * so both arities are legal C and ksigbuilder reads whichever is written.
  */
 #define KOF_DIAG_DECLARE_TAIL(...)
+/* A second KOF_DIAG_DECLARE_HEAD starts a second block (at most two); KOF_DIAG_DECLARE_JOIN(cap) names its node
+ * of that capability that must reach a node the first block bound (kofdiag.c, KOF_DIAG_B_JOIN). */
+#define KOF_DIAG_DECLARE_JOIN(cap)
 /*
  * KOF_DIAG_DECLARE_SEQUENCE(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG) -
  * the head is not a call of its own: it is what two calls are when one comes
@@ -642,6 +649,8 @@ struct kof_diag {
  * same reason.
  */
 #define KOF_DIAG_HAS_ATTRB(fact, value)
+#define KOF_DIAG_HAS_ANOMALY(format, name)   /* KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, SECTAB_MISSING): the gate, objctx_diag_gate.c */
+#define KOF_DIAG_HAS_NUCLEO(cap)             /* KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_ALLOC_EXEC): a form's only, objctx_diag_gate.c */
 
 /*
  * A TAGGED TRAILING SECTION OF A .kdig, tag then one length byte.
@@ -732,7 +741,6 @@ struct kof_diag {
 #define KDIG_ATTR_VALUE 1u      /* 8 bytes LE - the value the node wrote */
 #define KDIG_ATTR_SYM   2u      /* a symbol name, not terminated         */
 
-
 /*
  * ==== WHAT THE ANALYSIS PRODUCED, AS A RULE READS IT =======================
  *
@@ -810,7 +818,6 @@ struct kof_diag {
 
 /* The bits byte is reserved and zero. Bit 0 was KOF_GR_B_ATTR_STR; the
  * number is left unused so nothing built against it reads another meaning. */
-
 
 static inline uint32_t kof_gr_count(const uint8_t *b, uint32_t n)
 {
@@ -989,6 +996,5 @@ static inline uint32_t kof_gr_entries(const uint8_t *b, uint32_t n,
 	}
 	return n_seen;
 }
-
 
 #endif /* KOFMOD_KOFDIAGTREE_H */

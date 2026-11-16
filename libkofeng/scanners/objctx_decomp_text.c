@@ -10,6 +10,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 
 /*
@@ -142,6 +143,8 @@ uint64_t oc_unpack_hextext(const struct kof_obj_ctx *ctx, kof_buf b,
 	}
 	if (n && oc_emit(ctx, out, n))
 		produced += n;
+	KOF_TRACE("[decomp] hextext off=%llu len=%llu produced %llu byte(s)\n", (unsigned long long)off,
+		  (unsigned long long)len, (unsigned long long)produced);
 	return produced;
 }
 
@@ -172,6 +175,8 @@ uint64_t oc_unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 	uint64_t room, got = 0, at;
 	uint8_t *buf;
 
+	KOF_TRACE("[decomp] textcode method=%u off=%llu len=%llu\n", (unsigned)method, (unsigned long long)off,
+		  (unsigned long long)len);
 	/*
 	 * RunLength goes straight to the sink and never through a buffer,
 	 * because its output cannot be sized from its input - see
@@ -185,6 +190,7 @@ uint64_t oc_unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 		snk.left = expand_limit(len, 0);
 		st = kuncoat_rle_decode(b.p + off, len, oc_expand_sink_fn, &snk, &got);
 		oc_stream_note(sc, st, STREAM_PARTIAL, &snk);
+		KOF_TRACE("[decomp] textcode runlength got %llu byte(s), status %d\n", (unsigned long long)got, (int)st);
 		return got;
 	}
 
@@ -213,6 +219,8 @@ uint64_t oc_unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 		oc_scan_broken(sc, oc_broken_of_status(st));
 	}
 	at = oc_emit_all(ctx, buf, got);
+	KOF_TRACE("[decomp] textcode method=%u got %llu of %llu byte(s), status %d\n", (unsigned)method,
+		  (unsigned long long)got, (unsigned long long)len, (int)st);
 	free(buf);
 	oc_scan_release(sc, len);
 	return at;

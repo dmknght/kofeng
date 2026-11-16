@@ -444,6 +444,9 @@ struct kgenome_dtx {
 	kgenome_textual_apply_fn apply;   /* what a call on constants does; NULL: no call is followed */
 	void          *apply_user;
 	struct kgenome_dtx_layers *lay;
+	/* ISLANDS (diag_scan.h): NULL for the 3 existing capability-graph callers (kgenome_diag_text_req.islands left unset), unchanged behaviour;
+	 * set only by kgenome_diag_text_islands, which reads it back when the walk is over. Filled by layer_of_call. */
+	struct kgenome_diag_text_island_set *islands;
 	/*
 	 * EVERY VARIABLE OF A SCOPE, once the request has been poured into its variables: `extract($_REQUEST)` makes $ctime and $atime of what the
 	 * sender called them - and overwrites a variable the program had set, which is what extract does by default - and so does
@@ -470,6 +473,22 @@ struct kgenome_dtx {
 	const struct kgenome_dtx_callsem *named_cs;
 	uint8_t        saw_decoder;     /* the evaluation just made called a decoder: the decode hook owns what a decoder makes, and is not told twice */
 	uint32_t       step_cap;        /* work the evaluator may spend on this text: it grows with the text, a fixed number would drop the late ones */
+	/*
+	 * THE STEPS A VALUE TOOK (the obfuscation measure, diag_text_obf.c): `obf_ops` counts every transform the evaluator applied - a join, an append (`.=`), a row of the
+	 * function table run (str_replace, chr, base64_decode, a method, an operator, a cast), an element picked out of an array literal, two literals side by side - and
+	 * `obf_refused` every row whose arguments were constants and that the hook would not run (gzinflate: the decode stage's). Read and zeroed by the measure around ONE
+	 * evaluation; nothing else reads them, so the evaluator answers exactly what it answered before they were counted.
+	 */
+	uint32_t       obf_ops, obf_refused;
+	uint8_t        obf_key;         /* the measure is evaluating the key of a called member: a function of the program handed constants is counted there */
+	struct kgenome_diag_text_obf_set *obf;  /* NULL unless a caller asked for the measure (kgenome_diag_text_req.obf); a layer inherits it */
+	/* The nodes this text made, where and of what capability, logged for the measure only (x->obf set): a record lists the capabilities of the nodes inside it.
+	 * Not charged to the scan: asking for the measure must change no answer of the route, and the nodes it mirrors are charged already. */
+	struct kgenome_dtx_obf_node { uint32_t off; uint16_t cap; } *obf_nd;
+	uint32_t       obf_nn, obf_ncap;
+	uint8_t        obf_nomem;       /* the log could not grow: the records' capability lists are incomplete, and the set says so */
+	const struct kgenome_diag_text_place *obf_isl;  /* the file's islands the measure gives a record each (kgenome_diag_text_req.obf_isl); read for the file only */
+	uint32_t       n_obf_isl;
 	uint32_t       layer;   /* 0 for the file, 1.. for code it computes */
 	uint64_t       layer_at; /* where a node of a layer is told to be: the call that ran the layer, in the file */
 };
@@ -498,6 +517,11 @@ void kgenome_dtx_cv_free(struct kgenome_dtx_cv *w);
 
 /* The constants of a command language (sh, batch, tcl): see diag_text_cmdval.c. */
 void kgenome_dtx_cmd_consts(struct kgenome_dtx *x);
+
+/* ---- the obfuscation measure (diag_text_obf.c): the walk is over, every assignment is known; one record of this text is appended to x->obf ---- */
+void kgenome_dtx_obf(struct kgenome_dtx *x);
+/* A node was made at token `tok` (kgenome_dtx_add_node): logged when the measure was asked for. */
+void kgenome_dtx_obf_node(struct kgenome_dtx *x, uint32_t tok, uint16_t cap);
 
 /* ---- the walk and what the route (diag_text_route.c) asks of it ---- */
 int kgenome_dtx_sink(void *u, const struct kgenome_textual_span *sp);     /* the lexer's sink: spans into tokens */

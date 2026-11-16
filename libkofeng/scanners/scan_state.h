@@ -59,10 +59,13 @@ struct kof_scanner {
 	 */
 	struct kof_mutation_ctx mutation;
 	/*
-	 * The ledger a function unit's CFG signature is made under (analyzers/cfgsign.h): the allocator that charges this scanner's budget and
-	 * releases it when the call returns. Set by sx_feed_cut for every feed; owner scan_feed.c.
+	 * DISABLED by the owner 2026-11-15 (CFG): the ledger a function unit's CFG signature is made under (analyzers/cfgsign.h): the allocator that
+	 * charges this scanner's budget and releases it when the call returns. Set by sx_feed_cut for every feed; owner scan_feed.c.
+	 * To re-enable: take this #if 0 out with scan_feed.c's.
 	 */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kof_cfgsign_host cfgsign;
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	/*
 	 * Where notes go, when anybody wants them.
 	 *

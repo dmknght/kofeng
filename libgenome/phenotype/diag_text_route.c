@@ -2,6 +2,22 @@
  * diag_text_route.c - the TEXT route's entry: one text lexed into tokens, the tables made out of them, the walk run over them, and the three ways it is
  * asked for - the scan of a script (kgenome_diag_run_text), the names it calls (kgenome_diag_text_names) and the constants it computes (on_const).
  * The walk itself is diag_text.c's, whatever the language; the language is the profile row the request's `lang` finds (diag_text_lang.c).
+ *
+ * IMPROVE text-norm-pipeline-review-1 (owner, 2026-11-05; NOTE ONLY, nothing built): review the whole scripting
+ * normalize/decode pipeline the way this session's PE/ELF work was reviewed (the CODE-classification lessons
+ * from PE-RSRC-EXEC-CODE/ELF-SEC-EXEC-CODE - a permission bit alone is not proof of what a region is - and the
+ * decode-routine lessons from merges 149/150's E-RWX and the eval()-layering cap/reach work). A 2026-11-05
+ * duplicate-work audit (a1716fd61b37ce2aa) already found two real candidates in this area, read-verified but
+ * not measured or fixed (both need an architecture decision, not a local patch): (A) sh/bat/tcl objects get a
+ * SECOND full-file byte scan - kgenome_textual_lex() here classifies the whole text once, but
+ * diag_text_cmdval.c's collect() then re-walks the same bytes with each language's own independent
+ * quote/escape/group-nesting reader (sh_cmd.c/bat_cmd.c/tcl_cmd.c) instead of reading x->t[]'s tokens - the
+ * exact shape of the already-fixed php_parse.c tag/close duplication, not yet shown to disagree on a real
+ * input but structurally identical to a bug that once did; (B) PHP/ASP/JSP page objects re-walk bytes
+ * [0, SCRIPT_LOOK) a second time when the island builder (kof_isl_lex) cannot resume from where the tag-sniff
+ * lex already stopped. Next step named by that audit: callgrind a shell-script-heavy corpus slice (the
+ * existing diag_text_work.c/textual_work.h harness) for a real before-number on (A) before deciding whether
+ * unifying the lexer and the command reader is worth the lib-internal restructuring.
  */
 
 #include <stdlib.h>
@@ -99,6 +115,7 @@ static void kgenome_dtx_close(struct kgenome_dtx *x)
 	kgenome_dtx_sum_free(x);
 	kgenome_dtx_ident_free(x);
 	kgenome_dtx_cv_free(x->cv);
+	free(x->obf_nd);
 }
 
 /* Does right side `a` come before `b`: by where it begins, the longest first where two begin together. */
@@ -213,11 +230,15 @@ void kgenome_dtx_run_one(struct kgenome_diag_scan *s, const uint8_t *base, uint6
 	x.on_const = hooks->on_const;
 	x.on_head = hooks->on_head;
 	x.const_user = hooks->const_user;
+	x.islands = hooks->islands;    /* NULL for every existing caller (unchanged behaviour); a nested layer inherits it from `hooks`, which is the parent's own x */
+	x.obf = hooks->obf;            /* the same: NULL unless the measure was asked for */
 	x.step_cap = 200000u + 16u * x.nt;      /* the work the evaluator may spend grows with the text it reads */
 	x.extract_src = -1;
 	x.named_node = -1;
 	x.layer = layer;
 	x.layer_at = layer_at;
+	x.obf_isl = hooks->obf_isl;
+	x.n_obf_isl = hooks->n_obf_isl;
 	if (!kgenome_dtx_charge(&x, (uint64_t)x.nt * sizeof *x.site))
 		goto out;
 	x.site = malloc((size_t)x.nt * sizeof *x.site);
@@ -237,6 +258,8 @@ void kgenome_dtx_run_one(struct kgenome_diag_scan *s, const uint8_t *base, uint6
 		}
 		if (x.on_head && x.lang->string_call && !x.layer)
 			report_heads(&x);
+		if (x.obf)
+			kgenome_dtx_obf(&x);
 	}
 out:
 	kgenome_dtx_close(&x);
@@ -257,6 +280,10 @@ void kgenome_diag_run_text(struct kgenome_diag_scan *s, const struct kgenome_dia
 	h.on_const = rq->on_const;
 	h.on_head = rq->on_head;
 	h.const_user = rq->const_user;
+	h.islands = rq->islands;
+	h.obf = rq->obf;
+	h.obf_isl = rq->obf_isl;
+	h.n_obf_isl = rq->n_obf_isl;
 	kgenome_dtx_run_one(s, rq->base, rq->size, 0, &h, &lay, 0, 0);
 	if (rq->work)
 		*rq->work = lay.work;
@@ -323,4 +350,32 @@ void kgenome_diag_text_names(const uint8_t *base, uint64_t size, uint32_t lang, 
 	s = kgenome_diag_scan_text(&rq);
 	kgenome_diag_scan_free(s);
 	kgenome_diag_text_names_free(acc);
+}
+
+/*
+ * EVERY ISLAND (diag_scan.h), SCANNER-FREE: the same capability-graph walk, asked only for what it already resolves, beside this one's own
+ * question (kgenome_diag_text_names). `out` is zeroed first - a caller handing over a non-empty set by mistake would otherwise leak it or merge
+ * two unrelated collections silently.
+ */
+void kgenome_diag_text_islands(const uint8_t *base, uint64_t size, uint32_t lang, kgenome_textual_apply_fn apply,
+			       struct kgenome_diag_text_island_set *out)
+{
+	struct kgenome_diag_text_req rq = { .base = base, .size = size, .lang = lang, .apply = apply, .islands = out };
+	struct kgenome_diag_scan *s;
+
+	memset(out, 0, sizeof *out);
+	s = kgenome_diag_scan_text(&rq);
+	kgenome_diag_scan_free(s);
+}
+
+void kgenome_diag_text_islands_free(struct kgenome_diag_text_island_set *out)
+{
+	uint32_t i;
+
+	if (!out)
+		return;
+	for (i = 0; i < out->n; i++)
+		free(out->v[i].data);
+	free(out->v);
+	memset(out, 0, sizeof *out);
 }

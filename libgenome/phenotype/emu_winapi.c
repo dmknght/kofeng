@@ -1,10 +1,10 @@
 /*
  * emu_winapi.c - the Windows environment: what each emulated API does when the guest calls it.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the interpreter's Windows environment; see emu_interp.c and emu_win_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_win_private.h"
 
 /*
  * the sockets of the scripted peer.

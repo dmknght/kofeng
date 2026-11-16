@@ -382,6 +382,21 @@ void bar_run(struct view *v, int i)
 	 * than either.
 	 */
 	case BI_QUIT:    v->quit = 1; break;
+	/*
+	 * Close: let go of the current file or process, with nothing loaded
+	 * afterwards - the same empty-panes state the program starts in when
+	 * neither a path nor --pid was given (kv_main.c's main()). view_close is
+	 * the one reset file_open and proc_open already use before loading what
+	 * they were asked to show; this is the menu's own dedicated entry point
+	 * onto it, not a second copy of what it does.
+	 */
+	case BI_CLOSE: {
+		kof_engine *eng = v->eng;
+
+		view_close(v);
+		v->eng = eng;
+		break;
+	}
 	case BI_FIND:
 		v->find_open = 1;
 		v->goto_open = 0;              /* they share the box */
@@ -392,6 +407,11 @@ void bar_run(struct view *v, int i)
 	 * bar_enabled: an item that reports itself live and has no case falls
 	 * to `default: break;` - the menu closes and nothing happens, which
 	 * is exactly how BI_GOTO looked before the dialog existed. */
+	/* The direct key, Ctrl+O (kv_events.c), calls the same function - one
+	 * implementation for both ways in. */
+	case BI_OPEN:
+		opendlg_show(v);
+		break;
 	case BI_SYNTAB:
 		tags_open(v);
 		break;

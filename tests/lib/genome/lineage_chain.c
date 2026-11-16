@@ -349,7 +349,9 @@ static void t_chain(void)
 					p.fn[0].dead = dead;
 					p.fn[0].nparams = 1;
 					st(dead, LG_S_EVAL, 0, api(LG_CONNECT, ex(LG_E_PARAM, 0, -1, -1, 0), -1), 0, 0);
-					check(target, lim[li].stages, &(struct want){ 1, 1, 0, 0, 0, 1, lim[li].why, 1, 0, 0, 0 }, lim[li].name);
+					/* every input of the connect nothing reaches is unresolved: the ones its ROW names, the socket and the address
+					 * (fd0 src1 on every target; the ELF row named fd0 only before fix_linrow: ROWS-ELF-CONNECT) */
+					check(target, lim[li].stages, &(struct want){ 1, 1, 0, 0, 0, 2, lim[li].why, 1, 0, 0, 0 }, lim[li].name);
 					continue;
 				}
 				st(blk, LG_S_EVAL, 0, api(LG_CONNECT, arg, -1), 0, 0);
@@ -373,7 +375,8 @@ static void t_chain(void)
 				st(p.fn[0].body, LG_S_ASSIGN, 0, api(LG_SOCKET, -1, -1), 0, 0);
 				st(p.fn[0].body, LG_S_EVAL, 0, ex(LG_E_CALL, 1, -1, -1, 0), 0, 0);
 				st(p.fn[0].body, LG_S_EVAL, 0, api(LG_CONNECT, ex(LG_E_VAR, 0, -1, -1, 0), -1), 0, 0);
-				check(target, KGENOME_LINEAGE_S_ALL, &(struct want){ 2, 2, 0, 0, halts ? 0u : 1u, halts ? 1u : 0u, halts ? KGENOME_LINEAGE_W_UNREACH : 0u, 1, 0, 0, 0 },
+				check(target, KGENOME_LINEAGE_S_ALL, &(struct want){ 2, 2, 0, 0, halts ? 0u : 1u, halts ? 2u : 0u,
+							halts ? KGENOME_LINEAGE_W_UNREACH : 0u, 1, 0, 0, 0 },
 				      halts ? "stop() does not return" : "stop() returns");
 				/* the same, in a region nothing reaches: a seed enters it at the socket */
 				lg_h_new(&p, 2, 0);

@@ -11,6 +11,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -89,9 +90,13 @@ uint64_t oc_unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	for (i = 0; i < 3u; i++)
 		charged = kof_sat_add(charged, pk[i]->out_size);
 	if (charged > oc_scan_room(sc)) {
+		KOF_TRACE("[decomp] bcj2 folder %u refused: %llu byte(s) over the room left\n", (unsigned)index,
+			  (unsigned long long)charged);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
+	KOF_TRACE("[decomp] bcj2 folder %u: out_len=%llu charged=%llu\n", (unsigned)index,
+		  (unsigned long long)out_len, (unsigned long long)charged);
 	scan_charge(sc, charged);
 
 	/*
@@ -141,6 +146,8 @@ uint64_t oc_unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
 	oc_emit_all(ctx, out, produced);
 done:
+	KOF_TRACE("[decomp] bcj2 folder %u produced %llu of %llu byte(s)\n", (unsigned)index,
+		  (unsigned long long)produced, (unsigned long long)out_len);
 	free(out);
 	for (i = 0; i < 3u; i++)
 		free(buf[i]);
@@ -248,6 +255,8 @@ uint64_t oc_unpack_mszip(struct kof_scanner *sc,
 	ext = eb->v;
 	if (!n)
 		return 0;
+	KOF_TRACE("[decomp] mszip entry %u: %u range(s), out_hint=%llu\n", (unsigned)index, (unsigned)n,
+		  (unsigned long long)out_hint);
 
 	b = kof_src_buf(sc->cur.src);
 	memset(&snk, 0, sizeof snk);
@@ -311,7 +320,28 @@ uint64_t oc_unpack_mszip(struct kof_scanner *sc,
 
 	free(snk.hist);
 	oc_scan_release(sc, KUNCOAT_INF_WINDOW);
+	KOF_TRACE("[decomp] mszip entry %u emitted %llu byte(s)\n", (unsigned)index, (unsigned long long)snk.emitted);
 	return snk.emitted;
+}
+
+/*
+ * THE SUM OF AN ENTRY'S RANGES, CLIPPED TO THE OBJECT.
+ *
+ * oc_entry_join below needs it to size the join; oc_unpack_lzx_reset needs the
+ * SAME number for its own ratio-limit input without actually joining (one
+ * decode per range, never one buffer) - computed separately before, which is
+ * exactly how the two already answered differently about the ratio question
+ * its own comment names (STRUCTURE NOTE / fix, coordinator after DF-9,
+ * 2026-11-12).
+ */
+static uint64_t ranges_total_len(kof_buf b, const struct kof_range *ext, uint32_t n)
+{
+	uint64_t want = 0;
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		want += kof_clip_len(b.n, ext[i].off, ext[i].len);
+	return want;
 }
 
 /*
@@ -332,13 +362,12 @@ uint8_t *oc_entry_join(struct kof_scanner *sc, kof_buf b,
 			   const struct kof_range *ext, uint32_t n,
 			   uint64_t *total)
 {
-	uint64_t want = 0, at = 0;
+	uint64_t want, at = 0;
 	uint8_t *in;
 	uint32_t i;
 
 	*total = 0;
-	for (i = 0; i < n; i++)
-		want += kof_clip_len(b.n, ext[i].off, ext[i].len);
+	want = ranges_total_len(b, ext, n);
 	if (!want)
 		return NULL;
 	if (want > oc_scan_room(sc)) {
@@ -408,6 +437,8 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 	take = out_hint & 0xffffffffu;
 	if (!take)
 		return 0;
+	KOF_TRACE("[decomp] lzx-reset entry %u: window_bits=%u skip=%llu take=%llu\n", (unsigned)index,
+		  (unsigned)window_bits, (unsigned long long)skip, (unsigned long long)take);
 
 	if (!sc->cache.lzx) {
 		sc->cache.lzx = malloc(sizeof *sc->cache.lzx);
@@ -431,15 +462,12 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 	 *
 	 * oc_unpack_lzx, which is the same decode with the pieces joined instead
 	 * of restarted, already sums them - see its expand_limit(total, take).
-	 * These two answered differently about the same question.
+	 * Both now go through ranges_total_len (above oc_entry_join) for that sum,
+	 * so the two cannot answer this one question differently again (fix,
+	 * coordinator after DF-9, 2026-11-12) - the restart-per-range behaviour
+	 * itself is the one real difference a cabinet needs, and stays.
 	 */
-	{
-		uint64_t in_all = 0;
-
-		for (i = 0; i < n; i++)
-			in_all += kof_clip_len(b.n, ext[i].off, ext[i].len);
-		snk.left = expand_limit(in_all, take);
-	}
+	snk.left = expand_limit(ranges_total_len(b, ext, n), take);
 
 	for (i = 0; i < n && take; i++) {
 		uint64_t off = ext[i].off;
@@ -478,6 +506,8 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 	}
 
 	oc_stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
+	KOF_TRACE("[decomp] lzx-reset entry %u got %llu byte(s), status %d\n", (unsigned)index,
+		  (unsigned long long)got, (int)st);
 	return got;
 }
 
@@ -518,6 +548,8 @@ uint64_t oc_unpack_lzx(struct kof_scanner *sc,
 	ext = eb->v;
 	if (!n)
 		return 0;
+	KOF_TRACE("[decomp] lzx entry %u: window_bits=%u skip=%llu take=%llu, %u range(s)\n", (unsigned)index,
+		  (unsigned)window_bits, (unsigned long long)skip, (unsigned long long)take, (unsigned)n);
 
 	b = kof_src_buf(sc->cur.src);
 	if (!sc->cache.lzx) {
@@ -545,6 +577,8 @@ uint64_t oc_unpack_lzx(struct kof_scanner *sc,
 	}
 	oc_stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
 
+	KOF_TRACE("[decomp] lzx entry %u got %llu byte(s), status %d\n", (unsigned)index,
+		  (unsigned long long)got, (int)st);
 	free(in);
 	oc_scan_release(sc, total);
 	return got;

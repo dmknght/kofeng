@@ -148,19 +148,41 @@ static void t_arm32_fields(void)
 		}
 	}
 	CK(kgenome_arm32_decode(&in, 0xe2810004u) == KGENOME_OK && in.id == KGENOME_ARM32_I_ADD_IMM);
-	/* every row list ends in a row that matches: scan the first rows of each key for a mask-0 end */
+	/*
+	 * ARM32DEC-CATCHALL-1's own red test was wrong, not the decoder: "every row list ends in a
+	 * literal mask==0 row" is not what the header's own contract promises (arm32_table.h: "the
+	 * LAST row of every list matches whatever is left" - by construction of the key's fixed
+	 * bits, not by the row's own mask being zero). Walking a list looking for mask==0 finds one
+	 * that is simply mask != 0 but still a complete match for every word of that key, and runs
+	 * off kgenome_arm32_lists - which is what ASAN caught, on a false premise.
+	 *
+	 * The real invariant is checked here instead: kgenome_arm32_decode(w) terminates inside
+	 * the table for every (key, free-bit pattern) combination - constructed directly per key
+	 * (not sampled and hoped for), with the key bits fixed per kgenome_arm32_key/key12's own
+	 * extraction and the remaining ("free") bits walked pseudo-randomly. A table whose
+	 * generator ever regresses this would abort under ASAN here (make unit-asan), not merely
+	 * silently decode something wrong.
+	 */
 	{
-		unsigned k, bad_lists = 0;
+		unsigned k;
+		struct hk_rng fr = { 0x9e3779b97f4a7c15ull };
+
 		for (k = 0; k < 2u * KGENOME_ARM32_KEYS; k++) {
-			unsigned e = kgenome_arm32_idx[k];
-			const struct kgenome_arm32_row *r = &kgenome_arm32_lists[e];
-			unsigned guard = 0;
-			while (r->mask != 0 && guard++ < 100000u)
-				r++;
-			if (guard >= 100000u)
-				bad_lists++;
+			unsigned k12 = k & 0xfffu;
+			/* bits 27:20 and 7:4 - what kgenome_arm32_key12 reads back (arm32_table.h) */
+			uint32_t key_bits = (((k12 >> 4) & 0xffu) << 20) | ((k12 & 0xfu) << 4);
+			unsigned v;
+
+			for (v = 0; v < 8u; v++) {
+				uint32_t free_bits = (uint32_t)hk_next(&fr) & ~0x0ff000f0u;
+				uint32_t w = key_bits | free_bits;
+
+				/* cond (bits 31:28): 1111 selects the k >= KGENOME_ARM32_KEYS half of the
+				 * key space (kgenome_arm32_key), so it is fixed, not left to free_bits. */
+				w = (w & 0x0fffffffu) | (k >= KGENOME_ARM32_KEYS ? 0xf0000000u : 0xe0000000u);
+				(void)kgenome_arm32_decode(&in, w);
+			}
 		}
-		CK(bad_lists == 0);      /* no list runs on without a catch-all row */
 	}
 }
 

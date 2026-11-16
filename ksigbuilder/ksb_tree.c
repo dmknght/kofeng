@@ -115,6 +115,8 @@ static void job_flush(struct tree_job *j)
  * which the caller turns into a serial build of that source rather than a
  * failure: a process limit is not a reason to refuse to compile a signature.
  */
+/* KNOWN DEFECT W-D10 (2026-11-17, M) [sev L]: job_start's parameter `ksb` is unused in the Windows compile (clang -Wunused-parameter, a Windows-only branch: Inference).
+ * Trigger: clang cross build for Windows. Effect: a warning in the Windows build. Reproducer: /mnt/games/normtest/fix_wd (wincross.log). Fix: (void)ksb in the Windows branch, or pass what it needs. */
 static int job_start(struct ksb_ctx *ksb, struct tree_job *j, char **argv,
 		     const char *src, const char *artefacts,
 		     const char *tmpdir, uint32_t n)

@@ -321,12 +321,21 @@ enum {
 	 * starts mid-section is describing bytes a section already owns; the
 	 * section keeps them, the region comes back empty, and this says why.
 	 */
-	KGENOME_PE_ANOM_RSRC_UNALIGNED    = 1ull << 26
+	KGENOME_PE_ANOM_RSRC_UNALIGNED    = 1ull << 26,
+
+	/*
+	 * E-CERT (fixed): the certificate directory points into bytes a section or
+	 * header already claimed (co < last_end), which is a different fact from
+	 * CERT_PAST_EOF (the directory runs past the file's own end) - the two used
+	 * to share one bit and the overlap case was mislabelled "past the end of
+	 * the file", which it is not.
+	 */
+	KGENOME_PE_ANOM_CERT_OVERLAP      = 1ull << 27
 };
 
 /* How many of the above there are, so the name table cannot fall behind
  * them - three of 7z's bits went unnamed until a checklist pass found it. */
-#define KGENOME_PE_ANOM_COUNT 27
+#define KGENOME_PE_ANOM_COUNT 28
 
 
 struct kgenome_pe_sec {
@@ -655,6 +664,15 @@ static inline int kgenome_pe_is_mapped(const struct kgenome_pe_info *p)
  *                         300-file subset has such a section. The linker's
  *                         own count (SizeOfCode) is still compared by
  *                         CNT_CODE, which is a different question.
+ *                         EXECUTE is necessary but not sufficient (PE-RSRC-
+ *                         EXEC-CODE): a section whose declared bytes overlap
+ *                         the resource directory or the certificate table is
+ *                         excluded regardless of the bit, because both are
+ *                         metadata a hostile file can flag EXECUTE to get
+ *                         icon/version/signature bytes decoded and hashed as
+ *                         a mutation gene. Needs the parsed `kgenome_pe_info`
+ *                         now, not just the one section, to read those two
+ *                         directories - see the function for why.
  *
  *   kgenome_pe_sec_extent     the bytes the section DECLARED (PointerToRawData,
  *                         SizeOfRawData) clipped to the object, or 0. Not the
@@ -664,7 +682,7 @@ static inline int kgenome_pe_is_mapped(const struct kgenome_pe_info *p)
  *                         those bytes. Both are deliberate and the two differ
  *                         only on an image whose sections overlap.
  */
-int kgenome_pe_sec_is_code(const struct kgenome_pe_sec *s);
+int kgenome_pe_sec_is_code(const struct kgenome_pe_info *p, const struct kgenome_pe_sec *s);
 /* IMAGE_SCN_MEM_READ/WRITE/EXECUTE of a section's Characteristics, as
  * KGENOME_PE_PERM_*. The one translation: the parser and the rebuild's section
  * reader both used to spell it. */

@@ -14,18 +14,17 @@
  *
  * This file is the NAME side of the same directory: kgenome_pe_exports (pe_image.c),
  * the walk kof_pe_syms_with/export_put (pe_sym.c) uses to put an export into the KSYM
- * symbol block. Reading kgenome_pe_exports (pe_image.c, no lo/hi forwarder check at
- * all, unlike its sibling kgenome_fntab_pe_export) found it does NOT skip a forwarder:
- * the forwarder string's own RVA is handed to export_put as if it were a function
- * address. export_put then computes KOF_SYM_F_IN_EXEC as `frva != 0`, with no check of
- * which section frva actually lands in - wrong for the forwarder (not a code address at
- * all) AND for a plain DATA export (a real address, but not inside an executable
- * section). KOF_SYM_F_IN_EXEC's own doc (kofmod/kofsym.h) says it is "the flags of the
- * SECTION the symbol lands in"; elf_sym.c computes it that way (SHF_EXECINSTR of the
- * real section); pe_sym.c's export_put does not.
- *
- * KNOWN DEFECT PE-EXPFWD-INEXEC (2026-11-05, M): see kgenome_pe_exports (pe_image.c).
- * This file PINS the current (wrong) behaviour so a fix flips these three rows.
+ * symbol block. kgenome_pe_exports itself hands `frva` over unchanged, forwarder or
+ * not - the name side still wants a forwarder's name, just not a code claim about its
+ * address - so the screening is export_put's own (export_in_exec, pe_sym.c): PE-EXPFWD-INEXEC
+ * (fixed 2026-11-05) was that it computed KOF_SYM_F_IN_EXEC as `frva != 0` alone, with no
+ * check of which section frva actually lands in - wrong for the forwarder (not a code
+ * address at all; kgenome_pe_export_is_forwarder, pe_image.h, is the same [rva,rva+size)
+ * test kgenome_fntab_pe_export already used on the boundary side) AND for a plain DATA
+ * export (a real address, but not inside an executable section). KOF_SYM_F_IN_EXEC's own
+ * doc (kofmod/kofsym.h) says it is "the flags of the SECTION the symbol lands in";
+ * elf_sym.c computes it that way (SHF_EXECINSTR of the real section) and export_in_exec
+ * now mirrors it (kgenome_pe_sec_at_off + kgenome_pe_sec_is_code) for symmetry.
  */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -110,18 +109,22 @@ static void t_export_forwarder_and_data_sym(void)
 	CK((alpha[KOF_SYM_R_FLAGS] & KOF_SYM_F_IN_EXEC) != 0);
 	CK(kof_sym_u64(alpha, KOF_SYM_R_VALUE) == 0x1000u);
 
-	/* KNOWN DEFECT PE-EXPFWD-INEXEC (2026-11-05, M): this row pins it, green until fixed - a
-	 * .data address is not executable, but export_put flags it IN_EXEC anyway (it only tests
-	 * "frva != 0", never which section frva lands in). */
-	CK((data[KOF_SYM_R_FLAGS] & KOF_SYM_F_IN_EXEC) != 0);
+	/* PE-EXPFWD-INEXEC, fixed: a .data address is real but not executable - export_in_exec
+	 * (pe_sym.c) now resolves frva through the section table (kgenome_pe_sec_at_off +
+	 * kgenome_pe_sec_is_code) instead of testing it against zero, so IN_EXEC is clear. The
+	 * name and the raw address are still reported: only the code claim changes. */
+	CK((data[KOF_SYM_R_FLAGS] & KOF_SYM_F_IN_EXEC) == 0);
 	CK(kof_sym_u64(data, KOF_SYM_R_VALUE) == 0x2000u);
 
-	/* KNOWN DEFECT PE-EXPFWD-INEXEC (2026-11-05, M): this row pins it, green until fixed -
-	 * "Forward" is a forwarder (kgenome_fntab_pe_export already excludes this exact RVA range
-	 * from the function table, t_export_forwarder_in_code); kgenome_pe_exports has no such check
-	 * and hands export_put the forwarder STRING's RVA as if it were a function address, which
-	 * export_put then also flags IN_EXEC. */
-	CK((fwd[KOF_SYM_R_FLAGS] & KOF_SYM_F_IN_EXEC) != 0);
+	/* PE-EXPFWD-INEXEC, fixed: "Forward" is a forwarder - its RVA is the address of the
+	 * string "other.Func", not of code, and lies inside the export directory's own range
+	 * (kgenome_pe_export_is_forwarder, the same [rva,rva+size) test kgenome_fntab_pe_export
+	 * already used to exclude it from the function table). export_in_exec now excludes it
+	 * from IN_EXEC too, unconditionally - never by luck of which section .edata happens to
+	 * be. kgenome_pe_exports still hands export_put the forwarder string's own RVA as the
+	 * export's "address" (the directory does not record anything else), so the record's
+	 * VALUE field is unchanged; only IN_EXEC, which claims the address is code, is fixed. */
+	CK((fwd[KOF_SYM_R_FLAGS] & KOF_SYM_F_IN_EXEC) == 0);
 	CK(kof_sym_u64(fwd, KOF_SYM_R_VALUE) == 0x3090u);
 	free(p.b);
 }

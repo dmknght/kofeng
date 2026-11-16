@@ -1,10 +1,10 @@
 /*
  * emu_x87.c - the x87 stack and the 80-bit format.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c and emu_x86_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 /* ---- the x87 stack ---------------------------------------------------------
  *
@@ -81,10 +81,10 @@ static void fpu_note(struct kgenome_emu *e, const struct kgenome_emu_insn *ixp)
 {
 	unsigned k;
 
-	e->fpu_rip = e->rip;
+	e->x86.fpu_rip = e->rip;
 	for (k = 0; k + 1u < ixp->h.len && k < sizeof ixp->h.code; k++)
 		if (ixp->h.code[k] >= 0xd8u && ixp->h.code[k] <= 0xdfu) {
-			e->fop = (uint16_t)(((ixp->h.code[k] & 7u) << 8) | ixp->h.code[k + 1u]);
+			e->x86.fop = (uint16_t)(((ixp->h.code[k] & 7u) << 8) | ixp->h.code[k + 1u]);
 			return;
 		}
 }
@@ -92,7 +92,7 @@ static void fpu_note(struct kgenome_emu *e, const struct kgenome_emu_insn *ixp)
 /* The rounding the control word's RC field (bits 10-11) selects: nearest even, down, up, toward zero. */
 static double fp_round(const struct kgenome_emu *e, double v)
 {
-	switch ((e->fcw >> 10) & 3u) {
+	switch ((e->x86.fcw >> 10) & 3u) {
 	case 1:  return floor(v);
 	case 2:  return ceil(v);
 	case 3:  return trunc(v);
@@ -102,28 +102,28 @@ static double fp_round(const struct kgenome_emu *e, double v)
 
 static double st_get(const struct kgenome_emu *e, unsigned i)
 {
-	return e->st[(e->st_top + i) & 7u];
+	return e->x86.st[(e->x86.st_top + i) & 7u];
 }
 
 static void st_set(struct kgenome_emu *e, unsigned i, double v)
 {
-	unsigned k = (e->st_top + i) & 7u;
+	unsigned k = (e->x86.st_top + i) & 7u;
 
-	e->st[k] = v;
-	e->st_tag[k] = 1;
+	e->x86.st[k] = v;
+	e->x86.st_tag[k] = 1;
 }
 
 static void st_push(struct kgenome_emu *e, double v)
 {
-	e->st_top = (uint8_t)((e->st_top - 1u) & 7u);
-	e->st[e->st_top] = v;
-	e->st_tag[e->st_top] = 1;
+	e->x86.st_top = (uint8_t)((e->x86.st_top - 1u) & 7u);
+	e->x86.st[e->x86.st_top] = v;
+	e->x86.st_tag[e->x86.st_top] = 1;
 }
 
 static void st_pop(struct kgenome_emu *e)
 {
-	e->st_tag[e->st_top] = 0;
-	e->st_top = (uint8_t)((e->st_top + 1u) & 7u);
+	e->x86.st_tag[e->x86.st_top] = 0;
+	e->x86.st_top = (uint8_t)((e->x86.st_top + 1u) & 7u);
 }
 
 /*
@@ -150,7 +150,7 @@ static int fp_rd(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const
 		return 0;
 	if (!kgenome_emu_mem_rd(e, ea, b, n))
 		return 0;
-	e->fpu_dp = ea;                    /* FDP: the operand's address, reported by FNSTENV/FXSAVE */
+	e->x86.fpu_dp = ea;                    /* FDP: the operand's address, reported by FNSTENV/FXSAVE */
 	if (is_int) {
 		int64_t v = 0;
 		unsigned i;
@@ -209,7 +209,7 @@ static int fp_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const
 
 		if (n != 2u && n != 4u && n != 8u)
 			return 0;
-		e->fpu_dp = ea;
+		e->x86.fpu_dp = ea;
 		/*
 		 * OUT OF RANGE IS THE "INTEGER INDEFINITE" (Intel SDM Vol. 1 4.8.4.1, FIST/FISTP/FISTTP):
 		 * a NaN, an infinity or a value that does not fit the destination's width is stored as the
@@ -248,13 +248,13 @@ static int fp_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const
 /* The three condition codes a compare leaves in the status word. */
 static void fp_cmp_cc(struct kgenome_emu *e, double a, double b)
 {
-	e->fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
+	e->x86.fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
 	if (isnan(a) || isnan(b))
-		e->fsw |= (uint16_t)(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
+		e->x86.fsw |= (uint16_t)(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
 	else if (a < b)
-		e->fsw |= KGENOME_EMU_FSW_C0;
+		e->x86.fsw |= KGENOME_EMU_FSW_C0;
 	else if (a == b)
-		e->fsw |= KGENOME_EMU_FSW_C3;
+		e->x86.fsw |= KGENOME_EMU_FSW_C3;
 }
 
 /*
@@ -437,19 +437,19 @@ static inline int x87_fxam(struct kgenome_emu *e, const struct kgenome_emu_insn 
 	double v = st_get(e, 0);
 
 	fpu_note(e, ixp);
-	e->fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C1 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
+	e->x86.fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C1 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
 	if (signbit(v))
-		e->fsw |= KGENOME_EMU_FSW_C1;
-	if (!e->st_tag[e->st_top])
-		e->fsw |= (uint16_t)(KGENOME_EMU_FSW_C3 | KGENOME_EMU_FSW_C0);  /* empty */
+		e->x86.fsw |= KGENOME_EMU_FSW_C1;
+	if (!e->x86.st_tag[e->x86.st_top])
+		e->x86.fsw |= (uint16_t)(KGENOME_EMU_FSW_C3 | KGENOME_EMU_FSW_C0);  /* empty */
 	else if (isnan(v))
-		e->fsw |= KGENOME_EMU_FSW_C0;
+		e->x86.fsw |= KGENOME_EMU_FSW_C0;
 	else if (isinf(v))
-		e->fsw |= (uint16_t)(KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C0);
+		e->x86.fsw |= (uint16_t)(KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C0);
 	else if (v == 0.0)
-		e->fsw |= KGENOME_EMU_FSW_C3;
+		e->x86.fsw |= KGENOME_EMU_FSW_C3;
 	else
-		e->fsw |= KGENOME_EMU_FSW_C2;                       /* normal */
+		e->x86.fsw |= KGENOME_EMU_FSW_C2;                       /* normal */
 	return KGENOME_EMU_RUN_OK;
 }
 
@@ -496,10 +496,10 @@ static unsigned tag_word(const struct kgenome_emu *e)
 	for (k = 0; k < 8u; k++) {
 		unsigned t = 3u;
 
-		if (e->st_tag[k] >= 2u)
-			t = e->st_tag[k] - 2u;                  /* the tag a restore loaded */
-		else if (e->st_tag[k])
-			t = (isnan(e->st[k]) || isinf(e->st[k])) ? 2u : (e->st[k] == 0.0 ? 1u : 0u);
+		if (e->x86.st_tag[k] >= 2u)
+			t = e->x86.st_tag[k] - 2u;                  /* the tag a restore loaded */
+		else if (e->x86.st_tag[k])
+			t = (isnan(e->x86.st[k]) || isinf(e->x86.st[k])) ? 2u : (e->x86.st[k] == 0.0 ? 1u : 0u);
 		w |= t << (2u * k);
 	}
 	return w;
@@ -507,7 +507,7 @@ static unsigned tag_word(const struct kgenome_emu *e)
 
 static uint16_t sw_with_top(const struct kgenome_emu *e)
 {
-	return (uint16_t)(e->fsw | (uint16_t)((e->st_top & 7u) << 11));
+	return (uint16_t)(e->x86.fsw | (uint16_t)((e->x86.st_top & 7u) << 11));
 }
 
 /*
@@ -517,6 +517,12 @@ static uint16_t sw_with_top(const struct kgenome_emu *e)
  * flat-model process has no use for them and CPUs that deprecate them (CPUID.7.0:EBX[13]) store zero.
  * FNSTENV is a control instruction and leaves FIP and FOP alone.
  */
+/* FOP IS REPORTED AS ZERO in the FNSTENV, FNSAVE and FXSAVE images (EMU-FOP-1, fixed 2026-11-15). A current CPU keeps
+ * FOP only for an unmasked exception: measured on an i7-11700K, fnstenv after fldz, ffree, fld1/fabs, fxch, fcmovnu,
+ * fstp st0, fnop and fincstp stores FOP = 0 every time. Reporting the last opcode broke the 64-bit GetPC
+ * `fnstenv [rsp-0xc]; pop rdx` of the msfvenom x86 encoders (samples/msfvenom-encr/shikata_ga_nai): the popped
+ * word carried FOP 0x5c3 in its upper half, the decoder's first store hit 0x5c3000000400078 and the run stopped
+ * after 7 instructions. e->x86.fop is still kept and loaded by FLDENV/FRSTOR; it is just not written out. */
 static inline int x87_fnstenv(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 {
 	uint8_t env[28];
@@ -526,12 +532,12 @@ static inline int x87_fnstenv(struct kgenome_emu *e, struct kgenome_emu_insn *ix
 	uint64_t ea;
 
 	memset(env, 0, sizeof env);
-	kof_st_le16(env, e->fcw);
+	kof_st_le16(env, e->x86.fcw);
 	kof_st_le16(env + 4, sw_with_top(e));
 	kof_st_le16(env + 8, (uint16_t)tag_word(e));
-	kof_st_le32(env + 12, (uint32_t)e->fpu_rip);
-	kof_st_le32(env + 16, (uint32_t)(e->fop & 0x7ffu) << 16);
-	kof_st_le32(env + 20, (uint32_t)e->fpu_dp);
+	kof_st_le32(env + 12, (uint32_t)e->x86.fpu_rip);
+	kof_st_le32(env + 16, 0u);                      /* FCS 0, FOP 0: see EMU-FOP-1 above */
+	kof_st_le32(env + 20, (uint32_t)e->x86.fpu_dp);
 	if (ixp->op[0].type != KGENOME_X86_OP_MEM ||
 	    !kgenome_emu_ea_of(e, ixp, &ixp->op[0], &ea))
 		return KGENOME_EMU_RUN_UNSUPPORTED;
@@ -558,25 +564,25 @@ static inline int x87_fxsave(struct kgenome_emu *e, struct kgenome_emu_insn *ixp
 
 	memset(area, 0, sizeof area);
 	for (k = 0; k < 8u; k++)
-		if (e->st_tag[k])
+		if (e->x86.st_tag[k])
 			ftw |= 1u << k;
-	kof_st_le16(area, e->fcw);
+	kof_st_le16(area, e->x86.fcw);
 	kof_st_le16(area + 2, sw_with_top(e));
 	area[4] = (uint8_t)ftw;
-	kof_st_le16(area + 6, e->fop & 0x7ffu);
+	kof_st_le16(area + 6, 0u);                      /* FOP 0: see EMU-FOP-1 */
 	if (ixp->h.id == KGENOME_X86_I_FXSAVE64) {
-		kof_st_le64(area + 8, e->fpu_rip);
-		kof_st_le64(area + 16, e->fpu_dp);
+		kof_st_le64(area + 8, e->x86.fpu_rip);
+		kof_st_le64(area + 16, e->x86.fpu_dp);
 	} else {
-		kof_st_le32(area + 8, (uint32_t)e->fpu_rip);
-		kof_st_le32(area + 16, (uint32_t)e->fpu_dp);
+		kof_st_le32(area + 8, (uint32_t)e->x86.fpu_rip);
+		kof_st_le32(area + 16, (uint32_t)e->x86.fpu_dp);
 	}
-	kof_st_le32(area + 24, e->mxcsr);
+	kof_st_le32(area + 24, e->x86.mxcsr);
 	kof_st_le32(area + 28, 0xffffu);
 	for (k = 0; k < 8u; k++)
-		f80_wr(area + 32u + 16u * k, e->st[(e->st_top + k) & 7u]);
+		f80_wr(area + 32u + 16u * k, e->x86.st[(e->x86.st_top + k) & 7u]);
 	for (k = 0; k < (e->bits == 32 ? 8u : 16u); k++)
-		memcpy(area + 160u + 16u * k, e->xmm[k], 16);
+		memcpy(area + 160u + 16u * k, e->x86.xmm[k], 16);
 	if (ixp->op[0].type != KGENOME_X86_OP_MEM ||
 	    !kgenome_emu_ea_of(e, ixp, &ixp->op[0], &ea))
 		return KGENOME_EMU_RUN_UNSUPPORTED;
@@ -591,14 +597,14 @@ static void x87_init(struct kgenome_emu *e)
 	unsigned q;
 
 	for (q = 0; q < 8u; q++) {
-		e->st[q] = 0.0;
-		e->st_tag[q] = 0;
+		e->x86.st[q] = 0.0;
+		e->x86.st_tag[q] = 0;
 	}
-	e->st_top = 0;
-	e->fsw = 0;
-	e->fcw = 0x037fu;
-	e->fpu_rip = e->fpu_dp = 0;
-	e->fop = 0;
+	e->x86.st_top = 0;
+	e->x86.fsw = 0;
+	e->x86.fcw = 0x037fu;
+	e->x86.fpu_rip = e->x86.fpu_dp = 0;
+	e->x86.fop = 0;
 }
 
 /* The 16 bit environment (a 66 prefix on FLDENV, FNSAVE, FRSTOR) is the one format this does not carry. */
@@ -617,14 +623,14 @@ static void x87_env_load(struct kgenome_emu *e, const uint8_t *env)
 	const unsigned sw = kof_ld_le16(env + 4), tw = kof_ld_le16(env + 8);
 	unsigned k;
 
-	e->fcw = kof_ld_le16(env);
-	e->st_top = (uint8_t)((sw >> 11) & 7u);
-	e->fsw = (uint16_t)(sw & ~0x3800u);
+	e->x86.fcw = kof_ld_le16(env);
+	e->x86.st_top = (uint8_t)((sw >> 11) & 7u);
+	e->x86.fsw = (uint16_t)(sw & ~0x3800u);
 	for (k = 0; k < 8u; k++)
-		e->st_tag[k] = (uint8_t)(((tw >> (2u * k)) & 3u) == 3u ? 0u : 2u + ((tw >> (2u * k)) & 3u));
-	e->fpu_rip = kof_ld_le32(env + 12);
-	e->fop = (uint16_t)((kof_ld_le32(env + 16) >> 16) & 0x7ffu);
-	e->fpu_dp = kof_ld_le32(env + 20);
+		e->x86.st_tag[k] = (uint8_t)(((tw >> (2u * k)) & 3u) == 3u ? 0u : 2u + ((tw >> (2u * k)) & 3u));
+	e->x86.fpu_rip = kof_ld_le32(env + 12);
+	e->x86.fop = (uint16_t)((kof_ld_le32(env + 16) >> 16) & 0x7ffu);
+	e->x86.fpu_dp = kof_ld_le32(env + 20);
 }
 
 static inline int x87_fldenv(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
@@ -655,7 +661,7 @@ static inline int x87_frstor(struct kgenome_emu *e, struct kgenome_emu_insn *ixp
 		return KGENOME_EMU_RUN_FAULT;
 	x87_env_load(e, img);
 	for (k = 0; k < 8u; k++)
-		e->st[(e->st_top + k) & 7u] = f80_rd(img + 28u + 10u * k);
+		e->x86.st[(e->x86.st_top + k) & 7u] = f80_rd(img + 28u + 10u * k);
 	return KGENOME_EMU_RUN_OK;
 }
 
@@ -670,14 +676,14 @@ static inline int x87_fnsave(struct kgenome_emu *e, struct kgenome_emu_insn *ixp
 	    !kgenome_emu_ea_of(e, ixp, &ixp->op[0], &ea))
 		return KGENOME_EMU_RUN_UNSUPPORTED;
 	memset(img, 0, sizeof img);
-	kof_st_le16(img, e->fcw);
+	kof_st_le16(img, e->x86.fcw);
 	kof_st_le16(img + 4, sw_with_top(e));
 	kof_st_le16(img + 8, (uint16_t)tag_word(e));
-	kof_st_le32(img + 12, (uint32_t)e->fpu_rip);
-	kof_st_le32(img + 16, (uint32_t)(e->fop & 0x7ffu) << 16);
-	kof_st_le32(img + 20, (uint32_t)e->fpu_dp);
+	kof_st_le32(img + 12, (uint32_t)e->x86.fpu_rip);
+	kof_st_le32(img + 16, 0u);                      /* FCS 0, FOP 0: see EMU-FOP-1 */
+	kof_st_le32(img + 20, (uint32_t)e->x86.fpu_dp);
 	for (k = 0; k < 8u; k++)
-		f80_wr(img + 28u + 10u * k, e->st[(e->st_top + k) & 7u]);
+		f80_wr(img + 28u + 10u * k, e->x86.st[(e->x86.st_top + k) & 7u]);
 	if (!kgenome_emu_mem_wr(e, ea, img, sizeof img))
 		return KGENOME_EMU_RUN_FAULT;
 	x87_init(e);
@@ -700,24 +706,24 @@ static inline int x87_fxrstor(struct kgenome_emu *e, struct kgenome_emu_insn *ix
 	if (!kgenome_emu_mem_rd(e, ea, area, sizeof area))
 		return KGENOME_EMU_RUN_FAULT;
 	sw = kof_ld_le16(area + 2);
-	e->fcw = kof_ld_le16(area);
-	e->st_top = (uint8_t)((sw >> 11) & 7u);
-	e->fsw = (uint16_t)(sw & ~0x3800u);
+	e->x86.fcw = kof_ld_le16(area);
+	e->x86.st_top = (uint8_t)((sw >> 11) & 7u);
+	e->x86.fsw = (uint16_t)(sw & ~0x3800u);
 	for (k = 0; k < 8u; k++)
-		e->st_tag[k] = (uint8_t)(((unsigned)area[4] >> k) & 1u);
-	e->fop = (uint16_t)(kof_ld_le16(area + 6) & 0x7ffu);
+		e->x86.st_tag[k] = (uint8_t)(((unsigned)area[4] >> k) & 1u);
+	e->x86.fop = (uint16_t)(kof_ld_le16(area + 6) & 0x7ffu);
 	if (ixp->h.id == KGENOME_X86_I_FXRSTOR64) {
-		e->fpu_rip = kof_ld_le64(area + 8);
-		e->fpu_dp = kof_ld_le64(area + 16);
+		e->x86.fpu_rip = kof_ld_le64(area + 8);
+		e->x86.fpu_dp = kof_ld_le64(area + 16);
 	} else {
-		e->fpu_rip = kof_ld_le32(area + 8);
-		e->fpu_dp = kof_ld_le32(area + 16);
+		e->x86.fpu_rip = kof_ld_le32(area + 8);
+		e->x86.fpu_dp = kof_ld_le32(area + 16);
 	}
-	e->mxcsr = kof_ld_le32(area + 24) & 0xffffu;
+	e->x86.mxcsr = kof_ld_le32(area + 24) & 0xffffu;
 	for (k = 0; k < 8u; k++)
-		e->st[(e->st_top + k) & 7u] = f80_rd(area + 32u + 16u * k);
+		e->x86.st[(e->x86.st_top + k) & 7u] = f80_rd(area + 32u + 16u * k);
 	for (k = 0; k < (e->bits == 32 ? 8u : 16u); k++)
-		memcpy(e->xmm[k], area + 160u + 16u * k, 16);
+		memcpy(e->x86.xmm[k], area + 160u + 16u * k, 16);
 	return KGENOME_EMU_RUN_OK;
 }
 
@@ -791,15 +797,15 @@ static inline int x87_fbstp(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
  */
 static void c_bits(struct kgenome_emu *e, unsigned c0, unsigned c1, unsigned c2, unsigned c3)
 {
-	e->fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C1 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
+	e->x86.fsw &= (uint16_t)~(KGENOME_EMU_FSW_C0 | KGENOME_EMU_FSW_C1 | KGENOME_EMU_FSW_C2 | KGENOME_EMU_FSW_C3);
 	if (c0)
-		e->fsw |= KGENOME_EMU_FSW_C0;
+		e->x86.fsw |= KGENOME_EMU_FSW_C0;
 	if (c1)
-		e->fsw |= KGENOME_EMU_FSW_C1;
+		e->x86.fsw |= KGENOME_EMU_FSW_C1;
 	if (c2)
-		e->fsw |= KGENOME_EMU_FSW_C2;
+		e->x86.fsw |= KGENOME_EMU_FSW_C2;
 	if (c3)
-		e->fsw |= KGENOME_EMU_FSW_C3;
+		e->x86.fsw |= KGENOME_EMU_FSW_C3;
 }
 
 static double indefinite(void)
@@ -975,7 +981,7 @@ int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		if (ixp->n &&
 		    ixp->op[0].type == KGENOME_X86_OP_REG &&
 		    ixp->op[0].rtype == KGENOME_X86_REG_FPU)
-			e->st_tag[(e->st_top +
+			e->x86.st_tag[(e->x86.st_top +
 				   ixp->op[0].reg) & 7u] = 0;
 		if (ixp->h.id == KGENOME_X86_I_FFREEP)
 			st_pop(e);
@@ -983,11 +989,11 @@ int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 
 	case KGENOME_X86_I_FDECSTP:
 		fpu_note(e, ixp);
-		e->st_top = (uint8_t)((e->st_top - 1u) & 7u);
+		e->x86.st_top = (uint8_t)((e->x86.st_top - 1u) & 7u);
 		break;
 	case KGENOME_X86_I_FINCSTP:
 		fpu_note(e, ixp);
-		e->st_top = (uint8_t)((e->st_top + 1u) & 7u);
+		e->x86.st_top = (uint8_t)((e->x86.st_top + 1u) & 7u);
 		break;
 
 	case KGENOME_X86_I_FXCH:
@@ -1097,8 +1103,8 @@ int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	 * TOP sits in bits 11..13 and is part of what is reported.
 	 */
 	case KGENOME_X86_I_FNSTSW: {
-		uint64_t v = (uint64_t)(e->fsw |
-				(uint16_t)((e->st_top & 7u) << 11));
+		uint64_t v = (uint64_t)(e->x86.fsw |
+				(uint16_t)((e->x86.st_top & 7u) << 11));
 
 		/* a control instruction: FIP and FOP stay as they were */
 		if (!ixp->n ||
@@ -1129,17 +1135,17 @@ int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	case KGENOME_X86_I_FNCLEX:
 		/* control instructions: FIP and FOP stay as they were (SDM Vol. 1 8.1.8) */
 		if (ixp->h.id == KGENOME_X86_I_FNSTCW && ixp->n &&
-		    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], e->fcw))
+		    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], e->x86.fcw))
 			goto unsupported;
 		if (ixp->h.id == KGENOME_X86_I_FLDCW) {
 			uint64_t cw;
 
 			if (!ixp->n || !kgenome_emu_op_rd(e, ixp, &ixp->op[0], &cw))
 				goto unsupported;
-			e->fcw = (uint16_t)cw;        /* RC is honoured by FIST/FRNDINT; the masks change nothing here */
+			e->x86.fcw = (uint16_t)cw;        /* RC is honoured by FIST/FRNDINT; the masks change nothing here */
 		}
 		if (ixp->h.id == KGENOME_X86_I_FNCLEX)
-			e->fsw = 0;
+			e->x86.fsw = 0;
 		break;
 
 	case KGENOME_X86_I_FNINIT:

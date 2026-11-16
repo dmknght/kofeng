@@ -1253,6 +1253,9 @@ int main(void)
 		}
 	}
 	he_rmtree(tmp);
+	/* The scratch is gone, the 2100-level tree included: he_rmtree skipped every path over
+	 * 1024 bytes, so each run left that tree behind. Missed because nothing asked (c). */
+	CK(lstat(tmp, &sb) != 0, "the scratch tree %s is still there after the run", tmp);
 	printf("hostile_engine_scan: %u checks, %u failed, %u known-miss\n", he_checks, he_fails, km_known());
 	return he_fails != 0 || km_failed();
 }

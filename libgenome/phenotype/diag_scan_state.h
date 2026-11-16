@@ -183,6 +183,21 @@ struct kgenome_diag_scan {
 	int                  adj_built;
 	/* THE LINEAGE STAGES' RESULT besides the links: the inputs they could not account for, each with its reason, and what
 	 * the selection did (diag_lineage.h). Owned by the scan. */
+	/* THE INPUTS OF A NODE PAST ITS VIEW (kgenome_diag_hit.in[] holds the first four of the vocabulary's roles; every other input is
+	 * here, as many as the program has, charged to the ledger - diag_hit.c, kgenome_diag_in_count / kgenome_diag_in_at read all of
+	 * them): the entries, a hash of them by (node, from, role, kind) for the repeat test, and their order by node once settled. */
+	struct kgenome_diag_xin          *xin;
+	uint32_t                          n_xin, cap_xin;
+	uint32_t                         *xin_tab;    /* entry index + 1, open addressing (diag_oatab.h) */
+	uint32_t                          xin_tcap, xin_tn;
+	uint32_t                         *xin_ord;    /* entry indices by node, then by when they were noted: valid when n_xin_ord == n_xin */
+	uint32_t                          n_xin_ord;
+	/* THE NODE TABLE'S MANAGEMENT (diag_hit.c): the table refused a node (no halt: the walk and the lineage go on), what that and the keep
+	 * rule cost by class, and the capabilities the rule keeps whatever links them (the caller's: kgenome_diag_inputs.keep_caps) */
+	uint8_t                           nodes_full;
+	struct kgenome_diag_drops         drops;
+	const uint16_t                   *keep_caps;
+	uint32_t                          n_keep_caps;
 	uint64_t                         *noret_at;   /* the calls (offsets, ascending) to an import that never returns: exit, abort ... */
 	uint32_t                          n_noret, cap_noret;
 	struct kgenome_diag_oblig        *oblig;

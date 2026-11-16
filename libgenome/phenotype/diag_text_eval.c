@@ -166,10 +166,13 @@ int kgenome_dtx_ev_run_row(struct kgenome_dtx_ev *e, const struct kgenome_textua
 		ok = kgenome_dtx_ev_val_room(e->x, o, first, 1) && kgenome_textual_fn_run(f, args, n, x->apply, x->apply_user, o->p + o->n, first, &got);
 		if (!ok && first < left)
 			ok = kgenome_dtx_ev_val_room(e->x, o, left, 1) && kgenome_textual_fn_run(f, args, n, x->apply, x->apply_user, o->p + o->n, left, &got);
-		if (!ok)
+		if (!ok) {
+			e->x->obf_refused++;     /* constants in, no answer out: the obfuscation measure counts it a step it could not take */
 			return 0;
+		}
 	}
 	o->n += got;
+	e->x->obf_ops++;
 	return 1;
 }
 
@@ -253,6 +256,10 @@ static int ev_call_named(struct kgenome_dtx_ev *e, uint32_t start, uint32_t open
 	memset(a, 0, sizeof a);
 	found = kgenome_textual_fn_find(x->lang->id, x->in + noff, nlen, &f) && f.shape == KGENOME_TEXTUAL_SHAPE_CALL;
 	n = kgenome_dtx_ev_args(e, open, a, 0, found && f.op == KGENOME_TEXTUAL_DEC_JOIN, &lst);
+	/* a function of the program handed constants where a NAME is read - the key of a member that is called, `o[f(0x1a)](...)`: a string-array decoder. Only there: a
+	 * module loader's `r(12)` returns an object, not a name (measured: counted everywhere, webpack bundles of WordPress came out as hidden as a loader) */
+	if (n > 0 && !found && x->obf_key)
+		x->obf_refused++;
 	if (n <= 0 || !found)
 		goto out;
 	/* an answer of more than one value is one value only where the call is bracketed or an operand of a join */
@@ -312,6 +319,7 @@ static int ev_primary(struct kgenome_dtx_ev *e, uint32_t *i, uint32_t end, struc
 				return 0;
 			out->str = (uint8_t)(out->str | piece);
 			*built = 1;
+			x->obf_ops++;
 		}
 		return 1;
 	}
@@ -466,6 +474,7 @@ int kgenome_dtx_ev_join_level(struct kgenome_dtx_ev *e, uint32_t *i, uint32_t en
 
 		*i += jn;
 		*built = 1;
+		e->x->obf_ops++;
 		out->str = 0;
 		if (!ev_operand(e, i, end, out, built, NULL))
 			return 0;
@@ -554,8 +563,10 @@ int kgenome_dtx_eval_var(struct kgenome_dtx *x, const struct kgenome_dtx_var *v,
 			x->ev_depth--;
 			return 0;
 		}
-		if (s)
+		if (s) {
 			*built = 1;
+			x->obf_ops++;    /* an append: one more piece joined to the value */
+		}
 	}
 	x->ev_depth--;
 	return 1;
@@ -622,6 +633,7 @@ int kgenome_dtx_eval_element(struct kgenome_dtx *x, uint32_t lb, struct kgenome_
 						return 0;
 					}
 					*built = 1;     /* the name is picked out of an array by an index: it is not written where it is called */
+					x->obf_ops++;
 					return 1;
 				}
 				n++;

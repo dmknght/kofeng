@@ -469,6 +469,8 @@ static void redraw_dialogs(struct out *o, struct view *v)
 			draw_find(o, v);
 		if (v->goto_open)
 			draw_goto(o, v);
+		if (v->opendlg_open)
+			draw_opendlg(o, v);
 	}
 }
 

@@ -164,6 +164,43 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 		FZ_CHECK(c, !kind || arg_ix < 8u, "name_arg names an argument past the registers");
 		fz_digest(c, kind + ((uint64_t)arg_ix << 4));
 	}
+	/* the row of the name and its shape (nucleo.h, "THE ROW OF A CALL AND ITS SHAPE") */
+	{
+		uint16_t row = kgenome_nucleo_row_of(target, name);
+		unsigned i, how = 9, e = kgenome_nucleo_entry_arg(row, &how);
+
+		FZ_CHECK(c, !id || row == id, "a name with an id is not that row");
+		FZ_CHECK(c, row || kgenome_nucleo_row_cap(row) == KGENOME_NUCLEO_NONE, "row 0 has a capability");
+		if (row) {
+			const char *sp = kgenome_nucleo_name_of(row);
+
+			FZ_CHECK(c, sp && *sp, "a row with no spelling");
+			FZ_CHECK(c, kgenome_nucleo_row_cap(row) == kgenome_nucleo_cap_of_name(target, name) ||
+				    kgenome_nucleo_cap_of_name(target, name) == KGENOME_NUCLEO_NONE, "the row's capability is not the name's");
+		}
+		for (i = 0; i < 9u; i++) {
+			FZ_CHECK(c, kgenome_nucleo_row_role(row, i) < KGENOME_DIAG_ROLE_COUNT, "a role past the enum");
+			FZ_CHECK(c, kgenome_nucleo_call_role(cap, row, i) == (row ? kgenome_nucleo_row_role(row, i) : kgenome_nucleo_cap_role(cap, i)),
+				 "call_role is not the row's or the capability's");
+			FZ_CHECK(c, kgenome_nucleo_cap_role(cap, i) < KGENOME_DIAG_ROLE_COUNT, "a capability's role past the enum");
+			fz_digest(c, kgenome_nucleo_row_role(row, i) + 8u * (unsigned)kgenome_nucleo_row_field(row, i));
+		}
+		FZ_CHECK(c, e == KGENOME_NUCLEO_ARG_NONE ? how == 0 : (kgenome_nucleo_row_role(row, e) == KGENOME_DIAG_ROLE_TARGET && how >= 1u && how <= 3u),
+			 "an entry that is not a TARGET argument, or a how without an entry");
+		FZ_CHECK(c, kgenome_nucleo_row_res(row) <= KGENOME_NUCLEO_RES_NORET, "a result kind past the enum");
+		FZ_CHECK(c, kgenome_nucleo_call_hands_on(cap, row) == (row ? kgenome_nucleo_row_hands_on(row) : kgenome_nucleo_hands_on(cap, NULL)),
+			 "call_hands_on is not the row's or the capability's");
+		fz_digest(c, kgenome_nucleo_row_res(row) + 16u * kgenome_nucleo_row_out(row, 0) + 4096u * kgenome_nucleo_row_out(row, 1) +
+			      (uint64_t)kgenome_nucleo_row_release(row) * 65536u);
+	}
+	/* an ordinal: a spelling of the PE table's library, or nothing */
+	{
+		const char *on = kgenome_nucleo_ordinal_name(name, nr);
+
+		FZ_CHECK(c, !on || *on, "an empty ordinal name");
+		if (on)
+			fz_digest(c, (uint8_t)on[0]);
+	}
 	/* the lineage class tables */
 	{
 		unsigned plan = kgenome_diag_lineage_plan(cls), bit;
@@ -213,5 +250,8 @@ FZ_ADAPTER(tables, .name = "kgenome/diag_tables",
 		     "kgenome_nucleo_cap_of_sockcall kgenome_nucleo_sys_name kgenome_nucleo_sys_name_all kgenome_nucleo_cap_of_syscall "
 		     "kgenome_nucleo_cap_of_name kgenome_nucleo_cap_named kgenome_nucleo_cap_generic kgenome_nucleo_hands_on kgenome_nucleo_name_arg "
 		     "kgenome_nucleo_name_id kgenome_nucleo_name_lookup kgenome_nucleo_cap_of_call kgenome_nucleo_name_of "
+		     "kgenome_nucleo_row_of kgenome_nucleo_row_cap kgenome_nucleo_row_role kgenome_nucleo_row_field kgenome_nucleo_row_res "
+		     "kgenome_nucleo_row_hands_on kgenome_nucleo_row_out kgenome_nucleo_row_release kgenome_nucleo_entry_arg kgenome_nucleo_cap_role "
+		     "kgenome_nucleo_call_role kgenome_nucleo_call_hands_on kgenome_nucleo_ordinal_name "
 		     "kgenome_diag_lineage_plan kgenome_diag_oblig_next_stage",
 	   .backstop_s = 3000, .shape = FZ_REQ, .seeds = seeds, .dict = dict, .run = run);

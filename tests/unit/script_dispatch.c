@@ -63,6 +63,17 @@ static int failures;
 static uint8_t kid[1u << 22];
 static uint64_t kid_n, n_kids;
 static uint32_t kid_regions, kid_mask, kid_off, kid_len;
+/*
+ * AN ISLAND SIBLING (2026-11-10): the deep const-fold's own evaluator can now turn an eval()/
+ * create_function() argument it resolves through a variable or a join into a SECOND, real child
+ * (KOF_ENT_SCRIPT, objctx_script.c's script_island_declare) beside the normalised view
+ * (KOF_ENT_NORMALIZED) - exactly the "hoho's shape" case `computed_values` already names in a
+ * comment below. `kid`/`kid_n` are kept as THE VIEW specifically (by kind, not by arrival order,
+ * since the island is declared first): every existing single-child case still captures the same
+ * bytes it always did. `ikid`/`ikid_n` are the island's, when one arrives.
+ */
+static uint8_t ikid[256];
+static uint64_t ikid_n;
 
 static int on_object(const char *name, const void *bytes, uint64_t len, const struct kof_result *res,
 		     void *user)
@@ -70,13 +81,17 @@ static int on_object(const char *name, const void *bytes, uint64_t len, const st
 	(void)user;
 	if (!strstr(name, "//"))
 		return 0;
-	if (n_kids++ == 0 && bytes && len <= sizeof kid) {
+	n_kids++;
+	if (res->entry_kind == KOF_ENT_NORMALIZED && bytes && len <= sizeof kid) {
 		memcpy(kid, bytes, (size_t)len);
 		kid_n = len;
 		kid_regions = res->n_region;
 		kid_mask = res->n_region ? res->region[0].mask : 0;
 		kid_off = res->n_region ? (uint32_t)res->region[0].off : 0;
 		kid_len = res->n_region ? (uint32_t)res->region[0].len : 0;
+	} else if (res->entry_kind == KOF_ENT_SCRIPT && bytes && len <= sizeof ikid) {
+		memcpy(ikid, bytes, (size_t)len);
+		ikid_n = len;
 	}
 	return 0;
 }
@@ -93,6 +108,7 @@ static void scan(const char *src, size_t n, int level)
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 32u << 20;
 	kid_n = n_kids = kid_regions = kid_mask = kid_off = kid_len = 0;
+	ikid_n = 0;
 	kscan_bytes(sc, src, n, "t", &opt, on_object, NULL);
 }
 
@@ -207,12 +223,12 @@ static void decoders(void)
 		}
 		lit[pn] = 0;
 		sprintf(src, "<?php\n// padding padding padding\neval(str_rot13('%s'));\n", lit);
-		view(src, "<?php\neval(decoded_str_rot13('echo(1);echo(2);echo(3);'));");
+		view(src, "<?php\neval(decoded_str_rot13('echo(1);\necho(2);\necho(3);'));");
 		for (k = 0; k < pn; k++)
 			lit[k] = plain[pn - 1 - k];
 		lit[pn] = 0;
 		sprintf(src, "<?php\n// padding padding padding\neval(strrev('%s'));\n", lit);
-		view(src, "<?php\neval(decoded_strrev('echo(1);echo(2);echo(3);'));");
+		view(src, "<?php\neval(decoded_strrev('echo(1);\necho(2);\necho(3);'));");
 	}
 
 	/* raw deflate, zlib and gzip, each behind base64 as a shell has them */
@@ -325,13 +341,19 @@ static int view_level(const char *src, int level, const char *const must[], cons
 
 	scan(src, strlen(src), level);
 	kid[kid_n < sizeof kid ? kid_n : sizeof kid - 1u] = 0;
+	/*
+	 * THE NORMALISED VIEW, WHICHEVER CHILD THAT IS (not "the only child"): on_object now keys
+	 * `kid` on KOF_ENT_NORMALIZED, so an island sibling - a second, real child this exact
+	 * engine's deep const-fold evaluator can now also produce, see the struct field comment
+	 * above `ikid` - never changes what is checked here.
+	 */
 	for (i = 0; must && must[i]; i++)
-		if (n_kids != 1 || !strstr((char *)kid, must[i])) {
-			printf("  FAIL level %d view of  %s\n       lacks   %s\n       view    %s\n", level, src, must[i], n_kids ? (char *)kid : "(none)");
+		if (!kid_n || !strstr((char *)kid, must[i])) {
+			printf("  FAIL level %d view of  %s\n       lacks   %s\n       view    %s\n", level, src, must[i], kid_n ? (char *)kid : "(none)");
 			bad++;
 		}
 	for (i = 0; mustnot && mustnot[i]; i++)
-		if (n_kids == 1 && strstr((char *)kid, mustnot[i])) {
+		if (kid_n && strstr((char *)kid, mustnot[i])) {
 			printf("  FAIL level %d view of  %s\n       has     %s\n       view    %s\n", level, src, mustnot[i], (char *)kid);
 			bad++;
 		}
@@ -356,6 +378,16 @@ static void computed_values(void)
 	/* the pieces joined by variables, and str_replace over the join (hoho's shape) */
 	snprintf(src, sizeof src, "%s$p = 'ec#ho '; $q = '1;'; $a = str_replace('#', '', $p . $q); eval($a);\n", pad);
 	view_level(src, 2, m2, n2);
+	/*
+	 * AND THE SAME RESOLVED VALUE IS NOW ALSO A REAL ISLAND CHILD (2026-11-10, objctx_script.c's
+	 * script_island_declare): eval()'s own argument here is a variable, never a bare string
+	 * literal, so Merge 167's own find_eval_islands never claims it (celllysis/script_funcs.c) -
+	 * exactly the shape this mechanism exists for. n_kids is 2 (the view above, and this).
+	 */
+	CKF(n_kids == 2, "hoho-shape eval(): expected the view plus one island child, got %llu object(s)",
+	    (unsigned long long)n_kids);
+	CKF(ikid_n == strlen("echo 1;") && !memcmp(ikid, "echo 1;", ikid_n),
+	    "hoho-shape eval(): island bytes are not the resolved payload (%llu byte(s))", (unsigned long long)ikid_n);
 	/* a function name built by str_replace, and a function named by it */
 	snprintf(src, sizeof src, "%s$f = str_replace('k', '', 'create_funkction'); $f('', 'return 1;');\n", pad);
 	view_level(src, 2, m3, NULL);
@@ -460,7 +492,7 @@ static void value_and_joins(void)
 		 "#!/usr/bin/env python\nexec(base64.decoded_b64decode(\"echo'hi';\"))\nkeep=1");
 	/* a join no decoder reads is folded, and that alone makes a view: nothing was left to tidy in this one */
 	view_raw("<?php\n$f = 'ev' . 'al'; $g = 'sys' . 'tem'; $keep = 1;\n",
-		 "<?php\n$f='eval';$g='system';$keep=1;");
+		 "<?php\n$f='eval';\n$g='system';\n$keep=1;");
 	/* a literal with something the program fills in has no value, so it is not offered */
 	view_raw("<?php\n// padding padding padding\neval( base64_decode( \"ZWNo$x\" ) );\n$keep = 1;\n",
 		 "<?php\neval(base64_decode(\"ZWNo$x\"));\n$keep=1;");
@@ -506,6 +538,20 @@ static void php_view(void)
 	/* a hex-escaped name is the name */
 	view("<?php\n// padding padding padding padding\n$f = $_SERVER[\"\\x53\\x43\\x52\\x49\\x50\\x54\"];\n",
 	     "<?php\n$f=$_SERVER['SCRIPT'];");
+	/*
+	 * A FLAT CHAIN THE FILE ITSELF NEVER BROKE ONTO MORE THAN ONE LINE (owner, 2026-11-10: "dĩ nhiên
+	 * là phải norm nó chứ" - of course it must be normalised - after being shown the exact shape of
+	 * hoho.php's own resolved payload, one physical line of semicolon-separated assignments, and
+	 * asking why normalise left it that way). The earlier answer - 0 embedded newlines in the
+	 * resolved bytes, so nothing was there to collapse - was true and still beside the point: a
+	 * normalised view is not a report of the file's OWN spacing, it is how the program reads, and a
+	 * statement's end gets the line break a normal program's line break would have (textual_lang.h's
+	 * `stmt_semi`), whether or not the source ever had one. RED on the code before this: the three
+	 * ";" below stayed on the one line the source typed them on, same as the file's own line did.
+	 */
+	view_raw("<?php $k='4e4d6c33';$a=1;$b=2;system($k);",
+	     "<?php $k='4e4d6c33';\n$a=1;\n$b=2;\nsystem($k);");
+	CK(kid_regions == 0);
 }
 
 static void shell_view(void)

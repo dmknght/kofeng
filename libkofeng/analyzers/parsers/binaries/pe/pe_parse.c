@@ -43,13 +43,13 @@ static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 
 	if (mask & KGENOME_SCAN_PE_CODE)
 		for (i = 0; i < p->sec_count; i++)
-			if (kgenome_pe_sec_is_code(&p->sec[i]))
+			if (kgenome_pe_sec_is_code(p, &p->sec[i]))
 				kof_rl_add(&l, ctx->obj_size, p->sec[i].claim_off,
 					   p->sec[i].claim_len);
 
 	if (mask & KGENOME_SCAN_PE_DATA)
 		for (i = 0; i < p->sec_count; i++)
-			if (!kgenome_pe_sec_is_code(&p->sec[i]))
+			if (!kgenome_pe_sec_is_code(p, &p->sec[i]))
 				kof_rl_add(&l, ctx->obj_size, p->sec[i].claim_off,
 					   p->sec[i].claim_len);
 
@@ -180,7 +180,7 @@ const char *kof_pe_anomaly_name(unsigned index)
 		"ENTRY_ZERO", "ENTRY_UNMAPPED", "ENTRY_NOT_EXEC", "ENTRY_ZEROFILL",
 		"CERT_PAST_EOF", "DIR_COUNT_ODD", "STUB_OVERSIZED",
 		"STUB_NONSTANDARD", "SUMMARY_MISMATCH", "DEBUG_OUTSIDE_SEC",
-		"RSRC_UNALIGNED"
+		"RSRC_UNALIGNED", "CERT_OVERLAP"
 	};
 
 

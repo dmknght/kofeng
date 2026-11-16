@@ -181,6 +181,7 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_state.c \
                 kofexamine/kv_cfgbody.c \
                 kofexamine/kv_cfgdlg.c \
+                kofexamine/kv_lineagebody.c \
                 kofexamine/kv_dash_dialog.c \
                 kofexamine/kv_graph.c \
                 kofexamine/kv_graph_paint.c \

@@ -76,6 +76,12 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 			struct kof_codenotes *out);
 void kof_codenotes_free(struct kof_codenotes *n);
 
+/* THE ONE SPELLING OF A SYSCALL of an object of `format` (KOF_FMT_*) and `arch` (enum kgenome_arch), from the code map's reference to it
+ * (phenotype/codemap.h; NULL or no number: "syscall, number not known here"): `name (nr)` in an ELF, the number alone in a PE, `linux: name (nr)` in
+ * anything else. The disassembly's comment and the CFG view's call table both say this. */
+struct kgenome_codemap_ref;
+void kof_syscall_spell(int format, unsigned arch, const struct kgenome_codemap_ref *r, char *out, size_t cap);
+
 /* The notes of the instruction at `at`: a pointer to the first and how many (0 and NULL for none). */
 const struct kof_note *kof_codenotes_at(const struct kof_codenotes *n, uint64_t at, uint32_t *count);
 static inline const char *kof_codenotes_text(const struct kof_codenotes *n, const struct kof_note *x)

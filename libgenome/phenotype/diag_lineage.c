@@ -21,41 +21,6 @@
 #include <kofcmp.h>
 #include "diag_lineage_private.h"
 
-/* ---- the calling convention ---- */
-
-static const uint8_t win64_arg[4] = { KGENOME_CELL_REG_CX, KGENOME_CELL_REG_DX, 8u, 9u };
-static const uint8_t clob_sysv[9] = { 0, 1, 2, 6, 7, 8, 9, 10, 11 };
-static const uint8_t clob_win64[7] = { 0, 1, 2, 8, 9, 10, 11 };
-static const uint8_t clob_i386[3] = { 0, 1, 2 };
-
-static void abi_init(struct kgenome_lineage_abi *a, const struct kgenome_obj *obj)
-{
-	memset(a, 0, sizeof *a);
-	if (obj->arch == KGENOME_ARCH_X86_64) {
-		a->wide = 1;
-		a->w = 8;
-		if (obj->format == KGENOME_FMT_PE) {
-			a->arg = win64_arg;
-			a->n_arg = 4;
-			a->clob = clob_win64;
-			a->n_clob = (uint8_t)sizeof clob_win64;
-			a->stack_first = 4;
-			a->stack_off = 32;      /* the callee's shadow space for the four register arguments */
-		} else {
-			a->arg = kgenome_diag_sysv_arg;
-			a->n_arg = 6;
-			a->clob = clob_sysv;
-			a->n_clob = (uint8_t)sizeof clob_sysv;
-			a->stack_first = 6;
-		}
-	} else {
-		a->w = 4;
-		a->clob = clob_i386;
-		a->n_clob = (uint8_t)sizeof clob_i386;
-		a->callee_pops = obj->format == KGENOME_FMT_PE;
-	}
-}
-
 /* ---- the codemap, the one other thing the stages read once ---- */
 
 const struct kgenome_codemap *kgenome_lineage_codemap(struct kgenome_lineage *L)
@@ -155,6 +120,17 @@ int kgenome_lineage_fn_get(const struct kgenome_lineage *L, uint32_t fi, struct 
 	const struct kgenome_func *g = &L->fs->v[fi];
 	uint64_t va;
 
+	/* AN UNPARTITIONED EXTENT IS NOT A FUNCTION (trust NONE: the object declares no function, fntab_build.c): it has no entry to solve from and no callers, so it is
+	 * neither solved nor a call target here; its nodes stay unlinked by the static lineage. LIMIT, named: such an object gets links only from the emulate route (next:
+	 * the emulate-gap route reads the same table). A function's further ranges (a chained .pdata part, kgenome_funcs_range) are not read here: the solve covers range 0,
+	 * so a node in a far part maps to its function (kgenome_funcs_at) and is not reached by that function's solve (limit; next: the frame over every range).
+	 * TODO(owner): default applied 2026-11-16 = NONE units are not solved (measured cost: links apt 118->114, set356 8696->7402, pe120 1137->931, every loss
+	 * in code no metadata declares); the alternative is solving a NONE unit from the entry point until the emulate-gap route exists.
+	 * A DERIVED function (phase 2, fntab_derive.c: an entry the descent reached and the blocks it reaches) IS solved: it has an entry and a proven body.
+	 * TODO(owner): default applied 2026-11-16 = DERIVED units are solved like HIGH ones (their first range, as for every function); the alternative is solving
+	 * HIGH units only. Links before/after are reported as information, not as a gate (fix_pmeta5 report). */
+	if (g->trust == KGENOME_FN_TRUST_NONE)
+		return 0;
 	if (g->off >= L->size || !g->len)
 		return 0;
 	va = fn_va(L, g->off);
@@ -380,6 +356,73 @@ static int cmp_agg(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
+/*
+ * ONE LINK, said by the stage. A link the stage proved on every path (MUST) is PROVEN even where a route said it first as MAY: the routes
+ * that link while they find the nodes (the sweep's origins, the symbol route) read the code in address order and join two arms by
+ * marking what they carry MAY, and kgenome_diag_note_in_how keeps the FIRST statement - so a link the stage proves over the function's
+ * graph (msfvenom cleartext's `jmp rsi` into the mmap'd region, across a connect retry loop whose pushes and pops balance on both paths)
+ * stayed MAY. The stage does not demote: a route's PROVEN it does not prove is a stronger claim it cannot refute from a value whose rest is
+ * unknown. Answers what kgenome_diag_note_in_how answers (1: the input was lost: the ledger refused the table).
+ */
+static int link_say(struct kgenome_lineage *L, struct kgenome_diag_hit *h, uint16_t from, uint8_t role, int must)
+{
+	if (must)
+		return kgenome_diag_note_in_seen(L->s, h, from, role, KGENOME_DIAG_KIND_PRODUCED);
+	return kgenome_diag_note_in_how(L->s, h, from, role, KGENOME_DIAG_KIND_PRODUCED, KGENOME_DIAG_LINK_MAY);
+}
+
+/* The class of a system call's number from what reached it (enum kgenome_diag_nr): a producer on some path is RESULT, else a parameter is
+ * PARAM, else a constant and nothing else is CONST. */
+static uint8_t nr_class(const struct kgenome_lineage_agg *a)
+{
+	if (a->n)
+		return KGENOME_DIAG_NR_RESULT;
+	if (a->param)
+		return KGENOME_DIAG_NR_PARAM;
+	if (a->other && !(a->why & ~(uint32_t)KGENOME_LINEAGE_W_CONST))
+		return KGENOME_DIAG_NR_CONST;
+	return KGENOME_DIAG_NR_UNKNOWN;
+}
+
+/* A system call's number onto its node (diag_vocab.h, enum kgenome_diag_nr): the class, and for a RESULT the producer - the lowest node
+ * index of those that reached it, so the answer does not follow the order the functions were solved in - how sure, and how many. */
+static void nr_write(struct kgenome_lineage *L, const struct kgenome_lineage_agg *a)
+{
+	struct kgenome_diag_hit *h = kgenome_diag_hit_of(L->s, (a->key >> 8) - 1u);
+	uint32_t lead = UINT32_MAX;
+	uint32_t j;
+
+	if (!h)
+		return;
+	h->nr = nr_class(a);
+	h->nr_n = a->n > 255u ? 255u : (uint8_t)a->n;     /* (a count, saturated; every producer is an input of the node) */
+	h->nr_from = KGENOME_DIAG_ORG_NONE;
+	h->nr_how = KGENOME_DIAG_LINK_UNKNOWN;
+	uint16_t *t = a->n ? malloc((size_t)a->n * sizeof *t) : NULL;
+
+	if (a->n && !t) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		return;
+	}
+	if (t)
+		kgenome_lineage_agg_toks(&L->glob, a, t);
+	for (j = 0; j < a->n; j++)
+		if (KGENOME_LINEAGE_TOK_NODE(t[j]) < lead)
+			lead = KGENOME_LINEAGE_TOK_NODE(t[j]);
+	free(t);
+	if (lead != UINT32_MAX) {
+		h->nr_from = (uint16_t)lead;
+		h->nr_how = a->n == 1u && !a->other ? KGENOME_DIAG_LINK_PROVEN : KGENOME_DIAG_LINK_MAY;
+	}
+}
+
+static int cmp_tok16(const void *a, const void *b)
+{
+	const uint16_t x = *(const uint16_t *)a, y = *(const uint16_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
 /* Write what reached each consumer onto the nodes: the sure ones first. */
 static void links_write(struct kgenome_lineage *L)
 {
@@ -394,9 +437,16 @@ static void links_write(struct kgenome_lineage *L)
 		kgenome_diag_note(L->s, KGENOME_NOMEM);     /* the links found are lost: said */
 		return;
 	}
-	for (i = 0; i < L->glob.cap; i++)
-		if (L->glob.v[i].key && L->glob.v[i].n)
-			v[n++] = &L->glob.v[i];
+	for (i = 0; i < L->glob.cap; i++) {
+		const struct kgenome_lineage_agg *a = &L->glob.v[i];
+
+		if (!a->key)
+			continue;
+		if ((a->key & 0xffu) == KGENOME_DIAG_ROLE_NUMBER)
+			nr_write(L, a);         /* the class; its producers are links like any input's, below */
+		if (a->n)
+			v[n++] = a;
+	}
 	if (n)
 		qsort(v, n, sizeof *v, cmp_agg);
 	for (pass = 0; pass < 2u; pass++)
@@ -404,15 +454,24 @@ static void links_write(struct kgenome_lineage *L)
 			const struct kgenome_lineage_agg *a = v[i];
 			const int must = a->n == 1u && !a->other;
 			struct kgenome_diag_hit *h;
-			uint8_t j;
+			uint16_t t0[KGENOME_LINEAGE_SET], *t = t0;
+			uint32_t j;
 
 			if (must != (pass == 0u))
 				continue;
 			h = kgenome_diag_hit_of(L->s, (a->key >> 8) - 1u);
+			/* the producers in node order: which of them a full node refuses does not follow the order the table was filled in (the
+			 * functions' solve order, the table's slot order) */
+			if (a->n > KGENOME_LINEAGE_SET && !(t = malloc((size_t)a->n * sizeof *t))) {
+				kgenome_diag_note(L->s, KGENOME_NOMEM);    /* this consumer's links are lost: said */
+				continue;
+			}
+			kgenome_lineage_agg_toks(&L->glob, a, t);
+			qsort(t, a->n, sizeof t[0], cmp_tok16);
 			for (j = 0; j < a->n && h; j++)
-				L->st.dropped += (uint64_t)kgenome_diag_note_in_how(L->s, h, (uint16_t)a->t[j], (uint8_t)(a->key & 0xffu),
-							 KGENOME_DIAG_KIND_PRODUCED,
-							 must ? KGENOME_DIAG_LINK_PROVEN : KGENOME_DIAG_LINK_MAY);
+				L->st.dropped += (uint64_t)link_say(L, h, (uint16_t)KGENOME_LINEAGE_TOK_NODE(t[j]), (uint8_t)(a->key & 0xffu), must);
+			if (t != t0)
+				free(t);
 		}
 	free(v);
 }
@@ -442,9 +501,11 @@ void kgenome_diag_run_lineage(struct kgenome_diag_scan *s, const struct kgenome_
 			      const uint8_t *base, uint64_t size)
 {
 	struct kgenome_lineage L;
+	struct kgenome_lineage_abi row;
 	unsigned plan;
 
-	if (!obj || (obj->arch != KGENOME_ARCH_X86 && obj->arch != KGENOME_ARCH_X86_64))
+	/* the architecture is a row of the table (diag_lineage_arch.c), or the stages do not read the object */
+	if (!kgenome_lineage_arch_of(obj, &row))
 		return;
 	plan = s->lineage_stages ? s->lineage_stages : kgenome_diag_lineage_plan(kgenome_diag_class_of(obj));
 	if (!plan)
@@ -458,7 +519,8 @@ void kgenome_diag_run_lineage(struct kgenome_diag_scan *s, const struct kgenome_
 	L.wk = s->walk;
 	L.frames = kgenome_diag_frames(s);
 	L.sums.s = s;
-	abi_init(&L.abi, obj);
+	L.abi = row;
+	kgenome_diag_noret_settle(s);
 	if (sites_build(&L) && L.n_site && fns_build(&L) && L.n_fn && site_fns_build(&L) && pops_build(&L)) {
 		L.fn_run = calloc(L.n_fn, 1);       /* (without it the next-stage count says "not run") */
 		if (plan & KGENOME_LINEAGE_S_SUMM)
@@ -476,7 +538,10 @@ void kgenome_diag_run_lineage(struct kgenome_diag_scan *s, const struct kgenome_
 	free(L.ref_from);
 	free(L.in);
 	free(L.glob.v);
+	free(L.glob.x);
+	free(L.vx);
 	free(L.loc.v);
+	free(L.loc.x);
 	free(L.callers);
 	free(L.sumhash);
 	free(L.has_site);

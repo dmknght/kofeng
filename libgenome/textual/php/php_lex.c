@@ -366,7 +366,9 @@ uint32_t kgenome_textual_php_tag_own(const uint8_t *tag, uint32_t len, int close
 		return len < 2u ? len : 2u;
 	if (len >= 3u && tag[2] == '=')
 		return 3u;
-	return len >= 5u && kgenome_textual_ci_eq(tag + 2, "php", 3u) ? 5u : 2u;
+	/* never more than it was given: a span shorter than a tag is all the tag there is (IS-6, found by the script_parts fuzz row:
+	 * kgenome_textual_tag_own asked of a 1-byte "<" answered 2) */
+	return len >= 5u && kgenome_textual_ci_eq(tag + 2, "php", 3u) ? 5u : len < 2u ? len : 2u;
 }
 
 void kgenome_textual_php_lex(struct kgenome_textual_lexer *lx)

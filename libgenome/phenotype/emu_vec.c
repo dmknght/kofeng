@@ -1,10 +1,10 @@
 /*
  * emu_vec.c - the SSE subset of the interpreter.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c and emu_x86_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 
 /*
@@ -45,7 +45,7 @@ static inline int vec_xorps(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 static inline int vec_addsd(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 {
 	uint8_t y[16];
-	unsigned ny, op, rc = (e->mxcsr >> 13) & 3u;
+	unsigned ny, op, rc = (e->x86.mxcsr >> 13) & 3u;
 	uint8_t *d = kgenome_emu_xmm_of(e, &ixp->op[0]);
 	int dbl = 1;
 
@@ -123,7 +123,7 @@ static inline int vec_ucomisd(struct kgenome_emu *e, struct kgenome_emu_insn *ix
 static inline int vec_cvtsi2sd(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 {
 	uint8_t y[16];
-	unsigned ny, rc = (e->mxcsr >> 13) & 3u;
+	unsigned ny, rc = (e->x86.mxcsr >> 13) & 3u;
 	uint8_t *dst = kgenome_emu_xmm_of(e, &ixp->op[0]);
 
 	if (!dst)

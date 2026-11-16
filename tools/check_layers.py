@@ -51,7 +51,20 @@ carries the lib's prefix - kgenome_ / KGENOME_ in libgenome/, kuncoat_ / KUNCOAT
 union / enum tags, enumerators, typedefs, functions, variables. A macro the same header #undefs is a
 local helper. No name is exempt.
 """
-import concurrent.futures, glob, os, re, shutil, subprocess, sys
+import concurrent.futures, glob, os, posixpath, re, shutil, subprocess, sys
+
+# EVERY PATH THIS SCRIPT MAKES IS SPELLED WITH '/', because it is compared as text: the
+# prefixes of part(), the EXEMPT keys, the regexes of every pass. os.walk, os.path.join,
+# normpath and glob answer with os.sep, which is '\\' under a native Python on Windows -
+# where `make` runs this script too (mk/checks.mk) - and every pass then misread the tree
+# (EXEMPT entries reported gone, kofmod headers compiled without the umbrella). These two
+# are the one place that spelling is decided; on POSIX they change nothing.
+def slash(p):
+    return p.replace(os.sep, '/') if os.sep != '/' else p
+
+def walk(top):
+    for d, ds, fs in os.walk(top):
+        yield slash(d), ds, fs
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -193,19 +206,19 @@ INC = re.compile(r'^\s*#\s*include\s+([<"])([^>"]+)[>"]', re.M)
 def resolve(src, kind, name):
     cands = []
     if kind == '"':
-        cands.append(os.path.normpath(os.path.join(os.path.dirname(src), name)))
+        cands.append(posixpath.normpath(posixpath.join(posixpath.dirname(src), name)))
     for r in ROOTS:
-        cands.append(os.path.normpath(os.path.join(r, name)))
+        cands.append(posixpath.normpath(posixpath.join(r, name)))
     for c in cands:
         if os.path.isfile(c):
             return c
     return None
 
 def sources(base):
-    for d, ds, fs in os.walk(base):
+    for d, ds, fs in walk(base):
         for f in sorted(fs):
             if f.endswith(('.c', '.h')):
-                yield os.path.join(d, f)
+                yield posixpath.join(d, f)
 
 _inc_cache = {}
 def includes_of(src):
@@ -225,11 +238,11 @@ def includes_of(src):
 def violations():
     out = []
     for base in ('libkofeng', 'libgenome', 'libuncoat', 'libkoforbit', 'bases'):
-        for d, ds, fs in os.walk(base):
+        for d, ds, fs in walk(base):
             for f in fs:
                 if not f.endswith(('.c', '.h')):
                     continue
-                src = os.path.join(d, f)
+                src = posixpath.join(d, f)
                 a = part(src)
                 if a is None:
                     continue
@@ -349,11 +362,11 @@ def header_names(path):
 def prefix_violations():
     out = []
     for lib, pre in PREFIX.items():
-        for d, ds, fs in os.walk(lib.rstrip('/')):
+        for d, ds, fs in walk(lib.rstrip('/')):
             for f in sorted(fs):
                 if not f.endswith('.h'):
                     continue
-                p = os.path.join(d, f)
+                p = posixpath.join(d, f)
                 for nm in sorted(header_names(p)):
                     if not nm.startswith(pre):
                         out.append(f'{p}: {nm}')
@@ -397,15 +410,13 @@ EXEMPT = {
     'function length': {
         'bases/unp/mpress_pe.c: kof_unpack': 'a module: pack bytes depend on the line numbers of bases/ (CLAUDE.md 12)',
         'bases/unp/upx_elf_00.c: kof_unpack': 'a module: pack bytes depend on the line numbers of bases/ (CLAUDE.md 12)',
-        'libgenome/phenotype/emu_interp.c: kgenome_emu_run': 'the interpreter loop: one switch, kept whole so the compiler inlines the hot path',
+        'libgenome/phenotype/emu_x86.c: x86_exec': 'the x86 entry\'s execute: one switch over the instruction ids, kept whole and inlined into the entry\'s instance of the run loop (emu_run_private.h) so the hot path stays one function',
     },
     'file size': {
         'libkoforbit/grille/wevt_decode.c': 'Windows-only, cannot be compiled or checked on this host',
         'libkoforbit/grille/wproc.c': 'Windows-only, cannot be compiled or checked on this host',
         'libkofeng/detectors/mutations/kofmutation.c': 'cohesive: the similarity matcher (the index probe, the per-object state, and its two scoring kinds - window containment and the CFG sketch\'s votes - share the batch, the filters and the state tables; a cut would export every static of it)',
         'libgenome/celllysis/decode_arm64.c': 'cohesive: the AArch64 decoder, one handler per encoding group; no function is long, nothing in it is read apart from the rest',
-        'libgenome/phenotype/emu_interp.c': 'cohesive: the interpreter loop and the inlined step helpers it is kept whole with (the register, flag and operand accessors are emu_state.c)',
-        'libgenome/phenotype/emu_private.h': 'cohesive: the interpreter family\'s ONE private header (the machine, its state, and what each part of the interpreter offers another: the vector, x87, integer and syscall parts all read it); a header per part would be several private headers for one family',
         'libuncoat/decompressors/ppmd.c': 'cohesive: one PPMd variant H decoder (model, range coder, symbol decode share one state)',
         'tools/genotype/x86_gen.c': 'needs the external reference decoder to build or verify a split',
     },
@@ -439,8 +450,8 @@ def tool_include_violations():
             except OSError:
                 continue
             for m in REL_INC.finditer(text):
-                target = os.path.normpath(os.path.join(os.path.dirname(src), m.group(1) + m.group(2)))
-                if target.split(os.sep)[0] in ENGINE_TREES:
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(src), m.group(1) + m.group(2)))
+                if target.split('/')[0] in ENGINE_TREES:
                     out[f'{src} -> {target}'] = ''
     return out
 
@@ -456,15 +467,15 @@ GUARD = re.compile(r'^\s*#\s*ifndef\s+(\w+)\s*\n\s*#\s*define\s+\1\b', re.M)
 
 def guard_violations():
     out = {}
-    for d, ds, fs in os.walk('.'):
+    for d, ds, fs in walk('.'):
         ds[:] = [x for x in ds if not x.startswith('.') and x != 'build']
-        rel = os.path.normpath(d)
+        rel = posixpath.normpath(d)
         if rel.startswith(('libgenome', 'libuncoat')):
             continue
         for f in sorted(fs):
             if not f.endswith('.h'):
                 continue
-            p = os.path.normpath(os.path.join(d, f))
+            p = posixpath.normpath(posixpath.join(d, f))
             try:
                 text = open(p, encoding='utf-8', errors='replace').read()
             except OSError:
@@ -634,16 +645,24 @@ def tests_tmp_violations():
 # libraries) are included by tools and tests that each build their own list of
 # sources, so a header that needs something included before it fails only in
 # whichever tool happens to include it first. Same test as HEADERS COMPILE ALONE,
-# with the orbit include roots added. The Windows half (grille/, chan_win.c) needs
-# windows.h and is skipped, as it cannot be compiled on a POSIX host: its headers are
-# not tested by this pass.
-ORBIT_SKIP = re.compile(r'^libkoforbit/(grille/|chan/chan_win)')
+# with the orbit include roots added. Each collector belongs to one platform, so the
+# pass compiles the half the COMPILER targets and skips the other: on a POSIX target the
+# Windows half (grille/, chan_win.c), which needs windows.h; on a Windows target (`make`
+# on Windows runs this pass too, mk/checks.mk) the Linux half (antarc/, chan_posix.c),
+# which needs sys/uio.h and /proc. The skipped half is not tested by this pass on that host.
+ORBIT_SKIP_POSIX = re.compile(r'^libkoforbit/(grille/|chan/chan_win)')
+ORBIT_SKIP_WINDOWS = re.compile(r'^libkoforbit/(antarc/|chan/chan_posix)')
 
-def _orbit_header_compile(cc, h):
+def _cc_targets_windows(cc):
+    """The compiler's own answer (its predefined _WIN32), not the host Python's."""
+    r = subprocess.run([cc, '-dM', '-E', '-x', 'c', '-'], input='', capture_output=True, text=True)
+    return re.search(r'^#define _WIN32\b', r.stdout, re.M) is not None
+
+def _orbit_header_compile(cc, h, skip_dir):
     args = [cc, '-std=c11', '-fsyntax-only', '-D_GNU_SOURCE', '-x', 'c',
             '-Ilibkofeng', '-Ilibkofeng/kofcore', '-Ilibgenome', '-Ilibuncoat']
     for d in sorted(os.listdir('libkoforbit')):
-        if os.path.isdir(os.path.join('libkoforbit', d)) and d != 'grille':
+        if os.path.isdir(os.path.join('libkoforbit', d)) and d != skip_dir:
             args.append('-Ilibkoforbit/' + d)
     r = subprocess.run(args + [h], capture_output=True, text=True)
     if r.returncode == 0:
@@ -657,9 +676,11 @@ def orbit_header_violations():
     if not cc:
         print('check-layers: orbit headers compile alone: skipped, no C compiler found')
         return out
-    hs = [h for h in sorted(sources('libkoforbit')) if h.endswith('.h') and not ORBIT_SKIP.match(h)]
+    win = _cc_targets_windows(cc)
+    skip, skip_dir = (ORBIT_SKIP_WINDOWS, 'antarc') if win else (ORBIT_SKIP_POSIX, 'grille')
+    hs = [h for h in sorted(sources('libkoforbit')) if h.endswith('.h') and not skip.match(h)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
-        for h, err in zip(hs, ex.map(lambda x: _orbit_header_compile(cc, x), hs)):
+        for h, err in zip(hs, ex.map(lambda x: _orbit_header_compile(cc, x, skip_dir), hs)):
             if err:
                 out[f'{h}: does not compile alone'] = err
     return out
@@ -669,9 +690,10 @@ def orbit_header_violations():
 # CLAUDE.md 12: "A function longer than about 400 lines is a sequence of named static
 # steps". The ceiling is 400 lines, counted from the line of the signature's closing
 # parenthesis to the closing brace at column 0, comments and blank lines included. What
-# is in EXEMPT cannot move today: kgenome_emu_run (the interpreter loop,
-# one switch whose cases share the register state in locals - a split would put that
-# state behind a struct on the hot path) and the unpackers under bases/ (a module's
+# is in EXEMPT cannot move today: x86_exec (the x86 entry's execute, emu_x86.c: one
+# switch whose cases share the operand and register state in locals, inlined into the
+# entry's instance of the run loop - a split would put that state behind a struct on
+# the hot path) and the unpackers under bases/ (a module's
 # object bytes depend on the order and the source lines of its functions, so splitting
 # one changes the pack with no change of behaviour - CLAUDE.md 12, "bases/").
 FN_CEILING = 400
@@ -908,10 +930,10 @@ def fuzz_headers():
         if os.path.exists(f):
             out.append(f)
     # libkoforbit (system-resource handling, orbit): every header that is not private to its directory (`*_int.h`).
-    for d, ds, fs in os.walk('libkoforbit'):
+    for d, ds, fs in walk('libkoforbit'):
         for f in sorted(fs):
             if f.endswith('.h') and not f.endswith(('_int.h', '_private.h')):
-                out.append(os.path.join(d, f))
+                out.append(posixpath.join(d, f))
     return sorted(set(out))
 
 def _fuzz_statements(s):
@@ -968,7 +990,7 @@ def fuzz_surface():
     for h in fuzz_headers():
         for n in fuzz_functions(h):
             out.setdefault(n, h)
-    for h in sorted(glob.glob('libkofeng/analyzers/parsers/containers/*_parse.h')):
+    for h in sorted(slash(g) for g in glob.glob('libkofeng/analyzers/parsers/containers/*_parse.h')):
         for n in fuzz_functions(h):
             if FUZZ_CONTAINER_FN.match(n):
                 out.setdefault(n, h)
@@ -994,7 +1016,7 @@ def fuzz_rows():
 
 def fuzz_exempt():
     out = {}
-    for src in sorted(glob.glob('tests/fuzz/exempt/*.txt')):
+    for src in sorted(slash(g) for g in glob.glob('tests/fuzz/exempt/*.txt')):
         for ln in open(src, encoding='utf-8'):
             ln = ln.rstrip('\n')
             if ln.strip() and not ln.startswith('#'):
@@ -1021,6 +1043,190 @@ def fuzz_cover_violations():
     for fn, f in sorted(ex.items()):
         if ' ' not in fn and fn not in surface:
             out[f'tests/fuzz/exempt/{f}: {fn}'] = 'not a public function any more: delete the entry'
+    return out
+
+# ---- MAKE ON WINDOWS ---------------------------------------------------------------
+#
+# The Makefile drives two shells that share no syntax (mk/shell.mk): sh, and cmd.exe under a
+# GNU make built for Windows (KOF_CMD_SHELL=yes, mk/platform.mk). A recipe spells a file
+# operation through MKDIR/RMRF/RM/COPY/EXEC/DEVNULL/NOOP/SILENCE, an interpreter through
+# $(PYTHON), a loop through $(foreach), a message through $(info) - never a shell's own word.
+# The Windows build broke when recipes and $(shell) calls were added that assumed sh (the merge
+# gate in check-rules, the coverage list, a `@#` comment, `python3`), and nothing said so on the
+# Linux machine where every change is made. This pass reads Makefile and mk/*.mk, evaluates the
+# conditionals that name the platform as a cmd.exe build on Windows sees them, and flags a
+# POSIX-only construct in every recipe line and $(shell) call that build can reach.
+#
+# What it cannot see, stated so a green pass is not read as more than it is:
+#  - it does not expand variables: a POSIX word inside a variable that a recipe expands is seen
+#    only if the variable's own line is a recipe or a $(shell) (UNIT_LIBS_*, UT_LDX_* are not
+#    read - the tests that carry -lrt or --wrap are listed in UNIT_SKIP_WINDOWS or are named by
+#    the report as unverified); $(if)/$(filter) inside a line is not evaluated;
+#  - a conditional on any other variable (SAN, BASE, WIN_CC) counts as reachable both ways;
+#  - files included from elsewhere (tests/fuzz/*/stage.mk) are not read: they are included
+#    only inside a fenced block of mk/fuzz.mk;
+#  - it says nothing about the C side (a Windows compile error) or about a program's own
+#    arguments (a flag a Windows linker does not take).
+MAKE_FILES = (['Makefile'] + sorted('mk/' + f for f in os.listdir('mk') if f.endswith('.mk'))) if os.path.isdir('mk') else []
+# How a cmd.exe build on Windows sees the variables the platform conditionals test.
+MAKE_WIN_VARS = {'NATIVE_OS': 'windows', 'KOF_CMD_SHELL': 'yes', 'KOF_ON_WINDOWS': 'yes',
+                 'OS': 'Windows_NT', 'KOF_UNIXY_MAKE': ''}
+# Programs a cmd.exe (no MSYS2) machine does not have. `python3` is POSIX's name: Windows
+# installs `python` (and `py`), which is why $(PYTHON) exists.
+MAKE_POSIX_CMDS = {'sh', 'bash', 'cat', 'grep', 'egrep', 'fgrep', 'sed', 'awk', 'cp', 'mv', 'rm', 'mkdir',
+                   'rmdir', 'test', '[', '[[', 'find', 'xargs', 'tr', 'head', 'tail', 'touch', 'chmod', 'ln',
+                   'uname', 'nproc', 'flock', 'timeout', 'ulimit', 'python3', 'env', 'true', 'false', 'printf',
+                   'ls', 'diff', 'patch', 'cmp', 'sort', 'uniq', 'wc', 'cut', 'date', 'which', 'command',
+                   'export', 'cygpath', 'install', 'readlink', 'realpath', 'stat', 'tee', 'nm', 'strip', 'ldd',
+                   'valgrind', 'gcov', 'lcov', 'pkg-config', 'while', 'case', 'do', 'done', 'then',
+                   'fi', 'esac', 'source', '.'}
+MAKE_POSIX_TOKENS = [
+    (re.compile(r'/dev/null'), '/dev/null (use $(DEVNULL) or $(SILENCE))'),
+    (re.compile(r'(?<!\$)\$\$\('), '$$( (sh command substitution)'),
+    (re.compile(r'`'), 'backtick (sh command substitution)'),
+    (re.compile(r'\bLD_LIBRARY_PATH\b'), 'LD_LIBRARY_PATH'),
+    (re.compile(r'(?<![\w-])-l(?:dl|rt)\b'), '-ldl/-lrt (no such library on Windows)'),
+    (re.compile(r'\bpython3\b'), 'python3 (use $(PYTHON))'),
+    (re.compile(r'(?<![\w/.])\./'), './program (cmd does not run that; use $(call EXEC,...))'),
+]
+MAKE_PROG_DIRS = ('$(OUT)/', '$(TEST)/', '$(INT)/', '$(BUILD)/', '$(FZB)/', '$(SDK)/', '$(COV_DIR)/')
+
+def _make_balanced_end(s, open_at):
+    """Index of the ')' that closes the '(' at s[open_at] (len(s) when it is not closed)."""
+    depth, j = 0, open_at
+    while j < len(s):
+        if s[j] == '(':
+            depth += 1
+        elif s[j] == ')':
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return len(s)
+
+MAKE_MSG_CALL = re.compile(r'\$\((?:info|error|warning)[\s,)]')
+
+def _make_strip_messages(s):
+    """s without its $(info ...), $(error ...), $(warning ...): make prints those, no shell reads them."""
+    out, i = [], 0
+    while i < len(s):
+        m = MAKE_MSG_CALL.match(s, i)
+        if not m:
+            out.append(s[i]); i += 1; continue
+        i = _make_balanced_end(s, i + 1) + 1
+    return ''.join(out)
+
+def _make_shell_calls(s):
+    """The command text of every $(shell ...) in s."""
+    return [s[m.end():_make_balanced_end(s, m.start() + 1)] for m in re.finditer(r'\$\(shell\s', s)]
+
+def _make_cond(line):
+    """True / False / None (not decidable here) for an ifeq/ifneq/ifdef/ifndef line."""
+    m = re.match(r'(ifeq|ifneq)\s*(.*)$', line)
+    if not m:
+        return None
+    arg = m.group(2).strip()
+    pm = re.match(r'\((.*)\)$', arg)
+    if pm:
+        depth, parts, cur = 0, [], ''
+        for c in pm.group(1):
+            if c == ',' and depth == 0:
+                parts.append(cur); cur = ''; continue
+            depth += (c == '(') - (c == ')')
+            cur += c
+        parts.append(cur)
+    else:
+        parts = [a or b for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', arg)]
+    if len(parts) != 2:
+        return None
+    vals = []
+    for p in parts:
+        p = re.sub(r'\$\((\w+)\)', lambda v: MAKE_WIN_VARS.get(v.group(1), v.group(0)), p.strip())
+        if '$' in p:
+            return None
+        vals.append(p.strip())
+    eq = vals[0] == vals[1]
+    return eq if m.group(1) == 'ifeq' else not eq
+
+def _make_posix_hits(cmd):
+    """What in one recipe line (or one $(shell) text) only a POSIX shell understands."""
+    hits = []
+    text = _make_strip_messages(cmd)
+    for rx, what in MAKE_POSIX_TOKENS:
+        if rx.search(text):
+            hits.append(what)
+    # a command is split at && || ; | outside quotes ('a|b' is one argument of grep)
+    unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", lambda q: '"' + 'x' * (len(q.group(0)) - 2) + '"', text)
+    for seg in re.split(r'&&|\|\||;|\|', unquoted):
+        seg = seg.strip().lstrip('@-+(').strip()
+        if not seg:
+            continue
+        if seg.startswith('#'):
+            hits.append('a # comment in a recipe (cmd has none: make it a make comment, not indented by a tab)')
+            continue
+        if re.match(r'[A-Za-z_]\w*=\S*\s+\S', seg):
+            hits.append('VAR=value command (sh only: pass an argument)')
+            continue
+        word = seg.split()[0]
+        if word in MAKE_POSIX_CMDS:
+            hits.append(f'{word} (not a program a cmd.exe build has)')
+        elif word.startswith(MAKE_PROG_DIRS) or (not word.startswith('$(') and '/' in word):
+            hits.append(f'{word} run by its path (cmd splits the word at /: use $(call EXEC,...))')
+    return hits
+
+def make_windows_violations():
+    out = {}
+    for path in MAKE_FILES:
+        try:
+            raw = open(path, encoding='utf-8', errors='replace').read().split('\n')
+        except OSError:
+            continue
+        stack = []          # per open conditional: [this branch's value, an earlier branch was taken]
+        in_define = 0
+        i = 0
+        while i < len(raw):
+            start, line = i, raw[i]
+            while line.endswith('\\') and i + 1 < len(raw):
+                i += 1
+                line = line[:-1] + ' ' + raw[i].lstrip()
+            i += 1
+            stripped = line.strip()
+            if not line.startswith('\t'):
+                words = stripped.split()
+                first = words[0] if words else ''
+                if first == 'define' or (first in ('override', 'export') and words[1:2] == ['define']):
+                    in_define += 1; continue
+                if first == 'endef':
+                    in_define = max(0, in_define - 1); continue
+                if first in ('ifeq', 'ifneq', 'ifdef', 'ifndef'):
+                    v = _make_cond(stripped)
+                    stack.append([v, v is True]); continue
+                if first == 'else':
+                    if stack:
+                        top, rest = stack[-1], stripped[4:].strip()
+                        if top[1]:
+                            nv = False
+                        elif rest:
+                            nv = _make_cond(rest)
+                        else:
+                            nv = None if top[0] is None else not top[0]
+                        top[0], top[1] = nv, top[1] or nv is True
+                    continue
+                if first == 'endif':
+                    if stack:
+                        stack.pop()
+                    continue
+            if any(f[0] is False for f in stack):
+                continue
+            body = line.replace('$$', '$') if in_define else line
+            if line.startswith('\t'):
+                for h in _make_posix_hits(body):
+                    out[f'{path}:{start + 1}: {h}'] = body.strip()[:120]
+                continue
+            code = re.sub(r'(?<!\\)#.*$', '', body)
+            for sh in _make_shell_calls(code):
+                for h in _make_posix_hits(sh):
+                    out[f'{path}:{start + 1}: $(shell) {h}'] = sh.strip()[:120]
     return out
 
 def main():
@@ -1065,6 +1271,8 @@ def layers_main():
                  'a test reads the environment (see the note at tests_getenv_violations):', EXEMPT['getenv in tests'])
     rc |= ratchet('fuzz coverage', fuzz_cover_violations(),
                  'a public function has no fuzz adapter row and no EXEMPT entry, or a table is stale (tests/fuzz/README.txt):')
+    rc |= ratchet('make on Windows', make_windows_violations(),
+                 'a recipe or $(shell) that a cmd.exe build on Windows reaches uses a POSIX-only construct (mk/shell.mk: MKDIR/RMRF/RM/COPY/EXEC/DEVNULL/$(PYTHON); or fence the target):')
     rc |= known_defect_main()
     return rc
 

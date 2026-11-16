@@ -93,6 +93,8 @@ static unsigned count_files(const char *dir)
 	return n;
 }
 
+/* KNOWN DEFECT W-D8 (2026-11-17, R) [sev L]: today_window calls localtime_r, so this test does not compile on Windows. Trigger: the Windows build of the unit tests.
+ * Effect: the test is not built there. Reproducer: /mnt/games/normtest/fix_wd/report.txt. Fix: kof_localtime (kofplatform). */
 static void today_window(char *lo, char *hi, size_t cap, void (*run)(void))
 {
 	time_t t = time(NULL);

@@ -77,11 +77,27 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
  * name are not reported: the record's identity is its name. `fn` returns 0 to
  * stop. Returns how many were handed over; `status`, when not NULL, is
  * KGENOME_TRUNCATED when NumberOfNames was cut at the walk's bound.
+ *
+ * `rva` IS HANDED OVER AS THE DIRECTORY STORES IT, forwarder or not: when it
+ * lies inside the export directory's own [rva, rva+size) range it is not a
+ * function address at all, but the RVA of a forwarder string ("DLL.Name") -
+ * this walk does not screen that out, because what a forwarder means differs
+ * by consumer (the function-table side drops it; the symbol side still wants
+ * the name, just not a code claim). A caller that treats `rva` as an address
+ * tests it with kgenome_pe_export_is_forwarder first.
  */
 typedef int (*kgenome_pe_export_fn)(void *user, uint64_t nameoff, uint32_t rva);
 uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 			kgenome_pe_export_fn fn, void *user,
 			enum kgenome_status *status);
+/*
+ * True when `rva` lies inside the export directory's own [rva, rva+size) range -
+ * the address of a forwarder string, never code. One test, shared by
+ * kgenome_fntab_pe_export (fntab_pe_export.c, the function-table side, which
+ * drops a forwarder) and kof_pe_syms_with's export_put (pe_sym.c, the symbol
+ * side, which keeps the name but must not claim the address is executable).
+ */
+int kgenome_pe_export_is_forwarder(const struct kgenome_pe_info *p, uint32_t rva);
 
 /*
  * THE IMPORT DIRECTORY, WALKED ONCE AND KEPT - for the readers that share one
@@ -163,6 +179,10 @@ struct kgenome_pe_coff_sym {
 typedef int (*kgenome_pe_coff_sym_fn)(void *user, const struct kgenome_pe_coff_sym *s);
 void kgenome_pe_coff_syms(kof_buf file, const struct kgenome_pe_info *p,
 			 kgenome_pe_coff_sym_fn fn, void *user, uint32_t *n_bad);
+/* The table's declared record count (NumberOfSymbols), clamped to the file - for a
+ * caller sizing a buffer, not walking records (kof_syms_declared, sym_any.c). 0 when
+ * there is no such table. */
+uint32_t kgenome_pe_coff_count(kof_buf file, const struct kgenome_pe_info *p);
 
 /*
  * Does this object look like PE at all?

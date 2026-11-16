@@ -173,4 +173,5 @@ const struct kgenome_textual_lang kgenome_textual_lang_perl = {
 	.fn_table = &kgenome_textual_perl_fn_table,
 	.value = kgenome_textual_perl_value,
 	.quote = &quote,
+	.stmt_delim = 1,
 };

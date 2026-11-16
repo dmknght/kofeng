@@ -171,7 +171,7 @@ enum kgenome_status kgenome_range_xref_build(const struct kgenome_obj *obj, kof_
 			const struct kgenome_pe_sec *sec = &p->sec[i];
 			uint64_t at, have;
 
-			if (!kgenome_pe_sec_is_code(sec) || !(have = kgenome_pe_sec_extent(sec, file.n, &at)))
+			if (!kgenome_pe_sec_is_code(p, sec) || !(have = kgenome_pe_sec_extent(sec, file.n, &at)))
 				continue;
 			total += have;
 			if (have > left) {

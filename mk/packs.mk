@@ -47,8 +47,8 @@
 # ALGORITHMS are not here at all: they are host services in
 # libuncoat, reached through the module ABI, for the reason
 # kofsig.h gives at the inflate
-# entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
-# unpacker kernel and the per-packer modules call into them.
+# entry. The decompressors (NRV, LZMA) live in the host's unpacking kernel and the
+# per-packer modules call into them.
 #
 #   make databases                     the product        -> build/release/databases
 #   make databases BASEDIR=tests/sigs  the engine's tests -> build/test/databases-sigs

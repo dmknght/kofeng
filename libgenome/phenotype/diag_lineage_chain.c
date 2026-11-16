@@ -39,6 +39,8 @@
  * reading would start.
  */
 #include <string.h>
+#include <stdlib.h>
+#include <kofcmp.h>
 #include "diag_lineage_private.h"
 
 #define S_LOCS KGENOME_LINEAGE_S_LOCS
@@ -85,7 +87,7 @@ static uint16_t call_bits(const struct kgenome_lineage *L, const struct kgenome_
 	uint32_t node, f;
 
 	if (kgenome_lineage_site_in(L, in, &node))
-		return (uint16_t)(P(NODE) | (kgenome_lineage_hands_on(L, &L->s->hit[node]) ? P(PRODUCER) : 0u));
+		return (uint16_t)(P(NODE) | (kgenome_lineage_hands_on(&L->s->hit[node]) ? P(PRODUCER) : 0u));
 	if (in->flags & KGENOME_CELL_F_INDIRECT)
 		return P(ICALL);
 	if (in->target_va == KGENOME_BROKEN)
@@ -97,6 +99,26 @@ static uint16_t call_bits(const struct kgenome_lineage *L, const struct kgenome_
 }
 
 static int fn_holds(const struct kgenome_lineage_cfg *g, const struct lineage_pred *p);
+
+/* Does a node sit inside block `b` (a system call's: the frame's bits say only whether the block calls or jumps). A search of the sorted
+ * sites, once per block. */
+static int block_has_site(const struct kgenome_lineage *L, const struct kgenome_lineage_cfg *g, uint32_t b)
+{
+	const struct kgenome_cell_insn *f = &L->in[kgenome_lineage_bfirst(g, b)], *e = &L->in[kgenome_lineage_bend(g, b) - 1u];
+	uint32_t lo = 0, hi = L->n_site;
+
+	if (!g->cfg.b[b].n_insn)
+		return 0;
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (L->site_at[mid] < f->at)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo < L->n_site && L->site_at[lo] < e->at + e->len;
+}
 
 /*
  * THE PREDICATES OF A BLOCK. What needs no other input - a memory operand beyond the frame, a store through one, a push, whether the block calls or jumps at all, and the
@@ -118,16 +140,20 @@ void kgenome_lineage_preds(struct kgenome_lineage *L, struct kgenome_lineage_cfg
 			pr |= P(MEMSTORE);
 		if ((fb & KGENOME_FRAME_B_PUSH) && L->abi.callee_pops)
 			pr |= P(STACKARG);
-		if (fb & (KGENOME_FRAME_B_CALL | KGENOME_FRAME_B_JMP)) {
+		if ((fb & (KGENOME_FRAME_B_CALL | KGENOME_FRAME_B_JMP)) || block_has_site(L, g, b)) {
 			uint32_t i;
 
 			for (i = kgenome_lineage_bfirst(g, b); i < kgenome_lineage_bend(g, b); i++) {
 				const struct kgenome_cell_insn *in = &L->in[i];
+				uint32_t node;
 
 				if (in->op == KGENOME_CELL_CALL || (in->op == KGENOME_CELL_JMP && kgenome_lineage_jmp_is_tail(L, g, b, in)))
 					pr |= call_bits(L, in);
 				else if (in->op == KGENOME_CELL_JMP && (in->flags & KGENOME_CELL_F_INDIRECT))
 					pr |= P(ICALL);
+				else if ((in->op == KGENOME_CELL_SYSCALL || in->op == KGENOME_CELL_INT) && kgenome_lineage_site_in(L, in, &node) &&
+					 kgenome_lineage_is_kentry(L, in))
+					pr |= call_bits(L, in);         /* a system call's node: a NODE, a PRODUCER when it hands one on */
 			}
 		}
 		/* a push counts as a stack argument only in a block that calls */
@@ -224,29 +250,24 @@ int kgenome_lineage_seed_block(const struct kgenome_lineage_cfg *g, uint32_t b)
  * A call the program does not come back from ends its block: the bytes after it are the next function's (or padding), and a walk
  * that went on into them would hand the state of this function to that one - MEASURED, a link from an fopen in one function to a
  * send in the next (540/f of the static stripped cell, seeded code). The knowledge is COVERAGE the decoder cannot supply: which
- * callees do not return. Two sources. IMPORTS, by name, from this ONE small table - the functions declared noreturn by C11 and
- * glibc's headers [Inference: from the declarations, not from a list the engine already holds: it holds none, grep of libgenome
- * and libkofeng for noreturn found nothing]; and FUNCTIONS OF THE OBJECT, structurally (diag_lineage_summ.c): no `ret`, no jump
- * out, no jump through a register, and at least one call or syscall - what __stack_chk_fail, abort and _exit of a static binary
- * are. A noreturn function that tail-jumps or returns on some path is not found: said, not guessed.
+ * callees do not return. Two sources. IMPORTS, by the ROW of their name: a row whose result is KGENOME_NUCLEO_RES_NORET (`res=noret`,
+ * nucleo_names_elf.c and nucleo_names_pe.c: the functions declared noreturn by C11 and glibc's headers, the Windows exits) - it was a
+ * list of names here beside the table that holds the other per-call facts, one fact in two carriers; and FUNCTIONS OF THE OBJECT,
+ * structurally (diag_lineage_summ.c): no `ret`, no jump out, no jump through a register, and at least one call or syscall - what
+ * __stack_chk_fail, abort and _exit of a static binary are. A noreturn function that tail-jumps or returns on some path is not found:
+ * said, not guessed. A route that already holds the row asks kgenome_nucleo_row_res (diag_pe.c, diag_elfimp.c); this answers for a
+ * name alone (a system call by the name of its number, diag_site.c), the ELF table first and then the PE one, as the old list mixed both.
  */
-static const char *const noreturn_names[] = {
-	"exit", "_exit", "_Exit", "abort", "quick_exit", "__stack_chk_fail", "__stack_chk_fail_local", "__assert_fail", "__assert",
-	"__assert_perror_fail", "__chk_fail", "__fortify_fail", "__libc_fatal", "longjmp", "_longjmp", "siglongjmp", "__longjmp_chk",
-	"pthread_exit", "__cxa_throw", "__cxa_rethrow", "__cxa_bad_cast", "__cxa_bad_typeid", "_Unwind_Resume", "err", "errx", "verr",
-	"verrx", "thrd_exit",
-	/* Windows: the imports a PE route reports by name. TerminateProcess is not here: it returns when the target is another process. */
-	"ExitProcess", "ExitThread", "RtlExitUserProcess", "RtlExitUserThread", "FatalExit", "_CxxThrowException", "_amsg_exit", "_invoke_watson"
-};
-
 int kgenome_diag_name_is_noreturn(const char *name)
 {
-	unsigned i;
+	uint16_t r;
 
-	for (i = 0; name && i < sizeof noreturn_names / sizeof noreturn_names[0]; i++)
-		if (!strcmp(name, noreturn_names[i]))
-			return 1;
-	return 0;
+	if (!name)
+		return 0;
+	r = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, name);
+	if (!r)
+		r = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, name);
+	return r && kgenome_nucleo_row_res(r) == KGENOME_NUCLEO_RES_NORET;
 }
 
 /* One call to an import that never returns, recorded at its file offset (a route that reads the code in address order keeps the list ascending; one that
@@ -270,6 +291,21 @@ int kgenome_diag_noret_add(struct kgenome_diag_scan *s, uint64_t at)
 	}
 	s->noret_at[s->n_noret++] = at;
 	return 1;
+}
+
+/* THE LIST IN ADDRESS ORDER, each place once: the routes add in the order they read (the PE route its thunk calls after the code, the sweep
+ * a window again on its second pass), and the one reader of the list, the lineage stage, puts it in order before it asks. */
+void kgenome_diag_noret_settle(struct kgenome_diag_scan *s)
+{
+	uint32_t i, m = 0;
+
+	if (s->n_noret < 2u)
+		return;
+	qsort(s->noret_at, s->n_noret, sizeof *s->noret_at, kof_cmp_u64);
+	for (i = 0; i < s->n_noret; i++)
+		if (!m || s->noret_at[m - 1u] != s->noret_at[i])
+			s->noret_at[m++] = s->noret_at[i];
+	s->n_noret = m;
 }
 
 /* Is the call at file offset `at` one to an import that does not return (the symbol route found it). */
@@ -411,23 +447,6 @@ static unsigned input_state(const struct kgenome_lineage *L, const struct kgenom
 	return a->param ? KGENOME_LINEAGE_W_ENTRY : KGENOME_LINEAGE_W_UNREACH;
 }
 
-/* KNOWN DEFECT REV-D7b (2026-10-24, Inference) [sev L]: glob_find (the lineage global table) is a hand-rolled open-addressing table with an unseeded multiplicative
- * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
- * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
- * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
-static struct kgenome_lineage_agg *glob_find(const struct kgenome_lineage *L, uint32_t key)
-{
-	uint32_t m, i;
-
-	if (!L->glob.cap)
-		return NULL;
-	m = L->glob.cap - 1u;
-	for (i = ((key * 0x9e3779b1u) >> 7) & m; L->glob.v[i].key; i = (i + 1u) & m)
-		if (L->glob.v[i].key == key)
-			return &L->glob.v[i];
-	return NULL;
-}
-
 /* Every input of every consumer node, once the links are written: counted, and the unaccounted ones kept. */
 void kgenome_lineage_obligations(struct kgenome_lineage *L)
 {
@@ -461,7 +480,8 @@ void kgenome_lineage_obligations(struct kgenome_lineage *L)
 			unsigned q;
 
 			for (q = 0; q < 6u; q++) {
-				uint8_t role = kgenome_diag_role_of_arg(h->cap, q);
+				uint8_t role = kgenome_nucleo_call_role(h->cap, h->row, q);
+				const struct kgenome_lineage_agg *a;
 				int partial, dup = 0;
 				unsigned why;
 
@@ -472,10 +492,9 @@ void kgenome_lineage_obligations(struct kgenome_lineage *L)
 				if (dup || ns >= 8u)
 					continue;
 				seen[ns++] = role;
-				why = input_state(L, glob_find(L, ((L->site_node[k] + 1u) << 8) | role), &partial);
+				a = kgenome_lineage_agg_get(&L->glob, ((L->site_node[k] + 1u) << 8) | role);
+				why = input_state(L, a, &partial);
 				if (pass == 0u) {
-					const struct kgenome_lineage_agg *a = glob_find(L, ((L->site_node[k] + 1u) << 8) | role);
-
 					st->inputs++;
 					st->fd_inputs += role == KGENOME_DIAG_ROLE_FD;
 					if (a && a->n == 1u && !a->other)

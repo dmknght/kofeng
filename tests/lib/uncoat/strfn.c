@@ -393,6 +393,47 @@ static void case_trim_all_bytes(void)
 	}
 }
 
+/*
+ * STRFN-TRIM-OVERLAP-1 / STRFN-CUT-OVERLAP-1's reproducer: trim_run and cut_run are called here
+ * with ONE buffer for both `in` and `out` (not through exact()/T(), which always use separate
+ * guard pages and so never alias) - the shape objtree_embed.c/executables.c's in-place callers
+ * use. Before the fix this is a memcpy with overlapping ranges (ASAN: memcpy-param-overlap,
+ * caught by tests/lib/uncoat/hostile_transform.c's own alias-fuzzing); the bytes still come out
+ * right under glibc's forward-copying memcpy in this direction (dst < src here), so this is a
+ * sanitizer-level regression guard more than a correctness one - checked anyway, so a future
+ * change that makes the direction unsafe is still caught by the byte comparison.
+ */
+static void inplace_trim_and_cut(void)
+{
+	{
+		uint8_t buf[16] = "  hello world  ";
+		struct kuncoat_step s = mk(KUNCOAT_ALGO_TRIM, 0, 3u, 0, NULL, 0);
+		uint64_t w = 0;
+		enum kuncoat_status st = kuncoat_transform(&s, buf, 16, buf, 16, &w);
+
+		CK(st == KUNCOAT_OK);
+		CK(w == 11u && !memcmp(buf, "hello world", 11));
+	}
+	{
+		uint8_t buf[7] = "foobar";
+		struct kuncoat_step s = mk(KUNCOAT_ALGO_CUTHEAD, 0, 0, 0, (const uint8_t *)"foo", 3);
+		uint64_t w = 0;
+		enum kuncoat_status st = kuncoat_transform(&s, buf, 6, buf, 6, &w);
+
+		CK(st == KUNCOAT_OK);
+		CK(w == 3u && !memcmp(buf, "bar", 3));
+	}
+	{
+		uint8_t buf[7] = "foobar";
+		struct kuncoat_step s = mk(KUNCOAT_ALGO_CUTTAIL, 0, 0, 0, (const uint8_t *)"bar", 3);
+		uint64_t w = 0;
+		enum kuncoat_status st = kuncoat_transform(&s, buf, 6, buf, 6, &w);
+
+		CK(st == KUNCOAT_OK);
+		CK(w == 3u && !memcmp(buf, "foo", 3));
+	}
+}
+
 /* ---- the url decode's RAW flag ---------------------------------------------------------------- */
 
 static size_t ref_url(const uint8_t *in, size_t n, int raw, uint8_t *out)
@@ -616,6 +657,7 @@ int main(void)
 	translate_exhaustive();
 	slice_exhaustive();
 	case_trim_all_bytes();
+	inplace_trim_and_cut();
 	url_raw();
 	hex_strict();
 	arg_rules();

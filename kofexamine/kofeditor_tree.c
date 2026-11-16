@@ -231,27 +231,22 @@ int kofeditor_link_name_ok(const char *n)
 }
 
 /* The regular file `dir`/`name`.c, read whole (malloc'd, NUL added) with its mode: NULL for a missing file, a symlink, a directory, anything
- * else that is not a regular file, or one over 1 MiB. O_NOFOLLOW as well as lstat, so a link swapped in between is refused too. */
+ * else that is not a regular file, or one over 1 MiB. The kind is asked without following a link (kof_path_kind) and the file is opened without
+ * following one (kof_fopen_read_nofollow), so a link swapped in between is refused too - on Windows a reparse point is the link. */
 char *kofeditor_tree_file(const char *dir, const char *name, size_t *n, mode_t *mode)
 {
 	char path[4400];
 	struct stat st;
 	FILE *f;
 	char *b;
-	int fd;
 
 	if (!kofeditor_link_name_ok(name) || snprintf(path, sizeof path, "%s/%s.c", dir, name) >= (int)sizeof path)
 		return NULL;
-	if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (off_t)(1 << 20))
+	if (kof_path_kind(path, &st) != KOF_PATH_REGULAR || st.st_size > (off_t)(1 << 20))
 		return NULL;
-	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-	if (fd < 0)
+	f = kof_fopen_read_nofollow(path);
+	if (!f)
 		return NULL;
-	f = fdopen(fd, "rb");
-	if (!f) {
-		close(fd);
-		return NULL;
-	}
 	b = file_bytes(f, n);
 	fclose(f);
 	*mode = st.st_mode & 07777u;
@@ -265,7 +260,7 @@ int kofeditor_tree_missing(const char *dir, const char *name)
 	char path[4400];
 	struct stat st;
 
-	return kofeditor_link_name_ok(name) && snprintf(path, sizeof path, "%s/%s.c", dir, name) < (int)sizeof path && lstat(path, &st) != 0 && errno == ENOENT;
+	return kofeditor_link_name_ok(name) && snprintf(path, sizeof path, "%s/%s.c", dir, name) < (int)sizeof path && kof_path_kind(path, &st) == KOF_PATH_MISSING;
 }
 
 /* The identity of a diagnose source: it reads and resolves, and its own name is `name`. 1 and the body hash, or 0. */

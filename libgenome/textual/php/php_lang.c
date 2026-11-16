@@ -51,6 +51,8 @@ const struct kgenome_textual_lang kgenome_textual_lang_php = {
 	.echo_call = 1,
 	.norm_quote = 1,
 	.heredoc_eol = 1,
+	.stmt_semi = 1,
+	.stmt_delim = 1,
 	.fn_table = &kgenome_textual_php_fn_table,
 	.fn_fold = 1,
 };

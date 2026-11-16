@@ -125,8 +125,8 @@ static const struct xrow XROWS[] = {
 	{ "jmp *[rip+0]",   0, { 0xff, 0x25, 0, 0, 0, 0 }, 6, X_EXIT, 0 },
 	{ "ljmp *(rax)",    0, { 0xff, 0x28 }, 2, X_EXIT, 0 },
 	{ "loop",           0, { 0xe2, 0 }, 2, X_BRC, 0 },
-	/* KNOWN DEFECT CL-1 (2026-10-30, M): this row pins it - the decoder reports jrcxz/jecxz as OTHER, so the table sees no branch. */
-	{ "jrcxz (CL-1: should be X_BRC)", 0, { 0xe3, 0 }, 2, X_NONE, 0 },
+	/* CL-1 (fixed): jrcxz/jecxz/jcxz is KGENOME_X86_I_JrCXZ -> KGENOME_CELL_LOOP -> X_BR_COND, same as loop. */
+	{ "jrcxz",          0, { 0xe3, 0 }, 2, X_BRC, 0 },
 	{ "call rel32",     0, { 0xe8, 0, 0, 0, 0 }, 5, X_NONE, 0 },
 	{ "call *rax",      0, { 0xff, 0xd0 }, 2, X_NONE, 0 },
 	{ "cmovne eax,ebx", 0, { 0x0f, 0x45, 0xc3 }, 3, X_NONE, 0 },

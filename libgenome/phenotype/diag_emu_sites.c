@@ -146,7 +146,7 @@ int kgenome_diag_emu_rel_span_no_producer(struct kgenome_diag_emu_rel_walk *R, s
 				 skips[t].callee) != 0xffffu))
 			producer = 1;
 		for (k = 0; k < 6u; k++)
-			if (kgenome_diag_role_of_arg(skips[t].cap, k)
+			if (kgenome_nucleo_cap_role(skips[t].cap, k)
 			    != KGENOME_DIAG_ROLE_NONE) {
 				takers++;
 				break;
@@ -327,8 +327,8 @@ static void rel_site_args(struct kgenome_diag_emu_rel_walk *R, struct kgenome_di
 
 		for (k = 0; k < 6u && h; k++) {
 			uint8_t role =
-			  kgenome_diag_role_of_arg(
-				h->cap, k);
+			  kgenome_nucleo_call_role(
+				h->cap, h->row, k);
 			uint64_t v = kgenome_emu_get_reg(em,
 			  kgenome_diag_sysv_arg[k]);
 			uint32_t t;

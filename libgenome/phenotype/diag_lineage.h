@@ -47,7 +47,7 @@
 #define KGENOME_CLASS_DYNAMIC  (1u << 3)   /* an ELF with a PT_INTERP: it imports its libc */
 #define KGENOME_CLASS_SYMBOLS  (1u << 4)   /* an ELF with a .symtab; a PE with a debug directory */
 #define KGENOME_CLASS_WIDE     (1u << 5)   /* 64-bit */
-#define KGENOME_CLASS_X86      (1u << 6)   /* x86 or x86-64: the arch the stages read */
+#define KGENOME_CLASS_X86      (1u << 6)   /* the arch the stages read: a row of diag_lineage_arch.c (today x86 and x86-64 alone) */
 #define KGENOME_CLASS_MANAGED  (1u << 7)   /* a PE whose code is managed (.NET): no native code to follow */
 #define KGENOME_CLASS_NOSECT   (1u << 8)   /* an ELF with no section header table (packed, hand-made): its code is found by its segments */
 

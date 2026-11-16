@@ -260,9 +260,27 @@ void draft_unit_items(const struct kof_editor *e, const char *stem, uint8_t utyp
 		snprintf(it->s1, sizeof it->s1, "%s", words);
 	}
 	if (e->dr.opt_on[OPT_SUBTYPE]) {
+		uint32_t sf;
+
 		it = &d->item[d->n++];
 		it->kind = KDS_SUBTYPE;
 		it->v = e->dr.opt_val[OPT_SUBTYPE];
+		/*
+		 * WHICH FORMAT THIS SUBTYPE BELONGS TO (kof_dsrc_print's own fmt_hint,
+		 * diagsrc.c): ELF, PE and Script all number their subtypes from zero,
+		 * so the bare value alone cannot say which word to print it as - this
+		 * is the one place that still has the draft's own declared format to
+		 * answer it (the printer, downstream, does not). Same source
+		 * kv_decl_opts.c's draft_sub_fmt reads for the panel's own display of
+		 * this value, minus that function's event-record fallback: a unit
+		 * reaching Save with OPT_SUBTYPE on has already had its format
+		 * declared, by the panel's own rule that a subtype needs one.
+		 */
+		for (sf = 0; sf < (uint32_t)KOF_FMT_COUNT; sf++)
+			if (e->dr.fmt_mask & (1u << sf)) {
+				it->b = (uint16_t)sf;
+				break;
+			}
 	}
 	/* The two options a signature declared as targets (KOF_TARGET_SIZE_MIN, KOF_TARGET_ARCH) are conditions of the diagnose: the
 	 * engine's facts for them (KOF_FACT_SIZE_MIN, KOF_FACT_ARCH_SET), written as KOF_DIAG_HAS_ATTRB lines. */
@@ -277,6 +295,21 @@ void draft_unit_items(const struct kof_editor *e, const char *stem, uint8_t utyp
 		it->kind = KDS_ATTRB;
 		it->a = (uint16_t)KOF_FACT_ARCH_SET;
 		it->v = (uint64_t)1 << e->dr.opt_val[OPT_ARCH];
+	}
+	/* The gate of the signature (kof_draft.gate), a line a condition, in the order they were added: KOF_DIAG_HAS_ANOMALY carries
+	 * the format and the bit, KOF_DIAG_HAS_NUCLEO the capability (the shared printer spells both by the engine's names). */
+	for (f = 0; f < e->dr.n_gate && f < KOF_DIAG_MAX_WHEN; f++) {
+		const struct kof_diag_when *w = &e->dr.gate[f];
+
+		it = &d->item[d->n++];
+		if (w->fact == KOF_FACT_ANOMALY) {
+			it->kind = KDS_ANOMALY;
+			it->a = (uint16_t)(w->val >> 32);
+			it->b = (uint16_t)(w->val & 63u);
+		} else {
+			it->kind = KDS_NUCLEO;
+			it->a = (uint16_t)w->val;
+		}
 	}
 	if (e->dr.family[0]) {
 		it = &d->item[d->n++];

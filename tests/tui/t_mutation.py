@@ -54,9 +54,8 @@ def table_columns_header_and_rows():
         check(len(r) >= 5, 'rows: %d' % len(r))
         for (_, _, a, _, _), (_, _, b, _, _) in zip(r, r[1:]):
             check(b > a, 'rows not sorted by offset')
-        # a function unit is signed whatever its size (the floor of 12 reachable blocks is gone): its row carries a hash; a data unit keeps its hash
-        check(not [b for b in r if b[3] == 'CODE' and b[4] == '-'], 'a function row shows a dash in the hash column')
-        check([b for b in r if b[3] == 'CODE' and re.match(r'[0-9a-f]{8}$', b[4])], 'no function row carries a hash')
+        # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): a function row has no signature, its hash cell is a dash; a data unit keeps its hash
+        check([b for b in r if b[3] == 'CODE' and b[4] == '-'], 'no function row shows a dash in the hash column')
         check([b for b in r if b[3] == 'DATA' and re.match(r'[0-9a-f]{8}$', b[4])], 'no data row with a hash')
 
 
@@ -100,14 +99,16 @@ def tick_makes_a_find_sim_matcher_and_the_folded_view_lists_the_row():
 
 @case(A)
 def a_function_row_below_the_floor_has_no_signature_and_cannot_be_ticked():
-    # A small function (it was below the floor of 12 reachable blocks, which is gone) is signed: its row shows a hash and ticking it takes.
+    # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): a function row has no signature: a dash, and its tick does not take (the status line says why).
     with ko() as v:
-        y = [b for b in blk_rows(v) if b[2] == 0x36bc0][0][0]
+        fn = [b for b in blk_rows(v) if b[3] == 'CODE' and b[4] == '-']
+        check(fn, 'no function row with a dash')
+        y = fn[0][0]
         r = v.row(y)
-        check(re.fullmatch('[0-9a-f]{8}', BLK.match(r).group(3)), 'a small function row must show its hash: %r' % r[:40])
         v.click(r.index('[ ]') + 2, y)
         v.pump_quiet()
-        check(v.row(y).lstrip().startswith('[x]'), 'the tick of a small function row did not take: %r' % v.row(y)[:30])
+        check(v.row(y).lstrip().startswith('[ ]'), 'the tick of an unsigned function row took: %r' % v.row(y)[:30])
+        check(v.find('CFG signing disabled by the owner 2026-11-15'), 'no reason said')
 
 
 @case(A)
@@ -277,8 +278,15 @@ def pe_file_has_mutation_table():
         open_tab(v, 'Blocks')
         r = blk_rows(v)
         check(r, 'no mutation rows for a PE: %r' % [v.row(y)[:50] for y in panel(v)][:12])
-        v.click(v.row(r[0][0]).index('[ ]') + 2, r[0][0])
-        check(v.row(r[0][0]).lstrip().startswith('[x]'))
+        # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): the first row may be a function row, which has no signature and cannot be ticked; a row with a hash is ticked
+        h = signed(v)
+        if h:
+            v.click(v.row(h[0][0]).index('[ ]') + 2, h[0][0])
+            check(v.row(h[0][0]).lstrip().startswith('[x]'), 'the tick of a PE row with a hash did not take')
+        else:       # every row on screen is a function row: none takes a tick
+            v.click(v.row(r[0][0]).index('[ ]') + 2, r[0][0])
+            v.pump_quiet()
+            check(r[0][4] == '-' and v.row(r[0][0]).lstrip().startswith('[ ]'), 'an unsigned PE function row took a tick')
 
 
 @case(A)

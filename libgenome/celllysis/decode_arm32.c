@@ -425,14 +425,14 @@ static void f_push1(struct kgenome_arm32_insn in, const struct a_info *e,
 		    struct kgenome_cell_insn *o)
 {
 	(void)e;
-	kgenome_arm_pushpop(o, 0, KGENOME_ARM_R(kgenome_arm32_r12(in)));
+	kgenome_arm_pushpop(o, 0, (uint32_t)KGENOME_ARM_R(kgenome_arm32_r12(in)));   /* rt is 4 bits: the bit fits the 16-bit list */
 }
 
 static void f_pop1(struct kgenome_arm32_insn in, const struct a_info *e,
 		   struct kgenome_cell_insn *o)
 {
 	(void)e;
-	kgenome_arm_pushpop(o, 1, KGENOME_ARM_R(kgenome_arm32_r12(in)));
+	kgenome_arm_pushpop(o, 1, (uint32_t)KGENOME_ARM_R(kgenome_arm32_r12(in)));   /* rt is 4 bits: the bit fits the 16-bit list */
 }
 
 static void f_push(struct kgenome_arm32_insn in, const struct a_info *e,

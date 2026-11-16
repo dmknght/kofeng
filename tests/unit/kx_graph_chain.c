@@ -6,6 +6,7 @@
  */
 #include "../lib/genome/cfg_kit.h"
 #include "../../libkofeng/analyzers/cfgview.h"
+#include "../../libkofeng/analyzers/lineageview.h"
 #include "../../libkofeng/analyzers/genome_obj.h"
 #include "../../kofexamine/kofview.h"
 #include "../../kofexamine/kv_graph.h"
@@ -31,10 +32,89 @@ static const char *box_text(void *user, uint32_t node, uint32_t i)
 	return kgenome_gv_box_line((const struct kgenome_gv *)user, node, i, buf, sizeof buf);
 }
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) is out of #if 0: the picture of the function's CFG made from bytes.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #include "kx_graph_chain_gold.h"
+
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+
+/*
+ * A LINEAGE IS DRAWN, ITS LINKS DOWNWARD (2026-11-14: the Lineage tab said "nodes=6 must-links=3" over an empty page). The engine's graph of a value flow
+ * (kof_lineageview_build) has no one entry: every producer nothing feeds is a start. Simulated records: L0 and L1 are sources, L1 feeds L2 and L3, L0
+ * feeds L3 (a link into a part another source reached first), L4 stands alone. Laid out as a lineage (sources_first) every box is drawn and no link is
+ * routed as one that goes back; laid out as a CFG from node 0, the link from L1 into L0's part is (what the tab drew before).
+ */
+static void lineage_drawn(void)
+{
+	struct kof_diag_lineage_rec lin[5];
+	struct kof_lineageview_req rq;
+	struct kgenome_gv gv;
+	struct kv_graph_in in;
+	struct kv_graph kg;
+	struct kv_graph_edge *e;
+	uint32_t i, back = 0, x0 = 0, x1 = 0;
+	int k;
+
+	memset(lin, 0, sizeof lin);
+	for (i = 0; i < 5u; i++) {
+		lin[i].at = 0x100u + 0x10u * i;
+		lin[i].cap = (uint16_t)(51u + i);
+	}
+	lin[2].in[0].from = 1; lin[2].in[0].how = KGENOME_DIAG_LINK_PROVEN; lin[2].n_in = 1;
+	lin[3].in[0].from = 0; lin[3].in[0].how = KGENOME_DIAG_LINK_PROVEN;
+	lin[3].in[1].from = 1; lin[3].in[1].how = KGENOME_DIAG_LINK_PROVEN; lin[3].n_in = 2;
+	memset(&rq, 0, sizeof rq);
+	rq.lin = lin;
+	rq.n_lin = 5;
+	rq.off = 0x100;
+	rq.len = 0x100;
+	CK(kof_lineageview_build(&rq, &gv) == KGENOME_OK && gv.n_node == 5 && gv.n_edge == 3);
+	e = calloc(gv.n_edge ? gv.n_edge : 1u, sizeof *e);
+	for (i = 0; i < gv.n_edge; i++) {
+		e[i].from = gv.edge[i].from;
+		e[i].to = gv.edge[i].to;
+	}
+	for (k = 1; k >= 0; k--) {
+		memset(&in, 0, sizeof in);
+		in.n_node = gv.n_node;
+		in.n_edge = gv.n_edge;
+		in.edge = e;
+		in.text = box_text;
+		in.user = &gv;
+		in.sources_first = (uint8_t)k;
+		CK(kv_graph_layout(&in, &kg) == KV_GS_OK && kg.n_box == 5u && kg.n_wire == 3u);
+		for (i = 0, back = 0; i < kg.n_wire; i++)
+			back += kg.wire[i].back;
+		for (i = 0; i < kg.n_box; i++) {
+			if (kg.box[i].node == 0u)
+				x0 = (uint32_t)kg.box[i].x;
+			if (kg.box[i].node == 1u)
+				x1 = (uint32_t)kg.box[i].x;
+		}
+		if (k) {
+			CKM(back == 0u, "a lineage: %u link(s) routed as going back", back);
+			CK(x0 < x1);            /* the sources stand in address order */
+		} else {
+			CKM(back > 0u, "as a CFG the link into the other source's part goes back: %u", back);
+		}
+		kv_graph_free(&kg);
+	}
+	free(e);
+	kgenome_gv_free(&gv, NULL);
+}
 
 int main(void)
 {
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) is out of #if 0: the picture of the function's CFG made from bytes.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct gspec g;
 	struct prog p;
 	struct blob x;
@@ -120,6 +200,8 @@ int main(void)
 	free(s.fs.v);
 	blob_free(&x);
 	prog_free(&p);
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+	lineage_drawn();
 	if (fails) {
 		printf("kx_graph_chain: %d failure(s)\n", fails);
 		return 1;

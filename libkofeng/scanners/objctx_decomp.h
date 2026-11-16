@@ -160,6 +160,35 @@ int oc_expand_sink_fn(void *user, const uint8_t *p, uint32_t n);
 void oc_stream_note(struct kof_scanner *sc, enum kuncoat_status st,
 		    uint32_t ordinary, const struct expand_sink *snk);
 
+/*
+ * ONE INFLATE OVER A SPAN, through the object's cache and sink - the kernel both
+ * oc_inflate_members (over the object, possibly several gzip members in a row) and
+ * oc_unpack_chain's own last step (one already-decoded intermediate, never gzip)
+ * need, every time either calls kuncoat_inflate at all. STRUCTURE NOTE (coordinator
+ * audit after DF-9, 2026-11-12): this was written out twice, the same lesson
+ * zlib_hdr_len above already names. The caller owns `snk` (ctx and left already set,
+ * `left` carried across repeat calls for a multi-member stream) and the cache
+ * (sc->cache.inf allocated, checked non-NULL) - this only runs the one decode and
+ * reports it, the same way every time.
+ */
+struct inflate_span_result {
+	uint64_t produced, consumed;
+	enum kuncoat_status st;
+};
+
+static inline struct inflate_span_result inflate_span(struct kof_scanner *sc, struct expand_sink *snk,
+						      const uint8_t *p, uint64_t n)
+{
+	struct kuncoat_io io = { .in = { p, n }, .sink = oc_expand_sink_fn, .user = snk };
+	struct inflate_span_result r;
+
+	r.st = kuncoat_inflate(sc->cache.inf, &io);
+	r.produced = io.produced;
+	r.consumed = io.consumed;
+	oc_stream_note(sc, r.st, STREAM_STRICT, snk);
+	return r;
+}
+
 /* ---- the buffered codings (objctx_decomp_buf.c) ---- */
 int oc_buffered_method(uint32_t method);
 int oc_nrv2_of(uint32_t method, int *variant, int *bits);

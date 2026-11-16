@@ -199,7 +199,32 @@ static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_im
 struct exp_ctx {
 	struct kof_symw *w;
 	kof_buf f;
+	const struct kgenome_pe_info *p;
 };
+
+/*
+ * KOF_SYM_F_IN_EXEC is "the flags of the SECTION the symbol lands in"
+ * (kofmod/kofsym.h), the same thing elf_sym.c computes from SHF_EXECINSTR of
+ * the symbol's real section - not "the RVA is non-zero". A PE export's `frva`
+ * needs the same resolve: a data export's address is real but lands in a
+ * non-executable section, and a forwarder's `frva` is not an address of code
+ * at all (kgenome_pe_export_is_forwarder, pe_image.h) - never IN_EXEC even on
+ * the rare layout where the export directory itself overlaps an executable
+ * section. Closes PE-EXPFWD-INEXEC.
+ */
+static int export_in_exec(const struct kgenome_pe_info *p, kof_buf f, uint32_t frva)
+{
+	uint64_t off;
+	const struct kgenome_pe_sec *s;
+
+	if (!frva || kgenome_pe_export_is_forwarder(p, frva))
+		return 0;
+	off = kgenome_pe_rva_to_off(p, frva);
+	if (off == KGENOME_BROKEN || off >= f.n)
+		return 0;
+	s = kgenome_pe_sec_at_off(p, off);
+	return s && kgenome_pe_sec_is_code(p, s);
+}
 
 static int export_put(void *user, uint64_t nameoff, uint32_t frva)
 {
@@ -215,14 +240,15 @@ static int export_put(void *user, uint64_t nameoff, uint32_t frva)
 	cut = len == KOF_SYM_NAME_MAX && nameoff + len < x->f.n &&
 	      x->f.p[nameoff + len] != 0;
 	return sym_put(x->w, (uint8_t)(KOF_SYM_F_DEFINED |
-				       (frva ? KOF_SYM_F_IN_EXEC : 0u)),
+				       (export_in_exec(x->p, x->f, frva) ?
+						KOF_SYM_F_IN_EXEC : 0u)),
 		       0xffffu, frva, fn, len, cut);
 }
 
 static enum kgenome_status do_exports(struct kof_symw *w, kof_buf f,
 				      const struct kgenome_pe_info *p)
 {
-	struct exp_ctx x = { w, f };
+	struct exp_ctx x = { w, f, p };
 	enum kgenome_status st = KGENOME_OK;
 
 	/*

@@ -90,6 +90,50 @@ static uint32_t coff_name_strtab(kof_buf file, uint64_t strtab_off, uint32_t so,
 	return i;
 }
 
+/*
+ * The table's start, its DECLARED record count (the file header's NumberOfSymbols,
+ * unclamped - the string table sits right after that many records whether or not the
+ * file actually holds them all) and how many of those records actually fit in the file.
+ * The one header-and-bounds read, so kgenome_pe_coff_syms (the walk) and
+ * kgenome_pe_coff_count (a caller that only wants to size a buffer, sym_any.c) do not
+ * each re-derive it.
+ */
+static int coff_table_at(kof_buf file, const struct kgenome_pe_info *p,
+			  uint32_t *at_out, uint32_t *cnt_out, uint64_t *n_out)
+{
+	uint32_t at, cnt;
+	uint64_t n;
+
+	if (!file.p || !p || !p->valid || p->layout != KGENOME_PE_LAYOUT_FILE)
+		return 0;
+	if (!kof_rd_u32(file, p->lfanew + 12u, 0, &at) ||
+	    !kof_rd_u32(file, p->lfanew + 16u, 0, &cnt) || !at || !cnt || at >= file.n)
+		return 0;
+	n = cnt;
+	if (n > (file.n - at) / 18u)
+		n = (file.n - at) / 18u;
+	*at_out = at;
+	*cnt_out = cnt;
+	*n_out = n;
+	return 1;
+}
+
+/*
+ * The COFF table's declared record count, clamped to what the file can actually hold -
+ * for a caller sizing the KSYM block up front (kof_syms_declared, sym_any.c), not
+ * walking the table. 0 when there is no such table (layout, bounds, or a zeroed
+ * header field).
+ */
+uint32_t kgenome_pe_coff_count(kof_buf file, const struct kgenome_pe_info *p)
+{
+	uint32_t at, cnt;
+	uint64_t n;
+
+	if (!coff_table_at(file, p, &at, &cnt, &n))
+		return 0;
+	return (uint32_t)n;
+}
+
 void kgenome_pe_coff_syms(kof_buf file, const struct kgenome_pe_info *p,
 			  kgenome_pe_coff_sym_fn fn, void *user, uint32_t *n_bad)
 {
@@ -98,14 +142,8 @@ void kgenome_pe_coff_syms(kof_buf file, const struct kgenome_pe_info *p,
 
 	if (n_bad)
 		*n_bad = 0;
-	if (!fn || !file.p || !p || !p->valid || p->layout != KGENOME_PE_LAYOUT_FILE)
+	if (!fn || !coff_table_at(file, p, &at, &cnt, &n))
 		return;
-	if (!kof_rd_u32(file, p->lfanew + 12u, 0, &at) ||
-	    !kof_rd_u32(file, p->lfanew + 16u, 0, &cnt) || !at || !cnt || at >= file.n)
-		return;
-	n = cnt;
-	if (n > (file.n - at) / 18u)
-		n = (file.n - at) / 18u;
 	/* The DECLARED count, not the clamped `n`: a short file still places the
 	 * string table where an honest one would be, and a wrong guess here
 	 * would read whatever bytes happen to sit after the records this walk
@@ -137,7 +175,7 @@ void kgenome_pe_coff_syms(kof_buf file, const struct kgenome_pe_info *p,
 			continue;
 		}
 		s = &p->sec[sn - 1];
-		if (!kgenome_pe_sec_is_code(s) || val >= s->file_size ||
+		if (!kgenome_pe_sec_is_code(p, s) || val >= s->file_size ||
 		    s->file_off >= file.n || val >= file.n - s->file_off) {
 			if (n_bad)
 				(*n_bad)++;

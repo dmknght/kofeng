@@ -19,6 +19,7 @@
 
 #include "objctx_decomp.h"
 #include "../analyzers/parsers/containers/gzip_parse.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 
 int oc_inflate_sink(void *user, const uint8_t *p, uint32_t n)
@@ -132,20 +133,15 @@ static uint64_t oc_inflate_members(struct kof_scanner *sc,
 	e.ctx = ctx;
 	e.left = expand_limit(len, out_hint);
 	for (;;) {
-		struct kuncoat_io io = {
-			.in = { b.p + off, len },
-			.sink = oc_expand_sink_fn, .user = &e,
-		};
-		enum kuncoat_status st = kuncoat_inflate(sc->cache.inf, &io);
+		struct inflate_span_result r = inflate_span(sc, &e, b.p + off, len);
 		struct kof_gzip_info g;
 		kof_buf rest;
 		uint64_t p, i;
 
-		produced += io.produced;
-		oc_stream_note(sc, st, STREAM_STRICT, &e);
-		if (!members || st != KUNCOAT_OK || e.left == 0)
+		produced += r.produced;
+		if (!members || r.st != KUNCOAT_OK || e.left == 0)
 			break;
-		p = off + io.consumed;
+		p = off + r.consumed;
 		if (b.n - p < 8u) {             /* the trailer is cut short */
 			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
 			break;
@@ -168,6 +164,8 @@ static uint64_t oc_inflate_members(struct kof_scanner *sc,
 		}
 		off = p + g.data_off;
 		len = b.n - off;
+		KOF_TRACE("[decomp] gzip: another member follows at off=%llu len=%llu, %llu byte(s) produced so far\n",
+			  (unsigned long long)off, (unsigned long long)len, (unsigned long long)produced);
 	}
 	return produced;
 }
@@ -197,6 +195,8 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (!len)
 		return 0;
 	members = method == KOF_UNP_DEFLATE && oc_is_gzip_first(ctx, off);
+	KOF_TRACE("[decomp] unpack method=%u off=%llu len=%llu out_hint=%llu gzip_members=%d\n", (unsigned)method,
+		  (unsigned long long)off, (unsigned long long)len, (unsigned long long)out_hint, members);
 
 	/*
 	 * ZLIB IS DEFLATE WITH TWO BYTES IN FRONT, so it is answered by moving

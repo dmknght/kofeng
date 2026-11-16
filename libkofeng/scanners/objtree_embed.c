@@ -81,6 +81,7 @@
 #include <uncoat.h>
 #include "../analyzers/genome_obj.h"
 #include "../analyzers/parsers/kofformat.h"
+#include "../kofcore/kofdebug.h"
 #include <kofcmp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,6 +373,8 @@ static int emit_cand(void *user, uint64_t off)
 	if (!off)
 		return 1;
 	if (!em->work) {
+		KOF_TRACE("[tree] embed: work allowance spent, candidates from off=%llu on not examined\n",
+			  (unsigned long long)off);
 		em->limit = 1;
 		return 0;
 	}
@@ -398,6 +401,8 @@ static int emit_cand(void *user, uint64_t off)
 		if (src < KOF_EMBED_TEXT_MIN)
 			return 1;
 		if ((src == room && room < rest) || src > em->work) {
+			KOF_TRACE("[tree] embed: off=%llu text run not read whole, allowance ended inside it\n",
+				  (unsigned long long)off);
 			em->limit = 1;      /* the allowance ended inside the run: it is not read whole */
 			return 0;
 		}
@@ -450,6 +455,8 @@ static int emit_cand(void *user, uint64_t off)
 			return 1;
 	}
 	if (!tab_add(&em->acc, &a)) {
+		KOF_TRACE("[tree] embed: the accepted-candidate table would not grow, stopping at off=%llu\n",
+			  (unsigned long long)off);
 		em->limit = 1;
 		return 0;
 	}
@@ -491,13 +498,17 @@ uint32_t kof_objtree_embedded(const struct kof_obj_ctx *ctx, const struct kof_sc
 	em.scr.t = (struct tab){ sc, NULL, 0, 0, 0, 1 };
 	kof_genome_obj(ctx, &obj);
 	nspan = data_spans(sc, &obj, file, &spans, &bytes, &spans_charged);
-	if (!nspan || !bytes)
+	if (!nspan || !bytes) {
+		KOF_TRACE("[tree] embed: no data span to search, nothing to offer\n");
 		goto out;
+	}
 	em.spans = spans;
 	em.nspan = nspan;
 	em.work = bytes * KOF_EMBED_WORK_PER_BYTE;
 	if (em.work < KOF_EMBED_WORK_MIN)
 		em.work = KOF_EMBED_WORK_MIN;
+	KOF_TRACE("[tree] embed: %u data span(s), %llu byte(s), work allowance=%llu\n", (unsigned)nspan,
+		  (unsigned long long)bytes, (unsigned long long)em.work);
 	memset(&rq, 0, sizeof rq);
 	rq.obj = &obj;
 	rq.file = file;
@@ -508,8 +519,12 @@ uint32_t kof_objtree_embedded(const struct kof_obj_ctx *ctx, const struct kof_sc
 	rq.user = &em;
 	kgenome_image_embed_starts(&rq, &rs);
 	/* a bound ended the walk (the allowance, a table the ledger would not grow): the object is cut, said once */
-	if (em.limit || kgenome_status_is_cut(rs.status))
+	if (em.limit || kgenome_status_is_cut(rs.status)) {
+		KOF_TRACE("[tree] embed: a bound ended the candidate walk, object cut\n");
 		oc_scan_limit(sc);
+	}
+	KOF_TRACE("[tree] embed: %llu candidate(s) accepted before dedup/overlap\n",
+		  (unsigned long long)em.acc.n);
 	if (!em.acc.n)
 		goto out;
 
@@ -525,6 +540,8 @@ uint32_t kof_objtree_embedded(const struct kof_obj_ctx *ctx, const struct kof_sc
 		/* at most as many as the tree may still take (its quota); the next one is the sticky limit a
 		 * refused child says, said after the ones it does take are made */
 		if (r >= sc->ledger.kids_left) {
+			KOF_TRACE("[tree] embed: tree's child quota met at %u, the rest are the sticky LIMIT\n",
+				  (unsigned)r);
 			over = 1;
 			break;
 		}
@@ -575,6 +592,7 @@ uint32_t kof_objtree_embedded(const struct kof_obj_ctx *ctx, const struct kof_sc
 	}
 	if (over)
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+	KOF_TRACE("[tree] embed done: made=%u child(ren)\n", (unsigned)made);
 out:
 	tab_free(&em.scr.t);
 	tab_free(&em.acc);

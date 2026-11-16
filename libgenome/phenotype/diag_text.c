@@ -292,10 +292,10 @@ void kgenome_dtx_link(struct kgenome_dtx *x, int32_t from, int32_t to, uint32_t 
 	if (!h)
 		return;
 	if ((uint32_t)from >= KGENOME_DTX_PSEUDO) {     /* a parameter's or a return's slot: the producers are not known until the text is read (diag_text_sum.c) */
-		kgenome_dtx_sum_pend(x, (uint32_t)from, (uint32_t)to, kgenome_diag_role_of_arg(h->cap, arg));
+		kgenome_dtx_sum_pend(x, (uint32_t)from, (uint32_t)to, kgenome_nucleo_call_role(h->cap, h->row, arg));
 		return;
 	}
-	kgenome_diag_note_in(x->s, h, (uint16_t)from, kgenome_diag_role_of_arg(h->cap, arg), KGENOME_DIAG_KIND_PRODUCED);
+	kgenome_diag_note_in(x->s, h, (uint16_t)from, kgenome_nucleo_call_role(h->cap, h->row, arg), KGENOME_DIAG_KIND_PRODUCED);
 }
 
 /* The capability of a producer that is a node, NONE for a slot of a summary (it is no node). */
@@ -566,6 +566,8 @@ int32_t kgenome_dtx_add_node(struct kgenome_dtx *x, uint32_t tok, uint16_t cap, 
 		return -1;
 	if (x->on_node && name)
 		x->on_node(x->user, name);
+	if (x->obf)
+		kgenome_dtx_obf_node(x, tok, cap);
 	if (x->stages & KGENOME_DTX_ST_PATH)
 		kgenome_dtx_ident_note(x, (int32_t)(x->s->n_hit - 1u), tok);
 	return (int32_t)(x->s->n_hit - 1u);

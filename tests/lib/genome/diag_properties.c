@@ -420,7 +420,7 @@ static void p3_p4(void)
 			}
 			kgenome_diag_scan_free(s);
 		}
-		CK(runs_after_funcs >= 1u);
+		CK(runs_after_funcs <= 1u);                       /* the table's strategies decode nothing (metadata only); phase 2's derivation asks the walk once when the object has undeclared code with a declared start in it: the decode every later reader shares */
 		CK(kgenome_diag_walk_runs(wk) <= 3u);             /* the decode of the object: the functions, the trace asked again, the scan: one decode each at most */
 		printf("  GBIN2 prog %u: walk decoded %u time(s) after the functions, %u in all\n", i, runs_after_funcs, kgenome_diag_walk_runs(wk));
 		if (f1.v)

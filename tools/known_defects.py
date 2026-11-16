@@ -99,7 +99,7 @@ def enclosing(lines, at):
 def scan(root=ROOT):
     recs, errs = [], []
     for path in sorted(files(root)):
-        rel = os.path.relpath(path, root)
+        rel = os.path.relpath(path, root).replace(os.sep, '/')   # '/' on every host: ids and paths are compared as text
         try:
             text = open(path, encoding='utf-8', errors='replace').read()
         except OSError:

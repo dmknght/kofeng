@@ -367,7 +367,7 @@ static void route_link_args(struct route *R, struct kgenome_diag_hit *h,
 	 * (t_partial) pins both answers so that the difference stays a decision.
 	 */
 	for (k = 0; k < 6u && h; k++) {
-		uint8_t role = kgenome_diag_role_of_arg(cap, k);
+		uint8_t role = kgenome_nucleo_call_role(cap, h->row, k);
 
 		if (role == KGENOME_DIAG_ROLE_NONE)
 			continue;
@@ -648,7 +648,6 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 	const struct kgenome_elf_info *ei;
 	struct kgenome_emu_unp_report rep;
 	struct route R;
-	unsigned stops = 0;
 
 
 	/*
@@ -729,7 +728,6 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 		int ended = 0;
 
 		for (;;) {
-			stops++;
 			R.fresh = 0;
 			if (!route_stop(&R)) {
 				ended = 1;

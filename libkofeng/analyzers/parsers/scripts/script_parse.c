@@ -635,6 +635,81 @@ static int shell_test_operator(kof_buf f, uint64_t at)
 static const struct kof_txt_tags TL_TAGS = { .tag = TL_TAG, .n = sizeof TL_TAG / sizeof TL_TAG[0], .first = TL_FIRST, .veto_mask = TL_GSH,
 					      .veto = shell_test_operator };
 
+/*
+ * JAVASCRIPT BY ITS SHAPE (island package, 2026-11-14). The markers above find a Windows-host script (ActiveXObject, console.log); a web
+ * bundle has neither, and 527 of the 581 .js files of the survey (WordPress 6.8: 574 .js, plus the MalwareLab ones) came back
+ * unrecognised - no script, no lexer, no function table, no similarity unit. Asked LAST, after every marker of the other languages and
+ * psh's cmdlet shape, so no file that had a kind changes it; only one that had none may become javascript. Both of two facts:
+ *   SHAPE    the language's own function syntax: the word `function` followed by an optional name and "(" (ECMA-262 15.2), or an arrow
+ *            "=>" after ")" or a name and before "{", "(", a name or a quote (15.3). C, C++, java, python, shell, css and prose write
+ *            neither (java's lambda is "->", c#'s "=>" is vetoed below).
+ *   MARKER   one token of the browser or node runtime or of the language's own operators: "use strict", document., window.,
+ *            module.exports, require(, .prototype., typeof, "===", "!==", addEventListener(, JSON., this.
+ *   VETO     a c# or c/c++ file ("using System", "#include", "#define", "#ifndef") or an xml document ("<?xml"), which may write all of
+ *            the above in its code, its comments or its strings. Not "namespace ": 88 of the corpus' .js write it in their jsdoc.
+ * MEASURED (2026-11-14, agent-measured, scratch sniff over the survey corpus and 4439 negatives - this tree's .c .h .py .md .txt .mk,
+ * /usr/share/doc, /etc, /usr/share .css .json .xml .java .cs .ts): the corpus' .js recognised as javascript 48 -> 567 of 581 (5 of the
+ * rest are php under a .js name and are php, 9 write no marker), no other file of the corpus changed its kind; without the veto 6
+ * negatives became javascript (5 c sources of this tree that hold javascript in strings and comments, a docbook xml), with it 0.
+ */
+static int js_word(kof_buf f, uint64_t i, uint64_t look, const char *w)
+{
+	uint64_t l = strlen(w);
+
+	return i + l <= look && !memcmp(f.p + i, w, (size_t)l) && (i == 0 || !(kof_is_alnum(f.p[i - 1u]) || f.p[i - 1u] == '_' ||
+										     f.p[i - 1u] == '$' || f.p[i - 1u] == '.')) &&
+	       (i + l == look || !(kof_is_alnum(f.p[i + l]) || f.p[i + l] == '_' || f.p[i + l] == '$'));
+}
+
+static uint64_t js_ws(kof_buf f, uint64_t i, uint64_t look)
+{
+	while (i < look && (f.p[i] == ' ' || f.p[i] == '\t' || f.p[i] == '\r' || f.p[i] == '\n'))
+		i++;
+	return i;
+}
+
+static int js_ident(uint8_t c)
+{
+	return kof_is_alnum(c) || c == '_' || c == '$';
+}
+
+static int js_shape(kof_buf f, uint64_t look)
+{
+	static const char *const marker[] = { "\"use strict\"", "'use strict'", "document.", "window.", "module.exports", "require(",
+					      ".prototype.", "typeof ", "===", "!==", "addEventListener(", "JSON.", "this.", NULL };
+	static const char *const veto[] = { "using System", "#include", "#define", "#ifndef", "<?xml", NULL };
+	uint64_t i;
+	int shape = 0, mark = 0, m;
+
+	for (m = 0; veto[m]; m++)
+		if (kof_txt_find(f, 0, look, veto[m], (uint32_t)strlen(veto[m])) != KOF_TXT_NONE)
+			return 0;
+	for (i = 0; i < look && !(shape && mark); i++) {
+		uint8_t c = f.p[i];
+
+		if (!shape && c == 'f' && js_word(f, i, look, "function")) {
+			uint64_t j = js_ws(f, i + 8u, look);
+
+			if (j < look && f.p[j] == '*')
+				j = js_ws(f, j + 1u, look);
+			while (j < look && js_ident(f.p[j]))
+				j++;
+			j = js_ws(f, j, look);
+			shape = j < look && f.p[j] == '(';
+		} else if (!shape && c == '=' && i + 1u < look && f.p[i + 1u] == '>' && i > 0) {
+			uint64_t b = i, a = js_ws(f, i + 2u, look);
+
+			while (b > 0 && (f.p[b - 1u] == ' ' || f.p[b - 1u] == '\t'))
+				b--;
+			shape = b > 0 && (f.p[b - 1u] == ')' || js_ident(f.p[b - 1u])) && a < look &&
+				(f.p[a] == '{' || f.p[a] == '(' || js_ident(f.p[a]) || f.p[a] == '"' || f.p[a] == '\'' || f.p[a] == '`');
+		}
+		for (m = 0; !mark && marker[m]; m++)
+			mark = f.p[i] == (uint8_t)marker[m][0] && i + strlen(marker[m]) <= look && !memcmp(f.p + i, marker[m], strlen(marker[m]));
+	}
+	return shape && mark;
+}
+
 static uint8_t tagless_kind(kof_buf f, uint64_t look)
 {
 	int psh;
@@ -653,6 +728,9 @@ static uint8_t tagless_kind(kof_buf f, uint64_t look)
 	 */
 	if (psh_cmdlet(f, look))
 		return KOF_SCRIPT_PSH;
+	/* LAST of all: only a text no other rule claimed (js_shape says why and what it reads) */
+	if (js_shape(f, look))
+		return KOF_SCRIPT_JS;
 	return KOF_SCRIPT_ANY;
 }
 
@@ -1248,6 +1326,9 @@ static int script_build(kof_buf file, struct kof_script_info *info,
 	ctx->obj_size = file.n;
 	ctx->format = KOF_FMT_SCRIPT;
 	ctx->subtype = info->kind;
+	/* A parsed script's code is entered at its tag, or it has no tags: never "code from byte 0", which is what a producer declares
+	 * (kof_script_from_code, script_route.h). Set here because a context a tool zeroes would otherwise say 0. */
+	ctx->entry_off = KOF_NA;
 	/*
 	 * THE FAMILY TOO, AND NOT ONLY THE LANGUAGE.
 	 *

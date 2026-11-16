@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include "diag_scan_state.h"
+#include "../celllysis/cfg.h"
 
 /* The limits in force: the scan's budget, and the floors where it was never filled
  * - a scan built by hand (a test) has a zeroed budget, and zero means "the
@@ -65,9 +66,16 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
 int kgenome_diag_name_is_noreturn(const char *name);
 int kgenome_diag_site_noreturn(const struct kgenome_diag_scan *s, uint64_t at);
 int kgenome_diag_noret_add(struct kgenome_diag_scan *s, uint64_t at);
+void kgenome_diag_noret_settle(struct kgenome_diag_scan *s);   /* sort and deduplicate the list, once, before it is read */
 /* A link the RUN saw arrive: PROVEN, and it replaces a MAY the code-only routes recorded for the same relation
  * (kgenome_diag_note_in_how keeps the first statement). The fold of two nodes at one site (merge_sites) asks for it:
  * the run's node and the code-only route's meet there. */
+/* Put a scan's table of the inputs past a node's view in order by node (diag_hit.c): once the routes are done, and after the fold. */
+void kgenome_diag_links_settle(struct kgenome_diag_scan *s);
+/* The keep rule over a table that refused a node: drop what is on no link (and named by no diagnose), renumber, count (diag_hit.c). */
+void kgenome_diag_nodes_keep(struct kgenome_diag_scan *s);
+/* Rebuild the table's hash after its nodes were renumbered (merge_sites). */
+int  kgenome_diag_links_rehash(struct kgenome_diag_scan *s);
 int kgenome_diag_note_in_seen(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
 			      uint16_t from, uint8_t role, uint8_t kind);
 /* 1 when the link did not fit (the node holds four) and was dropped. */
@@ -361,5 +369,21 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 uint32_t kgenome_diag_extent_count(const struct kgenome_obj *obj);
 uint64_t kgenome_diag_extent(const struct kgenome_obj *obj, uint32_t i, uint64_t size,
 			 uint64_t *at);
+
+/*
+ * THE BLOCK LAYER OF AN OBJECT (fntab_blocks.c; celllysis/cfg.h kgenome_cfg_obj_build): recursive descent from every start the headers declare, read from
+ * the walk's one decode (`walk` is ensured WITH its trace here). `max_insn` is the work bound the caller sizes from the root (0: the code's bytes); `budget`
+ * and `mem` bound and own what it holds. STEP B 1b: tests and harnesses only until STEP B 2 makes the function table a view of it.
+ */
+struct kgenome_fntab_blocks_req {
+	const struct kgenome_obj *obj;
+	const uint8_t *data;
+	uint64_t data_n;
+	struct kgenome_diag_walk *walk;
+	uint64_t max_insn;
+	struct kgenome_budget *budget;
+	struct kgenome_cfg_mem mem;
+};
+enum kgenome_status kgenome_fntab_blocks(const struct kgenome_fntab_blocks_req *rq, struct kgenome_cfg_obj *out);
 
 #endif /* KGENOME_DIAG_PRIVATE_H */

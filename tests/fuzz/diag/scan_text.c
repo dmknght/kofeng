@@ -22,8 +22,11 @@
  *   - the constants the evaluator reports (on_const, on_head) are inside the text, in order, none holding another
  *   - RULE 4 on the shapes of the `count` attack: when the bytes carry the evidence (the node of the final call) the graph has it,
  *     or the status / the cut count says it was lost - never neither
+ *   - kgenome_script_funcs_build (2026-11-05), over the same attacked text: every entry inside the buffer, starts ascending,
+ *     ends never dipping below an earlier one's (what kgenome_funcs_at's binary search needs)
  *   - G9 (strict mode only, -DDIAG_STRICT_G9, finding F17): with an allocation refused the graph is the clean one or the status says it may be short
  */
+#include <math.h>
 #include <stdarg.h>
 
 #include "diag_seed.h"
@@ -439,6 +442,34 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 	tn = attack(text, scratch, len, lang, c->rng, &evidence);
 	if (tn > MAXN * 4u)
 		tn = MAXN * 4u;
+	/*
+	 * SCRIPT FUNCTIONS, over the SAME grammar-aware attacked text (unbalanced brackets,
+	 * N-deep nesting, huge strings, dropped bytes, colliding names): one entry per
+	 * kgenome_func inside the buffer, starts ascending, ends never dipping below an
+	 * earlier one's (the invariant kgenome_funcs_at's binary search needs - shared by
+	 * every consumer of the table, not only mutation).
+	 */
+	{
+		struct kgenome_func_set sfs;
+		uint32_t si;
+
+		memset(&sfs, 0, sizeof sfs);
+		kgenome_script_funcs_build(lang, (const uint8_t *)text, tn, &sfs);
+		for (si = 0; si < sfs.n; si++) {
+			FZ_CHECK(c, sfs.v[si].off <= tn && sfs.v[si].len <= tn - sfs.v[si].off,
+				 "a script function unit outside the attacked text");
+			FZ_CHECK(c, sfs.v[si].kind == KGENOME_FN_SCRIPT, "a script entry of the wrong kind");
+			FZ_CHECK(c, si == 0 || sfs.v[si].off >= sfs.v[si - 1u].off,
+				 "script funcs: starts not ascending");
+			FZ_CHECK(c, si == 0 || sfs.v[si].off + sfs.v[si].len >= sfs.v[si - 1u].off + sfs.v[si - 1u].len,
+				 "script funcs: an end dips below an earlier one's");
+			/* 2026-11-14: one unit per outermost function, so every byte is in at most one */
+			FZ_CHECK(c, si == 0 || sfs.v[si].off >= sfs.v[si - 1u].off + sfs.v[si - 1u].len,
+				 "script funcs: two entries overlap");
+		}
+		fz_step(&c->steps, sfs.n);
+		kgenome_funcs_free(&sfs);
+	}
 	/* the table questions */
 	FZ_CHECK(c, (kgenome_diag_text_serves(lang) != 0) == (kgenome_diag_text_target(lang) != 0), "serves and target disagree on a language");
 	(void)kgenome_diag_text_reads_view(lang);
@@ -477,9 +508,17 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 			uint64_t peak = 0;
 
 			(void)kgenome_diag_scan_bytes(s, &peak);
-			/* SPACE: the ledger holds about 290 bytes a byte of text on the worst shape measured (one name defined and called 4097 times);
-			 * the bound is linear in the text, with room: a table sized from a count the text states, and not from its bytes, shows here. */
-			FZ_CHECK(c, peak <= 512u * (uint64_t)tn + (1u << 20), "the scan holds more than 512 bytes of ledger per byte of text");
+			/*
+			 * SPACE: re-measured 2026-11-13 (two independent 150,000-iteration sweeps, seed 11 and seed
+			 * 42, this adapter alone): the worst shape is now SH with the structural count-attacks
+			 * stacked (an alias chain and a scope-depth attack together), ~688-729 bytes a byte of text,
+			 * not the ~290 of the one-name-called-4097-times shape this bound was last set from. Both
+			 * sweeps stayed flat as tn grew from 2 KiB to 27 KiB (the ratio FELL as tn rose: a fixed
+			 * per-scan floor plus a linear term, not a shape that gets worse with more text) - still
+			 * linear, just a higher constant; nothing here grows with tn the way G1/G7/G11's probe/edge/
+			 * list bounds above guard against. 1024 leaves about 1.4x room over the measured 729.
+			 */
+			FZ_CHECK(c, peak <= 1024u * (uint64_t)tn + (1u << 20), "the scan holds more than 1024 bytes of ledger per byte of text");
 		}
 		fz_step(&c->steps, w.steps / 64u);
 		fz_step(&c->steps, w.probes / 64u);
@@ -531,6 +570,93 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 			kgenome_diag_text_names_free(a2);
 		}
 	}
+	/*
+	 * ISLANDS (2026-11-10), over the SAME attacked text: a value an eval()/create_function() call resolves through something other than a
+	 * bare literal (diag_text_walk.c's layer_of_call). `at` is a real offset of the attacked text (the call site), never past it; every
+	 * island's bytes are independently valid for kgenome_script_funcs_build (the one thing a real consumer does with them, script_route.c's
+	 * kof_script_island_units) - checked here as cheaply as the entries themselves, not a second attack surface.
+	 */
+	{
+		struct kgenome_diag_text_island_set iset;
+		uint32_t ii;
+
+		kgenome_diag_text_islands((const uint8_t *)text, tn, lang, rq.apply, &iset);
+		for (ii = 0; ii < iset.n; ii++) {
+			struct kgenome_func_set ifs;
+
+			FZ_CHECK(c, iset.v[ii].at <= tn, "an island's call site past the attacked text");
+			FZ_CHECK(c, iset.v[ii].len != 0 && iset.v[ii].data != NULL, "an empty or NULL island kept");
+			memset(&ifs, 0, sizeof ifs);
+			/* an island has no opening tag of its own: it is read as the fragment it is
+			 * (kgenome_script_funcs with KGENOME_TEXTUAL_FRAGMENT, what the engine's adapter asks) */
+			kgenome_script_funcs(&(const struct kgenome_script_funcs_req){ .lang = lang,
+					     .flags = KGENOME_TEXTUAL_FRAGMENT, .in = iset.v[ii].data, .n = iset.v[ii].len }, &ifs);
+			FZ_CHECK(c, ifs.n == 0 || ifs.v[ifs.n - 1u].off + ifs.v[ifs.n - 1u].len <= iset.v[ii].len,
+				 "a function found past the end of its own island");
+			kgenome_funcs_free(&ifs);
+		}
+		fz_step(&c->steps, iset.n);
+		kgenome_diag_text_islands_free(&iset);
+	}
+	/*
+	 * THE OBFUSCATION MEASURE (2026-11-13), over the SAME attacked text: every record's classes partition no more than its effects, a record's value is
+	 * at most log2(1 + kmax) bits a effect, the text's value is the highest record's, and a layer's record names a call site inside the text.
+	 * ONE RECORD PER ISLAND (2026-11-14): the file's records come first, its islands inside the text, in order and none overlapping the next; a layer is
+	 * a LAYER record; every capability list is ascending with no repeat.
+	 */
+	{
+		struct kgenome_diag_text_obf_set os;
+		struct kgenome_diag_text_place pl[8], took[8];
+		struct kgenome_diag_text_req oq = { .base = (const uint8_t *)text, .size = tn, .lang = lang, .apply = rq.apply, .obf = &os, .obf_isl = pl };
+		uint32_t oi, ci, best = 0, n_took = 0, n_isl = 0, k;
+		uint64_t isl_end = 0, pe = 0;
+		int seen_layer = 0, refused = 0, measured = 0;
+
+		/* the caller's islands, made from the attacked bytes: anywhere, any length, out of order and overlapping as often as not. The oracle of what
+		 * the measure must take is its rule as the header states it: not empty, after the last one taken, inside the text */
+		for (k = 0; k < 8u && 2u * k + 1u < tn; k++) {
+			pl[k].off = ((uint64_t)(uint8_t)text[2u * k] * (tn + 8u)) / 256u;
+			pl[k].len = ((uint64_t)(uint8_t)text[2u * k + 1u] * (tn + 8u)) / 256u;
+			if (pl[k].len && pl[k].off >= pe && pl[k].off <= tn && pl[k].len <= tn - pl[k].off) {
+				took[n_took++] = pl[k];
+				pe = pl[k].off + pl[k].len;
+			} else
+				refused = 1;
+		}
+		oq.n_obf_isl = k;
+		kgenome_diag_text_obf(&oq);
+		/* the file is measured when the route read it (a record of layer 0 exists): only then were the islands asked for */
+		for (oi = 0; oi < os.n; oi++)
+			measured |= os.v[oi].layer == 0u;
+		FZ_CHECK(c, !measured || !refused || os.status != KGENOME_OK, "an island the measure could not take, and the set says OK");
+		for (oi = 0; oi < os.n; oi++) {
+			const struct kgenome_diag_text_obf_rec *r = &os.v[oi];
+			uint32_t m = kgenome_diag_text_obf_milli(r);
+
+			FZ_CHECK(c, (uint64_t)r->n_built + r->n_bound + r->n_refused + r->n_dynamic <= r->n_eff, "an effect counted in two classes");
+			FZ_CHECK(c, (uint64_t)m <= (uint64_t)(log2(1.0 + (double)r->k_max) * 1000.0 + 1.0), "a record above log2(1 + kmax) a effect");
+			FZ_CHECK(c, (r->layer != 0) == (r->kind == KGENOME_DIAG_TEXT_OBF_LAYER), "a layer that is not a LAYER record, or the reverse");
+			FZ_CHECK(c, !r->layer || r->at <= tn, "a layer's call site past the attacked text");
+			FZ_CHECK(c, r->layer || r->at + r->len <= tn, "a record of the file past the attacked text");
+			FZ_CHECK(c, !seen_layer || r->layer, "a record of the file after a layer's");
+			if (r->kind == KGENOME_DIAG_TEXT_OBF_ISLAND) {
+				FZ_CHECK(c, r->at >= isl_end, "two islands overlap, or out of order");
+				FZ_CHECK(c, n_isl < n_took && r->at == took[n_isl].off && r->len == took[n_isl].len, "an island record that is not the caller's island");
+				isl_end = r->at + r->len;
+				n_isl++;
+			}
+			for (ci = 1; ci < r->n_cap; ci++)
+				FZ_CHECK(c, r->cap[ci - 1u] < r->cap[ci], "a capability list not ascending and distinct");
+			seen_layer |= r->layer != 0;
+			if (m > best)
+				best = m;
+			fz_digest(c, m);
+		}
+		FZ_CHECK(c, kgenome_diag_text_obf_value(&os) == best, "the value is not the highest record");
+		FZ_CHECK(c, !measured || os.status == KGENOME_NOMEM || os.status == KGENOME_OVER_BUDGET || n_isl == n_took, "an island of the caller's the set has no record of");
+		fz_step(&c->steps, os.n);
+		kgenome_diag_text_obf_free(&os);
+	}
 	/* the names, by the other door: the same text, the same order */
 	{
 		struct fz_ctx *cc = c;
@@ -548,6 +674,7 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 FZ_ADAPTER(scan_text, .name = "kgenome/diag_scan_text",
 	   .covers = "kgenome_diag_scan_text kgenome_diag_text_names kgenome_diag_text_names_new kgenome_diag_text_names_node "
 		     "kgenome_diag_text_names_free kgenome_diag_text_serves kgenome_diag_text_reads_view kgenome_diag_text_target "
-		     "kgenome_diag_text_cap_of_name",
+		     "kgenome_diag_text_cap_of_name kgenome_script_funcs_build kgenome_script_funcs kgenome_diag_text_islands kgenome_diag_text_islands_free "
+		     "kgenome_diag_text_obf kgenome_diag_text_obf_free kgenome_diag_text_obf_milli kgenome_diag_text_obf_value",
 	   .flags = FZ_MAY_HIT_CAP | FZ_KEEPS_STATE, .backstop_s = 3000, .steps_base = 8000000u, .steps_per_byte = 256,
 	   .shape = FZ_REQ, .seeds = seeds, .dict = dict, .run = run);

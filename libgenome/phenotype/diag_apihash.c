@@ -338,7 +338,7 @@ static void atoms_in(struct kgenome_diag_apihash_set *a, const struct kgenome_ob
  * and a later call that takes that value as its descriptor or its buffer is the
  * same object: the socket WSASocketA returned is the first argument of the
  * connect and of both reads; the pointer VirtualAlloc returned is the buffer of
- * the second read. Each argument that has a role (kgenome_diag_role_of_arg) is
+ * the second read. Each argument that has a role (the row's, kgenome_nucleo_call_role) is
  * matched against the results so far, and a value too small to be a handle or
  * a pointer is not matched - 0x1000 is a length as often as it is anything.
  */
@@ -391,7 +391,7 @@ static uint32_t pe_idle_slices(const struct kgenome_budget *bud)
 static void run_resolver_in(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size,
 			 const struct kgenome_pe_imptab *imports,
-			 const struct kgenome_budget *bud)
+			 const struct kgenome_budget *bud, struct kgenome_emu_unp_kept *keep)
 {
 	struct kgenome_emu_unp_report rep;
 	struct kgenome_emu *em;
@@ -401,6 +401,13 @@ static void run_resolver_in(struct kgenome_diag_apihash_set *a, const struct kge
 	memset(&first, 0, sizeof first);
 	first.max_insn = bud->max_insn_resolve < DIAG_PE_SLICE ? bud->max_insn_resolve : DIAG_PE_SLICE;
 	first.insn_spent = bud->insn_spent;
+	/* A machine that outlives this analysis (kept for the unpack run, EA8) is built as that run would
+	 * build it: the caller's address space and the caller's account for its pages. */
+	if (keep) {
+		first.max_bytes = bud->max_bytes;
+		first.account = bud->account;
+		first.account_user = bud->account_user;
+	}
 	memset(&rep, 0, sizeof rep);
 	em = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
 			.file = base,
@@ -490,6 +497,24 @@ static void run_resolver_in(struct kgenome_diag_apihash_set *a, const struct kge
 	}
 	a->end_rip = kgenome_emu_get_rip(em);
 	a->end_from = kgenome_emu_last_branch_at(em);
+	if (keep) {
+		/* HANDED OVER, NOT FREED (EA8): the caller is told now what ran, and the machine counts
+		 * nothing more to the caller's total. */
+		struct kgenome_emu_cfg own;
+
+		memset(&own, 0, sizeof own);
+		own.account = first.account;
+		own.account_user = first.account_user;
+		if (bud->insn_spent)
+			*bud->insn_spent += kgenome_emu_insn_count(em);
+		(void)kgenome_emu_adopt(em, &own);
+		kgenome_emu_free(keep->em);
+		keep->em = em;
+		keep->rep = rep;
+		keep->file = base;
+		keep->n = size;
+		return;
+	}
 	kgenome_emu_free(em);
 }
 
@@ -500,7 +525,7 @@ static void run_resolver_in(struct kgenome_diag_apihash_set *a, const struct kge
 static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size,
 			 const struct kgenome_pe_imptab *imports,
-			 const struct kgenome_budget *bud)
+			 const struct kgenome_budget *bud, struct kgenome_emu_unp_kept *keep)
 {
 	struct kgenome_pe_imptab own;
 	enum kgenome_status own_st = KGENOME_OK;
@@ -511,7 +536,7 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 		own_st = own.status;
 		imports = &own;
 	}
-	run_resolver_in(a, obj, base, size, imports, bud);
+	run_resolver_in(a, obj, base, size, imports, bud, keep);
 	a->status = kgenome_status_merge(a->status, own_st);
 	kgenome_pe_imptab_free(&own);
 }
@@ -521,6 +546,17 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 				    const struct kgenome_pe_imptab *imports,
 				    const struct kgenome_budget *budget)
 {
+	return kgenome_diag_apihash_make(&(const struct kgenome_diag_apihash_req){
+			.obj = obj, .base = base, .size = size, .imports = imports, .budget = budget, .keep = NULL });
+}
+
+struct kgenome_diag_apihash_set *kgenome_diag_apihash_make(const struct kgenome_diag_apihash_req *rq)
+{
+	const struct kgenome_obj *obj = rq->obj;
+	const uint8_t *base = rq->base;
+	const uint64_t size = rq->size;
+	const struct kgenome_pe_imptab *imports = rq->imports;
+	const struct kgenome_budget *budget = rq->budget;
 	const struct kgenome_pe_info *p;
 	struct kgenome_diag_apihash_set *a;
 	struct kgenome_budget bud;
@@ -552,6 +588,11 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 		bud.max_insn_resolve = budget->max_insn_resolve;
 	bud.deadline_ms = budget ? budget->deadline_ms : 0;
 	bud.insn_spent = budget ? budget->insn_spent : NULL;
+	if (budget) {
+		bud.max_bytes = budget->max_bytes;
+		bud.account = budget->account;
+		bud.account_user = budget->account_user;
+	}
 	steps = bud.max_insn;
 	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
 		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
@@ -562,7 +603,7 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 	/* Only a program that read the loader data and then loaded from it is
 	 * worth a run. */
 	if (a->n_ldr)
-		run_resolver(a, obj, base, size, imports, &bud);
+		run_resolver(a, obj, base, size, imports, &bud, rq->keep);
 	return a;
 }
 
@@ -647,6 +688,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 		h = kgenome_diag_hit_add(s, at, cap, fl);
 		if (!h || kgenome_diag_scan_count(s) != before + 1u)
 			continue;
+		h->row = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, c->api);
 		node[i] = (uint16_t)before;
 		/* an allocation owns the range it returned, for the jump below */
 		if (cap == KGENOME_NUCLEO_ALLOC || cap == KGENOME_NUCLEO_ALLOC_EXEC) {
@@ -654,7 +696,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 			rlen[i] = c->arg[1];
 		}
 		for (k = 0; k < 4u; k++) {
-			uint8_t role = kgenome_diag_role_of_arg(cap, k);
+			uint8_t role = kgenome_nucleo_call_role(cap, h->row, k);
 			uint32_t j;
 
 			if (role == KGENOME_DIAG_ROLE_NONE || c->arg[k] < 0x100u)

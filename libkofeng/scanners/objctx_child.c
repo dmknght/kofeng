@@ -20,6 +20,7 @@
 #include "../kofcore/kofplatform.h"
 #include <genotype/image/elf_rebuild.h>
 
+#include "../kofcore/kofdebug.h"
 #include "objctx_int.h"
 #include <kofmod/arj.h>
 #include <kofmod/cab.h>
@@ -118,8 +119,10 @@ static int child_close(const struct kof_obj_ctx *ctx)
 
 	if (!sc->cur.src)
 		return 0;
-	if (sc->sink.len + sc->sink.spilled == 0)
+	if (sc->sink.len + sc->sink.spilled == 0) {
+		KOF_TRACE("[child] close: nothing was emitted, not a child\n");
 		return 0;              /* nothing was emitted; not a child */
+	}
 
 	/*
 	 * THE HEADER, WRITTEN HERE AND NOWHERE ELSE - see oc_image.
@@ -275,6 +278,7 @@ static int child_close(const struct kof_obj_ctx *ctx)
 			 * blob: the module asked for a file and got none, and
 			 * saying so is the only honest answer.
 			 */
+			KOF_TRACE("[child] close: refused, the declared image's header does not fit or has the wrong parent\n");
 			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
 			return 0;
 		}
@@ -287,11 +291,13 @@ static int child_close(const struct kof_obj_ctx *ctx)
 		kid = kof_src_fd(sc->sink.fd, sc->sink.spilled);
 		sc->sink.fd = -1;
 		sc->sink.spilled = 0;
+		KOF_TRACE("[child] close: %llu byte(s) held, spilled to a file\n", (unsigned long long)held);
 	} else {
 		held = sc->sink.len;
 		kid = kof_src_heap(sc->sink.mem, sc->sink.len);
 		sc->sink.mem = NULL;
 		sc->sink.cap = 0;
+		KOF_TRACE("[child] close: %llu byte(s) held, on the heap\n", (unsigned long long)held);
 	}
 	sc->sink.len = 0;
 	sc->sink.fixed = 0;
@@ -316,6 +322,8 @@ static int child_close(const struct kof_obj_ctx *ctx)
 		 * container whose entry decoded perfectly and then could not
 		 * be wrapped was reported as having nothing in it.
 		 */
+		KOF_TRACE("[child] close: the constructor failed on %llu charged byte(s), the object is gone\n",
+			  (unsigned long long)held);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		oc_scan_release(sc, held);
 		return 0;
@@ -347,6 +355,7 @@ int oc_child(const struct kof_obj_ctx *ctx)
 	if (!made && sc->sink.refuse == OC_REFUSE_CUT_OPENED)
 		made = 1;
 	sc->sink.refuse = 0;
+	KOF_TRACE("[child] module close: made=%d\n", made);
 	return made;
 }
 
@@ -365,6 +374,7 @@ void oc_entry_cut_close(const struct kof_obj_ctx *ctx)
 		sc->sink.refuse = OC_REFUSE_CUT_OPENED;
 	else
 		sc->sink.refuse = OC_REFUSE_CUT;
+	KOF_TRACE("[child] entry cut close: refuse=%u\n", (unsigned)sc->sink.refuse);
 }
 
 /*
@@ -393,11 +403,15 @@ uint64_t oc_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
 	uint64_t done = 0;
 	uint32_t n, i;
 
-	if (!oc_can_produce(sc))
+	if (!oc_can_produce(sc)) {
+		KOF_TRACE("[child] gather mask=%x: refused, the object cannot produce\n", (unsigned)mask);
 		return 0;
+	}
 
 	n = kof_scan_resolve_range(ctx, mask, eb);
 	ext = eb->v;
+	KOF_TRACE("[child] gather mask=%x: %u range(s), cap=%llu\n", (unsigned)mask, (unsigned)n,
+		  (unsigned long long)cap);
 	for (i = 0; i < n; i++) {
 		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
 		uint64_t at = 0;
@@ -408,17 +422,24 @@ uint64_t oc_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
 			if (want > EMIT_MAX)
 				want = EMIT_MAX;
 			if (cap) {
-				if (done >= cap)
+				if (done >= cap) {
+					KOF_TRACE("[child] gather mask=%x: stopped, %llu byte(s) met the cap\n",
+						  (unsigned)mask, (unsigned long long)done);
 					return done;
+				}
 				if (want > cap - done)
 					want = cap - done;
 			}
-			if (!oc_emit(ctx, s.p + at, (uint32_t)want))
+			if (!oc_emit(ctx, s.p + at, (uint32_t)want)) {
+				KOF_TRACE("[child] gather mask=%x: stopped, the host took no more at %llu byte(s)\n",
+					  (unsigned)mask, (unsigned long long)done);
 				return done;
+			}
 			at += want;
 			done += want;
 		}
 	}
+	KOF_TRACE("[child] gather mask=%x done: %llu byte(s)\n", (unsigned)mask, (unsigned long long)done);
 	return done;
 }
 
@@ -452,11 +473,59 @@ void oc_child_kind(const struct kof_obj_ctx *ctx, uint32_t kind)
 	kof_scan_of(ctx)->pend.kind = kind;
 }
 
+/* The next child is evidence, not a scan target of its own - see
+ * kof_src_declare_evidence_only in objsrc.h. Stored and spent by oc_kid_push,
+ * like `kind` beside it, and cleared there whatever happens to the child. */
+void oc_child_evidence_only(const struct kof_obj_ctx *ctx)
+{
+	kof_scan_of(ctx)->pend.evidence_only = 1;
+}
+
 /* Which entry the next child is the content of. Stored and spent by oc_kid_push,
  * like the two beside it. */
 void oc_child_entry(const struct kof_obj_ctx *ctx, uint32_t index)
 {
 	kof_scan_of(ctx)->pend.entry = index;
+}
+
+/*
+ * THE NEXT CHILD IS TOLD WHAT IT IS, not asked (scan_norm.c's own header comment on this,
+ * at length: a view's header is the parent's byte for byte and reading it back gives the
+ * wrong answer). `img`/`img_len` is a copy of the format's own header struct (a PE/ELF
+ * image description, a `struct kof_script_info`): copied into scanner-owned storage here so
+ * the caller's own copy (a stack local, an island's single-use one) need not outlive this
+ * call. Spent by oc_kid_push like `kind`/`evidence_only` beside it - kof_src_declare_desc,
+ * read back by sx_inherit_image when the child becomes current. A copy that cannot be
+ * afforded leaves the child raw (OC_LIMIT, as every other over-ceiling answer does) rather
+ * than silently describing it wrong.
+ */
+void oc_child_desc(const struct kof_obj_ctx *ctx, uint8_t fmt, uint8_t arch, uint8_t subtype,
+		   uint64_t entry_off, const void *img, uint32_t img_len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!img || !img_len)
+		return;
+	if (sc->pend.desc_cap < img_len) {
+		uint8_t *g = realloc(sc->pend.desc_buf, img_len);
+
+		if (g) {
+			sc->pend.desc_buf = g;
+			sc->pend.desc_cap = img_len;
+		} else {
+			OC_LIMIT(sc, "child image description not allocated");
+		}
+	}
+	if (sc->pend.desc_cap < img_len)
+		return;
+	memcpy(sc->pend.desc_buf, img, img_len);
+	sc->pend.desc.fmt = fmt;
+	sc->pend.desc.arch = arch;
+	sc->pend.desc.subtype = subtype;
+	sc->pend.desc.entry_off = entry_off;
+	sc->pend.desc.info = sc->pend.desc_buf;
+	sc->pend.desc.info_len = img_len;
+	sc->pend.desc_set = 1;
 }
 
 /*
@@ -908,6 +977,10 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 		sc->ledger.obj_cap = 1;
 	sc->obj.open.broken = 0;
 	sc->obj.open.stop = 0;
+	KOF_TRACE("[child] tree budget: produced=%llu kids=%u window=%llu resident_max=%llu obj_cap=%llu\n",
+		  (unsigned long long)sc->ledger.budget, (unsigned)sc->ledger.kids_left,
+		  (unsigned long long)sc->ledger.window_left, (unsigned long long)sc->ledger.resident_max,
+		  (unsigned long long)sc->ledger.obj_cap);
 }
 
 void kof_scan_kids_reset(struct kof_scanner *sc)

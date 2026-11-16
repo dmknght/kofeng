@@ -59,9 +59,17 @@
 #define KV_GW_LANE 3u           /* no lane left for it */
 #define KV_GRAPH_CELLS_MAX (4u << 20)   /* cells of the canvas, whatever max_cols and max_rows say (4 bytes each) */
 
-/* The two properties of an edge, as the engine states them (kgenome_gv_cond, kgenome_gv_loop: the same values). */
+/* The properties of an edge, as the engine states them (kgenome_gv_cond, kgenome_gv_loop, kgenome_gv_sure: the same values). */
 enum kv_graph_cond { KV_GC_NONE = 0, KV_GC_T, KV_GC_F };
 enum kv_graph_loop { KV_GL_NONE = 0, KV_GL_LOOP, KV_GL_RETREAT };
+/*
+ * HOW SURE A LINK IS (a lineage's: a CFG edge is always SURE). The straight runs of each are drawn their own way and so is the arrowhead, so a picture
+ * shows the four apart without a colour:
+ *   SURE     solid `│` `─`, `v`            MAY      dashed `╎` `╌` (plain: `;` `_`), `v`
+ *   UNKNOWN  heavy dashed `╏` `╍` (`?` `?`), `?`      BROKEN   heavy dotted `┋` `┉` (`x` `x`), `x`
+ * A loop link or a retreating edge keeps its own dotted runs and `^` (a lineage's cycle is one); a corner and a junction are the same for every kind.
+ */
+enum kv_graph_sure { KV_GSR_SURE = 0, KV_GSR_MAY, KV_GSR_UNKNOWN, KV_GSR_BROKEN };
 
 enum kv_graph_status { KV_GS_OK = 0, KV_GS_TRUNCATED, KV_GS_BAD_INPUT, KV_GS_NOMEM };
 
@@ -69,6 +77,7 @@ struct kv_graph_edge {
 	uint32_t from, to;              /* node indices; the edges are sorted by `from`, a node's edges in the order they should stand left to right */
 	uint8_t  cond;                  /* enum kv_graph_cond: T and F are drawn as a letter under the source box, none draws none */
 	uint8_t  loop;                  /* enum kv_graph_loop: a loop link or a retreating edge is a back edge (never walked forward); none may still turn out to go back, and is then drawn as retreating */
+	uint8_t  sure;                  /* enum kv_graph_sure (appended: an initialiser that names none draws every edge SURE) */
 };
 
 struct kv_graph_in {
@@ -83,6 +92,9 @@ struct kv_graph_in {
 	uint8_t (*mark)(void *user, uint32_t node, int32_t line);
 	uint32_t max_node;              /* 0 = KV_GRAPH_MAX_NODE */
 	uint32_t max_cols, max_rows;    /* the canvas; 0 = KV_GRAPH_COLS_DEF / KV_GRAPH_ROWS_DEF */
+	/* 1: the graph has no one entry (a lineage: every node nothing points to is a start): the order is topological over all of them, and `entry` is not
+	 * read. 0: a CFG, the entry's part first (APPENDED: an initialiser that does not name it keeps the CFG's drawing). */
+	uint8_t  sources_first;
 };
 
 struct kv_graph_box {
@@ -100,6 +112,7 @@ struct kv_graph_wire {
 	uint32_t edge;                  /* index into the input's edges */
 	uint32_t seg0, n_seg;           /* its segments, in order of travel; consecutive segments share their corner cell */
 	uint8_t  cond, loop;            /* as given, loop = RETREAT for an edge the walk found going back that the input did not call a loop */
+	uint8_t  sure;                  /* as given */
 	uint8_t  back;                  /* routed through a lane (or a hook): leaves the tail's bottom, enters the head's bottom from below */
 	char     letter;                /* 'T', 'F' or 0 */
 	char     arrow;                 /* `v` (a forward edge enters the top of its target), `^` (a back edge enters the bottom of its head) */
@@ -113,6 +126,7 @@ struct kv_graph_cell {
 	uint8_t mask;                   /* for a line: the sides it connects to (KV_GM_*) */
 	uint8_t kind;                   /* the edge drawn here: 1 + loop * 3 + cond (kv_graph_cell_attr); a box's border or text cell: KV_GRAPH_MARK0 - 1 + its mark (kv_graph_in.mark), else 0 */
 	char    ch;                     /* a letter, an arrowhead or a character of a box's text */
+	uint8_t sure;                   /* the edge drawn here: enum kv_graph_sure, the first edge's when two share the cell (as `kind`) */
 };
 
 enum kv_graph_glyph { KV_GG_EMPTY = 0, KV_GG_TEXT, KV_GG_BTL, KV_GG_BTR, KV_GG_BBL, KV_GG_BBR, KV_GG_BH, KV_GG_BV, KV_GG_LINE, KV_GG_ARROW, KV_GG_LABEL };
@@ -155,6 +169,11 @@ struct kv_graph_style {
 	int ascii;                      /* 1: the plain set (`|` `-` `+` `'` `.`); 0: box drawing for lines and the viewer's own glyphs for boxes */
 	const char *attr[KV_GRAPH_KINDS]; /* a string written before the run of cells of a kind (NULL: none); index = kv_graph_cell_attr() */
 	const char *off;                /* written when a run of coloured cells ends (NULL: nothing) */
+	/* LIT EDGES: the cells of the wires of the input edges whose lit[edge] is not 0 (lit holds n_lit flags) are written after `lit_attr` instead of
+	 * their kind's attribute - the reader's pick of links, shown on the drawing. NULL: none lit. */
+	const uint8_t *lit;
+	uint32_t n_lit;
+	const char *lit_attr;
 };
 /* The style the viewer uses: box drawing unless the build is KOFVIEW_ASCII_BOX; no attributes. */
 struct kv_graph_style kv_graph_style_default(void);

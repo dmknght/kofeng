@@ -307,6 +307,145 @@ static void thumb_fields(void)
 	ok("tbb: base 0, index 1", kgenome_thumb_w_rn(in) == 0u && kgenome_thumb_w_rm(in) == 1u);
 }
 
+/*
+ * DA-ARM32ROWS (arm32_rows.c, 2026-10-28, sev L, not fixed - owner decision pending
+ * on which words become INVALID vs. are handed to a later row): several rows of
+ * kgenome_arm32_src_cond (MRS, CLZ, the register-offset halfword rows among them)
+ * leave a should-be-zero/one bit unchecked, so a word that a real disassembler
+ * reads as a different instruction still decodes under the loose row's name.
+ * Pinned here with the id in the comment (both ways, per check_rules): a mask fix
+ * flips one of these three words, and this test is meant to fail that day, not
+ * stay silently green on behaviour nobody is checking.
+ */
+static void known_defect_da_arm32rows(void)
+{
+	struct kgenome_arm32_insn in;
+
+	kgenome_arm32_decode(&in, 0x01010101u);
+	ok("DA-ARM32ROWS: 01010101 reads as MRS today (a real disassembler reads TST)",
+	   in.id == KGENOME_ARM32_I_MRS);
+
+	kgenome_arm32_decode(&in, 0x91616812u);
+	ok("DA-ARM32ROWS: 91616812 reads as CLZ today (a real disassembler reads CMN)",
+	   in.id == KGENOME_ARM32_I_CLZ);
+
+	kgenome_arm32_decode(&in, 0x0007d1bcu);
+	ok("DA-ARM32ROWS: 0007d1bc reads as STRH_REG today (a real disassembler reads it undefined)",
+	   in.id == KGENOME_ARM32_I_STRH_REG);
+}
+
+/* ---- every row, by itself --------------------------------------------------- */
+
+/*
+ * The curated cases above name maybe 40 of ARM state's 213 ids and Thumb's by
+ * hand, and the million-word fuzz in tables() below only checks that an id
+ * is IN RANGE - neither ever asks "does THIS row's own pattern decode to
+ * THIS row's own id." A row whose mask is a little too wide or too narrow
+ * for the row above or below it in priority order passes both of those and
+ * is still wrong.
+ *
+ * THE ORACLE is not a second decoder: it is a linear, first-match-wins scan
+ * of the very array the row came from (kgenome_arm32_src_cond and friends,
+ * arm32_private.h) - the definition the derived index (arm32_index.c,
+ * checked for drift in tests/lib/genome/arm_index.c) exists to answer
+ * faster than. Comparing the real inline decode against that scan, for a
+ * word built from EVERY row's own mask/value with the free bits filled
+ * several different ways (not just zero, which a row whose free bits
+ * happen to spell a zero register or a zero shift amount could pass by
+ * accident), is full coverage of the hand-written table by construction:
+ * every row gets exercised at least once through its own pattern, not
+ * through whichever curated example or random word happened to hit it.
+ */
+static unsigned scan_rows(const struct kgenome_arm32_row *rows, unsigned n, uint32_t w)
+{
+	unsigned i;
+
+	for (i = 0; i < n; i++)
+		if ((w & rows[i].mask) == rows[i].value)
+			return rows[i].id;
+	return ~0u;
+}
+
+static uint32_t rnd32(uint64_t *s)
+{
+	*s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
+	return (uint32_t)(*s >> 16);
+}
+
+#define ROW_SAMPLES 8u
+
+static void every_row(void)
+{
+	uint64_t seed = 0x2545f4914f6cdd1dull;
+	unsigned i, j, bad;
+
+	bad = 0;
+	for (i = 0; i < kgenome_arm32_src_cond_n; i++) {
+		const struct kgenome_arm32_row *row = &kgenome_arm32_src_cond[i];
+
+		for (j = 0; j <= ROW_SAMPLES; j++) {
+			uint32_t free_bits = j ? rnd32(&seed) & ~row->mask : 0u;
+			uint32_t w = ((row->value & row->mask) | free_bits) & 0x0fffffffu;
+			struct kgenome_arm32_insn in;
+
+			w |= 0xe0000000u;       /* condition AL: the conditional space this row lives in */
+			kgenome_arm32_decode(&in, w);
+			if (in.id != scan_rows(kgenome_arm32_src_cond, kgenome_arm32_src_cond_n, w))
+				bad++;
+		}
+	}
+	ok("every ARM state conditional row decodes to what the canonical list itself says first", !bad);
+
+	bad = 0;
+	for (i = 0; i < kgenome_arm32_src_unc_n; i++) {
+		const struct kgenome_arm32_row *row = &kgenome_arm32_src_unc[i];
+
+		for (j = 0; j <= ROW_SAMPLES; j++) {
+			uint32_t free_bits = j ? rnd32(&seed) & ~row->mask : 0u;
+			uint32_t w = ((row->value & row->mask) | free_bits) & 0x0fffffffu;
+			struct kgenome_arm32_insn in;
+
+			w |= 0xf0000000u;       /* condition 1111: the unconditional space */
+			kgenome_arm32_decode(&in, w);
+			if (in.id != scan_rows(kgenome_arm32_src_unc, kgenome_arm32_src_unc_n, w))
+				bad++;
+		}
+	}
+	ok("every ARM state unconditional row decodes to what the canonical list itself says first", !bad);
+
+	bad = 0;
+	for (i = 0; i < kgenome_thumb_src_narrow_n; i++) {
+		const struct kgenome_arm32_row *row = &kgenome_thumb_src_narrow[i];
+
+		for (j = 0; j <= ROW_SAMPLES; j++) {
+			uint32_t free_bits = j ? rnd32(&seed) & 0xffffu & ~row->mask : 0u;
+			uint32_t w = ((row->value & row->mask) | free_bits) & 0xffffu;
+			struct kgenome_thumb_insn in;
+
+			kgenome_thumb_decode_narrow(&in, w);
+			if (in.id != scan_rows(kgenome_thumb_src_narrow, kgenome_thumb_src_narrow_n, w))
+				bad++;
+		}
+	}
+	ok("every Thumb narrow row decodes to what the canonical list itself says first", !bad);
+
+	bad = 0;
+	for (i = 0; i < kgenome_thumb_src_wide_n; i++) {
+		const struct kgenome_arm32_row *row = &kgenome_thumb_src_wide[i];
+
+		for (j = 0; j <= ROW_SAMPLES; j++) {
+			uint32_t free_bits = j ? rnd32(&seed) & ~row->mask : 0u;
+			uint32_t w = (row->value & row->mask) | free_bits;
+			struct kgenome_thumb_insn in;
+
+			kgenome_thumb_decode_wide(&in, w >> 16, w & 0xffffu);
+			if (in.id != scan_rows(kgenome_thumb_src_wide, kgenome_thumb_src_wide_n, w))
+				bad++;
+		}
+	}
+	ok("every Thumb wide row decodes to what the canonical list itself says first", !bad);
+}
+
 /* ---- the tables themselves -------------------------------------------------- */
 
 /*
@@ -364,8 +503,10 @@ int main(void)
 	printf("genotype arm32:\n");
 	arm32_curated();
 	arm32_fields();
+	known_defect_da_arm32rows();
 	thumb_curated();
 	thumb_fields();
+	every_row();
 	tables();
 	printf("genotype arm32: %d checks, %s\n", checks, failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

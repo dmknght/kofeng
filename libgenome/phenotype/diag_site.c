@@ -217,6 +217,19 @@ static void note_node(struct kgenome_diag_scan *s, struct kgenome_diag_orgs *w,
 		h->bits |= KGENOME_DIAG_H_ZERO_OK;
 }
 
+/*
+ * A SYSTEM CALL THAT DOES NOT RETURN (exit, exit_group) is listed with the calls to imports that do not (kgenome_diag_noret_add), by the
+ * name the number has: the code after it is not reached from it. The vocabulary has no capability for them, so they make no node, and
+ * without this the lineage stage walked on from `exit` into the next block - MEASURED on msfvenom's cleartext stager, the error path
+ * `push 60; pop rax; syscall` falls through into `pop rsi` of the success path, the stack pointer of the two arrivals differs, and the
+ * buffer the stager jumps into was MAY where every real path gives the mmap'd region.
+ */
+static void noret_note(struct kgenome_diag_scan *s, uint64_t at, const char *nm)
+{
+	if (nm && kgenome_diag_name_is_noreturn(nm))
+		(void)kgenome_diag_noret_add(s, at);
+}
+
 #define ARM_OABI_BASE 0x900000u
 
 static void at_syscall_fixed(struct kgenome_diag_scan *s, struct kgenome_cell_cur *k,
@@ -258,8 +271,10 @@ static void at_syscall_fixed(struct kgenome_diag_scan *s, struct kgenome_cell_cu
 		s->n_unread++;
 	cap = kgenome_nucleo_cap_of_syscall_abi(fx, (uint32_t)nr, arg, &fl);
 	nm = kgenome_nucleo_sys_name_abi(fx, (uint32_t)nr);
-	if (cap == KGENOME_NUCLEO_NONE)
+	if (cap == KGENOME_NUCLEO_NONE) {
+		noret_note(s, in->at, nm);
 		return;
+	}
 	{
 		const struct node_site x = { in->at, cap, fl, nm, ar, n_ar, have, fx->ret,
 					     (have & 2u) && (arg[1] & 0x800u) /* SOCK_NONBLOCK */, 0 };
@@ -383,6 +398,8 @@ void kgenome_diag_at_syscall(struct kgenome_diag_scan *s, struct kgenome_cell_cu
 		 */
 		if (bits == 32 && nr == 102u && !(have & 1u))
 			wrap_note(s, at);
+		/* (the vocabulary's table names only the calls it has a word for: the kernel's full table names exit) */
+		noret_note(s, at, kgenome_nucleo_sys_name_all((unsigned)bits, (uint32_t)nr));
 		return;                 /* a syscall the vocabulary has no word for */
 	}
 	{

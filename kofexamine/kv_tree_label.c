@@ -191,10 +191,18 @@ void obj_label(const struct object *o, char *out, size_t cap)
 		 * the presence of the word is the fact, rather than the word
 		 * "Raw" being one.
 		 */
-		snprintf(out, cap, "//%.24s%s", leaf,
+		snprintf(out, cap, "%s%.24s%s", o->evidence_only ? "~" : "//", leaf,
 			 o->too_big ? "  (not kept)" : "");
 	} else {
-		snprintf(out, cap, "//%.24s %.18s%s", leaf, what,
+		/*
+		 * "~" INSTEAD OF "//" FOR EVIDENCE (owner, 2026-11-10): the row's
+		 * real name (o->name) still carries the engine's own "//<n>" - tests,
+		 * dumps and the examiner's path all read that, unchanged; this is
+		 * display only, so a reader does not take the row for a piece of the
+		 * file's own structure the way a container entry or an unpacked image
+		 * is. See struct object.evidence_only.
+		 */
+		snprintf(out, cap, "%s%.24s %.18s%s", o->evidence_only ? "~" : "//", leaf, what,
 			 /* Scanned, but not kept: there is nothing to show and
 			  * the row should not pretend there is. */
 			 o->too_big ? "  (not kept)" : "");

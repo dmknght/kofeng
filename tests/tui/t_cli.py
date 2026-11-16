@@ -13,9 +13,25 @@ def run(args, **kw):
 
 
 @case(A)
-def no_arguments_prints_usage_and_exits_2():
+def no_arguments_without_a_tty_needs_a_terminal():
+    # Neither a path nor --pid is not a usage error any more (owner): the
+    # reader opens something from the empty view instead (Ctrl+O, File >
+    # Open - see no_path_or_pid_starts_with_empty_panes below, and
+    # open_from_the_empty_view_loads_a_file in t_dialogs.py). Run without a
+    # pty, so main() reaches term_setup() and is refused there, the same as
+    # any other invocation with no terminal (non_tty_stdin_is_refused_cleanly).
     rc, out, err = run([])
-    eq(rc, 2); check('kofviewer [--db' in err, err[:80])
+    eq(rc, 1); check('needs a terminal' in err, err[:80])
+
+
+@case(A)
+def no_path_or_pid_starts_with_empty_panes():
+    with Viewer(None, db=False) as v:
+        check(v.alive(), 'empty start (no path, no --pid) did not come up')
+        check('File' in v.row(1), 'no menu bar: %r' % v.row(1))
+        # nothing is loaded: no row carries the '*' selection marker
+        check(v.row(2)[:1] != '*', 'a row is selected with nothing open: %r' % v.row(2)[:30])
+        check(v.menu_item('File', 'Open...'), 'File > Open is not offered from the empty view')
 
 
 @case(A)

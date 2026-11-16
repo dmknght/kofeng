@@ -100,10 +100,11 @@ struct relsite {
 	uint16_t cap;
 	/*
 	 * The vocabulary's id for the name, not the string - see
-	 * kgenome_nucleo_name_id. Carried because one capability can cover two
-	 * calls that differ in whether the object comes back: mmap and
-	 * mprotect are both an executable mapping and only the first hands
-	 * one back. See kgenome_nucleo_hands_on.
+	 * kgenome_nucleo_name_id - which is the ROW the call's shape is read
+	 * from (kgenome_nucleo_call_role, kgenome_nucleo_call_hands_on): one
+	 * capability covers calls that differ in which argument is which and
+	 * in whether the object comes back (mmap and mprotect are both an
+	 * executable mapping and only the first hands one back).
 	 */
 	uint16_t name;
 	uint8_t  argrole[6];    /* which input each argument register is */
@@ -150,7 +151,7 @@ static void gather(struct relgather *g, const struct kgenome_diag_rcall *rc)
 	g->site[g->n].cap = cap;
 	g->site[g->n].name = rc->name;
 	for (i = 0; i < 6u; i++)
-		g->site[g->n].argrole[i] = kgenome_diag_role_of_arg(cap, i);
+		g->site[g->n].argrole[i] = kgenome_nucleo_call_role(cap, rc->name, i);
 	g->n++;
 }
 
@@ -181,6 +182,23 @@ static int site_at_cmp(const void *x, const void *y)
 	return a->idx < b->idx ? -1 : a->idx > b->idx;
 }
 
+/*
+ * A FORWARD JCC THIS WALK HAS NOT PHYSICALLY REACHED YET: the origin map as it stood when the
+ * branch was taken, remembered at its target. The walk never jumps - it only ever reads the
+ * fallthrough - but it does, eventually, read every byte of the function in order, so when it
+ * arrives at the target the two paths are merged with kgenome_diag_org_merge (the sweep's own
+ * primitive for exactly this question, diag_origin.c - not a second copy of its logic). A
+ * register one path set and the other did not comes out MAY; one both paths set the same way
+ * stays PROVEN. Scoped to one function at a time (reset with every entry of the outer loop
+ * below), so a small fixed table is enough - SYM_JOIN_MAX is generous for one function's own
+ * forward branches, and a table that fills demotes instead of guessing (reported, not silent).
+ */
+struct sym_join {
+	uint64_t at;
+	struct kgenome_diag_orgs w;
+};
+#define SYM_JOIN_MAX 16u
+
 void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size)
@@ -195,6 +213,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	struct relgather g;
 	const struct kgenome_func_set *fg;
 	const struct kgenome_elf_info *ei;
+	struct sym_join *pj = NULL;
 	uint32_t i, j;
 
 	/* A PE has an import table and not a relocation table; its half of this
@@ -269,9 +288,16 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 		node_of[i] = 0xffffu;
 		if (off >= size)
 			continue;
+		/* KNOWN DEFECT SYM-DUP-1 (2026-11-12, R) [sev L]: this loop never dedupes by `off` -
+		 * two relocation CALL sites sharing one r_offset each get their own hit node, but the
+		 * walk below only ever links the first node found at an address, leaving the second
+		 * permanently input-less.
+		 * Trigger: a .ko with two relocations at one offset. Effect: an orphan node, no
+		 * evidence lost, just an unlinked duplicate. Fix: fold matching `off` before this loop. */
 		h = kgenome_diag_hit_add(s, off, sites[i].cap, 0);
 		if (!h)
 			continue;       /* full: the rest keep their 0xffff */
+		h->row = sites[i].name;
 		node_of[i] = (uint16_t)(s->n_hit - 1u);
 	}
 	for (i = 0; i < g.n; i++) {
@@ -298,12 +324,17 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	 */
 	kgenome_cell_space_init(&sp, obj, base, size);
 	kgenome_diag_callees_init(&ce, &sp, obj->arch, 0, size);
+	/* NULL is a valid, safe degraded state: every jcc then takes the demote fallback below,
+	 * same as before this fix - reported once, not a crash and not a silent wrong answer. */
+	pj = malloc((size_t)SYM_JOIN_MAX * sizeof *pj);
+	if (!pj)
+		kgenome_diag_note(s, KGENOME_NOMEM);
 	for (j = 0; j < fg->n; j++) {
 		struct kgenome_cell_cur k;
 		struct kgenome_cell_insn in;
 		struct kgenome_diag_orgs w;
 		uint64_t lo, hi;
-		uint32_t r;
+		uint32_t r, npj = 0;
 
 		lo = fns[j].off;         /* a file offset, as above */
 		if (lo >= size)
@@ -322,6 +353,21 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 		while (k.at < hi && kgenome_cell_step(&k, &sp, &in)) {
 			uint64_t tva;
 
+			/* A PATH REJOINS HERE: merge what an earlier forward jcc left waiting for this
+			 * address, before this address's own instruction is read at all. */
+			if (npj) {
+				uint32_t ji;
+
+				for (ji = 0; ji < npj; ji++) {
+					if (pj[ji].at != in.at)
+						continue;
+					if (kgenome_diag_org_merge(&w, &pj[ji].w))
+						kgenome_diag_note(s, KGENOME_TRUNCATED);
+					pj[ji] = pj[--npj];
+					break;
+				}
+			}
+
 			/*
 			 * A CALL OR A TAIL JUMP TO AN IMPORT. The decoder
 			 * computes the address of the NEXT instruction for an
@@ -337,9 +383,46 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 				 * cleared. What follows in the same function is reached by a branch from earlier
 				 * in it, which this walk does not model: what is carried is reached, not shown -
 				 * the sweep's rule for the code after a jmp that no join reaches.
+				 *
+				 * A `jcc` IS A FORK: its OTHER side (the target) is a path this linear walk
+				 * never reads directly, so what it carries past the branch is only PROVEN
+				 * when the target side agrees - which is exactly the join above, run in
+				 * reverse: remember the live map at the target (pj[]), merged in once the
+				 * walk's own reading reaches it. SYM-BRANCH-1 (2026-11-12, fixed): a forward,
+				 * resolved target inside this function is tracked that way; anything this
+				 * walk cannot place a join for (backward, indirect, unresolved, or the small
+				 * table full) falls back to the same demote a ret gets - never silently
+				 * PROVEN past a fork it did not account for.
 				 */
 				if (in.op == KGENOME_CELL_RET)
 					kgenome_diag_org_demote(&w, 0xffffu);
+				if (in.op == KGENOME_CELL_JCC) {
+					int tracked = 0;
+
+					if (pj && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
+					    in.target != KGENOME_BROKEN &&
+					    in.target > in.at && in.target < hi) {
+						uint32_t ji;
+
+						for (ji = 0; ji < npj; ji++)
+							if (pj[ji].at == in.target)
+								break;
+						if (ji < npj) {
+							if (kgenome_diag_org_merge(&pj[ji].w, &w))
+								kgenome_diag_note(s, KGENOME_TRUNCATED);
+							tracked = 1;
+						} else if (npj < SYM_JOIN_MAX) {
+							pj[npj].at = in.target;
+							pj[npj].w = w;
+							npj++;
+							tracked = 1;
+						} else {
+							kgenome_diag_note(s, KGENOME_TRUNCATED);
+						}
+					}
+					if (!tracked)
+						kgenome_diag_org_demote(&w, 0xffffu);
+				}
 				if (w.stk_cut) {
 					w.stk_cut = 0;
 					kgenome_diag_note(s, KGENOME_TRUNCATED);
@@ -430,9 +513,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 * are kept.
 			 */
 			if (i < g.n && node_of[i] != 0xffffu) {
-				if (kgenome_nucleo_hands_on(sites[i].cap,
-						      kgenome_nucleo_name_of(
-							      sites[i].name)))
+				if (kgenome_nucleo_call_hands_on(sites[i].cap, sites[i].name))
 					kgenome_diag_org_set(&w, KGENOME_CELL_REG_AX,
 							 node_of[i]);
 				else
@@ -444,4 +525,5 @@ out:
 	free(sites);
 	free(node_of);
 	free(by_at);
+	free(pj);
 }

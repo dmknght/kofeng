@@ -21,6 +21,18 @@
  * N5-N7 inject the failure at the allocation that matters (malloc of a size the code asks for, or the
  * next calloc) and ask one thing: a failure that was hit must be REPORTED - the object broken = LIMIT, or
  * kof_stats.limit_hits - never silent. Under a sanitizer, which owns malloc, they are skipped.
+ *
+ *   E-RWX the ELF dedicated end-to-end fixture merge 150 flagged as an open follow-up (not an N-numbered
+ *        audit defect; fixed directly in merge 149, libkofeng/scanners/scan_norm_text.c's ELF half of
+ *        sx_norm_keep_exec): a REAL ELF64 ET_EXEC (tests/unit/norm_elf_fx.h, the ELF counterpart of
+ *        norm_pe_fx.h used above for N3) with a PROGBITS+EXECINSTR+WRITE code section is driven through
+ *        this same kscan_bytes/vscan harness; its UTF-16LE string must come out of the normalised view
+ *        NARROWED, not kept byte for byte - the N3 PE case already proves this end to end for PE, this is
+ *        the ELF half of the same proof. Read-only code of the same shape is the control: kept verbatim.
+ *   NV-1  an executable's view was declared a LANGUAGE (kof_result.lang_known), and a host printed every
+ *        PE view as a shell script (nv1_view_format).
+ *   PT-16 one object's result is the same from a fresh scanner and after other objects
+ *        (pt16_order_independent).
  */
 
 #include "caps_fix.h"
@@ -30,6 +42,7 @@
 #include "../../libkofeng/scanners/objprod.h"
 #include "../../libkofeng/scanners/objsrc.h"
 #include <genotype/image/funcs.h>
+#include <phenotype/diag_scan.h>
 
 #ifndef __SANITIZE_ADDRESS__
 #define CAN_FAIL 1
@@ -101,6 +114,7 @@ static void disarm(void)
 struct vobj {
 	char     name[96];
 	uint32_t kind, broken;
+	uint8_t  lang_known, rgn_fmt;   /* what the host was told the object is (NV-1) */
 	uint8_t *bytes;
 	uint64_t len;
 	uint32_t n_rgn;
@@ -127,6 +141,8 @@ static int vcollect(const char *name, const void *bytes, uint64_t len, const str
 	snprintf(o->name, sizeof o->name, "%s", name ? name : "");
 	o->kind = res->entry_kind;
 	o->broken = res->broken;
+	o->lang_known = res->lang_known;
+	o->rgn_fmt = res->region_fmt;
 	if (len && len < (8u << 20)) {
 		o->bytes = RAW_MALLOC((size_t)len);
 		if (o->bytes) {
@@ -248,6 +264,99 @@ static void n3_regions(void)
 	}
 }
 
+/* ---- E-RWX (end-to-end ELF fixture; see the header comment) ---------------------------------- */
+
+#include "norm_elf_fx.h"
+
+static void erwx_elf_narrow(void)
+{
+	static uint8_t elf[ELF_FX_MAX];
+	static const unsigned counts[] = { 1, 3 };
+	unsigned c, v;
+
+	for (v = 0; v < 2u; v++) {
+		for (c = 0; c < sizeof counts / sizeof counts[0]; c++) {
+			const unsigned n = counts[c];
+			const uint64_t shflags = v ? ELF_SHF_RWX : ELF_SHF_RX;
+			uint32_t len = build_elf(elf, n, shflags);
+			struct vres r;
+			const struct vobj *w;
+			uint8_t ascii[16], wide[32];
+			unsigned j, ok;
+
+			memcpy(ascii, ELF_WIDE_TXT, 16);
+			for (j = 0; j < 16u; j++) {
+				wide[2u * j] = ascii[j];
+				wide[2u * j + 1u] = 0;
+			}
+			ok = vscan(elf, len, &r) >= 2u && (w = view_of(&r)) != NULL;
+			CK(ok);
+			if (!ok) {
+				vfree(&r);
+				continue;
+			}
+			if (!v) {
+				/* read-only code is kept verbatim: all N sections' wide strings stay wide */
+				unsigned wide_n = count_of(w->bytes, w->len, wide, sizeof wide);
+
+				printf("  %u read-only RX code section(s): %u still wide\n", n, wide_n);
+				CK(wide_n == n);
+				CK(count_of(w->bytes, w->len, ascii, 16) == 0u);
+			} else {
+				/* E-RWX: a writable+executable ELF section is narrowed like any other data */
+				unsigned narrow = count_of(w->bytes, w->len, ascii, 16);
+
+				printf("  %u writable RWX code section(s): %u narrowed, %u still wide\n",
+				       n, narrow, count_of(w->bytes, w->len, wide, sizeof wide));
+				CK(narrow == n);
+				CK(count_of(w->bytes, w->len, wide, sizeof wide) == 0u);
+			}
+			vfree(&r);
+		}
+	}
+}
+
+/* ---- NV-1 ------------------------------------------------------------------------------------ */
+
+/*
+ * NV-1 (2026-11-15, M): every PE's normalised view reached the host with kof_result.lang_known set,
+ * and a host reads that as "a script of the declared family": kofexaminer printed the view of
+ * sacsvr.dll as `format Script any Shell` with its PE region bits named HEADER/BODY/MARKUP and a
+ * region sum MISMATCH. The view of an executable is described by its image description (the
+ * parent's format), never by a language. Old tests missed it: (c) they checked the view's bytes and
+ * regions, never what the result told the host the object is.
+ */
+static void nv1_view_format(void)
+{
+	static uint8_t pe[PE_MAX];
+	static uint8_t elf[ELF_FX_MAX];
+	uint32_t len;
+	struct vres r;
+	const struct vobj *w;
+	int ok;
+
+	len = build_pe(pe, 3, 0xe0000020u);
+	ok = vscan(pe, len, &r) >= 2u && (w = view_of(&r)) != NULL;
+	CK(ok);
+	if (ok) {
+		printf("  PE view: lang_known=%u region vocabulary=%u (PE=%u), parent lang_known=%u\n",
+		       w->lang_known, w->rgn_fmt, (unsigned)KOF_FMT_PE, r.o[0].lang_known);
+		CK(w->lang_known == 0u);
+		CK(w->rgn_fmt == (uint8_t)KOF_FMT_PE);
+	}
+	vfree(&r);
+	len = build_elf(elf, 1, ELF_SHF_RWX);
+	ok = vscan(elf, len, &r) >= 2u && (w = view_of(&r)) != NULL;
+	CK(ok);
+	if (ok) {
+		printf("  ELF view: lang_known=%u region vocabulary=%u (ELF=%u)\n",
+		       w->lang_known, w->rgn_fmt, (unsigned)KOF_FMT_ELF);
+		CK(w->lang_known == 0u);
+		CK(w->rgn_fmt == (uint8_t)KOF_FMT_ELF);
+	}
+	vfree(&r);
+}
+
 /* ---- N5 -------------------------------------------------------------------------------------- */
 
 static void n5_alloc_refusal(void)
@@ -316,7 +425,8 @@ static void n6_remap_status(void)
 	memset(&g, 0, sizeof g);
 	CK(kgenome_elf_image_parse(kof_buf_make(buf, n), &info, &g));
 	g.file_header = &info;
-	kgenome_funcs_build(KGENOME_FMT_ELF, buf, n, &info, &fs);
+	/* the table the scan builds (round 2: the undeclared code is in it too, so its size is the symbols' plus the gaps) */
+	kgenome_diag_funcs_of(&g, buf, n, &fs);
 	printf("  parent functions: %u\n", fs.n);
 	CK(fs.n >= 2u);
 	CK(vscan(buf, n, &r) >= 2u && view_of(&r) != NULL);                /* the control: the view is made */
@@ -448,6 +558,82 @@ static void n8_decode_nothing(void)
 	CK(!memcmp(a, b, sizeof a));
 }
 
+/* ---- PT-16 ----------------------------------------------------------------------------------- */
+
+static int vres_same(const struct vres *a, const struct vres *b)
+{
+	unsigned i;
+
+	if (a->n != b->n)
+		return 0;
+	for (i = 0; i < a->n; i++) {
+		const struct vobj *x = &a->o[i], *y = &b->o[i];
+
+		unsigned k;
+
+		if (strcmp(x->name, y->name) || x->kind != y->kind || x->broken != y->broken ||
+		    x->lang_known != y->lang_known || x->rgn_fmt != y->rgn_fmt || x->len != y->len ||
+		    (x->len && memcmp(x->bytes, y->bytes, (size_t)x->len)) || x->n_rgn != y->n_rgn)
+			return 0;
+		/* Field by field, not memcmp: struct kof_src_region has 4 bytes of padding after `mask`, and a struct copy carries whatever the engine's
+		 * memory held there. Measured 2026-11-15 (fix_nocfg, M): every mask/off/len of the 17 regions equal and memcmp unequal once the scanner's
+		 * history changed (struct kof_scanner lost a member); the row compared padding, not the result. */
+		for (k = 0; k < x->n_rgn; k++)
+			if (x->rgn[k].mask != y->rgn[k].mask || x->rgn[k].off != y->rgn[k].off || x->rgn[k].len != y->rgn[k].len)
+				return 0;
+	}
+	return 1;
+}
+
+/*
+ * PT-16 (2026-11-15, M): corp300/199_243.bin ran past 600 s in a FRESH process of the partition harness
+ * and finished in a batch, which read as state carried between objects. It is not the engine: the
+ * engine answers the same in 0.64-0.72 s fresh, after another object and twice in one scanner; the time
+ * was the harness's own decode counter (a hash set whose home slots are 22 bits wide for a 25-bit table,
+ * 4.65 million distinct decodes on that file: linear probing over the clusters). What the report asked
+ * of the engine is pinned here: one object's result does not depend on what the scanner scanned before
+ * it. A fresh scanner, the long-lived one after every case above, and the fresh one again after a PE,
+ * must give the same objects, bytes, regions and status for plain-elf64.
+ */
+static void pt16_order_independent(void)
+{
+	static uint8_t buf[1u << 20], pe[PE_MAX];
+	static struct vres r1, r2, r3, rp;
+	FILE *f = fopen("build/test/fixtures/plain-elf64", "rb");
+	kof_scanner *fresh, *keep = e2e_sc;
+	size_t n;
+	uint32_t pn;
+
+	if (!f) {
+		printf("  PT-16: no plain-elf64 fixture\n");
+		CK(0);
+		return;
+	}
+	n = fread(buf, 1, sizeof buf, f);
+	fclose(f);
+	fresh = kscan_new(e2e_eng);
+	CK(fresh != NULL);
+	if (!fresh)
+		return;
+	e2e_sc = fresh;
+	CK(vscan(buf, n, &r1) >= 2u);                            /* the first object this scanner sees */
+	e2e_sc = keep;
+	(void)vscan(buf, n, &r2);                                 /* after every case above */
+	e2e_sc = fresh;
+	pn = build_pe(pe, 3, 0xe0000020u);
+	(void)vscan(pe, pn, &rp);                                 /* another object first */
+	(void)vscan(buf, n, &r3);
+	e2e_sc = keep;
+	printf("  fresh %u object(s), long-lived %u, after a PE %u\n", r1.n, r2.n, r3.n);
+	CK(vres_same(&r1, &r2));
+	CK(vres_same(&r1, &r3));
+	vfree(&r1);
+	vfree(&r2);
+	vfree(&r3);
+	vfree(&rp);
+	kscan_free(fresh);
+}
+
 int main(void)
 {
 	if (!e2e_open(NULL)) {
@@ -456,6 +642,10 @@ int main(void)
 	}
 	printf("N3 regions of a PE with many code extents\n");
 	n3_regions();
+	printf("E-RWX end-to-end ELF fixture (writable code is narrowed)\n");
+	erwx_elf_narrow();
+	printf("NV-1 an executable's view is not declared a language\n");
+	nv1_view_format();
 	printf("N5 norm_alloc refused\n");
 	n5_alloc_refusal();
 	printf("N6 funcs_remap status\n");
@@ -464,6 +654,8 @@ int main(void)
 	n7_publish_refused();
 	printf("N8 decode of a run answers nothing\n");
 	n8_decode_nothing();
+	printf("PT-16 a result does not depend on what the scanner scanned before\n");
+	pt16_order_independent();
 	if (fails) {
 		printf("norm_defect_engine: %d check(s) failed\n", fails);
 		return 1;

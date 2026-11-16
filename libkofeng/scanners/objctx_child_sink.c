@@ -7,6 +7,7 @@
 #include "../kofcore/kofplatform.h"
 #include <genotype/image/elf_rebuild.h>
 
+#include "../kofcore/kofdebug.h"
 #include "objctx_int.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ void oc_pend_clear(struct kof_scanner *sc)
 	sc->pend.label_len = 0;
 	sc->pend.name_bad = 0;
 	sc->pend.kind = 0;
+	sc->pend.evidence_only = 0;
 	sc->pend.entry = KOF_ENTRY_NONE;
 	sc->pend.want = 0;
 	sc->pend.want_level = 0;
@@ -422,6 +424,10 @@ if (sc->pend.name_bad) {
  */
 kof_src_declare_kind(kid, sc->pend.kind);
 sc->pend.kind = 0;
+/* And whether it is evidence rather than a scan target of its own, spent and
+ * cleared the same way, beside it. */
+kof_src_declare_evidence_only(kid, sc->pend.evidence_only);
+sc->pend.evidence_only = 0;
 /* Spent whatever happened to the child, and reset to the sentinel
  * rather than to zero - zero is entry 0 and is a real answer. */
 kof_src_declare_entry(kid, sc->pend.entry);
@@ -740,6 +746,7 @@ int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 * ordinary answer. Whoever can tell the two apart reports;
 		 * see oc_child, which can.
 		 */
+		KOF_TRACE("[child] push: no child (a window refused the range, or an allocation failed)\n");
 		oc_pend_clear(sc);
 		return 0;
 	}
@@ -748,16 +755,19 @@ int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
 		 * the difference between "nothing else here" and "stopped looking". */
+		KOF_TRACE("[child] push: refused, the tree's child quota is spent\n");
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		kof_src_unref(kid);
 		return 0;
 	}
 	if (!kid_charge(sc, kid)) {
+		KOF_TRACE("[child] push: refused, the ledger would not charge it\n");
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		kof_src_unref(kid);
 		return 0;
 	}
 	if (sc->child.n == sc->child.cap && !kid_grow(sc)) {
+		KOF_TRACE("[child] push: refused, the child list could not grow past %u\n", (unsigned)sc->child.cap);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		kof_src_unref(kid);
 		return 0;
@@ -784,6 +794,8 @@ int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	if (sc->pend.superseded)
 		sc->obj.open.superseded = 1;
 	oc_pend_clear(sc);
+	KOF_TRACE("[child] push: child %u accepted, %u left in the tree's quota\n", (unsigned)(sc->child.n - 1u),
+		  (unsigned)sc->ledger.kids_left);
 	return 1;
 }
 
@@ -922,6 +934,8 @@ int oc_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 	 */
 	span = sc->cur.src ? kof_clip_len(kof_src_buf(sc->cur.src).n, off, len) : 0;
 	if (span > sc->ledger.window_left) {
+		KOF_TRACE("[child] window off=%llu len=%llu: refused, %llu byte(s) over the tree's window allowance\n",
+			  (unsigned long long)off, (unsigned long long)len, (unsigned long long)span);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		oc_pend_clear(sc);
 		return 0;
@@ -972,13 +986,17 @@ static int sink_begin_spill(struct kof_scanner *sc)
 	if (!oc_spill_usable(sc))
 		return 0;
 	fd = oc_spill_open(sc);
-	if (fd < 0)
+	if (fd < 0) {
+		KOF_TRACE("[child] spill: could not open a scratch file, staying in memory\n");
 		return 0;
+	}
 	sc->sink.fd = fd;
 	if (!oc_sink_spill(sc)) {
 		/* oc_spill_write discarded the sink, which closed the descriptor */
+		KOF_TRACE("[child] spill: the write failed, the object is gone\n");
 		return -1;
 	}
+	KOF_TRACE("[child] spill: now spilling to a scratch file\n");
 	return 1;
 }
 
@@ -1117,6 +1135,7 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	}
 	/* A length out of a file, refused before it is used to read anything. */
 	if (n > EMIT_MAX) {
+		KOF_TRACE("[child] emit: refused, %u byte(s) over EMIT_MAX\n", (unsigned)n);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
@@ -1124,6 +1143,8 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * discards, for the same reason the memory ceiling does - what has already
 	 * been decompressed is a real prefix and is worth scanning. */
 	if (n > sc->ledger.budget) {
+		KOF_TRACE("[child] emit: cut, %u byte(s) over the tree's produced-bytes budget (%llu left)\n",
+			  (unsigned)n, (unsigned long long)sc->ledger.budget);
 		oc_child(ctx);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
@@ -1192,9 +1213,11 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 			 * with the 700 entries after it unopened.
 			 */
 			if (over_res) {
+				KOF_TRACE("[child] emit: cut, over the tree's resident ceiling - the walk stops\n");
 				oc_child(ctx);
 				oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 			} else {
+				KOF_TRACE("[child] emit: cut, over this entry's object cap - the rest of this entry is refused\n");
 				oc_entry_cut_close(ctx);
 			}
 			return 0;

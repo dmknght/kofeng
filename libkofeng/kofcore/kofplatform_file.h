@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>          /* kof_path_kind */
 #include <sys/stat.h>
 #include "kofplatform_os.h"
 
@@ -413,6 +414,111 @@ static inline HANDLE kof_win_open_nofollow(const char *path, DWORD access,
 	return h;
 }
 #endif
+
+/*
+ * WHAT A NAME IS, WITHOUT FOLLOWING A LINK: the question a caller that refuses a link asks before it
+ * reads or deletes (the signature editor: a diagnose source must be a regular file in the tree, and a
+ * link put where one was expected - live or dangling - is refused, not followed).
+ *
+ *   KOF_PATH_MISSING  nothing by that name (errno ENOENT); the one answer a caller may treat as "not
+ *                     there" rather than as a refusal
+ *   KOF_PATH_REGULAR  a regular file that is not a link; `st` holds its size and mode
+ *   KOF_PATH_LINK     a symlink on POSIX; on Windows any reparse point (a symlink or a junction - a
+ *                     junction needs no privilege to make, see kof_win_open_nofollow)
+ *   KOF_PATH_OTHER    a directory, a device, a FIFO
+ *   KOF_PATH_ERROR    it could not be asked (errno says why)
+ *
+ * POSIX is lstat, read exactly as the editor read it before. Windows opens the NAME itself
+ * (FILE_FLAG_OPEN_REPARSE_POINT, and BACKUP_SEMANTICS so a directory opens too) and reads its attributes
+ * from the handle - the same test kof_win_open_nofollow makes - so a dangling link is a LINK too; only
+ * then stat() for the size and mode. (GetFileAttributesA was tried first: under wine it does not report
+ * a symlink as a reparse point, measured 2026-11-16, while the handle does.) kof_lstat is not used here: on Windows it is stat() and follows the link (see
+ * kofplatform.h). The answer is a moment's; a reader still opens with kof_fopen_read_nofollow, which
+ * refuses a link swapped in after the question.
+ */
+enum kof_path_kind {
+	KOF_PATH_ERROR = 0,
+	KOF_PATH_MISSING,
+	KOF_PATH_REGULAR,
+	KOF_PATH_LINK,
+	KOF_PATH_OTHER
+};
+
+static inline enum kof_path_kind kof_path_kind(const char *path, struct stat *st)
+{
+#ifdef _WIN32
+	BY_HANDLE_FILE_INFORMATION bi;
+	HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			       NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	int ok;
+
+	if (h == INVALID_HANDLE_VALUE) {
+		DWORD e = GetLastError();
+
+		if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) {
+			errno = ENOENT;
+			return KOF_PATH_MISSING;
+		}
+		errno = e == ERROR_ACCESS_DENIED ? EACCES : EIO;
+		return KOF_PATH_ERROR;
+	}
+	ok = GetFileInformationByHandle(h, &bi) != 0;
+	CloseHandle(h);
+	if (!ok) {
+		errno = EIO;
+		return KOF_PATH_ERROR;
+	}
+	if (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+		return KOF_PATH_LINK;
+	if (stat(path, st) != 0)
+		return KOF_PATH_ERROR;
+#else
+	if (lstat(path, st) != 0)
+		return errno == ENOENT ? KOF_PATH_MISSING : KOF_PATH_ERROR;
+	if (S_ISLNK(st->st_mode))
+		return KOF_PATH_LINK;
+#endif
+	return S_ISREG(st->st_mode) ? KOF_PATH_REGULAR : KOF_PATH_OTHER;
+}
+
+/*
+ * OPEN FOR READING, NEVER THROUGH A LINK, AND NOT INTO A CHILD. POSIX: O_NOFOLLOW (a symlink is
+ * refused with ELOOP) and O_CLOEXEC (the descriptor does not survive an exec). Windows: the handle is
+ * taken by kof_win_open_nofollow, which refuses any reparse point, and CreateFile with no security
+ * attributes makes a handle that is not inheritable - which is the whole of O_CLOEXEC's job there.
+ * NULL when it cannot be opened. Ask kof_path_kind first when the name could be a FIFO or a device:
+ * opening one is not refused here (it was not before either).
+ */
+static inline FILE *kof_fopen_read_nofollow(const char *path)
+{
+	int fd;
+	FILE *fp;
+
+#ifdef _WIN32
+	{
+		HANDLE h = kof_win_open_nofollow(path, GENERIC_READ, OPEN_EXISTING, FILE_SHARE_READ);
+
+		if (h == INVALID_HANDLE_VALUE)
+			return NULL;
+		fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+		if (fd < 0) {
+			CloseHandle(h);
+			return NULL;
+		}
+	}
+	fp = _fdopen(fd, "rb");
+	if (!fp)
+		_close(fd);
+#else
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0)
+		return NULL;
+	fp = fdopen(fd, "rb");
+	if (!fp)
+		close(fd);
+#endif
+	return fp;
+}
 
 /*
  * THE USER'S OWN DIRECTORY, from the system and not from the environment.

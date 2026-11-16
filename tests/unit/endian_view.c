@@ -405,16 +405,20 @@ static void block_path(kof_scanner *sc)
 		CK(kscan_bytes(sc, le.b, le.n, "block-le", &opt, fixture_found, hit) > 0);
 		/* The little-endian object holds the block, in a function: a function unit is listed and not scored. */
 		CK(!hit[0] && !hit[1]);
-		/* the small function is signed on both (floor of one block, owner 2026-11-01; the function table and the frame read every architecture): the object is not counted unsigned. The test pinned
-		 * ppc64 as unsigned, a count it measured and whose reason it said it did not assert: stale since the floor and the frames (measured: the count does not move for either). */
-		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before);
+		/* this fixture's function is RANDOM bytes (make_block, a fixed PRNG seed) decoded as mips32/ppc64 code, so its reachable-block
+		 * count is whatever that decode happens to produce - deterministic, but not a number this test chose. It used to be irrelevant
+		 * (floor of one block, owner 2026-11-01: any decodable function was signed, so the object was never counted unsigned here). Under
+		 * the raised floor (KGENOME_CFG_ANCHOR_MIN, 5, anchor-floor-1) this specific decode comes out below it for mips32 and ppc64, LE and
+		 * BE alike (measured, this machine, 2026-11-07: all four cases), so the object IS now counted unsigned, by exactly one function -
+		 * a real, floor-caused change of this fixture's own count, not a flaky one (the bytes and the decode are both fixed). */
+		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before + 1u);
 		unsigned_before = kscan_stats(sc)->mutation_unsigned_objects;
 		hit[0] = hit[1] = 0;
 		notes_clear();
 		CK(kscan_bytes(sc, be.b, be.n, "block-be", &opt, fixture_found, hit) > 0);
 		CK(!hit[0]);                            /* the big-endian object does not */
 		CK(!hit[1]);                            /* nor does its canonical view: its functions are found again (remapped) but not scored */
-		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before);
+		CK(kscan_stats(sc)->mutation_unsigned_objects == unsigned_before + 1u);
 	}
 }
 

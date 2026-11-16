@@ -12,8 +12,10 @@
  * does not return: the frame sets KGENOME_CFG_F_TRAP_EXITS for a PE), so code behind a noreturn call is not "reached" through it.
  *
  * WHAT IT DOES NOT SAY, as a state on the entry and never as a silent cut (rule 4; the end stays the next start, flag END_OPEN, and the ends step closes it as before):
- *   REACH_INDIRECT  a reachable `jmp` through a register or an indexed table: the code of a switch is reached only through its table, so what is reached is a lower bound. NEXT: read the table
- *                   (the `lea` of its base and the bounded `cmp`/`ja` before the jump) and add its targets as edges.
+ *   REACH_INDIRECT  a reachable `jmp` through a register or an indexed table that `kgenome_cfg_build` could NOT resolve against a real switch/jump table (cfg.h,
+ *                   KGENOME_CFG_T_SWITCH): read the table (the `lea` of its base and the bounded `cmp`/`ja` before the jump) and add its targets as edges is now DONE,
+ *                   wired below (reach_switch_read_at, the switch_reach step of graph_of) - this state is left ONLY for the case the resolver itself names as
+ *                   unresolved (no table found, a second hop, a refused read, cfg.h's own NAMED LIMITS): what is reached there is still a lower bound.
  *   REACH_NONE      the entry has no graph (the trace holds none, the bytes do not decode, the reached code crosses bytes that decode as nothing, a bound of cost fired).
  *   REACH_OPEN      the reached code runs on into the next start: the next start may be inside this function (a false start: a call target in data), or the call before it does not return and
  *                   carries no mark. NEXT: drop a start that nothing but the walk names when the code before it flows into it with no padding between.
@@ -27,9 +29,12 @@
  * COST. Each entry is read over a window that starts at WIN0 bytes (256: most functions are shorter) and grows by 4 while the reached code runs past it (a branch beyond the window or no terminator in it), up to WIN_MAX; at that bound
  * the entry is REACH_NONE. The work is the entry's own size, not the bound's: a gap of data with many candidate starts costs each its own window.
  */
+/* DISABLED by the owner 2026-11-16: the ends from what an entry reaches, the GAPS starts behind bodies and the prologue recognisers are built from the decoded flow: the error-prone disassembly analysis the owner ruled out for the partition. To re-enable: take the #if 0 out, set KGENOME_FNTAB_X_PE_REACH (and WALK) in the selector rows and call it from kgenome_diag_funcs_with_walk between the merge and the ends. */
+#if 0
 #include "fntab_build_private.h"
 #include <kgenome_budget.h>
 #include <genotype/image/fntab_private.h>
+#include <genotype/image/image_addr.h>
 #include "frame.h"
 
 #define REACH_WIN0 256ull
@@ -43,8 +48,18 @@
 
 enum { R_OK = 0, R_OPEN, R_INDIRECT, R_NONE };
 
-/* The instruction a function BEGINS with: `push r`, `sub rsp,n`, `mov rax,rsp`, or a store into [rsp+n] / [rbp+n] (the compilers' prologues; it is evidence of a start, never a proof). */
-static int entry_insn(const struct kgenome_cell_insn *in)
+/* The instruction a function BEGINS with, PER ARCHITECTURE: evidence of a start, never a proof (used only to
+ * decide a GAP candidate, never to drop a known one). `kgenome_fntab_reach` resolves which of these to use
+ * ONCE per object, from `r->obj->arch` (`entry_insn_of`, below) - never re-derived from instruction bytes
+ * inside graph_of()'s hot per-candidate loop. A new architecture gets its own `entry_insn_<arch>`, never a
+ * branch inside an existing one (kofeng/CLAUDE.md: structured by pipeline matrix, a format/arch's own strategy
+ * stays its own function). */
+
+/* x86 and x86-64 (the same canonical SP/BP regardless of width): `push r`, `sub rsp,n`, `mov rax,rsp`, or a store
+ * into [rsp+n] / [rbp+n] (the compilers' prologues). UNCHANGED, byte for byte, from the pre-generalisation
+ * `entry_insn` this replaces (measured, tested; this generalisation's own scope is adding architectures beside
+ * it, not touching this one). */
+static int entry_insn_x86(const struct kgenome_cell_insn *in)
 {
 	if (in->op == KGENOME_CELL_PUSH)
 		return in->n_op && in->o[0].kind == KGENOME_CELL_O_REG;
@@ -56,6 +71,52 @@ static int entry_insn(const struct kgenome_cell_insn *in)
 		return in->o[0].kind == KGENOME_CELL_O_REG && in->o[1].kind == KGENOME_CELL_O_REG && in->o[1].reg == KGENOME_CELL_REG_SP;
 	}
 	return 0;
+}
+
+/* ARM32 (and Thumb, which shares the same decoder-side shape): `push {reglist}` - ARM UAL's own name for
+ * `stmdb sp!, {reglist}` (arm32_rows.c: `cccc 1001 0010 1101 xxxx ...`, mask 0x0fff0000, Rn=SP(13) with
+ * writeback and no load - KGENOME_ARM32_I_PUSH; verified against this tree's own decoder table, not guessed)
+ * or its one-register form `str rt,[sp,#-4]!` (mask 0x0fff0fff, KGENOME_ARM32_I_PUSH_1). Both map to the
+ * generic op==KGENOME_CELL_PUSH regardless of register count (`kgenome_arm_pushpop`, decode_arm32.h, shared
+ * with decode_thumb.c) - unlike x86, where PUSH is always exactly one register, so no further operand check is
+ * meaningful here: ARM's decoder reserves op==PUSH for this one real shape (never a mid-function stack-pointer
+ * write by coincidence, the way x86's generic `sub rsp,n` could be spelled many ways). NAMED LIMIT, not
+ * guessed at: ARM's OTHER common prologue instruction, `sub sp,sp,#n` (no register push at all, a leaf
+ * function with only local stack space), decodes to the generic op==KGENOME_CELL_OTHER on this architecture
+ * (decode_arm32.c's DP() table folds every data-processing opcode, SUB included, into OTHER with an
+ * ARM-private aux field the generic `struct kgenome_cell_insn` does not expose) - recognising it needs a
+ * second, ARM-specific accessor this task's scope does not add; next algorithm, not attempted here. */
+static int entry_insn_arm32(const struct kgenome_cell_insn *in)
+{
+	return in->op == KGENOME_CELL_PUSH;
+}
+
+/* No prologue shape verified yet for this architecture (rule: never guess an opcode encoding without reading
+ * it against a real decode): REACH's own generic gap/padding mechanism (merge 136) still runs exactly as it
+ * does for ARM32/x86 - only this one extra piece of start evidence is withheld, the same conservative default
+ * every architecture had before its own shape was verified and added. */
+static int entry_insn_none(const struct kgenome_cell_insn *in)
+{
+	(void)in;
+	return 0;
+}
+
+/* OPEN, NOT GUESSED AT (next algorithm, not this round's scope): MIPS (`addiu $sp,$sp,-N` then `sw $ra,N($sp)`)
+ * and PowerPC (`stwu r1,-N(r1)` / `mflr r0` / `stw r0,N(r1)`) each have a real, well-known prologue shape too,
+ * but adding them needs the same per-architecture verification ARM32's own comment above went through (reading
+ * the real row/encoding this tree's own decoder already recognises them by, not assuming one from memory) -
+ * deferred for time, not attempted blind. Both fall through to `entry_insn_none` until then. */
+static int (*entry_insn_of(unsigned arch))(const struct kgenome_cell_insn *)
+{
+	switch (arch) {
+	case KGENOME_ARCH_X86:
+	case KGENOME_ARCH_X86_64:
+		return entry_insn_x86;
+	case KGENOME_ARCH_ARM:
+		return entry_insn_arm32;
+	default:
+		return entry_insn_none;
+	}
 }
 
 struct reach {
@@ -195,6 +256,101 @@ static int jump_is_table(const struct kgenome_fntab_run *r, const struct kgenome
 	return (in->flags & KGENOME_CELL_F_INDIRECT) && kgenome_cell_slot_of(in, r->obj->arch == KGENOME_ARCH_X86_64, 0) == KGENOME_BROKEN;
 }
 
+/* REACH_INDIRECT: this entry's own access to the object's bytes at an arbitrary VA, for `kgenome_cfg_build`'s
+ * `switch_src.read_at` (cfg.h). No accessor is invented here (rule 5): `kgenome_image_addr_to_off` is the SAME
+ * translation diag_apihash.c/diag_emu.c/image_embed.c already use, and `r->data`/`r->data_n` is the SAME buffer
+ * every other read in this file (first_insns, call_mark_at, crosses_pad) already indexes by file offset. A VA
+ * this engine has no mapping for, or a read that would run past the object's own bytes, is refused (0) - which
+ * `resolve_switches()` already treats exactly like an out-of-range table entry or an unmapped read (cfg.h's own
+ * doc on struct kgenome_cfg_switch_src): never a crash, never a guess. Wired ONLY into THIS reach walk's own
+ * `kgenome_frame_src` (graph_of, below) - cfgsign.c, the lineage, codenotes and cfgview each build their own
+ * `kgenome_frame_src`/`kgenome_cfg_req` and stay on the existing NULL default, byte-for-byte unaffected. */
+static int reach_switch_read_at(void *user, uint64_t va, void *out, uint32_t len)
+{
+	const struct kgenome_fntab_run *r = user;
+	uint64_t off = kgenome_image_addr_to_off(r->obj, va);
+
+	if (off == KGENOME_BROKEN || len > r->data_n || off > r->data_n - len)
+		return 0;
+	memcpy(out, r->data + off, len);
+	return 1;
+}
+
+/* The block of `g` whose own instructions cover index `insn` (cfg_build.c pass 4: every instruction of the array
+ * belongs to exactly one block, blocks contiguous and in increasing instruction-index order) - a table lookup
+ * (rule 5), not a re-walk: the block whose `first` is the largest not greater than `insn`. KGENOME_CFG_NONE when
+ * `insn` is out of the array (a hostile or stale index) or lands in no block's own range. */
+static uint32_t block_of_insn(const struct kgenome_cfg *g, uint32_t insn)
+{
+	uint32_t lo = 0, hi = g->n_all;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (g->b[mid].first <= insn)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	if (!lo || insn >= g->b[lo - 1u].first + g->b[lo - 1u].n_insn)
+		return KGENOME_CFG_NONE;
+	return lo - 1u;
+}
+
+/* REACH_INDIRECT: `kgenome_cfg_build` deliberately keeps a resolved switch's targets (`switch_tgt[]`) OUT of
+ * `succ[]`/`reach`/`n_blk`/`n_edge` (cfg.h's own comment on KGENOME_CFG_T_SWITCH: folding them in would change
+ * the WL structural signature's measured behaviour, which is not this reach walk's business). This walk's own
+ * question - what does this entry's code REACH, to size its extent - wants the real edges, so it runs its OWN
+ * small reachability pass over `fr.cfg` (a copy made fresh for this one call by kgenome_frame_make, released at
+ * the end of graph_of, never the shared cache or anything cfg_sign.c reads: mutating `reach` here touches
+ * nothing else). Seeded from every reachable SWITCH block's resolved targets, propagated through `succ[]`
+ * exactly as pass 5 of cfg_build.c already would have if these edges had been folded in - never re-deriving the
+ * CLASS of a branch or re-decoding anything (rule 5: table lookups over what classify()/resolve_switches()
+ * already built). A block pushed here is pushed at most once (guarded by its own `reach` flag), so the
+ * worklist never needs more than `g->n_all` slots. Returns 0 only on NOMEM (the entry's own reach from its
+ * start is unaffected either way: this only ever ADDS blocks, never removes the ones pass 5 already found). */
+static int switch_reach_extend(struct kgenome_cfg *g)
+{
+	uint32_t *wl;
+	uint32_t top = 0, q;
+
+	if (!g->n_switch_tgt)
+		return 1;
+	wl = malloc((size_t)g->n_all * sizeof *wl);
+	if (!wl)
+		return 0;
+	for (q = 0; q < g->n_all; q++) {
+		struct kgenome_cfg_block *b = &g->b[q];
+		uint32_t t;
+
+		if (!b->reach || b->term != KGENOME_CFG_T_SWITCH)
+			continue;
+		for (t = 0; t < b->n_switch; t++) {
+			uint32_t bi = block_of_insn(g, g->switch_tgt[b->switch_first + t]);
+
+			if (bi != KGENOME_CFG_NONE && !g->b[bi].reach) {
+				g->b[bi].reach = 1;
+				wl[top++] = bi;
+			}
+		}
+	}
+	while (top) {
+		const struct kgenome_cfg_block *b = &g->b[wl[--top]];
+		unsigned e;
+
+		for (e = 0; e < 2u; e++) {
+			uint32_t s = b->succ[e];
+
+			if (s != KGENOME_CFG_NONE && !g->b[s].reach) {
+				g->b[s].reach = 1;
+				wl[top++] = s;
+			}
+		}
+	}
+	free(wl);
+	return 1;
+}
+
 /* Is `t` the first byte behind the PADDING of a function: the run of int3 that ends at file offset `t` has a byte that is not the mark of a call (the one int3 right after a call is the compiler's
  * sign that the call does not return; a second noreturn call block of the same body can follow it with no padding at all)? The instructions are in order of address: a binary search for the one that
  * starts at `t`, then the run back from it. */
@@ -241,6 +397,8 @@ static int graph_of(struct kgenome_fntab_run *r, uint64_t off, uint64_t len, uin
 	src.base = r->data;
 	src.size = r->data_n;
 	src.wk = r->walk;
+	src.switch_src.read_at = reach_switch_read_at;         /* REACH_INDIRECT: see reach_switch_read_at's own comment above */
+	src.switch_src.user = r;
 	*more = 0;
 	out->cut = 0;
 	out->nomem = 0;
@@ -261,6 +419,8 @@ static int graph_of(struct kgenome_fntab_run *r, uint64_t off, uint64_t len, uin
 		out->st = R_NONE;
 		return 0;
 	}
+	if (!switch_reach_extend(&fr.cfg))
+		out->nomem = 1;                 /* a resolved switch's targets could not be added to this graph's own reach: the entry's reach from its start is still correct, just without that extension (reported, never a crash) */
 	for (q = 0; q < fr.cfg.n_all; q++) {
 		const struct kgenome_cfg_block *b = &fr.cfg.b[q];
 		const struct kgenome_cell_insn *l;
@@ -354,7 +514,13 @@ static int graph_of(struct kgenome_fntab_run *r, uint64_t off, uint64_t len, uin
 			if (q + 1u == fr.cfg.n_all && b->term == KGENOME_CFG_T_FALL)
 				off_window = 1;         /* the reached code goes on past the window (after a call too: whether that call returns is not known at the window's edge) */
 		}
-		if (l->op == KGENOME_CELL_JMP && jump_is_table(r, l))
+		/* REACH_INDIRECT: a block `kgenome_cfg_build` already resolved to KGENOME_CFG_T_SWITCH carries real
+		 * edges now - `switch_reach_extend` (above, run once before this loop over every block) already
+		 * marked its targets' blocks `reach`, so this SAME loop visits them too (whatever their own `q`) and
+		 * folds their bytes into `end`/`last` exactly like any other reachable block. It is no longer "no
+		 * edge known" and must not fall into R_INDIRECT; only a jump this resolver could NOT resolve (still
+		 * a plain EXIT on an indirect jmp that is not a fixed slot) is the genuine lower-bound case. */
+		if (l->op == KGENOME_CELL_JMP && jump_is_table(r, l) && b->term != KGENOME_CFG_T_SWITCH)
 			indirect = 1;
 		if (cut_here)
 			break;                  /* blocks after this one are all at a higher address (cfg_build.c builds them in address order): none of them is this entry's either (cut_by_pad already decided at the trigger site above) */
@@ -377,7 +543,7 @@ static int graph_of(struct kgenome_fntab_run *r, uint64_t off, uint64_t len, uin
 		out->fell = !(fr.in[endi].op == KGENOME_CELL_CALL || (fr.in[endi].op == KGENOME_CELL_NOP && fr.in[endi].len == 1u && endi > 0 && fr.in[endi - 1u].op == KGENOME_CELL_CALL));
 	}
 	out->end = end;
-	out->entry_like = entry_insn(&fr.in[0]);
+	out->entry_like = r->entry_insn(&fr.in[0]);
 	out->open_end = 0;
 	if (runs_out) {
 		/* the code goes on past its last instruction: it ends at the first padding that stands behind a call (a call that does not return, with or without its mark), when there is one */
@@ -547,6 +713,7 @@ void kgenome_fntab_reach(struct kgenome_func_set *s, struct kgenome_fntab_run *r
 	uint32_t n = 0, cap = 0, i;
 	int short_ = 0;
 
+	r->entry_insn = entry_insn_of(r->obj->arch);    /* resolved ONCE for this object; graph_of() below calls through it on every candidate */
 	if (n_cover)
 		qsort(cover, n_cover, sizeof *cover, cmp_ext);
 	for (i = 0; i < s->n; i++) {
@@ -656,3 +823,4 @@ nomem:
 	free(nv);
 	s->status = KGENOME_NOMEM;
 }
+#endif

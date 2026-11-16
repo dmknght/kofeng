@@ -25,6 +25,16 @@
 static int fails;
 #define CK(c) do { if (!(c)) { printf("  FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
+/* The entries a metadata source declared (2026-11-16 round 2: the code no metadata declares is an entry too, trust NONE, source UNDECLARED). */
+static __attribute__((unused)) uint32_t n_decl(const struct kgenome_func_set *s)
+{
+	uint32_t i, k = 0;
+
+	for (i = 0; i < s->n; i++)
+		k += s->v[i].trust != KGENOME_FN_TRUST_NONE;
+	return k;
+}
+
 /* ---- the writer ------------------------------------------------------------------------------------------------ */
 
 #define TEXT_OFF 0x100u
@@ -285,24 +295,22 @@ static void t_selector(void)
 {
 	static const struct { struct kgenome_fntab_meta m; unsigned ccase, run, check; } rows[] = {
 		/* format  rel sym dyn unw se de pe */
-		{ { KGENOME_FMT_ELF, 0, 1, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_SYMTAB, KGENOME_FNTAB_X_SYMTAB, 0 },
-		{ { KGENOME_FMT_ELF, 0, 1, 1, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_SYMTAB, KGENOME_FNTAB_X_SYMTAB | KGENOME_FNTAB_X_FDE, KGENOME_FN_S_FDE },
+		{ { KGENOME_FMT_ELF, 0, 1, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_SYMTAB, KGENOME_FNTAB_X_SYMTAB | KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 1, 1, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_SYMTAB, KGENOME_FNTAB_X_SYMTAB | KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_ENTRY, 0 },   /* PMA-6 (round 3): FDE a source, not a check */
 		{ { KGENOME_FMT_ELF, 1, 1, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_SYMTAB, KGENOME_FNTAB_X_SYMTAB, 0 },
-		/* a symbol table found empty is the next row */
-		/* ELF-NO-REACH, fixed 2026-11-05: every row below that runs WALK now runs REACH beside it (KGENOME_FNTAB_X_PE_REACH), exactly as
-		 * the equivalent PE rows do (fntab_pe_select.c) - RED on base (these rows held no REACH bit there). ELF_SYMTAB above is untouched:
-		 * it never sets WALK, so REACH would have no trace to read (see fntab_select.c's header comment). */
-		{ { KGENOME_FMT_ELF, 0, 1, 1, 1, 1, 0, 0 }, KGENOME_FNTAB_C_ELF_DYNSYM, KGENOME_FNTAB_X_DYNSYM | KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 0, 0, 1, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_DYNSYM, KGENOME_FNTAB_X_DYNSYM | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 0, 0, 1, 1, 0, 1, 0 }, KGENOME_FNTAB_C_ELF_FDE, KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 0, 0, 0, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_FDE, KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 0, 0, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_WALK, KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 0, 1, 0, 0, 1, 0, 0 }, KGENOME_FNTAB_C_ELF_WALK, KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_ELF, 1, 0, 0, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_WALK, 0, 0 },
+		/* a symbol table found empty is the next row. 2026-11-16 (metadata only): no row runs WALK or REACH (decode-derived, DISABLED); every row of a linked
+		 * object runs the ENTRY strategy (asked by the orchestrator only beside another source); a row with no exact source is ELF_META */
+		{ { KGENOME_FMT_ELF, 0, 1, 1, 1, 1, 0, 0 }, KGENOME_FNTAB_C_ELF_DYNSYM, KGENOME_FNTAB_X_DYNSYM | KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 0, 1, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_DYNSYM, KGENOME_FNTAB_X_DYNSYM | KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 0, 1, 1, 0, 1, 0 }, KGENOME_FNTAB_C_ELF_FDE, KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 0, 0, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_FDE, KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 0, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_META, KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 0, 1, 0, 0, 1, 0, 0 }, KGENOME_FNTAB_C_ELF_META, KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_ELF, 1, 0, 0, 1, 0, 0, 0 }, KGENOME_FNTAB_C_ELF_META, 0, 0 },
 		/* (the PE rows are tested in fntab_pe.c; this one is the placeholder row of phase A1, now answered by the PE_PDATA row's whole run set) */
-		{ { KGENOME_FMT_PE, 0, 0, 0, 0, 0, 0, 1 }, KGENOME_FNTAB_C_PE_PDATA, KGENOME_FNTAB_X_PDATA | KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_WALK |
-		  KGENOME_FNTAB_X_PE_THUNK | KGENOME_FNTAB_X_PE_REACH, 0 },
-		{ { KGENOME_FMT_PE, 0, 0, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_PE_NONE, 0, 0 },
+		{ { KGENOME_FMT_PE, 0, 0, 0, 0, 0, 0, 1 }, KGENOME_FNTAB_C_PE_PDATA, KGENOME_FNTAB_X_PDATA | KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG |
+		  KGENOME_FNTAB_X_ENTRY, 0 },
+		{ { KGENOME_FMT_PE, 0, 0, 0, 0, 0, 0, 0 }, KGENOME_FNTAB_C_PE_NONE, KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_ENTRY, 0 },
 		{ { 0, 0, 1, 1, 1, 0, 0, 0 }, KGENOME_FNTAB_C_NONE, 0, 0 },
 	};
 	unsigned i;
@@ -427,7 +435,7 @@ static void t_fde_sections(void)
 
 	CK(parse(B, n, &ei, &o));
 	kgenome_diag_funcs_of(&o, B, n, &fs);
-	CK(fs.status == KGENOME_OK && fs.n == 4);
+	CK(fs.status == KGENOME_OK && n_decl(&fs) == 4);
 	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->len == 11);
 	CK(fn_at(&fs, TEXT_OFF + 0x10) && fn_at(&fs, TEXT_OFF + 0x10)->len == 6);
 	CK(fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8);
@@ -436,14 +444,43 @@ static void t_fde_sections(void)
 	CK(fs.ccase == KGENOME_FNTAB_C_ELF_FDE);
 	CK(fn_at(&fs, TEXT_OFF + 0x30) && fn_at(&fs, TEXT_OFF + 0x30)->end_source == KGENOME_FN_E_UNWIND);
 	CK(fn_at(&fs, TEXT_OFF + 0x30) && (fn_at(&fs, TEXT_OFF + 0x30)->source & KGENOME_FN_S_FDE));
-	CK(fn_at(&fs, TEXT_OFF + 0x10) && (fn_at(&fs, TEXT_OFF + 0x10)->source == (KGENOME_FN_S_FDE | KGENOME_FN_S_WALK)));   /* two sources agree */
-	CK(fs.state == KGENOME_FNTAB_PARTIAL && (fs.partial & KGENOME_FNTAB_P_STARTS));    /* the walk ran: starts a function nobody calls and no FDE names are missing */
+	CK(fn_at(&fs, TEXT_OFF + 0x10) && (fn_at(&fs, TEXT_OFF + 0x10)->source == KGENOME_FN_S_FDE));   /* the unwind table alone (2026-11-16: the walk's call targets are no source) */
+	CK(fn_at(&fs, TEXT_OFF) && (fn_at(&fs, TEXT_OFF)->source == (KGENOME_FN_S_FDE | KGENOME_FN_S_ENTRY)));   /* the entry point beside it: two sources agree */
+	CK(fs.state == KGENOME_FNTAB_PARTIAL && (fs.partial & KGENOME_FNTAB_P_STARTS));    /* an unwind table need not name every function: said */
 	CK(fs.n_disagree == 0);
 #endif
 	kgenome_funcs_free(&fs);
 }
 
 /* The same file with NO section table: the unwind data is found through PT_GNU_EH_FRAME. */
+/* ROUND 2 (coordinator 2026-11-16): code no metadata declares is an entry of its own. f1 and f3 have an FDE, f2 has none (static musl and hand-written
+ * asm carry no CFI): three entries cover the code - f1 HIGH, f2 a NONE entry of source UNDECLARED (not a guessed function), f3 HIGH. RED before: f2's bytes
+ * were in no entry. */
+static const struct fde gap_fdes[2] = { { 0, 0x10 }, { 0x20, 0x20 } };
+
+static void t_undeclared_gap(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	uint32_t n = build_x86(&in, 1, 0, gap_fdes, 2, NULL);
+	uint64_t off;
+
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.status == KGENOME_OK && fs.n == 3);
+	CK(fs.n == 3 && fs.v[0].off == TEXT_OFF && fs.v[0].len == 0x10 && fs.v[0].trust == KGENOME_FN_TRUST_HIGH);
+	CK(fs.n == 3 && fs.v[1].off == TEXT_OFF + 0x10 && fs.v[1].len == 0x10 && fs.v[1].trust == KGENOME_FN_TRUST_NONE &&
+	   fs.v[1].source == KGENOME_FN_S_UNDECLARED && fs.v[1].end_source == KGENOME_FN_E_NEXT_START);
+	CK(fs.n == 3 && fs.v[2].off == TEXT_OFF + 0x20 && fs.v[2].len == 0x20 && fs.v[2].trust == KGENOME_FN_TRUST_HIGH);
+	CK(fs.n_undeclared == 1 && (fs.partial & KGENOME_FNTAB_P_UNDECLARED) && !(fs.partial & KGENOME_FNTAB_P_NO_META) && fs.state == KGENOME_FNTAB_PARTIAL);
+	CK(fs.ccase == KGENOME_FNTAB_C_ELF_FDE);
+	for (off = TEXT_OFF; off < TEXT_OFF + 0x40; off++)          /* every byte of the code in exactly one entry */
+		CK(kgenome_funcs_at(&fs, off) != KGENOME_FUNCS_NONE);
+	kgenome_funcs_free(&fs);
+}
+
 static void t_fde_no_sections(void)
 {
 	struct elf_in in;
@@ -455,7 +492,7 @@ static void t_fde_no_sections(void)
 	CK(parse(B, n, &ei, &o));
 	CK(ei.sec_count == 0);
 	kgenome_diag_funcs_of(&o, B, n, &fs);
-	CK(fs.n == 4);
+	CK(n_decl(&fs) == 4);
 	CK(fn_at(&fs, TEXT_OFF + 0x30) && fn_at(&fs, TEXT_OFF + 0x30)->len == 6);
 	CK(fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8);
 	kgenome_funcs_free(&fs);
@@ -592,17 +629,17 @@ static void t_symtab_fde_disagree(void)
 	CK(parse(B, n, &ei, &o));
 	kgenome_diag_funcs_of(&o, B, n, &fs);
 	/* the symbol table stands (exact path unchanged: 3 functions, A with the symbol's size) */
-	CK(fs.n == 3);
+	/* round 3 (audit PMA-6): the FDE of C is an exact source beside the symbols: C is a HIGH entry of its own */
+	CK(n_decl(&fs) == 4);
 	CK(fn_at(&fs, TEXT_OFF + 0x10) && fn_at(&fs, TEXT_OFF + 0x10)->len == 20);
-	CK(fn_at(&fs, TEXT_OFF + 0x30) == NULL);        /* the FDE of C is a check only: it does not enter a symbol-table object */
+	CK(fn_at(&fs, TEXT_OFF + 0x30) && fn_at(&fs, TEXT_OFF + 0x30)->source == KGENOME_FN_S_FDE && fn_at(&fs, TEXT_OFF + 0x30)->trust == KGENOME_FN_TRUST_HIGH);
 #ifndef FNTAB_OLD_API_ONLY
 	CK(fs.ccase == KGENOME_FNTAB_C_ELF_SYMTAB);
 	CK(fs.n_disagree == 1);
 	CK(fn_at(&fs, TEXT_OFF + 0x10) && (fn_at(&fs, TEXT_OFF + 0x10)->flags & KGENOME_FN_F_DISAGREE));
 	CK(fn_at(&fs, TEXT_OFF + 0x10) && (fn_at(&fs, TEXT_OFF + 0x10)->source == (KGENOME_FN_S_SYMTAB | KGENOME_FN_S_FDE)));
-	/* and the table says that the symbols lack a function the unwind data names */
-	CK(fs.state == KGENOME_FNTAB_PARTIAL && (fs.partial & KGENOME_FNTAB_P_SYMTAB));
-	CK(fs.n_extra >= 1);
+	/* the FDE starts inside the symbol bodies agree with them (no extra start): the symbol table no longer needs to say it lacks C */
+	CK(!(fs.partial & KGENOME_FNTAB_P_SYMTAB));
 #endif
 	kgenome_funcs_free(&fs);
 	/* with the symbol of C present the symbols are complete: COMPLETE, no disagreement */
@@ -613,9 +650,9 @@ static void t_symtab_fde_disagree(void)
 		n = elf_build(&in, B);
 		CK(parse(B, n, &ei, &o));
 		kgenome_diag_funcs_of(&o, B, n, &fs);
-		CK(fs.n == 4);
+		CK(n_decl(&fs) == 4);
 #ifndef FNTAB_OLD_API_ONLY
-		CK(fs.state == KGENOME_FNTAB_COMPLETE && fs.partial == 0 && fs.n_disagree == 0);
+		CK((fs.partial & ~(uint16_t)KGENOME_FNTAB_P_UNDECLARED) == 0 && fs.n_disagree == 0);
 #endif
 		kgenome_funcs_free(&fs);
 	}
@@ -623,6 +660,8 @@ static void t_symtab_fde_disagree(void)
 
 /* ---- the walk case: stripped, no unwind data -------------------------------------------------------------------------------------- */
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * ELF-NO-REACH, fixed 2026-11-05 (RED on base, GREEN on tree): before the fix, a function ran to the next entry
  * INCLUDING the alignment padding in front of it, and the last function ran to the segment's end (into .rodata) -
@@ -704,7 +743,10 @@ static void t_walk_x86(void)
 		CK(have && at == TEXT_OFF && at + have == TEXT_OFF + in.text_n);
 	}
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * Originally RED on base (the function table did not exist): the owner's Q1 - does a test pin the accuracy GAP
  * between the FDE-present case (t_fde_sections: 4/4 exact) and the walk-only case with NO symtab, NO dynsym and NO
@@ -783,7 +825,10 @@ static void t_walk_no_calls_collapse(void)
 		kgenome_funcs_free(&fs2);
 	}
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * ELF-NO-REACH, fixed 2026-11-05 (RED on base, GREEN on tree): the ELF twin of fntab_pe.c's fnr4_reach_stops_at_padding
  * (case 1 there). f is the object's entry point and has NO terminator of its own (just one `push ebp`): on base,
@@ -834,6 +879,7 @@ static void t_walk_padding_crossing(void)
 #endif
 	kgenome_funcs_free(&fs);
 }
+#endif
 
 /* one table of the call-target walk on an architecture: S calls A and B; each body is followed by `pad` words of padding. `word` writes one instruction. */
 struct arch_fx {
@@ -848,6 +894,8 @@ struct arch_fx {
 
 static void w32(uint8_t *p, int be, uint32_t v) { struct wr w = { p, be }; p32(&w, 0, v); }
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 static void t_walk_arch(const struct arch_fx *fx)
 {
 	struct elf_in in;
@@ -912,7 +960,10 @@ static void t_walk_arch(const struct arch_fx *fx)
 		printf("  %s: S %llu A %llu B %llu\n", fx->name, (unsigned long long)fn_at(&fs, TEXT_OFF + s_off)->len, (unsigned long long)fn_at(&fs, TEXT_OFF + a_off)->len, (unsigned long long)fn_at(&fs, TEXT_OFF + b_off)->len);
 	kgenome_funcs_free(&fs);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * Owner's Q2 (D4): t_walk_arch's "mips-be" row above builds S calling A and B with DIRECT `jal`, and asserts the
  * CORRECT result (3 functions) - so that row does NOT pin D4. Direct `jal` already works: pass_a
@@ -983,7 +1034,10 @@ static void t_walk_mips_indirect_jalr(void)
 #endif
 	kgenome_funcs_free(&fs);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * RED on base, GREEN on tree: CN-5's actual fix. S reaches A and B only through `jalr $t9`, each preceded,
  * straight-line, by the real MIPS o32 PIC shape `lw $t9, off($gp)` - the GOT entries hold A's and B's real
@@ -1039,7 +1093,10 @@ static void t_walk_mips_indirect_jalr_got(void)
 	CK(fn_at(&fs, TEXT_OFF + 0x38) != NULL);          /* B: found as its own entry (CN-5's fix) */
 	kgenome_funcs_free(&fs);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * Conservative fallback, explicit: the SAME `.got` section and the SAME GOT values as the test above (so $gp
  * IS known), but $t9 is set by an instruction that is NOT the recognised `lw $t9, off($gp)` shape (here,
@@ -1091,7 +1148,10 @@ static void t_walk_mips_indirect_jalr_no_lw(void)
 #endif
 	kgenome_funcs_free(&fs);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * CN-5's SECOND fix (this round): MIPS o32 PIC's OTHER convention - a function that recomputes its OWN
  * $gp from $t9 at entry (`lui $gp,hi; addiu $gp,$gp,lo; addu $gp,$gp,$t9`) instead of reading the
@@ -1172,6 +1232,7 @@ static void t_walk_mips_indirect_jalr_prologue_gp(void)
 	CK(fn_at(&fs, TEXT_OFF + 0x28) != NULL);
 	kgenome_funcs_free(&fs);
 }
+#endif
 
 /*
  * Conservative fallback, explicit: the SAME three registers and the SAME GOT value as the test above,
@@ -1223,6 +1284,320 @@ static void t_walk_mips_indirect_jalr_prologue_gp_broken(void)
 			seen_a = 1;
 	CK(!seen_a);                       /* no edge to A: the broken prologue resolves nothing, and crashes nothing */
 	kgenome_diag_walk_free(wk);
+}
+
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/*
+ * ARCH-WALK-SURVEY (2026-11-05, owner's ask: does ARM/ARM64/PowerPC have a CN-5-class gap - pass_a
+ * silently dropping an indirect call it never tries to resolve - the same structural shape as MIPS
+ * o32 PIC's `jalr $t9`?). CONFIRMED GREEN, not a defect: unlike MIPS, ARM's calling convention does
+ * not route ordinary (even PIC/PLT) calls through an indirect register - `bl`/`blx label` are
+ * PC-relative DIRECT branches, which pass_a's generic (architecture-blind) direct-call push already
+ * resolves. A real register-indirect call (`blx rN`) exists only for genuine function pointers,
+ * vtables, interworking veneers and a PLT stub's own final hop - never for an ordinary intra-module
+ * call - confirmed by counting mnemonics with rizin 5.0.7 (capstone oracle) on 8 real ARM32 IoT
+ * botnet samples (Mozi, Demon, Fantazy, Josho families; agent-reported, M): 0 `blx rN` indirect calls
+ * in any of them against 645-4362 direct `bl` calls each; the only non-return register/memory
+ * branches seen were 5 `bx rN` (Mozi/Fantazy/Josho/arm7.1, likely interworking returns) and 12
+ * `ldr pc,[...]` (Demon.arm4 only) - none at the volume that collapsed MIPS's walk pre-CN-5.
+ * THIS TEST pins the mechanism that makes an indirect ARM call harmless anyway: pass_a adds NO call
+ * edge for `blx r0` (confirmed by reading the walk's own entry list, same proof style as CN-5's own
+ * tests above), yet A is still found - not through call-edge resolution, but through the SAME
+ * padding/REACH gap mechanism ARM already has for the zero-fill linker padding between functions
+ * (the `zeronop` list in pass_a already includes KGENOME_ARCH_ARM). Nothing is filed as a defect here:
+ * nothing is unresolved that CN-5's MIPS fix resolves, because ARM never needed that resolution in
+ * the first place - a genuine function pointer or vtable call is, correctly, left unresolved (rule 4:
+ * no guess), exactly as an x86 `call eax` already is.
+ */
+static void t_walk_arm_indirect_blx_no_edge(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	struct kgenome_diag_walk *wk;
+	uint8_t t[0x28];
+	uint32_t n, ne, i;
+	const uint64_t *ent;
+	int seen_a = 0;
+
+	memset(t, 0, sizeof t);
+	w32(t + 0x00, 0, 0xe3a00020u);     /* S: mov r0, #0x20 - NOT A's real address, pass_a must not guess it is */
+	w32(t + 0x04, 0, 0xe12fff30u);     /* S: blx r0 - CALL|INDIRECT, operand r0 (f_blx_reg, decode_arm32.c) */
+	w32(t + 0x08, 0, 0xe12fff1eu);     /* S: bx lr - S's own end, 0xc bytes */
+	/* [0xc, 0x20): the linker's zero fill (ARM zeronop, pass_a's zeronop list) */
+	w32(t + 0x20, 0, 0xe3a00002u);     /* A: mov r0, #2 */
+	w32(t + 0x24, 0, 0xe12fff1eu);     /* A: bx lr, ends the text exactly */
+
+	memset(&in, 0, sizeof in);
+	in.em = 40; in.base = 0x10000u; in.text = t; in.text_n = sizeof t; in.rodata_n = 0x20; in.sections = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+
+	/* No call edge to A: pass_a has no ARM-specific indirect-call resolution (none exists, and the
+	 * real-sample survey above says none is needed) - the engine must not invent one. */
+	wk = kgenome_diag_walk_new();
+	CK(kgenome_diag_walk_ensure(wk, &o, B, n, 0));
+	ent = kgenome_diag_walk_entries(wk, &ne);
+	for (i = 0; i < ne; i++)
+		if (ent[i] == TEXT_OFF + 0x20)
+			seen_a = 1;
+	CK(!seen_a);
+	kgenome_diag_walk_free(wk);
+
+	/* A is still found: REACH's gap step, independent of any call edge (same mechanism as
+	 * t_walk_mips_indirect_jalr above, now shown on ARM's own zero-fill convention). */
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.n == 2);
+	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->len == 0xc);
+	CK(fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8u);
+	kgenome_funcs_free(&fs);
+}
+#endif
+
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/*
+ * Task B (2026-11-05): fntab_reach.c's entry_insn() is now resolved PER ARCHITECTURE (entry_insn_of, keyed by
+ * obj->arch - resolved once per object, never re-derived per candidate), not just x86's own prologue shapes.
+ * ARM32's `push {reglist}` (`stmdb sp!, {reglist}`, arm32_rows.c's own verified encoding, cccc 1001 0010 1101
+ * xxxx ...) maps to the generic op==KGENOME_CELL_PUSH with NO single-register operand at all
+ * (kgenome_arm_pushpop, decode_arm32.h: a multi-register list is carried in `o[0].imm`, n_op stays 0) - the
+ * pre-generalisation x86-shaped `entry_insn` required `n_op && o[0].kind==KGENOME_CELL_O_REG`, which a
+ * MULTI-register ARM push never satisfies, so ARM's own real multi-register prologue never counted as
+ * entry_like before this fix (a ONE-register ARM push, `str rt,[sp,#-4]!`, happened to satisfy the old x86
+ * check by coincidence of the same n_op==1/O_REG shape - not what this test attacks).
+ *
+ * S (the entry point: mov r0,#1; bx lr, 8 bytes, REACH-established end, no padding after it) sits directly
+ * next to H (push {r4,lr}; pop {r4,pc}, 8 bytes) with NO gap and NO call anywhere pointing at H - the exact
+ * "no evidence, is it absorbed or kept" shape fnr2_no_evidence_absorb/fnr2v2_trap_not_absorbed (fntab_pe.c)
+ * test on x86, now on ARM32's own prologue shape.
+ *
+ * RED on base: H's own `entry_like` is 0 (ARM was never dispatched; x86's check fails the multi-register
+ * shape), so H (call-free, not reach-linked) carries none of the "this looks like a real function start"
+ * evidence the absorption decision needs and is silently absorbed into S: fs.n == 1, S swallows H's 8 bytes
+ * (len 16) with nothing left to say a second function was ever there.
+ * GREEN on tree: entry_insn_arm32 recognises the push, H is correctly kept as its own gap-discovered function:
+ * fs.n == 2, S stays 8 bytes, H is its own entry (source WALK, flag GAP).
+ */
+static void t_walk_arm_push_prologue_not_absorbed(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	uint8_t t[0x10];
+	uint32_t n;
+	const struct kgenome_func *s, *h;
+
+	w32(t + 0x00, 0, 0xe3a00001u);    /* S: mov r0, #1 */
+	w32(t + 0x04, 0, 0xe12fff1eu);    /* S: bx lr - S's own end, REACH-established, 8 bytes, no padding after it */
+	w32(t + 0x08, 0, 0xe92d4010u);    /* H: push {r4, lr} - a real prologue; nothing calls H, nothing points at it */
+	w32(t + 0x0c, 0, 0xe8bd8010u);    /* H: pop {r4, pc} - returns, ends H cleanly */
+
+	memset(&in, 0, sizeof in);
+	in.em = 40; in.base = 0x10000u; in.text = t; in.text_n = sizeof t; in.rodata_n = 0x10; in.sections = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.n == 2);                   /* RED on base: 1 (H absorbed into S) */
+	s = fn_at(&fs, TEXT_OFF);
+	CK(s && s->len == 8u);
+	h = fn_at(&fs, TEXT_OFF + 0x08);
+	CK(h != NULL);                   /* RED on base: NULL (swallowed, no trace of a second function) */
+	if (h)
+		CK(h->len == 8u && h->source == KGENOME_FN_S_WALK && (h->flags & KGENOME_FN_F_GAP));
+	kgenome_funcs_free(&fs);
+}
+#endif
+
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/*
+ * ARCH-WALK-SURVEY, PowerPC half. CONFIRMED GREEN, not a defect, same reasoning as ARM above: PPC's
+ * `bl`/`bla` are PC-relative DIRECT branches (24-bit displacement, already resolved by pass_a's
+ * generic direct-call push - the "ppc-be" row of t_walk_arch above pins exactly that), and `bctrl`
+ * (CALL|INDIRECT through CTR, decode_ppc.c's BCCTR handling) is PowerPC's analogue of MIPS's
+ * `jalr $t9` - but unlike MIPS o32 PIC, PPC32's SVR4 ABI does not route ordinary same-object calls
+ * through it: confirmed by disassembling a REAL recovered PowerPC Mirai sample (rizin 5.0.7,
+ * /mnt/games/normtest/ppcview/_mirai_r.bin_dump/0/object, UPX-unpacked, 120396 bytes; agent-reported,
+ * M) with `e asm.arch=ppc; e cfg.bigendian=true; aa; pd`: 2219 direct `bl` calls against 13 `bctrl`
+ * and 2 `bctr` (0.6% of calls), with 76 `mtctr` total (most of the gap being loop-counter setup, not
+ * indirect-call setup) - the overwhelming majority of calls are direct, nothing like MIPS's
+ * convention of routing EVERY PIC call through an indirect register. The separate function-table
+ * survey done for the PPC decoder's own merge (/mnt/games/normtest/feat_ppc/report.md section 2)
+ * measured 141/156 of this exact sample's functions matching an independent oracle (rizin `afl`) -
+ * agent-reported, not independently re-verified by this test, but consistent with "no catastrophic
+ * collapse" rather than CN-5's pre-fix "one 60844-byte blob ~= whole .text".
+ * THIS TEST pins the mechanism (same proof style as the ARM test above and CN-5's own MIPS tests):
+ * pass_a adds no call edge for `bctrl` (PPC has no mips-style special case, and none is shown needed),
+ * and A is still found via REACH's generic gap step - here across a REAL recognised NOP run
+ * (`ori r0,r0,0` = 0x60000000, not an all-zero word: PowerPC's decoder has no all-zero-word NOP
+ * reading, so pass_a's `zeronop` list correctly excludes KGENOME_ARCH_PPC/PPC64 - an all-zero-byte
+ * gap on PPC is therefore NOT read as padding by this mechanism; this fixture does not exercise that
+ * narrower, unmeasured case, named here as an open question for whoever investigates PPC gaps next,
+ * not as a defect of this test's own topic).
+ */
+static void t_walk_ppc_indirect_bctrl_no_edge(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	struct kgenome_diag_walk *wk;
+	uint8_t t[0x28];
+	uint32_t n, ne, i;
+	const uint64_t *ent;
+	int seen_a = 0;
+
+	memset(t, 0, sizeof t);
+	w32(t + 0x00, 1, 0x38600020u);     /* S: li r3, 0x20 - NOT A's real address, pass_a must not guess it is */
+	w32(t + 0x04, 1, 0x7c6903a6u);     /* S: mtctr r3 */
+	w32(t + 0x08, 1, 0x4e800421u);     /* S: bctrl - CALL|INDIRECT through CTR (decode_ppc.c) */
+	w32(t + 0x0c, 1, 0x4e800020u);     /* S: blr - S's own end, 0x10 bytes */
+	for (i = 4; i < 8; i++)
+		w32(t + 4u * i, 1, 0x60000000u);       /* ori r0,r0,0: PPC's real NOP, recognised padding */
+	w32(t + 0x20, 1, 0x38600002u);     /* A: li r3, 2 */
+	w32(t + 0x24, 1, 0x4e800020u);     /* A: blr, ends the text exactly */
+
+	memset(&in, 0, sizeof in);
+	in.be = 1; in.em = 20; in.base = 0x10000000u; in.text = t; in.text_n = sizeof t; in.rodata_n = 0x20; in.sections = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+
+	/* No call edge to A: pass_a has no PPC-specific indirect-call resolution (none exists, and the
+	 * real-sample survey above says none is needed). */
+	wk = kgenome_diag_walk_new();
+	CK(kgenome_diag_walk_ensure(wk, &o, B, n, 0));
+	ent = kgenome_diag_walk_entries(wk, &ne);
+	for (i = 0; i < ne; i++)
+		if (ent[i] == TEXT_OFF + 0x20)
+			seen_a = 1;
+	CK(!seen_a);
+	kgenome_diag_walk_free(wk);
+
+	/* A is still found: REACH's gap step over the real (non-zero) NOP run. */
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.n == 2);
+	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->len == 0x10);
+	CK(fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8u);
+	kgenome_funcs_free(&fs);
+}
+#endif
+
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts and the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/*
+ * ARCH-WALK-SURVEY, ARM64 half. NOT measured on a real sample (no AArch64 malware sample and no
+ * AArch64 disassembler were available to this investigation - static code reading only, so this test
+ * is confirmatory of the CODE as read, not of real-world frequency the way the ARM32 and PowerPC
+ * tests above are). Read from decode_arm64.c/arm64_tab.c: `B`/`BL` (h_branch_imm) are PC-relative
+ * DIRECT branches - architecturally the same shape as ARM32's `b`/`bl` and PowerPC's `bl`, already
+ * resolved by pass_a's generic direct-call push - while `BLR` (h_breg) is CALL|INDIRECT through a
+ * register, AArch64's analogue of ARM32's `blx rN` and PowerPC's `bctrl`. [Inference, not measured]
+ * AAPCS64 does not route ordinary intra-module or PLT calls through BLR either (PLT stubs still use a
+ * direct `bl` from the call site; BLR is for function pointers, vtables and PAC-authenticated calls
+ * (BLRAA/BLRAB, also CALL|INDIRECT) - same reasoning as the ARM32/PowerPC findings above, extended by
+ * analogy, not confirmed on real AArch64 code in this investigation.
+ * THIS TEST only pins the mechanism (no call edge from BLR; REACH's gap step finds A anyway) - it is
+ * NOT evidence of real-world frequency the way the ARM32/PowerPC tests are. ARM64 is not in pass_a's
+ * `zeronop` list either (only MIPS/MIPS64/ARM are), so this fixture pads with a real AArch64 `nop`
+ * (0xd503201f), not a zero-fill, exactly as the PowerPC test does for the same reason.
+ */
+static void t_walk_arm64_indirect_blr_no_edge(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	struct kgenome_diag_walk *wk;
+	uint8_t t[0x28];
+	uint32_t n, ne, i;
+	const uint64_t *ent;
+	int seen_a = 0;
+
+	memset(t, 0, sizeof t);
+	w32(t + 0x00, 0, 0x52800400u);     /* S: movz w0, #0x20 - NOT A's real address, pass_a must not guess it is */
+	w32(t + 0x04, 0, 0xd63f0000u);     /* S: blr x0 - CALL|INDIRECT, operand x0 (h_breg, arm64_tab.c BLR row) */
+	w32(t + 0x08, 0, 0xd65f03c0u);     /* S: ret - S's own end, 0xc bytes */
+	for (i = 3; i < 8; i++)
+		w32(t + 4u * i, 0, 0xd503201fu);        /* S: nop - ARM64's real NOP, recognised padding (not a zero-fill: ARM64 is not in pass_a's zeronop list) */
+	w32(t + 0x20, 0, 0x52800440u);     /* A: movz w0, #2 */
+	w32(t + 0x24, 0, 0xd65f03c0u);     /* A: ret, ends the text exactly */
+
+	memset(&in, 0, sizeof in);
+	in.c64 = 1; in.em = 183u; in.base = 0x400000u; in.text = t; in.text_n = sizeof t; in.rodata_n = 0x20; in.sections = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+
+	/* No call edge to A: pass_a has no ARM64-specific indirect-call resolution (none exists). */
+	wk = kgenome_diag_walk_new();
+	CK(kgenome_diag_walk_ensure(wk, &o, B, n, 0));
+	ent = kgenome_diag_walk_entries(wk, &ne);
+	for (i = 0; i < ne; i++)
+		if (ent[i] == TEXT_OFF + 0x20)
+			seen_a = 1;
+	CK(!seen_a);
+	kgenome_diag_walk_free(wk);
+
+	/* A is still found: REACH's gap step over the real (non-zero) NOP run. */
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.n == 2);
+	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->len == 0xc);
+	CK(fn_at(&fs, TEXT_OFF + 0x20) && fn_at(&fs, TEXT_OFF + 0x20)->len == 8u);
+	kgenome_funcs_free(&fs);
+}
+#endif
+
+/*
+ * MIPS SYMBOL CHECK (owner's separate ask, 2026-11-05): `_gp_disp` is the MIPS-only pseudo-symbol some
+ * non-PIC/PIC-boundary code references (via %hi(_gp_disp)/%lo(_gp_disp) relocations) to compute $gp;
+ * it is always SHN_UNDEF (no defining section - the linker resolves it specially, it is never a real
+ * function body). CONFIRMED GREEN by reading kgenome_fntab_symtab (funcs.c): its existing, already
+ * architecture-generic `if (!sy.shndx || ...) continue;` check (funcs.c, right after the is_func test)
+ * drops ANY symbol with shndx 0 before it ever reaches the MIPS-specific code in this file - `_gp_disp`
+ * was already safe, by a check that has nothing MIPS-specific about it. This test pins that fact
+ * directly (a function table built from a symbol set that includes `_gp_disp` must not create an
+ * entry for it, and must not crash reading its zero value/size) rather than leaving it implicit.
+ *
+ * SEPARATE, NOT PINNED HERE [Inference, not verified against a real linked sample or the written MIPS
+ * ABI supplement text - a web search only partially corroborated this, see the test file's commit
+ * notes]: STO_MIPS_PLT (0x8 in st_other) can mark a DEFINED MIPS dynsym entry whose st_value the
+ * static linker rewrote to a local PLT stub's address rather than the real function body, when other
+ * code reaches it indirectly. kgenome_fntab_symtab reads `sy.other` into struct kgenome_elf_symbol but
+ * never inspects it - confirmed by reading the function, this part is NOT inference - so if the ABI
+ * detail above is accurate, a dynamically-linked MIPS object exporting such a function would have its
+ * symtab-sourced function entry attributed to the PLT stub's few bytes rather than the real body. No
+ * test is written for this: no real dynamically-linked MIPS sample with an STO_MIPS_PLT-marked export
+ * was available to confirm the actual bytes a real linker produces, and asserting specific behaviour
+ * from a partially-corroborated ABI detail risks pinning the wrong thing. Left for whoever next picks
+ * up a dynamically-linked MIPS sample to confirm or refute.
+ */
+static void t_walk_mips_symtab_gp_disp_ignored(void)
+{
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	uint32_t n;
+	const uint64_t va = 0x400000u + TEXT_OFF;
+	struct sym s[2] = {
+		{ "_start", va, 8, 0x12, 1 },            /* FUNC, in .text (shndx 1) */
+		{ "_gp_disp", 0, 0, 0x10, 0 },           /* NOTYPE/GLOBAL, SHN_UNDEF: never a function body */
+	};
+
+	memset(&in, 0, sizeof in);
+	in.be = 1; in.em = 8; in.base = 0x400000u; in.text = T; in.text_n = 0x20; in.sections = 1;
+	in.sym = s; in.nsym = 2;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_funcs_build(KGENOME_FMT_ELF, B, n, &ei, &fs);
+	CK(fs.status == KGENOME_OK);
+	CK(fs.n == 1);                                  /* _start only: _gp_disp (shndx 0) made no entry */
+	CK(fn_at(&fs, TEXT_OFF) != NULL);
+	kgenome_funcs_free(&fs);
 }
 
 #ifndef FNTAB_OLD_API_ONLY
@@ -1322,12 +1697,10 @@ static void t_ends(void)
 	f = mk(0x50, 0, KGENOME_FN_S_WALK, KGENOME_FN_E_NONE); CK(kgenome_fntab_list_add(&l, &f));     /* beyond the extent */
 	kgenome_fntab_merge(&l, 0, &s);
 	kgenome_fntab_ends(&s, &ext, 1, pad, 3);
-	CK(s.n == 3);
-	CK(s.v[0].off == 0x10 && s.v[0].len == 0x0b && s.v[0].end_source == KGENOME_FN_E_TRIMMED);     /* 0x10..0x1b: the run [0x1b,0x20) ends at the next start */
-	CK(s.v[1].off == 0x20 && s.v[1].len == 0x0e && s.v[1].end_source == KGENOME_FN_E_TRIMMED);     /* 0x20..0x2e */
-	CK(s.v[2].off == 0x30 && s.v[2].len == 0x0c && s.v[2].end_source == KGENOME_FN_E_TRIMMED);     /* to the end of the extent, less [0x3c,0x40) */
+	/* round 4: a start no source closed is a declared START, not a unit (the rule changed: they were units to the next start, trust MEDIUM) */
+	CK(s.n == 0 && s.n_st == 3 && s.st && s.st[0].off == 0x10 && s.st[1].off == 0x20 && s.st[2].off == 0x30);
 	CK(s.n_extra == 1);                                                                          /* 0x50: in no extent */
-	CK((s.partial & KGENOME_FNTAB_P_ENDS) && (s.v[0].flags & KGENOME_FN_F_END_OPEN));
+	CK(!(s.partial & KGENOME_FNTAB_P_ENDS));                                                     /* no end is guessed */
 	kgenome_funcs_free(&s);
 	/* a run that covers a whole function is not cut (the function is only padding: it stays one byte-for-byte unit) */
 	{
@@ -1338,7 +1711,7 @@ static void t_ends(void)
 		f = mk(0x20, 0, KGENOME_FN_S_WALK, KGENOME_FN_E_NONE); CK(kgenome_fntab_list_add(&l, &f));
 		kgenome_fntab_merge(&l, 0, &s);
 		kgenome_fntab_ends(&s, &ext, 1, all, 1);
-		CK(s.n == 2 && s.v[0].len == 0x10 && s.v[0].end_source == KGENOME_FN_E_NEXT_START);
+		CK(s.n == 0 && s.n_st == 2);                    /* round 4: two declared starts, no unit */
 		kgenome_funcs_free(&s);
 	}
 	/* an exact entry is never touched, padding or not */
@@ -1398,17 +1771,49 @@ int main(void)
 	t_symtab_thumb();
 	t_fde_sections();
 	t_fde_no_sections();
+	t_undeclared_gap();
 	t_symtab_fde_disagree();
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_x86 */
 	t_walk_x86();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_no_calls_collapse */
 	t_walk_no_calls_collapse();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_padding_crossing */
 	t_walk_padding_crossing();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_arch */
 	for (i = 0; i < sizeof fx / sizeof *fx; i++)
 		t_walk_arch(&fx[i]);
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_mips_indirect_jalr */
 	t_walk_mips_indirect_jalr();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_mips_indirect_jalr_got */
 	t_walk_mips_indirect_jalr_got();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_mips_indirect_jalr_no_lw */
 	t_walk_mips_indirect_jalr_no_lw();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_mips_indirect_jalr_prologue_gp */
 	t_walk_mips_indirect_jalr_prologue_gp();
+#endif
 	t_walk_mips_indirect_jalr_prologue_gp_broken();
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_arm_indirect_blx_no_edge */
+	t_walk_arm_indirect_blx_no_edge();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_arm_push_prologue_not_absorbed */
+	t_walk_arm_push_prologue_not_absorbed();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_ppc_indirect_bctrl_no_edge */
+	t_walk_ppc_indirect_bctrl_no_edge();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_walk_arm64_indirect_blr_no_edge */
+	t_walk_arm64_indirect_blr_no_edge();
+#endif
+	t_walk_mips_symtab_gp_disp_ignored();
+	(void)fx;
+	(void)i;
 	printf("fntab: %d failure(s)\n", fails);
 	return fails != 0;
 }

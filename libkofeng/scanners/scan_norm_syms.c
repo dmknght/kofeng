@@ -8,6 +8,7 @@
 #include "scan_int.h"
 #include "../analyzers/parsers/binaries/sym_pool.h"
 #include "../kofcore/kofmod/elf.h"
+#include "../kofcore/kofdebug.h"
 #include <string.h>
 
 
@@ -74,9 +75,12 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * a PE's symbols from the analysis product, and the view carries
 		 * what the object says. One source, one copy. */
 		in = ctx->content->syms(ctx, &n_in);
-		if (!in || !n_in || n_in > cap)
+		if (!in || !n_in || n_in > cap) {
+			KOF_TRACE("[norm] syms: PE symbol block refused, %u byte(s) does not fit the %u cap\n", n_in, cap);
 			return 0;
+		}
 		memcpy(out, in, n_in);
+		KOF_TRACE("[norm] syms: PE symbol block carried whole, %u byte(s)\n", n_in);
 		return n_in;
 	}
 	if (ctx->format != KOF_FMT_ELF || !sc->cur.lib_ok)
@@ -123,15 +127,21 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		/* After the room test, not before it: a record the cap stopped
 		 * short of is not at an index, so the header must not name one
 		 * for it. */
-		if (!kof_symw_put_from(&w, in, n_in, r))
+		if (!kof_symw_put_from(&w, in, n_in, r)) {
+			KOF_TRACE("[norm] syms: cut short, the output cap holds %u of %u record(s)\n", w.n, total);
 			break;
+		}
 		if (i == start_at)
 			start_new = w.n - 1u;
 	}
 	kept = w.n;
-	if (!kept)
+	if (!kept) {
+		KOF_TRACE("[norm] syms: no records survived the library cut, out of %u\n", total);
 		return 0;
+	}
 	nb = kof_symw_end(&w);
+	KOF_TRACE("[norm] syms: ELF view kept %u of %u record(s), %u dropped as the toolchain's\n",
+		  kept, total, total - kept);
 	/* The origin is the parent's, and so is a cut: the copy holds what the
 	 * parent held, less what the library cut dropped. */
 	out[KOF_SYM_H_ORIGIN] = in[KOF_SYM_H_ORIGIN];

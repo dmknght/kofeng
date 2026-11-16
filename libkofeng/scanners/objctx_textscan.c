@@ -16,10 +16,12 @@
  * that stage owns it and frees it (tests/unit/text_scan_hold.c did not, and unit-asan reported the scan it took). What is held is the scanner's memory (scan_charge) and is given back with it.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "objctx_int.h"
+#include "../kofcore/kofdebug.h"
 #include "../kofcore/tabgrow.h"
 #include "../analyzers/parsers/scripts/script_apply.h"
 #include "../analyzers/parsers/scripts/script_parse.h"
@@ -39,16 +41,61 @@ static int same_text(const struct kof_scan_obj_text *t, uint32_t lang, kof_buf b
 static void text_clear(struct kof_scanner *sc)
 {
 	struct kof_scan_obj_text *t = &sc->obj.text;
-	uint8_t deep = t->deep, made = t->made;
+	uint8_t deep = t->deep, made = t->made, told = t->obf_told;
+	const struct kof_obj_ctx *page_ctx = t->page_ctx;
 
 	if (t->s)
 		kgenome_diag_scan_free(t->s);
 	oc_scan_release(sc, t->charged);
 	free(t->name);
 	oc_consts_free(t->consts);
+	if (t->islands) {
+		kgenome_diag_text_islands_free(t->islands);
+		free(t->islands);
+	}
+	if (t->obf) {
+		kgenome_diag_text_obf_free(t->obf);
+		free(t->obf);
+	}
 	memset(t, 0, sizeof *t);
 	t->deep = deep;
 	t->made = made;
+	t->obf_told = told;
+	t->page_ctx = page_ctx;
+}
+
+void oc_text_page(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
+{
+	sc->obj.text.page_ctx = ctx->format == KOF_FMT_SCRIPT ? ctx : NULL;
+}
+
+/*
+ * THE OBFUSCATION MEASURE OF THE OBJECT'S TEXT, said (EXPERIMENTAL, owner 2026-11-13: to look at the value the engine computes, not a copy of it): one line per
+ * object, as KOF_TRACE in a DEBUG build and as the debug-callback fact "obf" in any build when the host registered kscan_on_debug - `value` the measure in
+ * thousandths of a bit per effect (kgenome_diag_text_obf_value: the highest of the file and the layers of code it computes), `what` the record it came from.
+ * Nothing reads it to decide anything.
+ */
+static void oc_text_obf_tell(struct kof_scanner *sc)
+{
+	struct kof_scan_obj_text *t = &sc->obj.text;
+	const struct kgenome_diag_text_obf_rec *top = NULL;
+	char line[240];
+	uint32_t i, v;
+
+	if (!t->obf || t->obf_told || !(KOF_TRACING || sc->debug_cb))
+		return;
+	t->obf_told = 1;
+	v = kgenome_diag_text_obf_value(t->obf);
+	for (i = 0; i < t->obf->n; i++)
+		if (!top || kgenome_diag_text_obf_milli(&t->obf->v[i]) > kgenome_diag_text_obf_milli(top))
+			top = &t->obf->v[i];
+	snprintf(line, sizeof line, "obf lang=%u bytes=%llu texts=%u layer=%u eff=%u built=%u bound=%u refused=%u dynamic=%u kmax=%u stop=%s", t->lang,
+		 (unsigned long long)t->n, t->obf->n,
+		 top ? top->layer : 0u, top ? top->n_eff : 0u, top ? top->n_built : 0u, top ? top->n_bound : 0u, top ? top->n_refused : 0u,
+		 top ? top->n_dynamic : 0u, top ? top->k_max : 0u, kgenome_status_name(t->obf->status));
+	KOF_TRACE("[obf] %u %s\n", v, line);
+	if (sc->debug_cb)
+		sc->debug_cb(kof_fact_id("obf"), line, v, sc->debug_user);
 }
 
 void kof_scan_text_drop(struct kof_scanner *sc)
@@ -87,6 +134,7 @@ static int text_make(struct kof_scanner *sc, uint32_t lang, kof_buf b, int const
 	struct kgenome_budget kb;
 	struct kgenome_diag_text_names_acc *acc;
 	struct kgenome_diag_text_req rq = { .base = b.p, .size = b.n, .lang = lang, .budget = &kb, .apply = kof_script_apply };
+	struct kgenome_diag_text_place *isl = NULL;
 	uint64_t peak;
 
 	text_clear(sc);
@@ -104,10 +152,36 @@ static int text_make(struct kof_scanner *sc, uint32_t lang, kof_buf b, int const
 		rq.on_const = oc_consts_on_const;
 		rq.on_head = oc_consts_on_head;
 		rq.const_user = t->consts;
+		/*
+		 * ISLANDS, THE SAME WALK (2026-11-10): the set is this call's own, small allocation -
+		 * a failure here does not fail the scan (the const-fold and the names still run), it
+		 * only means no island is collected for this object, said once (rule 4: a cap never
+		 * deletes evidence silently).
+		 */
+		t->islands = calloc(1, sizeof *t->islands);
+		if (t->islands)
+			rq.islands = t->islands;
+		else
+			oc_scan_limit(sc);
+	}
+	/* The measure rides on the walk only when someone reads it - the trace, or a host's debug callback (oc_text_obf_tell): it is evidence for a reader, not an
+	 * input of any stage, and a tool with no live scan asks for it on request (kof_script_obf). Without the small set, none (said). */
+	if (KOF_TRACING || sc->debug_cb) {
+		t->obf = calloc(1, sizeof *t->obf);
+		if (t->obf) {
+			const struct kgenome_script_islands *si = t->page_ctx ? oc_script_islands(t->page_ctx) : NULL;
+
+			rq.obf = t->obf;
+			/* the islands are the engine's table (oc_script_islands: level 0 of the server layer), not the module ABI's first 256 */
+			rq.n_obf_isl = si ? kof_script_places(si, &isl) : 0u;
+			rq.obf_isl = isl;
+		} else
+			oc_scan_limit(sc);
 	}
 	kgenome_budget_default(&kb, b.n, 0);
 	kb.max_bytes = oc_scan_room(sc);
 	t->s = kgenome_diag_scan_text(&rq);
+	free(isl);
 	kgenome_diag_text_names_free(acc);
 	if (!t->s) {
 		text_clear(sc);
@@ -120,6 +194,7 @@ static int text_make(struct kof_scanner *sc, uint32_t lang, kof_buf b, int const
 	t->eval_cut = (uint8_t)(kgenome_diag_scan_eval_cut(t->s) != 0);
 	t->charged = kgenome_diag_scan_bytes(t->s, &peak);
 	scan_charge(sc, t->charged);
+	oc_text_obf_tell(sc);
 	return 1;
 }
 
@@ -148,6 +223,8 @@ uint32_t oc_syms_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, co
 	uint32_t lang = oc_text_served(ctx) ? kof_script_textual_lang(ctx->subtype) : 0u;
 	kof_buf b = kof_buf_make(sc->match.m.data.p, sc->match.m.data.n);
 
+	oc_text_page(sc, ctx);
+
 	if (lang && b.p && b.n && b.n <= 0xffffffffu &&
 	    (same_text(&sc->obj.text, lang, b) || text_make(sc, lang, b, consts_expected(sc, lang, b))) && !sc->obj.text.names_lost)
 		return kof_syms_build_grow_script(feed_names, sc, &sc->syms.buf, &sc->syms.cap, passes);
@@ -167,6 +244,15 @@ struct oc_consts *oc_text_consts(struct kof_scanner *sc, uint32_t lang, kof_buf 
 int oc_text_eval_cut(const struct kof_scanner *sc)
 {
 	return sc->obj.text.eval_cut;
+}
+
+const struct kgenome_diag_text_island_set *oc_text_islands(struct kof_scanner *sc, uint32_t lang, kof_buf b)
+{
+	struct kof_scan_obj_text *t = &sc->obj.text;
+
+	if (same_text(t, lang, b) && t->consts)
+		return t->islands;
+	return text_make(sc, lang, b, 1) ? t->islands : NULL;
 }
 
 struct kgenome_diag_scan *oc_text_take(struct kof_scanner *sc, uint32_t lang, kof_buf b)

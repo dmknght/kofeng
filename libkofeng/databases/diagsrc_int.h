@@ -15,6 +15,7 @@
 #include "../kofcore/kofcore.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+#include <kofmod/script.h>
 #include <celllysis/nucleo.h>
 #include "diagsrc.h"
 

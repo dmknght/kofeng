@@ -259,6 +259,71 @@ def option_menu_does_not_offer_what_is_already_set():
         v.esc()
 
 
+# ------------------------------------------------- the gate of the signature (owner 2026-11-17: anomalies, nucleo)
+# The two rows of [+ Options] the owner named: "Anomaly" opens the engine's anomaly list for the object (sunrpc.ko: its parse
+# raises SECNAME_TRUNC), "Nucleo" the engine's list of the nucleo seen in it; a row taken is a condition of the draft, shown on
+# a row of its own under the options, and not offered again. The lists themselves are pinned against the engine in
+# tests/unit/diag_form_generate.c (gate_draft, run1 included); here is the screen.
+def _sub_first_item(v, before):
+    """The first row of the list that opened beside the menu: the text that is new on the first row that changed."""
+    for y in range(1, v.rows + 1):
+        a, b = before[y - 1], v.row(y)
+        if a == b:
+            continue
+        x = next(i for i in range(min(len(a), len(b))) if a[i] != b[i])
+        t = b[x:].strip().split('  ')[0].strip()
+        if t:
+            return t, y
+    return None, None
+
+
+@case(A)
+def gate_anomaly_is_added_from_the_engine_list():
+    with ko() as v:
+        click_in_panel(v, '[+ Options]')
+        pick_menu_item(v, 'Anomaly')
+        p = v.find('ELF SECNAME_TRUNC')
+        check(p, 'the anomaly the engine reports for the object is not listed')
+        v.click(*p)
+        y = line(v, 'Anomaly')
+        check(y is not None and 'ELF SECNAME_TRUNC' in v.row(y), 'no gate row: %r' % (v.row(y) if y else None))
+        click_in_panel(v, '[+ Options]')
+        n = sum(1 for yy in range(1, v.rows + 1) if 'Anomaly' in v.row(yy))
+        check(n == 1, 'Anomaly offered again after its only anomaly was added (%d rows say it)' % n)
+        v.esc()
+
+
+@case(A)
+def gate_nucleo_is_added_from_the_list_seen_in_the_file():
+    with ko() as v:
+        click_in_panel(v, '[+ Options]')
+        p = v.find('Nucleo')
+        check(p, 'no Nucleo row in [+ Options]')
+        before = [v.row(y) for y in range(1, v.rows + 1)]
+        v.click(*p)
+        v.pump_quiet()
+        item, iy = _sub_first_item(v, before)
+        check(item, 'the nucleo list did not open')
+        v.click(v.find(item, rows=(iy, iy))[0], iy)
+        y = line(v, 'Nucleo')
+        check(y is not None and item in v.row(y), 'no gate row for %r: %r' % (item, v.row(y) if y else None))
+        check(v.alive())
+
+
+@case(A)
+def gate_rows_have_no_control():
+    """A gate row is read only: the owner named adding, nothing else (no [x], no click target)."""
+    with ko() as v:
+        click_in_panel(v, '[+ Options]')
+        pick_menu_item(v, 'Anomaly')
+        v.click(*v.find('ELF SECNAME_TRUNC'))
+        y = line(v, 'Anomaly')
+        check(y is not None and '[x]' not in v.row(y), 'a gate row carries a control: %r' % (v.row(y) if y else None))
+        v.click(v.row(y).index('ELF SECNAME_TRUNC') + 2, y)
+        v.pump_quiet()
+        check(line(v, 'Anomaly') == y and v.alive(), 'a click on a gate row changed the panel')
+
+
 # --------------------------------------------------------------------- strings
 @case(A)
 def add_string_row_columns_and_hex_encoding():

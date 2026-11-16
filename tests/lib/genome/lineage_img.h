@@ -426,6 +426,58 @@ static LA_UNUSED int lg_build_pe(struct lg_img *g, struct lg_cg *c)
 		}
 	}
 	g->n = hdr + sect;
+	/*
+	 * THE FUNCTIONS' METADATA (2026-11-16: the function table is made from loader/ABI metadata only, nothing decodes code): an x64 image carries the
+	 * .pdata a compiler writes for every function (one RUNTIME_FUNCTION each, one shared UNWIND_INFO of version 1 and no codes), an x86 image the COFF
+	 * symbol table a toolchain that keeps it writes (a function symbol and its auxiliary record with TotalSize). Without them the image declares no
+	 * function and the static lineage has nothing to solve (one unpartitioned unit), which is not what these campaigns measure.
+	 */
+	if (wide) {
+		const uint32_t pd = 0x7000u, ui = 0x7800u;
+
+		b[hdr + ui] = 1;
+		for (i = 0; i < (uint32_t)c->p->nf; i++) {
+			lg_p32(b, hdr + pd + 12u * i, text_rva + c->fn_off[i]);
+			lg_p32(b, hdr + pd + 12u * i + 4u, text_rva + c->fn_end[i]);
+			lg_p32(b, hdr + pd + 12u * i + 8u, text_rva + ui);
+		}
+		lg_p32(b, o + 112 + 24, text_rva + pd);
+		lg_p32(b, o + 112 + 28, 12u * (uint32_t)c->p->nf);
+	} else {
+		uint32_t k = 0;
+		uint8_t *t = b + g->n;
+
+		for (i = 0; i < (uint32_t)c->p->nf; i++) {
+			memset(t + 18u * k, 0, 36);
+			memcpy(t + 18u * k, "fn", 2);
+			lg_p32(t, 18u * k + 8u, c->fn_off[i]);          /* the offset in .text */
+			lg_p16(t, 18u * k + 12u, 1);                    /* section 1 */
+			lg_p16(t, 18u * k + 14u, 0x20);                 /* a function */
+			t[18u * k + 16u] = 2;                           /* external */
+			t[18u * k + 17u] = 1;                           /* one auxiliary record */
+			lg_p32(t, 18u * (k + 1u) + 4u, c->fn_end[i] - c->fn_off[i]);   /* TotalSize */
+			k += 2u;
+		}
+		/* the import stubs (`jmp [slot]`, 6 bytes) the code calls: the import library's own function symbols name them, sized */
+		for (imp = 1; imp < LG_NIMP; imp++) {
+			if (!c->thunk_used[imp])
+				continue;
+			memset(t + 18u * k, 0, 36);
+			memcpy(t + 18u * k, "imp", 3);
+			lg_p32(t, 18u * k + 8u, c->thunk_off[imp]);
+			lg_p16(t, 18u * k + 12u, 1);
+			lg_p16(t, 18u * k + 14u, 0x20);
+			t[18u * k + 16u] = 2;
+			t[18u * k + 17u] = 1;
+			lg_p32(t, 18u * (k + 1u) + 4u, 6);
+			k += 2u;
+		}
+		memset(t + 18u * k, 0, 4);                              /* the string table: its size field only */
+		lg_p32(t, 18u * k, 4);
+		lg_p32(b, 0x84 + 8, g->n);
+		lg_p32(b, 0x84 + 12, k);
+		g->n += 18u * k + 4u;
+	}
 	return 1;
 }
 

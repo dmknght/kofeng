@@ -75,6 +75,10 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 	struct kgenome_diag_hit *h;
 
 	kgenome_diag_wrapper_eval_call(c, f, ws, &e);
+	/* KNOWN DEFECT LE-D4 (2026-11-17, Inference) [sev M]: emit_call_node makes no node when the number is not a constant here; glibc's cancellable calls (open/read/write/connect/send)
+	 * pass it as a stack argument to __syscall_cancel, so the user's calls get no node and ONE sweep node at __internal_syscall_cancel's `syscall` stands for all of them (M). Trigger: static glibc >= 2.34.
+	 * Effect: 34 sites hold two nodes (mem-read + file-open), 31 self links, fd/buffer MAY from every producer of the program, PROVEN from one (144 static builds).
+	 * Reproducer: lin_truth res/s2/gcc_O2_64_static.sym.dump node at 0x3b4c5. Fix: carry the stack-passed number through the helper level so the node is made at the user call. */
 	if (e.nr.t != KGENOME_DIAG_WRAPPER_V_CONST)
 		return kgenome_diag_wrapper_unk;                     /* which system call is not known */
 	nr = (uint64_t)e.nr.v;
@@ -124,6 +128,9 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 	if ((cap == KGENOME_NUCLEO_ALLOC && !(have & (1u << 2))) ||
 	    (cap == KGENOME_NUCLEO_NET_OPEN && (have & 3u) != 3u))
 		h->bits |= KGENOME_DIAG_H_ARG_UNKNOWN;
+	/* KNOWN DEFECT LE-D2 (2026-11-17, M) [sev M]: emit_call_node writes every input through kgenome_diag_note_in, i.e. PROVEN, though pass B walks in address order taking no branch (diag_wrapper.c: "a MAY link").
+	 * Trigger: a value made on two arms (socket on one, open on the other) and consumed after the join, in a static program. Effect: the arm laid out last is linked PROVEN, the other not at all.
+	 * Reproducer: tests/lib/genome/lineage_sites.c t_truth_two_arms (green until fixed); lin_truth's static cells: 226 of 1724 scored links are such PROVEN overclaims. Fix: write these MAY (kgenome_diag_note_in_how). */
 	for (i = 0; i < 6u; i++) {
 		uint8_t role = kgenome_diag_role_of_arg(cap, i);
 
@@ -284,6 +291,9 @@ int kgenome_diag_wrapper_tgt_index(const struct kgenome_diag_wrapper_ctx *c, uin
 	return lo < c->wk->n_tgt && c->wk->tgt[lo] == at ? (int)lo : -1;
 }
 
+/* KNOWN DEFECT LE-D1 (2026-11-17, M) [sev M]: kgenome_diag_wrapper_pass_b resets the frame only at a direct-CALL target (wk->tgt), so a function reached only by a jump inherits the registers of the code laid out before it.
+ * Trigger: i386 static, GCC -O2: a local function taking its argument in eax, entered by a tail jmp, after a function that ends in a jmp. Effect: a FALSE PROVEN link (send fd <- an open of another function).
+ * Reproducer: tests/lib/genome/lineage_sites.c t_truth_tail_jump_carry (green until fixed); lin_truth s5/s6/s11 gcc_O2_32_static. Fix: reset at every start of the function table (kgenome_funcs_start) and after an unconditional jmp/ret. */
 void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct kgenome_diag_wrapper_isrc it;

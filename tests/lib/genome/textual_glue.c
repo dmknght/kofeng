@@ -24,7 +24,7 @@ int main(void)
 	/* the NUL pair: no space, in php as in the other rows */
 	{
 		static const char in[] = "<?php $a=1; \0 \0 $b=2;";
-		static const char out[] = "<?php $a=1;\0\0$b=2;";
+		static const char out[] = "<?php $a=1;\n\0\0$b=2;";
 		uint32_t n;
 
 		CK(form_of(in, sizeof in - 1u, fbuf, sizeof fbuf, &n) == KGENOME_TEXTUAL_OK);
@@ -32,7 +32,7 @@ int main(void)
 		/* a NUL and another byte */
 		{
 			static const char in2[] = "<?php $a=1; \0 + $b=2;";
-			static const char out2[] = "<?php $a=1;\0+$b=2;";
+			static const char out2[] = "<?php $a=1;\n\0+$b=2;";
 
 			CK(form_of(in2, sizeof in2 - 1u, fbuf, sizeof fbuf, &n) == KGENOME_TEXTUAL_OK && n == sizeof out2 - 1u && !memcmp(fbuf, out2, n));
 		}

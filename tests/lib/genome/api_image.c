@@ -485,9 +485,9 @@ static void t_pe_small(void)
 	CK(kgenome_pe_sec_perm(0x0000ffffu) == 0);
 	CK(kgenome_pe_sec_perm(0xffffffffu) == 7);
 
-	CK(kgenome_pe_sec_is_code(&pi.sec[0]));
-	CK(!kgenome_pe_sec_is_code(&pi.sec[1]));
-	CK(!kgenome_pe_sec_is_code(&pi.sec[2]));
+	CK(kgenome_pe_sec_is_code(&pi, &pi.sec[0]));
+	CK(!kgenome_pe_sec_is_code(&pi, &pi.sec[1]));
+	CK(!kgenome_pe_sec_is_code(&pi, &pi.sec[2]));
 
 	CK(kgenome_pe_sec_extent(&pi.sec[0], P.n, &off) == 0x200 && off == P.text_off);
 	CK(kgenome_pe_sec_extent(&pi.sec[0], P.text_off + 7u, &off) == 7);
@@ -534,6 +534,115 @@ static void t_pe_small(void)
 	CK(t.v == NULL && t.n == 0 && t.dll == NULL);
 	kgenome_pe_imptab_free(&t);         /* again: nothing left to free */
 	kgenome_pe_imptab_free(NULL);
+}
+
+/*
+ * PE-RSRC-EXEC-CODE: EXECUTE is necessary but not sufficient - a section whose
+ * declared raw bytes (file_off, file_size) overlap the resource directory's
+ * resolved extent (res_off/res_len) or the certificate table (the raw, unresolved
+ * dir[KGENOME_PE_DIR_SECURITY] - see pe_image.c for why cert_off is NOT the one to
+ * read here) is excluded from CODE regardless of the bit. Every boundary is named
+ * directly on a COPY of a real, already-parsed kgenome_pe_info and one of its real
+ * sections (hk_pe's .text: EXECUTE set, file [0x200, 0x400)) rather than by
+ * hand-crafting a new on-disk PE for each case - kgenome_pe_sec_is_code reads only
+ * these two already-resolved fields, so this is the direct and sufficient way to
+ * attack the predicate itself; hostile_image.c and the real-sample check (see the
+ * owner's report) cover getting a hostile directory INTO those fields from bytes.
+ */
+static void t_pe_sec_is_code_overlap(void)
+{
+	static struct hk_pe lp;
+	static struct kgenome_pe_info lpi;
+	struct kgenome_obj lo;
+	struct kgenome_pe_sec s, rs;
+	struct kgenome_pe_info q;
+
+	hk_pe(&lp, 1);
+	CK(parse_pe(&lp, &lpi, &lo));
+	s = lpi.sec[0];                         /* .text: EXECUTE set */
+	rs = lpi.sec[1];                        /* .idata: no EXECUTE */
+	CK((s.perm & KGENOME_PE_PERM_X) != 0 && s.file_off == 0x200 && s.file_size == 0x200);
+	CK(!(rs.perm & KGENOME_PE_PERM_X));
+
+	q = lpi;
+	q.n_dirs = KGENOME_PE_DIR_SECURITY + 1u;
+
+	/* resource directory strictly inside the section: excluded, whole section */
+	q.res_off = 0x250; q.res_len = 0x10;
+	CK(!kgenome_pe_sec_is_code(&q, &s));
+
+	/* strictly before the section: no overlap, still code */
+	q.res_off = 0x100; q.res_len = 0x10;
+	CK(kgenome_pe_sec_is_code(&q, &s));
+
+	/* starts before, ends inside (left straddle): excluded */
+	q.res_off = 0x1f0; q.res_len = 0x20;
+	CK(!kgenome_pe_sec_is_code(&q, &s));
+
+	/* starts inside, ends after (right straddle): excluded */
+	q.res_off = 0x3f0; q.res_len = 0x20;
+	CK(!kgenome_pe_sec_is_code(&q, &s));
+
+	/* touches only the section's very last byte: still an overlap, excluded */
+	q.res_off = 0x3ff; q.res_len = 1;
+	CK(!kgenome_pe_sec_is_code(&q, &s));
+
+	/* half-open ranges: ending exactly where the section starts, or starting
+	 * exactly where it ends, is adjacency, not overlap - still code either way */
+	q.res_off = 0x100; q.res_len = 0x100;   /* [0x100, 0x200) */
+	CK(kgenome_pe_sec_is_code(&q, &s));
+	q.res_off = 0x400; q.res_len = 0x10;    /* [0x400, 0x410) */
+	CK(kgenome_pe_sec_is_code(&q, &s));
+	q.res_off = 0; q.res_len = 0;
+
+	/* the certificate table: same overlap rule, the RAW security directory field
+	 * (a file offset for this one directory, not an RVA) */
+	q.dir[KGENOME_PE_DIR_SECURITY].rva = 0x300; q.dir[KGENOME_PE_DIR_SECURITY].size = 0x10;
+	CK(!kgenome_pe_sec_is_code(&q, &s));
+	q.dir[KGENOME_PE_DIR_SECURITY].rva = 0x500; q.dir[KGENOME_PE_DIR_SECURITY].size = 0x10;
+	CK(kgenome_pe_sec_is_code(&q, &s));
+
+	/* n_dirs too small to carry the security directory at all: ignored even set */
+	q.n_dirs = KGENOME_PE_DIR_SECURITY;
+	q.dir[KGENOME_PE_DIR_SECURITY].rva = 0x300; q.dir[KGENOME_PE_DIR_SECURITY].size = 0x10;
+	CK(kgenome_pe_sec_is_code(&q, &s));
+	q.n_dirs = KGENOME_PE_DIR_SECURITY + 1u;
+
+	/* a zero-length directory never excludes anything */
+	q.dir[KGENOME_PE_DIR_SECURITY].rva = 0x300; q.dir[KGENOME_PE_DIR_SECURITY].size = 0;
+	q.res_off = 0x250; q.res_len = 0;
+	CK(kgenome_pe_sec_is_code(&q, &s));
+
+	/* a non-executable section is never code, overlap or not */
+	q.res_off = 0; q.res_len = 0;
+	q.dir[KGENOME_PE_DIR_SECURITY].size = 0;
+	CK(!kgenome_pe_sec_is_code(&q, &rs));
+
+	/* no parsed kgenome_pe_info (NULL): every real caller already null-checks its
+	 * own pointer before this call (CLAUDE.md - never guess), so this is the
+	 * defensive fallback alone, exercised so the line is not a dead branch:
+	 * EXECUTE still answers code with no directories to check against. */
+	CK(kgenome_pe_sec_is_code(NULL, &s));
+
+	/* a zero-raw-size RWX section (a packer stub whose code is written only to
+	 * the memory image, SizeOfRawData/PointerToRawData both 0) can never be
+	 * excluded: an empty range overlaps nothing, by construction, so this fix
+	 * does not touch it. Pins the real shape of
+	 * pe_elf_fixtures/samples/g15_nocode_rwx/text_rawsize0_rwx.exe (a real
+	 * gcc-built PE with .text's raw fields zeroed and WRITE ORed onto its
+	 * EXECUTE bit) - checked directly against that file with kofexaminer
+	 * --dump (M): KGENOME_SCAN_PE_CODE dumps empty either side of this fix,
+	 * because .text's zero file_size already contributes zero bytes to any
+	 * region regardless of which way kgenome_pe_sec_is_code answers. */
+	{
+		struct kgenome_pe_sec zs = s;
+
+		zs.file_off = 0; zs.file_size = 0;
+		zs.perm |= KGENOME_PE_PERM_W;
+		q.res_off = 0; q.res_len = 0x10000;              /* would overlap any non-empty range */
+		CK(kgenome_pe_sec_is_code(&q, &zs));
+		q.res_off = 0; q.res_len = 0;
+	}
 }
 
 /* ---- the CLR vocabulary and claims -------------------------------------------- */
@@ -683,20 +792,16 @@ static void t_funcs(void)
 	ext.at = E.text;
 	ext.len = E.n - E.text;
 
-	/* entries with no end: each runs to the next entry, the last to the end of the code extent */
+	/* entries with no end (round 4: the rule changed): each is a declared START, not a unit - no end is guessed */
 	memset(&l, 0, sizeof l);
 	memset(&fs, 0, sizeof fs);
 	ent[0] = E.text; ent[1] = E.text + 10u; ent[2] = E.text + 14u;
 	put_entries(&l, ent, 3);
 	kgenome_fntab_merge(&l, 0, &fs);
 	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
-	CK(fs.status == KGENOME_OK && fs.n == 3);
-	CK(fs.v[0].off == E.text && fs.v[0].len == 10);
-	CK(fs.v[1].off == E.text + 10u && fs.v[1].len == 4);
-	CK(fs.v[2].off == E.text + 14u);
-	CK(fs.v[2].off + fs.v[2].len == E.n);
-	CK(fs.v[0].end_source == KGENOME_FN_E_NEXT_START && (fs.v[0].flags & KGENOME_FN_F_END_OPEN));
-	CK(fs.partial & KGENOME_FNTAB_P_ENDS);
+	CK(fs.status == KGENOME_OK && fs.n == 0 && fs.n_st == 3);
+	CK(fs.n_st == 3 && fs.st[0].off == E.text && fs.st[1].off == E.text + 10u && fs.st[2].off == E.text + 14u);
+	CK(!(fs.partial & KGENOME_FNTAB_P_ENDS));
 	kgenome_funcs_free(&fs);
 	CK(fs.v == NULL && fs.n == 0);
 	kgenome_funcs_free(&fs);                /* idempotent */
@@ -708,7 +813,7 @@ static void t_funcs(void)
 	put_entries(&l, ent, 3);
 	kgenome_fntab_merge(&l, 0, &fs);
 	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
-	CK(fs.n == 1 && fs.v[0].off == E.text + 10u);
+	CK(fs.n == 0 && fs.n_st == 1 && fs.st[0].off == E.text + 10u);
 	CK(fs.n_extra == 2);
 	kgenome_funcs_free(&fs);
 	kgenome_fntab_list_free(&l);
@@ -732,7 +837,7 @@ static void t_funcs(void)
 	put_entries(&l, ent, 3);
 	kgenome_fntab_merge(&l, 0, &fs);
 	kgenome_fntab_ends(&fs, &ext, 1, NULL, 0);
-	CK(fs.n == 2 && fs.v[0].off == E.text && fs.v[1].off == E.text + 14u);
+	CK(fs.n == 0 && fs.n_st == 2 && fs.st[0].off == E.text && fs.st[1].off == E.text + 14u);
 	{
 		uint32_t i;
 		for (i = 0; i < fs.n; i++)
@@ -782,6 +887,7 @@ int main(int argc, char **argv)
 	t_symbol_index_wrap();
 	t_reloc_in();
 	t_pe_small();
+	t_pe_sec_is_code_overlap();
 	t_clr();
 	t_funcs();
 	t_ledger_note();

@@ -145,6 +145,7 @@ extern const struct kof_range *kex_g_decl_fixed;
 extern uint32_t kex_g_decl_fixed_n;
 extern struct kof_scan_region kex_g_decl_rgn[KOF_MAX_REGIONS];
 extern uint8_t kex_g_decl_lang;
+extern uint8_t kex_g_decl_code;        /* the engine reported the object code from its first byte (kof_script_entry_is_code) */
 extern uint8_t kex_g_decl_subtype;
 extern uint8_t kex_g_decl_subfam;
 extern uint32_t kex_g_decl_rgn_n;
@@ -152,6 +153,7 @@ extern int kex_g_blocks;
 extern int kex_g_hashes;
 extern int kex_g_scfind;
 extern int kex_g_decl_view;
+extern int kex_g_decl_evidence; /* the object on hand is evidence, not a scan target of its own */
 extern const char *kex_g_root_path;
 
 #endif /* KOF_KOFEXAMINER_PRIVATE_H */

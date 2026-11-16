@@ -68,13 +68,14 @@ static void t_degenerate_strip(void)
 	kgenome_fntab_list_free(&l);
 
 	/* end to end: the orchestrator's retry (fntab_build_elf.c) must set symtab_empty from this REAL
-	 * degenerate .symtab (not from a section that is absent or empty) and fall through to the WALK
-	 * case, since there is no .dynsym here either. */
+	 * degenerate .symtab (not from a section that is absent or empty) and fall through to the rows
+	 * below; with no .dynsym, unwind, Go or loader table either, the object declares no function:
+	 * NO_META (2026-11-16, metadata only; it was the WALK case). */
 	{
 		struct kgenome_func_set fs;
 
 		kgenome_diag_funcs_with_walk(&o, B, n, NULL, &fs);
-		CK(fs.ccase == KGENOME_FNTAB_C_ELF_WALK);
+		CK(fs.ccase == KGENOME_FNTAB_C_NO_META && (fs.partial & KGENOME_FNTAB_P_NO_META));
 		kgenome_funcs_free(&fs);
 	}
 }

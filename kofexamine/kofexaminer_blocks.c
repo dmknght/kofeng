@@ -8,6 +8,8 @@
 
 #include "kofexaminer_private.h"
 #include "../libkofeng/analyzers/cfgsign.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
+#include <kofmod/script.h>
 
 /*
  * Everything this tool does to one object's bytes.
@@ -43,6 +45,7 @@
  */
 int kex_g_blocks, kex_g_hashes, kex_g_scfind;
 int kex_g_decl_view;           /* the object on hand is a normalised view */
+int kex_g_decl_evidence;       /* evidence for another object's verdict, not a scan target of its own */
 const char *kex_g_root_path;   /* the file a recovered object came from */
 
 struct blk_ctx {
@@ -52,8 +55,15 @@ struct blk_ctx {
 	const uint8_t *syms;
 	uint32_t syms_n;
 	uint32_t units;
+	const struct kgenome_func_set *fs;      /* the table the units were cut from: a function unit's further ranges are read from it */
 };
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and the call in blk_unit (in #if 0), with kof_cfgsign_function (analyzers/cfgsign.c) and kgenome_mutation_signature answering KGENOME_MUTATION_SIG_CFG; a function row then prints cfg_blocks and its block_id again.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* A function unit, printed from its CFG signature (kof_cfgsign_function, the engine's one signing function): the block count, the id as the table
  * and a diagnose carry it, and the keys. An unsigned one says why. */
 static void blk_func(struct blk_ctx *c, const struct kgenome_func *first)
@@ -80,13 +90,14 @@ static void blk_func(struct blk_ctx *c, const struct kgenome_func *first)
 		printf(" %08x", cs.sign.key[k]);
 	printf("\n");
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 		    uint32_t side, const struct kgenome_func *first)
 {
 	struct blk_ctx *c = user;
 	uint32_t np = 0, k, nb, block[KGENOME_MUTATION_MINHASH_K];
-	/* A function unit has a CFG signature, not windows (kgenome_mutation_signature): its row is printed by blk_func. */
+	/* A function unit has no signature (kgenome_mutation_signature: KGENOME_MUTATION_SIG_NONE, CFG signing disabled by the owner 2026-11-15): no windows, no block_id. */
 	int nosig = kgenome_mutation_signature(first) != KGENOME_MUTATION_SIG_WINDOWS;
 	uint32_t *pool = nosig ? NULL : kgenome_mutation_pool(c->buf.p + off, len, &np);
 	const char *rn = (c->fp && c->fp->region_name && region != KOF_SCAN_ALL)
@@ -94,19 +105,77 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 	char sym[64];
 
 	sym[0] = 0;
-	if (first && c->syms)
-		kof_sym_name_at(c->syms, c->syms_n, &first->value,
-				     (int)first->shndx, sym, sizeof sym);
+	/*
+	 * The ONE spelling (funcs.h's own header: "the blocks table's row ... say a function this
+	 * way"): its symbol, a script's own declared name, or `fcn_<offset>` - not a second "(no
+	 * symbol)" fallback text that disagreed with the CFG dialog and the viewer's own blocks table
+	 * (kv_mutation.c) for the exact same unnamed function.
+	 *
+	 * A script's own REMAINDER unit (owner, 2026-11-06: "for the script case, name a block with
+	 * no function as block_<line_number>") has `first` NULL - by_function already emitted the
+	 * real functions, this piece is what mutation_units.c's script_remainder() cuts from what is
+	 * left between them, never an entry of the function table - so a throwaway KGENOME_FN_SCRIPT
+	 * entry is built from the unit's own (off, len) HERE, for naming only: `nb`/`nosig` above and
+	 * below still read the real `first` (NULL), unchanged, so this does not turn the row into a
+	 * signed function unit, only names it.
+	 */
+	if (first)
+		(void)kof_func_name(first, c->syms, c->syms_n, c->buf.p, c->buf.n, sym, sizeof sym);
+	else if (c->ctx->format == KOF_FMT_SCRIPT) {
+		struct kgenome_func blk;
+
+		memset(&blk, 0, sizeof blk);
+		blk.off = off;
+		blk.len = len;
+		blk.kind = KGENOME_FN_SCRIPT;
+		(void)kof_func_name(&blk, NULL, 0, c->buf.p, c->buf.n, sym, sizeof sym);
+	}
 	nb = kgenome_mutation_unit_minhash(first, c->buf.p + off, len, block);
 	c->units++;
 	printf("    unit  region=%s  off=0x%llx  len=%llu  side=%s", rn,
 	       (unsigned long long)off, (unsigned long long)len,
 	       side == KGENOME_MUTATION_SIDE_LIB ? "LIB" : "USER");
-	if (first)
-		printf("  func=%s", sym[0] ? sym : "(no symbol)");
+	if (first || sym[0])
+		printf("  func=%s", sym);
+	/* What the table says of the function (the engine's: funcs.h): its trust, and every range when it has more than one (a chained .pdata part far from its body).
+	 * A unit of trust none is one unpartitioned code extent of an object that declares no function, not a function. */
+	if (first && first->kind != KGENOME_FN_SCRIPT && c->fs && first >= c->fs->v && first < c->fs->v + c->fs->n) {
+		const uint32_t fi = (uint32_t)(first - c->fs->v), nr = kgenome_funcs_n_ranges(c->fs, fi);
+
+		printf("  trust=%s", kgenome_fn_trust_name(first->trust));
+		/* a NONE unit (undeclared code) carries the starts the start-only tables declare in it (round 4): it is not cut at them */
+		if (first->trust == KGENOME_FN_TRUST_NONE)
+			printf("  starts=%u", kgenome_funcs_starts_in(c->fs, fi, NULL));
+		/* a DERIVED function (phase 2): what the descent could not establish about it (funcs.h KGENOME_FN_F_*), the engine's flags as they are */
+		if (first->trust == KGENOME_FN_TRUST_DERIVED) {
+			static const struct { uint16_t bit; const char *word; } dfl[] = { { KGENOME_FN_F_INCOMPLETE, "incomplete" }, { KGENOME_FN_F_BROKEN, "broken" },
+											  { KGENOME_FN_F_ASSUMED_RET, "assumed_ret" }, { KGENOME_FN_F_SHARED, "shared" } };
+			const char *sep = "  derived=";
+
+			for (k = 0; k < sizeof dfl / sizeof *dfl; k++)
+				if (first->flags & dfl[k].bit) {
+					printf("%s%s", sep, dfl[k].word);
+					sep = "|";
+				}
+		}
+		if (nr > 1u) {
+			printf("  ranges=");
+			for (k = 0; k < nr; k++) {
+				const struct kgenome_func_range r = kgenome_funcs_range(c->fs, fi, k);
+
+				printf("%s0x%llx+%llu", k ? "," : "", (unsigned long long)r.off, (unsigned long long)r.len);
+			}
+		}
+	}
 	if (nosig) {
-		if (first)
+		/* DISABLED by the owner 2026-11-15: a CFG-signed function row (cfg_blocks, block_id, keys). To re-enable: take this #if 0 out with blk_func's. */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+		if (first && kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG)
 			blk_func(c, first);
+		else
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+		if (first)
+			printf("  windows=-  block_id=-  (function unit: not signed: %s)\n", KGENOME_MUTATION_SIG_NONE_WHY);
 		else
 			printf("  windows=-  block_id=-  (no signature)\n");
 		return 0;
@@ -132,7 +201,10 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 
 void kex_print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 {
-	static struct kof_range ext[KOF_SRC_MAX_REGIONS];
+	/* KOF_SCAN_MAX_EXTENTS, as kofviewer's mtn_* pass (SP-15, 2026-11-14): a region COUNT (KOF_SRC_MAX_REGIONS, 16) held a page's code
+	 * extents, one per island, and a page with more than 16 lost every function after the 16th from this table with nothing said - 50
+	 * of 161 functions of a 19-island webshell; the scan's own feed grows its buffer and cut them all. */
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	static uint8_t blk[KOF_SYM_MAX_BYTES];
 	struct kgenome_func_set fs, parent;
 	struct kgenome_true_all lib;
@@ -146,7 +218,35 @@ void kex_print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 	c.ctx = ctx;
 	c.buf = buf;
 	c.fp = kof_parser_of(ctx->format);
-	if (kex_g_decl_view && kex_g_root_path) {
+	if (ctx->format == KOF_FMT_SCRIPT) {
+		/*
+		 * A script has no image header kgenome_diag_funcs_of can read (kgenome_obj.file_header
+		 * is the engine's opaque struct kof_script_info there, a type the lib does not define):
+		 * its table comes from kof_script_funcs_build instead, exactly as objctx_diag.c's
+		 * funcs_of asks for the scanner's own feed - one adapter, not a second one for this
+		 * tool. AN ISLAND (2026-11-10: a real child object now, objctx_script.c's
+		 * script_island_declare, superseding the scanner-free display row this function used to
+		 * print on its own) has format SCRIPT and the declared subtype like any other script
+		 * child, but its own bytes never carry an opening tag - the adapter reads that from the
+		 * object's entry (kof_script_from_code; this tool's context says it when the engine's
+		 * result did, kof_script_mark_code), so this tool asks the one call the scan feed asks.
+		 *
+		 * CHECKED BEFORE kex_g_decl_view (KXA-17, 2026-11-10 - the branch below is the
+		 * image-only remap and never finds a script's functions: a script's normalised view is
+		 * not padding-collapsed like a binary's, it is reformatted - the form pass rewrites
+		 * comments, spacing and decoded literals inside a function's own body, so the view's
+		 * bytes are almost never byte-identical to the parent's there, and kgenome_funcs_remap's
+		 * exact-byte search (measured: 0 of 3 real functions on a 142-byte JS sample whose
+		 * normalised form is confirmed to have found all 3 on the parent) finds nothing - not
+		 * "wrong names", NO view at all, one opaque block. A script's own bytes, raw or
+		 * normalised, are STILL THE LANGUAGE (an island's too): this same call already finds
+		 * them correctly on the raw object by reading the text in hand, not a parent's, and reads
+		 * them exactly as correctly on the view's, which is reformatted but still syntactically
+		 * the same functions under the same names. A real per-function byte-for-byte remap
+		 * (what the parent's EXTENT became in the view, past this) is the next algorithm, open.
+		 */
+		kof_script_funcs_build(ctx, buf.p, buf.n, &fs);
+	} else if (kex_g_decl_view && kex_g_root_path) {
 		/* The parent's functions, found again in this object's bytes. */
 		/* KNOWN DEFECT KXA-16 (2026-10-28, R) [sev M]: kex_print_blocks reads the whole root file a second time with fseek/ftell (long) and malloc(n), no cap, though the caller holds
 		 * the bytes in buf (two paths for one job). Trigger: a root file of several GB, or one that changed after the scan. Effect: a huge
@@ -210,8 +310,17 @@ void kex_print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 		const struct kof_scan_cut basis = { .funcs = &fs, .lib = have_lib ? &lib : NULL,
 						    .fixed = kex_g_decl_fixed, .n_fixed = kex_g_decl_fixed_n };
 
+		c.fs = &fs;
 		kof_scan_mutation_units(ctx, buf, ~0u, &basis, &eb, blk_unit, &c);
 	}
+	/*
+	 * ISLANDS NO LONGER PRINTED HERE (2026-11-10): an island is a real child of the raw script
+	 * object now (objctx_script.c's script_island_declare), so it reaches this same function on
+	 * its OWN recursive call - via on_unpacked/kex_examine_bytes, kofexaminer_unpack.c - exactly
+	 * the way the normalised view already does. Nothing in this tool names an island specially
+	 * any more: it is a listed, dumped child like any other, with its own "blocks of the object"
+	 * header line above, printed by this same function called again on its own bytes.
+	 */
 	printf("  units     %u\n", c.units);
 	kgenome_funcs_free(&fs);
 	kgenome_funcs_free(&parent);

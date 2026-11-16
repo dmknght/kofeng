@@ -13,7 +13,8 @@
  */
 #include "diag_lineage_private.h"
 
-#define SP KGENOME_CELL_REG_SP
+/* the row's stack pointer: every function below has the stage in hand */
+#define SP (L->abi.sp)
 
 int kgenome_lineage_charge(struct kgenome_lineage *L, uint64_t n)
 {
@@ -59,24 +60,71 @@ void kgenome_lineage_val_other(struct kgenome_lineage_val *v)
 	kgenome_lineage_val_unknown(v, KGENOME_LINEAGE_W_OPAQUE);
 }
 
-/* Add a token; 1 when the value changed. A ninth producer does not fit and widens the value to `other`,
- * which is the safe direction (its links become MAY) - and the scan says a bound fired. */
-int kgenome_lineage_val_add(struct kgenome_lineage *L, struct kgenome_lineage_val *v, uint32_t t)
+/* Does the value hold token `t`: its inline tokens, then its chain. */
+static int val_has(const struct kgenome_lineage *L, const struct kgenome_lineage_val *v, uint32_t t)
 {
-	uint8_t i;
+	uint32_t i, c;
 
 	for (i = 0; i < v->n; i++)
 		if (v->t[i] == t)
-			return 0;
-	if (v->n >= KGENOME_LINEAGE_SET) {
-		kgenome_lineage_bound(L, KGENOME_LINEAGE_B_VALUE);
-		if (v->other && (v->why & KGENOME_LINEAGE_W_LIMIT))
-			return 0;
-		v->other = 1;
-		v->why |= KGENOME_LINEAGE_W_LIMIT;
+			return 1;
+	for (c = v->more; c; c = L->vx[c - 1u].next)
+		if (L->vx[c - 1u].tok == t)
+			return 1;
+	return 0;
+}
+
+uint32_t kgenome_lineage_val_toks(const struct kgenome_lineage *L, const struct kgenome_lineage_val *v, uint16_t *out, uint32_t cap)
+{
+	uint32_t n = 0, i, c;
+
+	for (i = 0; i < v->n; i++, n++)
+		if (n < cap)
+			out[n] = v->t[i];
+	for (c = v->more; c; c = L->vx[c - 1u].next, n++)
+		if (n < cap)
+			out[n] = L->vx[c - 1u].tok;
+	return n;
+}
+
+/*
+ * Add a token; 1 when the value changed. Past the inline ones a token is a new head of the value's chain in the solve's pool (see
+ * KGENOME_LINEAGE_SET in diag_lineage_private.h): the chain is never written in place, so the copies of the value that share it keep what
+ * they had. Only the ledger bounds it: a refusal widens the value to `other` (W_LIMIT, its links MAY) and the scan says a bound fired.
+ */
+int kgenome_lineage_val_add(struct kgenome_lineage *L, struct kgenome_lineage_val *v, uint32_t t)
+{
+	if (val_has(L, v, t))
+		return 0;
+	if (v->n < KGENOME_LINEAGE_VAL_INLINE) {
+		v->t[v->n++] = (uint16_t)t;
 		return 1;
 	}
-	v->t[v->n++] = (uint16_t)t;
+	if (L->nvx == L->capvx) {
+		const uint32_t nc = kgenome_grow_cap(L->capvx, 256u);
+		struct kgenome_lineage_aggx *nv;
+
+		if (!nc || !kgenome_lineage_charge(L, (uint64_t)(nc - L->capvx) * sizeof *nv))
+			goto lost;
+		nv = realloc(L->vx, (size_t)nc * sizeof *nv);
+		if (!nv) {
+			kgenome_lineage_uncharge(L, (uint64_t)(nc - L->capvx) * sizeof *nv);
+			kgenome_diag_note(L->s, KGENOME_NOMEM);
+			goto lost;
+		}
+		L->vx = nv;
+		L->capvx = nc;
+	}
+	L->vx[L->nvx].tok = (uint16_t)t;
+	L->vx[L->nvx].next = v->more;
+	v->more = ++L->nvx;
+	return 1;
+lost:
+	kgenome_lineage_bound(L, KGENOME_LINEAGE_B_VALUE);
+	if (v->other && (v->why & KGENOME_LINEAGE_W_LIMIT))
+		return 0;
+	v->other = 1;
+	v->why |= KGENOME_LINEAGE_W_LIMIT;
 	return 1;
 }
 
@@ -86,12 +134,19 @@ int kgenome_lineage_val_join(struct kgenome_lineage *L, struct kgenome_lineage_v
 	int ch = 0;
 	uint8_t i;
 
-	/* the common case at a join: the two paths hold the very same value */
-	if (a->n == b->n && a->other == b->other && a->why == b->why && a->k == b->k && a->v == b->v &&
+	/* the common case at a join: the two paths hold the very same value (one chain is one set: it is never written in place) */
+	if (a->n == b->n && a->more == b->more && a->other == b->other && a->why == b->why && a->k == b->k && a->v == b->v &&
 	    !memcmp(a->t, b->t, (size_t)a->n * sizeof a->t[0]))
 		return 0;
 	for (i = 0; i < b->n; i++)
 		ch |= kgenome_lineage_val_add(L, a, b->t[i]);
+	{
+		uint32_t c;
+
+		/* (b's chain is read before a gains cells: a new head of a's points at a's old one, never into b's) */
+		for (c = b->more; c; c = L->vx[c - 1u].next)
+			ch |= kgenome_lineage_val_add(L, a, L->vx[c - 1u].tok);
+	}
 	if (b->other) {
 		/* the reasons add; a reason gained alone does not make the block be read again (it changes no link, and the fixpoint would
 		 * run on it for nothing) */
@@ -185,7 +240,8 @@ static unsigned place_resolve(const struct kgenome_lineage *L, const struct kgen
 		*key = key_make(KGENOME_LINEAGE_KEY_GLOB, (uint64_t)wadd(b->v, o->disp));
 		return KGENOME_LINEAGE_KEY_GLOB;
 	}
-	if (locs && b->n == 1 && !b->other && !(b->t[0] & KGENOME_LINEAGE_PARAM)) {
+	/* (a STATUS token is a value, not an object: connect's zero names no field) */
+	if (locs && b->n == 1 && !b->more && !b->other && !(b->t[0] & (KGENOME_LINEAGE_PARAM | KGENOME_LINEAGE_STATUS))) {
 		*key = key_make(KGENOME_LINEAGE_KEY_HEAP, ((uint64_t)b->t[0] << 32) | (uint32_t)(int32_t)o->disp);
 		return KGENOME_LINEAGE_KEY_HEAP;
 	}
@@ -263,6 +319,84 @@ static void slot_put(struct kgenome_lineage *L, struct kgenome_lineage_state *st
 	st->n_slot++;
 }
 
+/*
+ * THE WORDS PUSHED WHILE THE STACK POINTER IS NOT KNOWN (LG-9). Where two paths meet with the stack at two depths, no slot of the frame
+ * can be named through the stack pointer any more - and what is pushed and popped AFTER that point is still consistent among itself on
+ * every path: msfvenom's exit block is reached at depth 0 and at depth 8, and its `push 60; pop rax` was lost with the stack pointer, so
+ * the exit's number was unknown, the stage could not take the exit as one, and the error path fell through into the success path's
+ * `pop rsi` (lineage_sites.c variant 7). So the state keeps, from the point the stack pointer was lost, the words pushed and not yet
+ * popped: `ld` of them, slots of their own space by depth, and a pop takes the top one back OUT of the state.
+ *
+ * WHY NOT A FRESH STACK BASE AT THE JOIN (tried, MEASURED, rejected): giving the joining block a stack pointer of its own made every
+ * later `mov [esp+x]` a slot too - on a Go i386 binary (corp300 277) the states at the joins held 143 slots on average against 52, the
+ * fixpoint visited 670796 blocks against 423356 and made 928837 joins against 583056, for no link more: lineage Ir +24.7% on the
+ * 30-file callgrind set, the three worst files x1.8 to x1.9 in time. The words pushed are only what a pop can take back, so only they
+ * are kept, and a pop deletes what it takes (nothing accumulates): on the same file 450761 visits, 620888 joins, 51.3 slots a join
+ * (without either form: 423356, 583056, 51.6), and on corp300 041 208369 / 287616 / 21.8 against 199428 / 275339 / 21.6 - the cost of
+ * following the pushes, and no other. Callgrind, the 30-file set, lineage Ir: base 10.44 G, the fresh base 13.01 G, this 10.82 G (+3.7%,
+ * the system call sites included); warm wall time of the 356-file A/B within 1% of base. A move of the stack pointer by anything but a push or a pop of whole
+ * words, two paths that meet with two different local depths, or a path with a known stack pointer meeting one with words pending,
+ * make the local depth unknown too (ld -1): what was pushed before it is then not taken for what a pop gives.
+ */
+static void lstk_drop(struct kgenome_lineage_state *st)
+{
+	uint32_t p = slot_pos(st, key_make(KGENOME_LINEAGE_KEY_LSTK, 0)), q = p;
+
+	while (q < st->n_slot && (st->slot[q].key >> 60) == KGENOME_LINEAGE_KEY_LSTK)
+		q++;
+	if (q > p) {
+		memmove(&st->slot[p], &st->slot[q], (size_t)(st->n_slot - q) * sizeof *st->slot);
+		st->n_slot -= q - p;
+	}
+}
+
+/* The stack pointer is no longer known: what is pushed from here is counted from here. */
+static void sp_lost(struct kgenome_lineage_state *st)
+{
+	st->spok = 0;
+	st->ld = 0;
+	lstk_drop(st);
+}
+
+/* ... and the words pushed since are not known either. */
+static void ld_lost(struct kgenome_lineage_state *st)
+{
+	st->ld = -1;
+	lstk_drop(st);
+}
+
+/* The stack pointer is known again (`mov rsp, rbp`): the words counted while it was not are below it or above it - not the local stack. */
+static void sp_found(struct kgenome_lineage_state *st, int32_t sp)
+{
+	st->sp = sp;
+	st->spok = 1;
+	st->ld = 0;
+	lstk_drop(st);
+}
+
+/* The stack moved UP by `words` (a pop is 1, `sub esp, 8` on x86-64 is -1) while its pointer is not known: the local depth follows, or is lost
+ * past its bottom. */
+static void ld_move(struct kgenome_lineage_state *st, int32_t words)
+{
+	int32_t n;
+	uint32_t p;
+
+	if (st->ld < 0)
+		return;
+	n = st->ld - words;
+	if (n < 0 || n > 0x7fff) {
+		ld_lost(st);
+		return;
+	}
+	/* the words above the new top are popped: out of the state */
+	while ((p = slot_pos(st, key_make(KGENOME_LINEAGE_KEY_LSTK, (uint64_t)n))) < st->n_slot &&
+	       (st->slot[p].key >> 60) == KGENOME_LINEAGE_KEY_LSTK) {
+		memmove(&st->slot[p], &st->slot[p + 1u], (size_t)(st->n_slot - p - 1u) * sizeof *st->slot);
+		st->n_slot--;
+	}
+	st->ld = (int16_t)n;
+}
+
 /* ---- the state ---- */
 
 int kgenome_lineage_state_copy(struct kgenome_lineage *L, struct kgenome_lineage_state *dst,
@@ -321,12 +455,16 @@ int kgenome_lineage_state_join(struct kgenome_lineage *L, struct kgenome_lineage
 	if (!memcmp(to->r, from->r, sizeof to->r) && to->n_slot == from->n_slot &&
 	    (!to->n_slot || !memcmp(to->slot, from->slot, (size_t)to->n_slot * sizeof *to->slot)) &&
 	    to->spok == from->spok &&
-	    (!to->spok || to->sp == from->sp) && to->pshs == from->pshs && to->seeded == from->seeded)
+	    (!to->spok || to->sp == from->sp) && to->pshs == from->pshs && to->seeded == from->seeded && to->ld == from->ld)
 		return 0;
 	for (i = 0; i < 16u; i++)
 		ch |= kgenome_lineage_val_join(L, &to->r[i], &from->r[i]);
+	/* two depths at one join: the stack pointer is lost, and what the block pushes from here is counted from here (see sp_lost) */
 	if (to->spok && (!from->spok || to->sp != from->sp)) {
-		to->spok = 0;
+		sp_lost(to);
+		ch = 1;
+	} else if (!to->spok && to->ld >= 0 && (from->spok ? 0 : from->ld) != to->ld) {
+		ld_lost(to);
 		ch = 1;
 	}
 	if (to->pshs && to->pshs != from->pshs) {       /* 0 is the top: once there it does not change again */
@@ -431,7 +569,7 @@ struct kgenome_lineage_val kgenome_lineage_arg(const struct kgenome_lineage *L,
 /* ---- one instruction ---- */
 
 /* The value an operand holds. */
-static void read_op(const struct kgenome_lineage *L, const struct kgenome_lineage_state *st,
+void kgenome_lineage_read_op(const struct kgenome_lineage *L, const struct kgenome_lineage_state *st,
 		    const struct kgenome_cell_insn *in, const struct kgenome_cell_operand *o,
 		    struct kgenome_lineage_val *out)
 {
@@ -496,12 +634,12 @@ static void write_op(struct kgenome_lineage *L, struct kgenome_lineage_state *st
 		if (o->reg >= 16u)
 			return;
 		if (o->reg == SP) {
-			if (v->k == KGENOME_LINEAGE_A_STACK && o->size >= 4u) {
-				st->sp = (int32_t)v->v;
-				st->spok = 1;
-			} else {
-				st->spok = 0;
-			}
+			if (v->k == KGENOME_LINEAGE_A_STACK && o->size >= 4u)
+				sp_found(st, (int32_t)v->v);
+			else if (st->spok)
+				sp_lost(st);
+			else
+				ld_lost(st);
 			st->pshs = 0;
 			return;
 		}
@@ -523,6 +661,7 @@ static unsigned unmodelled_reason(const struct kgenome_cell_insn *in)
 	case KGENOME_CELL_ROL: case KGENOME_CELL_ROR: case KGENOME_CELL_RCL: case KGENOME_CELL_RCR:
 	case KGENOME_CELL_MUL: case KGENOME_CELL_IMUL: case KGENOME_CELL_DIV: case KGENOME_CELL_IDIV:
 	case KGENOME_CELL_LEA: case KGENOME_CELL_CMOV: case KGENOME_CELL_SETCC:
+	case KGENOME_CELL_WIDEN:        /* cdq/cqo: the sign of eax */
 		return KGENOME_LINEAGE_W_COMPUTED;
 	default:
 		return KGENOME_LINEAGE_W_OPAQUE;
@@ -541,7 +680,10 @@ static void forget_written(struct kgenome_lineage *L, struct kgenome_lineage_sta
 		if (!(in->wmask & (1ull << r)))
 			continue;
 		if (r == SP) {
-			st->spok = 0;
+			if (st->spok)
+				sp_lost(st);
+			else
+				ld_lost(st);
 			st->pshs = 0;
 		} else {
 			st->r[r] = oth;
@@ -556,6 +698,12 @@ static void forget_written(struct kgenome_lineage *L, struct kgenome_lineage_sta
 void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineage_state *st,
 				const struct kgenome_cell_insn *in)
 {
+	L->abi.step(L, st, in);
+}
+
+/* THE x86 AND x86-64 TRANSFER FUNCTION (the `step` of their rows, diag_lineage_arch.c). */
+void kgenome_lineage_step_x86(struct kgenome_lineage *L, struct kgenome_lineage_state *st, const struct kgenome_cell_insn *in)
+{
 	const struct kgenome_cell_operand *d = &in->o[0], *s = &in->o[1];
 	struct kgenome_lineage_val v;
 	const int w = L->abi.w;
@@ -567,7 +715,7 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 		return;
 	case KGENOME_CELL_MOV:
 		if (in->n_op >= 2u) {
-			read_op(L, st, in, s, &v);
+			kgenome_lineage_read_op(L, st, in, s, &v);
 			write_op(L, st, in, d, &v);
 			return;
 		}
@@ -582,7 +730,13 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 			st->r[d->reg] = st->r[s->reg];
 			return;
 		}
-		if (in->op == KGENOME_CELL_WIDEN)
+		/*
+		 * THE OPERAND-LESS WIDENINGS ARE TWO KINDS (the decoder says which by the register it writes, cell_state.c reads it the same way).
+		 * cwde/cdqe widen eax in place: the same value, kept. cdq/cqo fill edx with the SIGN of eax: a value computed from eax, not eax
+		 * and not what edx held - this returned without forgetting edx, so a producer left in rdx outlived the `cqo` that destroyed it
+		 * (LG-1: `mov rdx, rax(malloc); cqo; mov rsi, rdx; call read` linked read's buffer to malloc as PROVEN).
+		 */
+		if (in->op == KGENOME_CELL_WIDEN && !(in->wmask & ~(1ull << L->abi.ret)))
 			return;
 		break;
 	case KGENOME_CELL_XCHG:
@@ -641,10 +795,15 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 		break;
 	case KGENOME_CELL_PUSH:
 		if (in->n_op >= 1u) {
-			read_op(L, st, in, d, &v);
+			kgenome_lineage_read_op(L, st, in, d, &v);
 			if (st->spok) {
 				st->sp -= w;
 				slot_put(L, st, key_stack(st->sp), &v);
+			} else if (st->ld >= 0 && st->ld < 0x7fff) {
+				slot_put(L, st, key_make(KGENOME_LINEAGE_KEY_LSTK, (uint64_t)st->ld), &v);
+				st->ld++;
+			} else {
+				ld_lost(st);
 			}
 			if (st->pshs < 250u)
 				st->pshs++;
@@ -653,7 +812,8 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 		break;
 	case KGENOME_CELL_POP:
 		if (in->n_op >= 1u && d->kind == KGENOME_CELL_O_REG && d->reg < 16u) {
-			const struct kgenome_lineage_val *p = st->spok ? slot_get(st, key_stack(st->sp)) : NULL;
+			const struct kgenome_lineage_val *p = st->spok ? slot_get(st, key_stack(st->sp))
+							      : st->ld > 0 ? slot_get(st, key_make(KGENOME_LINEAGE_KEY_LSTK, (uint64_t)(st->ld - 1))) : NULL;
 
 			if (d->reg != SP) {
 				if (p)
@@ -665,6 +825,8 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 		}
 		if (st->spok)
 			st->sp += w;
+		else
+			ld_move(st, 1);
 		if (st->pshs)
 			st->pshs--;
 		return;
@@ -679,8 +841,10 @@ void kgenome_lineage_state_step(struct kgenome_lineage *L, struct kgenome_lineag
 			if (d->reg == SP) {
 				int64_t n = (int64_t)st->sp + imm;
 
-				if (n > KGENOME_DIAG_WRAPPER_SP_LIM || n < -KGENOME_DIAG_WRAPPER_SP_LIM)
-					st->spok = 0;
+				if (!st->spok)
+					imm % w ? ld_lost(st) : ld_move(st, (int32_t)(imm / w));
+				else if (n > KGENOME_DIAG_WRAPPER_SP_LIM || n < -KGENOME_DIAG_WRAPPER_SP_LIM)
+					sp_lost(st);
 				else
 					st->sp = (int32_t)n;
 				st->pshs = 0;
@@ -723,7 +887,7 @@ void kgenome_lineage_state_call(struct kgenome_lineage *L, struct kgenome_lineag
 	for (i = 0; i < a->n_clob; i++)
 		kgenome_lineage_val_unknown(&st->r[a->clob[i]], KGENOME_LINEAGE_W_CLOBBER);
 	if (ret)
-		st->r[KGENOME_CELL_REG_AX] = *ret;
+		st->r[a->ret] = *ret;
 	if (a->callee_pops) {
 		const int cdecl_clean = next && next->op == KGENOME_CELL_ADD && next->n_op >= 2u &&
 					next->o[0].kind == KGENOME_CELL_O_REG && next->o[0].reg == SP;
@@ -733,9 +897,14 @@ void kgenome_lineage_state_call(struct kgenome_lineage *L, struct kgenome_lineag
 		} else if (pop >= 0) {
 			if (st->spok)
 				st->sp += (int32_t)(a->w * pop);
+			else
+				ld_move(st, pop);
 			st->pshs = st->pshs > (uint8_t)pop ? (uint8_t)(st->pshs - pop) : 0;
 		} else if (st->pshs) {
-			st->spok = 0;
+			if (st->spok)
+				sp_lost(st);
+			else
+				ld_lost(st);
 		}
 	} else {
 		st->pshs = 0;

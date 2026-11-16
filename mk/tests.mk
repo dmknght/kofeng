@@ -95,7 +95,13 @@ else
 UNIT_SKIP := $(UNIT_SKIP_POSIX)
 endif
 
-UNIT_SRC := $(filter-out $(addprefix tests/unit/,$(addsuffix .c,$(UNIT_SKIP))),\
+# DISABLED by the owner 2026-11-15 (CFG): tests that exercise only the CFG signature and the CFG view of a function, whose code is inside #if 0
+# (celllysis/cfg_sign.c, cfg_anchor.c, cfg_view.c, cfg_gv.c, analyzers/cfgsign.c, cfgview.c). Their sources are inside #if 0 too. To re-enable: take
+# the name out of this list when its code is out of #if 0.
+UNIT_CFG_DISABLED := cfg_sig_gen cfg_sig_threads cfgsign_wk cfg_view_api
+LIBTEST_CFG_DISABLED := cfg_sign cfg_sketch cfg_estimator cfg_hostile
+
+UNIT_SRC := $(filter-out $(addprefix tests/unit/,$(addsuffix .c,$(UNIT_SKIP) $(UNIT_CFG_DISABLED))),\
                          $(wildcard tests/unit/*.c))
 UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 
@@ -142,6 +148,8 @@ UNIT_LIBS_parse_once := -Wl,--wrap=kgenome_elf_image_parse -Wl,--wrap=kgenome_pe
 # how many times the wrapper fixpoint asked whether a function could come out differently (C1), and every
 # mem*/qsort call that was handed a NULL pointer, whatever the length (U1: memcmp(NULL, NULL, 0)).
 UNIT_LIBS_codemap_decode_once := -Wl,--wrap=kgenome_cell_decode
+# pe_run_once counts the machines a scan builds (EA8: one run of a PE object from its entry).
+UNIT_LIBS_pe_run_once := -Wl,--wrap=kgenome_emu_new
 UNIT_LIBS_fntab_cov   := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 UNIT_LIBS_fntab_pe_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 UNIT_LIBS_lineage_frame := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=kgenome_cell_decode
@@ -203,6 +211,7 @@ UNIT_LIBS_textual_defect_work_bat := $(LEXWORK_FLAGS)
 UNIT_LIBS_textual_defect_work_php := $(LEXWORK_FLAGS)
 UNIT_LIBS_textual_defect_work_ecma := $(LEXWORK_FLAGS)
 UNIT_LIBS_textual_defect_work_page := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_jsp := $(LEXWORK_FLAGS)
 UNIT_LIBS_strfn_defect_work := $(LEXWORK_FLAGS) -Wl,--wrap=memcmp -Wl,--wrap=memmem
 UNIT_LIBS_textual_defect_work_form := $(LEXWORK_FLAGS) -Wl,--wrap=kgenome_textual_c_block_end
 ifeq ($(NATIVE_OS),windows)
@@ -284,7 +293,7 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # gets the lib's archive alone. UNIT_LIBS_<name> applies to these too (the zlib
 # oracle of inflate_diff). Tests that need the engine - the object context, the
 # parsers, a database - stay in tests/unit/.
-LIBTEST_GENOME_SRC := $(wildcard tests/lib/genome/*.c)
+LIBTEST_GENOME_SRC := $(filter-out $(addprefix tests/lib/genome/,$(addsuffix .c,$(LIBTEST_CFG_DISABLED))),$(wildcard tests/lib/genome/*.c))    # LIBTEST_CFG_DISABLED: see UNIT_CFG_DISABLED
 LIBTEST_UNCOAT_SRC := $(wildcard tests/lib/uncoat/*.c)
 LIBTEST_BIN := $(patsubst tests/lib/genome/%.c,$(TEST)/libtest_genome_%$(EXE),$(LIBTEST_GENOME_SRC)) \
                $(patsubst tests/lib/uncoat/%.c,$(TEST)/libtest_uncoat_%$(EXE),$(LIBTEST_UNCOAT_SRC))
@@ -415,6 +424,15 @@ UT_INC_callnames    := -Ilibkofeng -Ilibkofeng/kofcore -Ilibgenome
 UT_LIB_callnames    := yes
 UT_DEP_codec_forms := $(SDK_HDR)
 
+# scan_modctx also drives kof_inspect_identify (kofinspect.c) directly - the CFG-CRASH-1
+# class regression needs the REAL tool-side sniff kofexamine/kofviewer use, not a hand-built
+# ctx, so the function under test (kof_scan_of(ctx) answering NULL) is exercised honestly.
+# Same KOFINSPECT_SRC codec_forms already links, plus the engine archive this test always needed.
+UT_SRC_scan_modctx := $(KOFINSPECT_SRC) $(KOFEVT_SRC)
+UT_INC_scan_modctx := -I$(SDK)/include
+UT_LIB_scan_modctx := yes
+UT_DEP_scan_modctx := $(SDK_HDR)
+
 # The examiner's shellcode-loader finder is tool code, not library code, so the
 # test over it compiles that source beside the engine.
 UT_SRC_kofscfind := kofexamine/kofscfind.c
@@ -532,7 +550,7 @@ UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 
 UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr diag_write diag_save diag_form_generate diag_head cfg_sig_gen blk_table_grow decl_table_grow pattern_audit \
               out_clip fidset fridge proc_rule \
-              chan_ring report_model grille_host api_engine_modhelpers code_notes callnames
+              chan_ring report_model grille_host api_engine_modhelpers code_notes callnames scan_modctx
 UNIT_EXTRA += $(ORBIT_TESTS) $(KX_TESTS)
 
 define UNIT_EXTRA_RULES
@@ -562,7 +580,7 @@ $(foreach t,$(UNIT_EXTRA),$(eval $(call UNIT_EXTRA_RULES,$(t))))
 test-sigs:
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/sigs
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/shape
-	@# tests/agree: the same sample named three other ways (tool_agree.c): other family, variant letter, tag and type; six diagnoses / three / none
+# tests/agree: the same sample named three other ways (tool_agree.c): other family, variant letter, tag and type; six diagnoses / three / none
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_a
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_b
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/agree/alt_none
@@ -627,6 +645,6 @@ include mk/tests_cov.mk
 # Static half of the "a tool shows what the engine answers" test (tests/tool_logic_check.py; the dynamic half is unit_tool_agree and tests/tui/t_agree.py).
 # Not wired into `check-rules` (mk/checks.mk is not this work's): the coordinator decides; run it with `make check-tool-logic`.
 check-tool-logic:
-	@python3 -I tests/tool_logic_check.py .
+	@$(PYTHON) -I tests/tool_logic_check.py .
 
 .PHONY: check-tool-logic

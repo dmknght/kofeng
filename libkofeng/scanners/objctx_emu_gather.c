@@ -498,7 +498,7 @@ static void emu_gather_exec_snapshots(const struct kof_obj_ctx *ctx,
 			continue;               /* the stub's own copy of itself */
 		g->any = 1;
 		/* Memory the run made executable, or wrote and then ran - see
-		 * the write-then-execute snapshot in emu_interp.c. Collected rather
+		 * the write-then-execute snapshot in emu_run_private.h. Collected rather
 		 * than handed over: it belongs to the same program as the
 		 * image, and emu_one_child puts them together. */
 		if (g->n_ex < EMU_EXTRA_MAX && !emu_dup(g->ex, g->n_ex, va, bytes, len)) {

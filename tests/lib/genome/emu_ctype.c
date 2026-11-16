@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <phenotype/emu_private.h>
+#include <phenotype/emu_win_private.h>   /* the Windows environment's names (kgenome_emu_win_fake_lib, _fake_find) */
 
 static int fails;
 #define CK(c, ...) do { if (!(c)) { printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); fails++; } } while (0)

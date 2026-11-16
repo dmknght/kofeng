@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "../kofcore/kofdebug.h"
 #include <string.h>
 
 
@@ -40,6 +41,8 @@ uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
 			n++;
 		}
 	}
+	if (r)
+		KOF_TRACE("[norm] gather: %u region(s)\n", n);
 	return n;
 }
 
@@ -147,8 +150,10 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
 {
 	uint32_t i;
 
-	if (!e || !e->sec_count)
+	if (!e || !e->sec_count) {
+		KOF_TRACE("[norm] keep_exec: no section table (stripped) - CODE kept whole\n");
 		return;
+	}
 	/* Take the whole of CODE back... */
 	for (i = 0; i < nr; i++) {
 		uint64_t end;
@@ -160,17 +165,21 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
 		end = r[i].len > n - r[i].off ? n : r[i].off + r[i].len;
 		sx_bits_clr(keep, r[i].off, end);
 	}
-	/* ...and give back only what is instructions. */
-	/* KNOWN DEFECT E-RWX (2026-10-24, R) [sev L]: the ELF half gives back every PROGBITS+EXEC section whatever its write bit,
-	 * the PE half (sx_norm_keep_exec_pe) takes a writable code section out of the kept set. Trigger: an ELF with a
-	 * writable executable section (a packed or unpacked image). Effect: its strings are never narrowed in the view, the
-	 * case the PE rule was made for (8.6 MB RWX, 7,434 UTF-16LE runs); not measured on ELF. Reproducer: none.
-	 * Fix: measure on an RWX ELF corpus, then apply the same SHF_WRITE test here. */
+	/* ...and give back only what is instructions.
+	 *
+	 * E-RWX (fixed): the same predicate that put the section in CODE, and the write
+	 * bit on top of it - the PE half (sx_norm_keep_exec_pe) already excludes a
+	 * writable code section from the kept set for exactly this reason (a section
+	 * the program rewrites at run time is not an instruction stream only, the whole
+	 * program is, strings included); the ELF half was giving every PROGBITS+EXEC
+	 * section back whole regardless of SHF_WRITE. A writable executable ELF
+	 * section is now left OUT of the restore, same as PE, so it is narrowed like
+	 * any other data instead of kept byte for byte. */
 	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
 		const struct kgenome_elf_sec *c = &e->sec[i];
 		uint64_t at, have;
 
-		if (!kgenome_elf_sec_is_code(c))
+		if (!kgenome_elf_sec_is_code(c) || (c->flags & KGENOME_ELF_SHF_WRITE))
 			continue;
 		have = kgenome_elf_sec_extent(c, n, &at);
 		if (!have)
@@ -220,7 +229,7 @@ void sx_norm_keep_exec_pe(uint8_t *keep, uint64_t n,
 		/* The same predicate that put the section in CODE, and the
 		 * write bit on top of it. Ownership is the claim, not the
 		 * declaration: this clears bits of a map that is a partition. */
-		if (!kgenome_pe_sec_is_code(c) || !(c->perm & KGENOME_PE_PERM_W))
+		if (!kgenome_pe_sec_is_code(e, c) || !(c->perm & KGENOME_PE_PERM_W))
 			continue;
 		if (!c->claim_len || c->claim_off >= n)
 			continue;

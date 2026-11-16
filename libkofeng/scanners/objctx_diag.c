@@ -24,9 +24,11 @@
 
 #include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
+#include "../analyzers/parsers/scripts/script_route.h"
 #include <celllysis/nucleo.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+#include <kofmod/script.h>
 
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_forms below. */
@@ -461,7 +463,13 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx)
 		 * of them would find the entries of a layout that is gone. "Built, and
 		 * there were none" is an answer here as everywhere else.
 		 */
-		if (!sc->cur.prod && ctx->file_header) {
+		if (!sc->cur.prod && ctx->format == KOF_FMT_SCRIPT) {
+			/* A script's table is its own declaration shape, and its islands are made from the same one lex
+			 * (script_route.h, kof_script_parts_build): one product, built once for every reader - the
+			 * similarity cut, the obfuscation measure - none of which lexes again. */
+			kof_prod_ran(sc, KOF_PROD_FUNCS);
+			oc_script_parts(sc, ctx);
+		} else if (!sc->cur.prod && ctx->file_header) {
 			struct kgenome_obj gobj;
 
 			kof_genome_obj(ctx, &gobj);
@@ -518,112 +526,6 @@ static const struct kgenome_func_set *funcs_cb(void *ctx)
  * kernel's export table by exact name, so it is there or the object does
  * not work.
  */
-/*
- * ---- THE FACTS THE ENGINE PUBLISHES ABOUT AN OBJECT ---------------------
- *
- * One question each, answered off the parse, and nothing here knows what
- * any of them is FOR. A diagnose states the condition - see
- * KOF_DIAG_HAS_ATTRB and enum kof_diag_fact - and this only fetches.
- *
- * IT USED TO BE THE OTHER WAY ROUND: a handful of named bits, each one's
- * meaning a few lines of C in this file, and a diagnose could only ask what
- * somebody had already written. One of them, ONE_LOAD, was a compound of
- * three clauses under a single name, so what a diagnose using it actually
- * demanded could not be read off the diagnose - and when one clause turned
- * out to be a build detail rather than a behaviour, nothing in the
- * declaration showed it.
- *
- * A FACT THIS BUILD DOES NOT KNOW ANSWERS NO. The loader refuses a
- * diagnose naming one, so reaching here with an unknown fact means the two
- * ends of the database disagree, and the safe answer to "should the
- * expensive analysis run" is no.
- */
-static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
-		      uint64_t want)
-{
-	const struct kgenome_elf_info *ei = NULL;
-	const struct kgenome_pe_info *pi = NULL;
-	uint32_t i;
-
-	if (!ctx)
-		return 0;
-	if (ctx->format == KOF_FMT_ELF) {
-		ei = kof_elf(ctx);
-		if (!ei || !ei->valid)
-			return 0;
-	} else if (ctx->format == KOF_FMT_PE) {
-		pi = kof_pe(ctx);
-		if (!pi)
-			return 0;
-	}
-
-	switch (fact) {
-	case KOF_FACT_ENTRY_PERM:
-		/*
-		 * EACH FORMAT'S OWN WORD FOR IT. The two permission enums
-		 * happen to agree bit for bit and that is not something to
-		 * rely on - KGENOME_PERM_X and KGENOME_PE_PERM_X are declared apart
-		 * on purpose.
-		 */
-		if (ei)
-			return ((uint64_t)ei->entry_perm & want) == want;
-		if (pi)
-			return ((uint64_t)pi->entry_perm & want) == want;
-		return 0;               /* no answer is not a yes */
-	case KOF_FACT_MAP_PERM:
-		if (ei) {
-			for (i = 0; i < ei->seg_count &&
-				    i < KGENOME_ELF_MAX_SEGMENTS; i++)
-				if (ei->seg[i].type == 1u &&      /* PT_LOAD */
-				    ((uint64_t)ei->seg[i].perm & want) == want)
-					return 1;
-			return 0;
-		}
-		if (pi) {
-			/* A section, which is where PE declares the same
-			 * thing about a mapping. */
-			for (i = 0; i < pi->sec_count; i++)
-				if (((uint64_t)pi->sec[i].perm & want) == want)
-					return 1;
-			return 0;
-		}
-		return 0;
-	case KOF_FACT_SECTIONS:
-		if (ei)
-			return (uint64_t)ei->shnum == want;
-		if (pi)
-			return (uint64_t)pi->sec_count == want;
-		return 0;
-	case KOF_FACT_OBJ_KIND:
-		if (ei)
-			return (uint64_t)ei->e_type == want;
-		return 0;
-	case KOF_FACT_FORMAT:
-		return (uint64_t)ctx->format == want;
-	case KOF_FACT_SIZE_MIN:
-		return ctx->obj_size >= want;
-	case KOF_FACT_ARCH_SET:
-		return ctx->arch < 64u && ((want >> ctx->arch) & 1u) != 0;
-	case KOF_FACT_FORMAT_SET:
-		/* A bit per format: the diagnose is for any of them (a form that lives in an ELF, in a script, in a plain text). */
-		return ctx->format < 64u && ((want >> ctx->format) & 1u) != 0;
-	default:
-		return 0;
-	}
-}
-
-/* Every condition a diagnose stated - see KOF_DIAG_HAS_ATTRB. */
-int oc_diag_when_met(const struct kof_obj_ctx *ctx,
-		     const struct kof_diag *d)
-{
-	uint8_t i;
-
-	for (i = 0; i < d->n_when; i++)
-		if (!fact_holds(ctx, d->when[i].fact, d->when[i].val))
-			return 0;
-	return 1;
-}
-
 static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			  uint32_t i);
 
@@ -1185,33 +1087,21 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	b = oc_mc(ctx)->data;
 	if (!b.p || !b.n)
 		return;
-	/*
-	 * ---- ONLY THE ROUTES AN OPEN DIAGNOSE DECLARED, WHERE THE FILE OFFERS THEM --
-	 *
-	 * Every scan once ran every route whatever the database wanted: a PE has
-	 * no syscall to find and a dynamically linked ELF has none either, so the
-	 * other route was work with nowhere to put its answer.
-	 *
-	 * THE UNION, because the database decides together. One diagnose asking for
-	 * the symbol route is enough reason to run it; no diagnose asking is the only
-	 * reason not to.
-	 */
+	/* ---- ONLY THE ROUTES AN OPEN DIAGNOSE DECLARED, WHERE THE FILE OFFERS THEM: running every route whatever
+	 * the database wanted left work with nowhere to put its answer (a PE has no syscall, a dynamic ELF no import
+	 * scan); the UNION, because the database decides together - one diagnose asking is reason enough to run it. */
 	{
 		unsigned run = 0;
 		struct kgenome_diag_seq *seqv;
 		uint32_t n_seq = 0;
 
-		/* Kept in the scanner, not on the stack: the scan keeps this
-		 * pointer for as long as its graph lives (see kof_scanner.diag.seq). */
+		/* Kept in the scanner, not the stack: the scan keeps this pointer for as long as its graph lives (see kof_scanner.diag.seq). */
 		seqv = sc->diag.seq;
 
 		for (i = 0; i < sc->eng->n_diag; i++) {
-			/* a diagnose whose signs are absent asks for no
-			 * route - see diag_gates */
-			if (!diag_gate_open(sc, ctx, i))
+			if (!diag_gate_open(sc, ctx, i))      /* a diagnose whose signs are absent asks for no route - see diag_gates */
 				continue;
-			/* A head built from two calls is built for the diagnose
-			 * that declared it, and for it alone. */
+			/* A head built from two calls is built for the diagnose that declared it, and for it alone. */
 			if (sc->eng->diag[i].seq_first && n_seq < sc->diag.cap) {
 				seqv[n_seq].made = sc->eng->diag[i].node[0].cap;
 				seqv[n_seq].first = sc->eng->diag[i].seq_first;
@@ -1223,6 +1113,13 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			if (sc->eng->diag[i].analysis & KOF_DIAG_USES_EMU)
 				run |= KGENOME_DIAG_RUN_EMULATE;
 		}
+		/* An explain caller is authoring a diagnose, not matching one: it needs every route the FORMAT serves,
+		 * gate or no gate (oc_diag_servable, the other half of oc_diag_routes above - still nothing for a format
+		 * with nothing, closed_gate.c); EMULATE is added for a binary, not a script. Only widens `run`. A signature's
+		 * nucleo gate asks about a capability picked from that author's list, so it asks for the same routes
+		 * (sc->obj.diag.author, objctx_diag_gate.c). */
+		if (sc->diag.explain || sc->obj.diag.author)
+			run |= oc_diag_author_routes(ctx);
 		if (!run)
 			return;
 		/* THE LINEAGE STAGES follow the routes that make nodes: which of them run is the class table's. */
@@ -1241,6 +1138,7 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			struct kgenome_diag_inputs in;
 			struct kgenome_obj gobj;
 			struct oc_emu_diag emu_acct;
+			uint16_t *keep;
 			/* ZEROED: the struct has fields this function does not set (lineage_stages, frames, funcs_fn, funcs_user) and an unset one is the stack's garbage - `lineage_stages`
 			 * was read uninitialised here until 2026-11-03, and the stages the lineage ran then followed the layout of the stack (measured: one 0.18 MB ELF changed from OK to
 			 * Limit reached when the frame of this function moved by 16 bytes). */
@@ -1292,10 +1190,15 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				return;
 			in.budget = &kb;
 			in.refused = &refused;
+			in.keep_caps = keep = oc_diag_keep_caps(sc, &in.n_keep_caps);     /* kept unlinked by the node table's keep rule */
 			kof_prod_ran(sc, KOF_PROD_DIAG);
 			ds = kgenome_diag_scan_with_inputs(&gobj, b.p, b.n, run, &in);
+			free(keep);
 			oc_emu_diag_end(sc, &emu_acct, ds);
 		}
+		/* The routes this graph was made by, after the emulator's account had its say (oc_emu_diag_begin may take EMULATE
+		 * out): what a nucleo gate needs to tell "not there" from "not looked for" (objctx_diag_gate.c). */
+		sc->obj.diag.run = ds ? run : 0u;
 		/* NULL for want of memory is not "nothing to read": said. */
 		if (!ds && refused != KGENOME_OK)
 			OC_LIMIT(sc, "diagnose scan not allocated");
@@ -1440,6 +1343,8 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 	memset(out, 0, sizeof *out);
 	out->name = d->name;
 	out->id = d->id;
+	/* What each condition came to - a gate condition may be UNKNOWN, never read as a NO (objctx_diag_gate.c). */
+	oc_diag_gate_report(sc, ctx, i, out);
 	/* A detection form has no node and no route: its state is whether its shape is here and what it came to. */
 	if (d->form) {
 		out->state = !oc_diag_when_met(ctx, d) ? KOF_DIAG_ST_SHAPE

@@ -162,15 +162,16 @@ struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
 	 * not run without them. */
 	/*
 	 * The per-diagnose state, sized by the database and not by a constant:
-	 * three bitmaps (matched, gate open, could not say) in one block, the
-	 * bound nodes, and the head sequences. One allocation per scanner.
+	 * seven bitmaps (matched, gate open, could not say, and the forms' asked,
+	 * answer, expression and gate-refused) in one block, the bound nodes, and
+	 * the head sequences. One allocation per scanner.
 	 */
 	sc->diag.cap = eng->n_diag;
 	sc->diag.bm = (eng->n_diag + 7u) / 8u;
 	{
 		size_t n = eng->n_diag ? eng->n_diag : 1u;
 
-		sc->diag.hit = calloc(5u * (sc->diag.bm ? sc->diag.bm : 1u), 1u);
+		sc->diag.hit = calloc(7u * (sc->diag.bm ? sc->diag.bm : 1u), 1u);
 		sc->diag.bind = calloc(n, sizeof *sc->diag.bind);
 		sc->diag.n_bind = calloc(n, 1u);
 		sc->diag.seq = calloc(n, sizeof *sc->diag.seq);
@@ -181,6 +182,8 @@ struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
 		sc->diag.unk = sc->diag.gate + (sc->diag.bm ? sc->diag.bm : 1u);
 		sc->diag.fhit = sc->diag.unk + (sc->diag.bm ? sc->diag.bm : 1u);
 		sc->diag.fdone = sc->diag.fhit + (sc->diag.bm ? sc->diag.bm : 1u);
+		sc->diag.fgate = sc->diag.fdone + (sc->diag.bm ? sc->diag.bm : 1u);
+		sc->diag.fexpr = sc->diag.fgate + (sc->diag.bm ? sc->diag.bm : 1u);
 	}
 	sc->match.live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->match.live);
 	if (eng->pix_regions) {
@@ -275,6 +278,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	}
 	kgenome_diag_apihash_free(sc->obj.diag.apihash);
 	sc->obj.diag.apihash = NULL;
+	oc_emu_kept_drop(sc);
 	kgenome_pe_imptab_free(&sc->obj.diag.pe_imp);
 	free(sc->diag.rep);
 	free(sc->diag.xm);
@@ -285,6 +289,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->diag.n_bind);
 	free(sc->diag.seq);
 	free(sc->diag.gr);
+	free(sc->diag.lineage);
+	free(sc->diag.lineage_in);
 	free(sc->match.live);
 	if (sc->match.pix_ready)
 		kofpix_ctx_free(&sc->match.pix);
@@ -323,6 +329,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->syms.decl);
 	free(sc->syms.buf);
 	kgenome_funcs_free(&sc->obj.sym.funcs);
+	oc_script_islands_drop(sc);
 	kgenome_frame_cache_free(sc->obj.diag.frames);
 	kgenome_diag_walk_free(sc->obj.diag.walk);
 	free(sc->pend.syms);
@@ -668,6 +675,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 		free(sc->obj.diag.relocs);
 	}
 	kgenome_diag_apihash_free(sc->obj.diag.apihash);
+	oc_emu_kept_drop(sc);
 	kgenome_pe_imptab_free(&sc->obj.diag.pe_imp);
 	/* The graph of the object that has just finished: held until here so
 	 * anything reporting on it could still read it. */
@@ -675,6 +683,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 	kof_scan_text_drop(sc);
 	sym_decl_free(sc);
 	kgenome_funcs_free(&sc->obj.sym.funcs);
+	oc_script_islands_drop(sc);
 	kof_prod_sync_walk(sc);
 	if (kgenome_diag_walk_capped(sc->obj.diag.walk))
 		sc->st.trace_capped++;
@@ -689,6 +698,8 @@ void sx_obj_begin(struct kof_scanner *sc)
 	memset(sc->diag.unk, 0, sc->diag.bm);
 	memset(sc->diag.fhit, 0, sc->diag.bm);
 	memset(sc->diag.fdone, 0, sc->diag.bm);
+	memset(sc->diag.fgate, 0, sc->diag.bm);
+	memset(sc->diag.fexpr, 0, sc->diag.bm);
 
 	/*
 	 * THE WIPE: the latches (one array, see enum kof_obj_latch), the symbol

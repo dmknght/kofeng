@@ -351,6 +351,20 @@ uint32_t kof_src_entry_of(const struct kof_objsrc *);
 void     kof_src_declare_kind(struct kof_objsrc *, uint32_t kind);
 uint32_t kof_src_kind_of(const struct kof_objsrc *);
 
+/*
+ * AND WHETHER THIS OBJECT IS EVIDENCE RATHER THAN A SCAN TARGET OF ITS OWN
+ * (owner, 2026-11-10: "không treat cái island này như 1 object riêng để
+ * scan... vẫn được sử dụng làm bằng chứng scan giống như 1 region riêng" -
+ * a code island is not an independent object to scan, it is evidence like a
+ * region is). A child declared this way still gets FACTS and SCRIPT (it is
+ * tokenized and normalised for display, same as any other object) but
+ * DETECT, SIMILAR, ANALYSE and VERDICT skip it - see scan_pipeline.c's four
+ * guards. Carried the same way `kind` is: a queue separates producing a
+ * child from scanning it.
+ */
+void     kof_src_declare_evidence_only(struct kof_objsrc *, int evidence_only);
+int      kof_src_evidence_only_of(const struct kof_objsrc *);
+
 struct kof_objsrc *kof_src_window(struct kof_objsrc *parent, uint64_t off,
 				  uint64_t len);
 

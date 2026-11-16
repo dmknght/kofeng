@@ -21,7 +21,7 @@
  * whoever already has rights on the machine. A file patched IN PLACE at the
  * same length, with its timestamps put back, has the same key.
  *
- * Kaspersky's iChecker keyed on exactly this and was sound anyway, because the
+ * Commercial clean-file caches keyed on exactly this and were sound anyway, because the
  * thing that invalidated an entry was not the timestamp: it was a filesystem
  * filter driver that saw every write. The stamp was a cheap consistency check
  * for what the driver could not see - a volume modified while mounted
@@ -114,7 +114,7 @@
  * Reading a file changes its access time, so a scanner that keyed on one would
  * invalidate every entry by looking at it. Permissions change without the
  * content changing - one chmod across a tree would throw the cache away for
- * nothing. Kaspersky dropped FILE_ATTRIBUTE_ARCHIVE for the same reason and
+ * nothing. Commercial caches dropped FILE_ATTRIBUTE_ARCHIVE for the same reason and
  * said so: "Backup agents may change archive attribute."
  *
  * Sixteen bytes for each of volume and node because Windows needs them: a

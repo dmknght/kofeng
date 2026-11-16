@@ -1,3 +1,9 @@
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when kof_cfgsign_function and kv_mutation.c's CFG branch are out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define _GNU_SOURCE
 /*
  * cfg_sig_gen - a FUNCTION ROW ticked in the table becomes a diagnose (Generate), is built into a pack, MATCHES an object through the normal verdict
@@ -8,8 +14,8 @@
  * (blk_set_picked on a block whose hashes are the unit's keys, region KOF_SCAN_ELF_CODE, norm RAW), then
  *   generate  one file per matcher; the block is `KOF_MUTATION_BLOCK(bN, KOF_SCAN_ELF_CODE, <n keys>)` with the 24 and the 14 keys
  *             of the two functions (a CODE block of 12..32 hashes is a block like any other: the reader the builder uses read it back before it wrote)
- *   floor     a CODE block of one key (a function of one reachable block) is written; of none, refused ("too few or too many hashes"); a DATA block
- *             keeps its 16. It was 12 keys written and 11 refused: the floor of 12 reachable blocks is gone (owner, 2026-11-01)
+ *   floor     a CODE block of KGENOME_CFG_ANCHOR_MIN keys (5) is written; of fewer, refused ("too few or too many hashes"); a DATA block
+ *             keeps its 16. The floor moved 12 -> 1 (owner, 2026-11-01) -> 5, measured (owner, 2026-11-07, anchor-floor-1)
  *   small     a function of 6 reachable blocks: its row is ticked and saved, the builder packs it, the engine (keng_open + kscan_explain) fires the
  *             diagnose on an object holding that function and not on an object whose small function has another shape
  *   verdict   ksigbuilder builds the pack from the generated directory; the engine scan of the object fires both diagnoses (the thresholds are
@@ -531,11 +537,13 @@ static void generate_and_match(void)
 
 static void floor_of_the_block(void)
 {
+	/* exhaustively below the floor (0..KGENOME_CFG_ANCHOR_MIN-1, which is 0..4 at the measured floor of 5), the floor itself, one above, and a round number well above */
+	static const uint32_t CANDIDATES[] = { 0, 1, 2, 3, 4, 5, 6, 12 };
 	char *t;
-	uint32_t b, i, n;
+	uint32_t b, i, ci;
 
-	/* a CODE block: none refused; one, two and twelve written and read back */
-	for (n = 0; n <= 12; n += (n < 2u ? 1u : 10u)) {
+	for (ci = 0; ci < sizeof CANDIDATES / sizeof *CANDIDATES; ci++) {
+		const uint32_t n = CANDIDATES[ci];
 		struct kgenome_cfg_sign s;
 
 		clean();
@@ -546,8 +554,8 @@ static void floor_of_the_block(void)
 			s.key[i] = 0x01000000u * (i + 1u) + 0x1234u;
 		b = function_row(&s);
 		tick(b, "flood", 70);
-		if (n == 0) {
-			CKM(save() < 0 && count_files() == 0u && strstr(msg, "too few or too many hashes"), "no key is refused: %d", 0);
+		if (n < KGENOME_CFG_ANCHOR_MIN) {
+			CKM(save() < 0 && count_files() == 0u && strstr(msg, "too few or too many hashes"), "%u keys (below the floor of %u) refused", n, KGENOME_CFG_ANCHOR_MIN);
 		} else {
 			CKM(save() == 1 && count_files() == 1u, "%u keys are written", n);
 			t = slurp("botnet_mirai_flood_01.c", NULL);
@@ -719,3 +727,4 @@ int main(void)
 	printf("cfg_sig_gen: ok\n");
 	return 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

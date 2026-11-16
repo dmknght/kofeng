@@ -41,6 +41,14 @@
  */
 #define GOTO_H 5
 
+/*
+ * The Open dialog: the same three-content-row shape as Go to (a field, a
+ * line under it, two buttons), wider because a path is longer than an
+ * offset.
+ */
+#define OPENDLG_H 5
+#define OPENDLG_W 70
+
 /* ---- the decoder ---------------------------------------------------------
  *
  * WHAT IT IS FOR. A dropper carries its second stage encoded, and until the
@@ -864,6 +872,137 @@ int goto_click(struct view *v)
 			v->edit = 0;
 		} else if (g_mx >= v->g_go[0] && g_mx <= v->g_go[1]) {
 			goto_take(v);
+		}
+	}
+	return 1;
+}
+
+/*
+ * THE OPEN DIALOG: one path field, Open and Cancel.
+ *
+ * File > Open (bar_run, BI_OPEN) and the direct key Ctrl+O (kv_events.c)
+ * both call opendlg_show - one implementation, so the two ways in cannot
+ * drift (kofeng/CLAUDE.md, "never leave two paths doing one job").
+ *
+ * The field is a plain path, read with field_key - the general text editor
+ * every other free-text field here uses (Find's) - rather than Go to's
+ * hand-rolled hex filter, because a path is not a restricted alphabet.
+ */
+void opendlg_show(struct view *v)
+{
+	v->opendlg_open = 1;
+	v->edit = 540;
+	v->ed.dr.warn[0] = 0;
+}
+
+/*
+ * Resolve the field's path and load it, exactly as the CLI argument is
+ * (main(), kv_main.c): a file is opened as typed; a folder is resolved to
+ * its first file by dir_pick, the same call main() makes - not a second
+ * walk of a directory.
+ *
+ * file_open is the one opener every caller in this program already uses
+ * (open_step, main); this adds nothing to what it does. On success the
+ * dialog closes. On failure - an empty field, an empty folder, or whatever
+ * file_open itself refuses - it leaves the reason in v->act_msg (the status
+ * line reads it, kv_marker.c) and keeps the dialog open: a running program
+ * cannot exit on a bad path the way argv parsing can, so the reader
+ * corrects it or presses Cancel.
+ */
+void opendlg_take(struct view *v)
+{
+	struct stat st;
+	char resolved[KOF_DUMP_PATH_ROOM];
+	const char *use = v->opendlg_path;
+
+	if (!v->opendlg_path[0]) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg, "Type a path first");
+		return;
+	}
+	if (stat(v->opendlg_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		if (!dir_pick(v->opendlg_path, NULL, PICK_FIRST, resolved,
+			       sizeof resolved)) {
+			v->act_ok = 0;
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "%.60s holds no file to open",
+				 base_name(v->opendlg_path));
+			return;
+		}
+		use = resolved;
+	}
+	if (!file_open(v, use, v->eng))
+		return;                 /* file_open left the reason */
+	v->opendlg_open = 0;
+	v->edit = 0;
+	v->act_ok = 1;
+	snprintf(v->act_msg, sizeof v->act_msg, "Opened %.60s",
+		 base_name(v->path));
+}
+
+/* One line: the field. Mirrors draw_goto's layout at half its complexity -
+ * no second mode to toggle, so one hint line under the field is enough. */
+void draw_opendlg(struct out *o, struct view *v)
+{
+	struct dframe *f = &g_opendlg_f;
+
+	if (!dframe_begin(o, f, "Open", OPENDLG_W, OPENDLG_H, 0))
+		return;
+
+	dframe_row(o, f, 0);
+	out_fmt(o, A_DIM "Path " A_OFF);
+	v->o_txt[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[", v->edit == 540 ? A_SEL : A_ID);
+	field_draw(o, v->opendlg_path, v->caret, &v->opendlg_off, 54,
+		   v->edit == 540, "path");
+	out_str(o, "]" A_OFF);
+	v->o_txt[1] = o->col_base + (int)o->col_hint - 1;
+	dframe_edge(o, f);
+
+	dframe_row(o, f, 1);
+	out_fmt(o, A_DIM "a file, or a folder (its first file by name)"
+		A_OFF);
+	dframe_edge(o, f);
+
+	dframe_row(o, f, 2);
+	v->o_go[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[ Open ]" A_OFF, v->opendlg_path[0] ? A_ID : A_DIM);
+	v->o_go[1] = o->col_base + (int)o->col_hint - 1;
+	out_str(o, "  ");
+	v->o_cancel[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
+	v->o_cancel[1] = o->col_base + (int)o->col_hint - 1;
+	dframe_edge(o, f);
+
+	dframe_end(o, f, NULL);
+	dframe_done(o, f);
+}
+
+/*
+ * A click inside the Open box. Mirrors goto_click, including the rule that a
+ * click OUTSIDE only takes the caret away - the dialog keeps its place until
+ * Cancel or Esc.
+ */
+int opendlg_click(struct view *v)
+{
+	const struct dframe *f = &g_opendlg_f;
+	int top = f->y;
+
+	if (!f->w || g_my < top || g_my >= top + f->h ||
+	    g_mx < f->x || g_mx >= f->x + f->w) {
+		v->edit = 0;
+		return 0;
+	}
+	if (g_my == top + 1 && g_mx >= v->o_txt[0] && g_mx <= v->o_txt[1]) {
+		v->edit = 540;
+		return 1;
+	}
+	if (g_my == top + 3) {
+		if (g_mx >= v->o_cancel[0] && g_mx <= v->o_cancel[1]) {
+			v->opendlg_open = 0;
+			v->edit = 0;
+		} else if (g_mx >= v->o_go[0] && g_mx <= v->o_go[1]) {
+			opendlg_take(v);
 		}
 	}
 	return 1;

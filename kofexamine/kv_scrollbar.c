@@ -27,7 +27,7 @@ static const char *bar_cell(int h0, int h1, int i, int horiz)
 	int hi = b >= h0 && b < h0 + h1;   /* the far half covered */
 
 	if (lo && hi)
-		return A_BOLD G_THUMB A_OFF;
+		return horiz ? A_BOLD G_THUMB_H A_OFF : A_BOLD G_THUMB A_OFF;
 	if (lo)
 		return horiz ? A_BOLD G_HALF_L A_OFF : A_BOLD G_HALF_T A_OFF;
 	if (hi)

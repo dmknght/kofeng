@@ -1,6 +1,9 @@
 #define _GNU_SOURCE
 #include "kv.h"
 
+#include <textual/textual.h>
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
+
 
 /*
  * Where the text starts, past the line-number gutter.
@@ -88,12 +91,25 @@ void sym_shn_str(const uint8_t *r, char *out, size_t n)
  * in the gutter counts lines rather than bytes.
  */
 
+/*
+ * The file offset of region position `at` - or, for a RENDERED buffer (kgenome_textual_pretty,
+ * txt_pretty_view below), `at` itself: the rendered buffer is a display transform with no file offset
+ * of its own (textual.h's own header on this call), and view_map's extents describe the OBJECT's raw
+ * bytes, which this buffer's length no longer matches once indentation has added to it - asking it for
+ * a position past the raw length would answer offset 0 instead of "no mapping", silently reading the
+ * wrong byte. Every line-walking function below takes `rendered` for this one reason and no other.
+ */
+static uint64_t txt_fo(struct view *v, uint64_t at, int rendered)
+{
+	return rendered ? at : view_map(v, at, 0);
+}
+
 /* The byte the line containing `at` starts on. */
 uint64_t txt_line_start(struct view *v, const uint8_t *base,
-			       uint64_t base_n, uint64_t at)
+			       uint64_t base_n, uint64_t at, int rendered)
 {
 	while (at > 0) {
-		uint64_t fo = view_map(v, at - 1u, 0);
+		uint64_t fo = txt_fo(v, at - 1u, rendered);
 
 		if (fo < base_n && base[fo] == '\n')
 			break;
@@ -104,10 +120,10 @@ uint64_t txt_line_start(struct view *v, const uint8_t *base,
 
 /* The byte after the line containing `at` ends, newline included. */
 uint64_t txt_line_end(struct view *v, const uint8_t *base,
-			     uint64_t base_n, uint64_t at)
+			     uint64_t base_n, uint64_t at, int rendered)
 {
-	while (at < v->rgn_len) {
-		uint64_t fo = view_map(v, at, 0);
+	while (at < base_n) {
+		uint64_t fo = txt_fo(v, at, rendered);
 
 		at++;
 		if (fo < base_n && base[fo] == '\n')
@@ -123,12 +139,12 @@ uint64_t txt_line_end(struct view *v, const uint8_t *base,
  */
 /* The newlines in [from, to), in the region's own address space. */
 static uint64_t txt_line_count(struct view *v, const uint8_t *base,
-			       uint64_t base_n, uint64_t from, uint64_t to)
+			       uint64_t base_n, uint64_t from, uint64_t to, int rendered)
 {
 	uint64_t i, n = 0;
 
 	for (i = from; i < to; i++) {
-		uint64_t fo = view_map(v, i, 0);
+		uint64_t fo = txt_fo(v, i, rendered);
 
 		if (fo < base_n && base[fo] == '\n')
 			n++;
@@ -137,19 +153,19 @@ static uint64_t txt_line_count(struct view *v, const uint8_t *base,
 }
 
 uint64_t txt_line_of(struct view *v, const uint8_t *base,
-			    uint64_t base_n, uint64_t at)
+			    uint64_t base_n, uint64_t at, int rendered)
 {
 	uint64_t n = 0;
 	int bad = 0;
 
-	if (v->txt_anchor > v->rgn_len)
+	if (v->txt_anchor > base_n)
 		v->txt_anchor = v->txt_anchor_ln = 0;
 	if (at >= v->txt_anchor) {
 		n = v->txt_anchor_ln +
-		    txt_line_count(v, base, base_n, v->txt_anchor, at);
+		    txt_line_count(v, base, base_n, v->txt_anchor, at, rendered);
 	} else {
 		uint64_t back = txt_line_count(v, base, base_n, at,
-					       v->txt_anchor);
+					       v->txt_anchor, rendered);
 
 		/*
 		 * AN ANCHOR THAT CANNOT PAY FOR THE LINES BEHIND IT IS NOT THIS
@@ -180,7 +196,7 @@ uint64_t txt_line_of(struct view *v, const uint8_t *base,
 	 */
 	if (bad || n > at) {
 		v->txt_anchor = v->txt_anchor_ln = 0;
-		n = txt_line_count(v, base, base_n, 0, at);
+		n = txt_line_count(v, base, base_n, 0, at, rendered);
 	}
 	v->txt_anchor = at;
 	v->txt_anchor_ln = n;
@@ -202,16 +218,16 @@ uint64_t txt_line_of(struct view *v, const uint8_t *base,
  * was anything left to see.
  */
 uint64_t txt_max_top(struct view *v, const uint8_t *base,
-			    uint64_t base_n, int rows)
+			    uint64_t base_n, int rows, int rendered)
 {
 	uint64_t a;
 	int i;
 
-	if (!v->rgn_len)
+	if (!base_n)
 		return 0;
-	a = txt_line_start(v, base, base_n, v->rgn_len - 1u);
+	a = txt_line_start(v, base, base_n, base_n - 1u, rendered);
 	for (i = 1; i < rows && a > 0; i++)
-		a = txt_line_start(v, base, base_n, a - 1u);
+		a = txt_line_start(v, base, base_n, a - 1u, rendered);
 	return a;
 }
 static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 1; }
@@ -257,17 +273,98 @@ static char txt_glyph(uint8_t c)
 	return (c >= 32 && c < 127) ? (char)c : '.';
 }
 
+/*
+ * THE SCRIPT NORM CHILD, LAID OUT FOR A READER (kgenome_textual_pretty, textual.h) - owner, 2026-11-11:
+ * "viết và hiển thị trong kofviewer thay thế nội dung phần norm" (write it and show it in kofviewer,
+ * replacing the norm section's content). Built once, lazily, and only for the object this IS: the form
+ * child of a KOF_FMT_SCRIPT object (entry_kind KOF_ENT_NORMALIZED), in a language the call lays out
+ * (kof_script_textual_lang answers KGENOME_TEXTUAL_LANG_NONE for one it does not). Answers 0 - every
+ * caller then keeps ob->buf.p/buf.n exactly as before - for anything else, including a call that wrote
+ * nothing: a cosmetic failure is never evidence lost, the raw form is always there to fall back to (see
+ * kgenome_textual_pretty's own header).
+ *
+ * THIS IS A DISPLAY-ONLY TRANSFORM, never fed back into the engine. It is also not addressed by FILE
+ * OFFSET the way ob->buf is: a declared string's hits and the engine's own markers were found by
+ * searching the RAW form, in ITS coordinates, so every caller that swaps to this buffer also stops
+ * asking those (the same reason a symbol row, kv_hex.c's own `sym`, turns them off) and passes
+ * `rendered` to the txt_line_* calls, which is the other half of the same fact: view_map maps a raw
+ * file offset, and this buffer's length no longer matches the object's once indentation has added to
+ * it (textual_pretty.c's cap is not KGENOME_TEXTUAL_FORM_CAP(n): it can be, and almost always is,
+ * larger than the object it is laid out from).
+ */
+int txt_pretty_view(struct object *ob, const uint8_t **p, uint64_t *n)
+{
+	uint32_t lang;
+	uint64_t cap;
+	uint8_t *buf;
+	struct kgenome_textual_pretty_req rq;
+	struct kgenome_textual_pretty_res res;
+
+	if (ob->pretty_done) {
+		if (!ob->pretty_p)
+			return 0;
+		*p = ob->pretty_p;
+		*n = ob->pretty_n;
+		return 1;
+	}
+	ob->pretty_done = 1;
+	if (ob->ctx.format != KOF_FMT_SCRIPT || ob->entry_kind != KOF_ENT_NORMALIZED ||
+	    !ob->buf.p || !ob->buf.n)
+		return 0;
+	lang = kof_script_textual_lang(ob->ctx.subtype);
+	if (lang == KGENOME_TEXTUAL_LANG_NONE)
+		return 0;
+	/* However much indentation could plausibly add, plus room to spare - truncation here only
+	 * cuts the cosmetic job short (res.truncated), never evidence: see textual_pretty.c's own
+	 * KGENOME_TEXTUAL_PRETTY_INDENT_MAX/WIDTH for the per-break worst case this is sized against. */
+	cap = ob->buf.n * 4u + 4096u;
+	if (cap > 64u * 1024u * 1024u)
+		cap = 64u * 1024u * 1024u;
+	buf = malloc((size_t)cap);
+	if (!buf)
+		return 0;
+	memset(&rq, 0, sizeof rq);
+	rq.in = ob->buf.p;
+	rq.n = ob->buf.n > 0xffffffffu ? 0xffffffffu : (uint32_t)ob->buf.n;
+	rq.lang = lang;
+	rq.out = buf;
+	rq.cap = cap > 0xffffffffu ? 0xffffffffu : (uint32_t)cap;
+	/*
+	 * CODE FROM ITS FIRST BYTE, THE SAME TEST objctx_script.c's own form call makes (kof_script_from_code, the engine's: the
+	 * object's entry, ISL-1 2026-11-10): an island has no opening tag of its own - php's lexer reads code only inside a tag's
+	 * island, so without this its whole text reads as one block of markup and this call is a no-op, byte for byte (measured:
+	 * n_out == buf.n exactly, the same symptom Merge 173 found and fixed for kgenome_textual_form).
+	 */
+	if (kof_script_from_code(&ob->ctx))
+		rq.flags = KGENOME_TEXTUAL_FRAGMENT;
+	kgenome_textual_pretty(&rq, &res);
+	if (!res.n_out) {
+		free(buf);
+		return 0;
+	}
+	ob->pretty_p = buf;
+	ob->pretty_n = res.n_out;
+	*p = buf;
+	*n = res.n_out;
+	return 1;
+}
+
 void draw_text(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
 	int top = hex_top(), bot = hex_last();
 	int gut = TREE_W + 3, x0 = txt_x0();
 	int wide = g_cols - x0;
-	uint64_t base_n = ob->buf.n;
-	const uint8_t *base = ob->buf.p;
+	uint64_t base_n;
+	const uint8_t *base;
+	int rendered = txt_pretty_view(ob, &base, &base_n);
 	uint64_t at, ln, maxtop;
 	int row, vbar, hbar;
 
+	if (!rendered) {
+		base_n = ob->buf.n;
+		base = ob->buf.p;
+	}
 	if (!base)
 		base_n = 0;
 
@@ -296,15 +393,15 @@ void draw_text(struct out *o, struct view *v)
 	hbar = txt_hbar_on(v);
 	if (hbar)
 		bot--;
-	maxtop = txt_max_top(v, base, base_n, bot - top + 1);
-	vbar = v->rgn_len > 0 && maxtop > 0;
+	maxtop = txt_max_top(v, base, base_n, bot - top + 1, rendered);
+	vbar = base_n > 0 && maxtop > 0;
 	if (vbar)
 		wide--;
 	if (wide < 1)
 		wide = 1;
 
-	at = txt_line_start(v, base, base_n, v->rgn_at);
-	ln = txt_line_of(v, base, base_n, at);
+	at = txt_line_start(v, base, base_n, v->rgn_at, rendered);
+	ln = txt_line_of(v, base, base_n, at, rendered);
 	v->txt_maxlen = 0;
 
 	for (row = top; row <= bot; row++) {
@@ -312,11 +409,11 @@ void draw_text(struct out *o, struct view *v)
 		int c;
 
 		out_at(o, row, gut);
-		if (at >= v->rgn_len) {
+		if (at >= base_n) {
 			out_str(o, "\033[K");
 			continue;
 		}
-		end = txt_line_end(v, base, base_n, at);
+		end = txt_line_end(v, base, base_n, at, rendered);
 		{
 			const char *a = A_LOC;
 
@@ -329,8 +426,8 @@ void draw_text(struct out *o, struct view *v)
 		{
 			uint64_t len = end - at;
 
-			while (len && at + len - 1u < v->rgn_len) {
-				uint64_t fo = view_map(v, at + len - 1u, 0);
+			while (len && at + len - 1u < base_n) {
+				uint64_t fo = txt_fo(v, at + len - 1u, rendered);
 				uint8_t bv = fo < base_n ? base[fo] : 0;
 
 				if (bv != '\n' && bv != '\r')
@@ -348,13 +445,19 @@ void draw_text(struct out *o, struct view *v)
 		 */
 		k = at + (uint64_t)v->txt_col;
 		for (c = 0; c < wide && k < end; c++, k++) {
-			uint64_t fo = view_map(v, k, 0);
+			uint64_t fo = txt_fo(v, k, rendered);
 			uint8_t bv = fo < base_n ? base[fo] : 0;
 			const char *ec, *pl;
 
 			if (bv == '\n' || bv == '\r')
 				break;
-			ec = evt_byte_colour(v, k);
+			/* A rendered buffer has no file offset of its own - a marker found by
+			 * searching the RAW form would light an unrelated byte at the same
+			 * number here, the same reason a symbol row turns these off (kv_hex.c's
+			 * own `sym`). Selection stays: it is set by THIS pane's own click
+			 * (text_under), in the SAME buffer's coordinates, whichever one this is. */
+			ec = rendered ? NULL : evt_byte_colour(v, k);
+			pl = rendered ? NULL : mtn_lit_at(v, k);
 			/* The same ladder the hex pane paints a byte with, in
 			 * the same order: what the reader picked beats what the
 			 * draft declared. */
@@ -363,9 +466,9 @@ void draw_text(struct out *o, struct view *v)
 			 * on this frame, and the engine's markers are what was
 			 * there before they asked. */
 			out_str(o, in_sel(v, k) ? A_SELB :
-				(pl = mtn_lit_at(v, k)) ? pl :
+				pl ? pl :
 				ec ? ec
-				  : decl_kind(v, fo) ? A_HIT3
+				  : (!rendered && decl_kind(v, fo)) ? A_HIT3
 				  : byte_colour(bv));
 			out_fmt(o, "%c", txt_glyph(bv));
 			out_str(o, A_OFF);
@@ -375,8 +478,8 @@ void draw_text(struct out *o, struct view *v)
 		ln++;
 	}
 	if (vbar)
-		kv_scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
-			  v->rgn_len - maxtop);
+		kv_scrollbar(o, g_cols, top, bot, v->rgn_at, base_n,
+			  base_n - maxtop);
 	if (hbar) {
 		kv_scrollbar_h(o, bot + 1, x0, g_cols - (vbar ? 1 : 0),
 			    v->txt_col, v->txt_maxlen, (uint64_t)wide);
@@ -399,34 +502,45 @@ void draw_text(struct out *o, struct view *v)
 
 /* Which byte a click landed on, and where it is in the line. Mirrors
  * byte_under, which answers the same question for the hex layout. */
+/* KNOWN DEFECT KXV-SCR-1 (2026-11-10, R) [sev M]: owner-reported, not reproduced live this
+ * session - a script-view pane stops accepting clicks after horizontal scroll. Trigger: scroll a
+ * long-line script object right, then click text. Effect: `at += v->txt_col + (col - x0)` below
+ * looks correct on inspection; v->txt_maxlen staleness after hscroll, or the click never reaching
+ * here for a script child, are not ruled out. Reproducer: none yet (owner report only). Fix: get
+ * a live (pyte) repro before changing this function. */
 int text_under(struct view *v, int row, int col, uint64_t *out,
 		      uint64_t *out_line, uint32_t *out_col)
 {
 	struct object *ob = cur_obj(v);
-	uint64_t base_n = ob ? ob->buf.n : 0;
-	const uint8_t *base = ob ? ob->buf.p : NULL;
+	uint64_t base_n;
+	const uint8_t *base;
+	int rendered = ob && txt_pretty_view(ob, &base, &base_n);
 	uint64_t at, end, ln;
 	int r, x0 = txt_x0();
 
+	if (!rendered) {
+		base_n = ob ? ob->buf.n : 0;
+		base = ob ? ob->buf.p : NULL;
+	}
 	if (!base)
 		base_n = 0;
 	/* Not the horizontal bar's row - see txt_bot. */
 	if (row < hex_top() || row > txt_bot(v) || col < x0)
 		return 0;
 
-	at = txt_line_start(v, base, base_n, v->rgn_at);
-	ln = txt_line_of(v, base, base_n, at);
+	at = txt_line_start(v, base, base_n, v->rgn_at, rendered);
+	ln = txt_line_of(v, base, base_n, at, rendered);
 	for (r = hex_top(); r < row; r++) {
-		if (at >= v->rgn_len)
+		if (at >= base_n)
 			return 0;
-		at = txt_line_end(v, base, base_n, at);
+		at = txt_line_end(v, base, base_n, at, rendered);
 		ln++;
 	}
-	if (at >= v->rgn_len)
+	if (at >= base_n)
 		return 0;
-	end = txt_line_end(v, base, base_n, at);
+	end = txt_line_end(v, base, base_n, at, rendered);
 	at += (uint64_t)v->txt_col + (uint64_t)(col - x0);
-	if (at >= end || at >= v->rgn_len)
+	if (at >= end || at >= base_n)
 		return 0;
 	if (out)
 		*out = at;
@@ -554,12 +668,17 @@ void txt_hscroll(struct view *v, int by)
 uint64_t txt_home_end(struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	uint64_t n = ob ? ob->buf.n : 0;
-	const uint8_t *b = ob ? ob->buf.p : NULL;
+	uint64_t n;
+	const uint8_t *b;
+	int rendered = ob && txt_pretty_view(ob, &b, &n);
 
+	if (!rendered) {
+		n = ob ? ob->buf.n : 0;
+		b = ob ? ob->buf.p : NULL;
+	}
 	if (!b)
 		n = 0;
-	return txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1);
+	return txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1, rendered);
 }
 
 /*

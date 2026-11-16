@@ -1,3 +1,9 @@
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when the scan signs function units again (scan_feed.c mutation_feed_func).
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define _GNU_SOURCE
 /*
  * cfg_sig_threads - eight scanners over ONE engine and the same objects, every one signing function units and scoring them against the same CFG blocks:
@@ -195,7 +201,7 @@ int main(void)
 				    job[i].got[k].verdict, job[0].got[k].verdict, job[i].got[k].fired, job[0].got[k].fired);
 		}
 		OKF(job[0].got[0].fired == (1u << N_TH) - 1u && job[0].got[0].verdict[0], "the reference fires every diagnose (%05x, \"%s\")", job[0].got[0].fired, job[0].got[0].verdict);
-		/* THE SMALL FUNCTION IS SIGNED (owner, 2026-11-01: the floor is one reachable block, KGENOME_CFG_ANCHOR_MIN; it was twelve keys): its 8 blocks are 8 of the reference's 24, a third of them (33%),
+		/* THE SMALL FUNCTION IS SIGNED (the floor is KGENOME_CFG_ANCHOR_MIN reachable blocks, 5, anchor-floor-1; it was twelve, then one, 2026-11-01): its 8 blocks are 8 of the reference's 24, a third of them (33%),
 		 * so the diagnose of threshold t (t * 5 percent of the reference's blocks) fires for t <= 6: the first six, and no other. The test expected "nothing" from the era of the old floor. */
 		OKF(job[0].got[2].fired == (1u << 6) - 1u && job[0].got[2].verdict[0], "the small function (8 of 24 blocks) fires the diagnoses up to 30%% and no more (fired %05x, \"%s\")", job[0].got[2].fired, job[0].got[2].verdict);
 		OKF(job[0].got[1].fired != 0 && job[0].got[1].fired != (1u << N_TH) - 1u, "the variant fires some diagnoses, not all (%05x)", job[0].got[1].fired);
@@ -212,3 +218,4 @@ int main(void)
 	printf("cfg_sig_threads: ok\n");
 	return 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

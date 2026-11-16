@@ -23,6 +23,52 @@ struct kgenome_nucleo_namerow {
 	uint8_t     refine;
 };
 
+/*
+ * WHAT ONE CALL IS, ARGUMENT BY ARGUMENT: the SHAPE of a row (kgenome_nucleo_row_role and its siblings, nucleo.h).
+ *
+ * WRITTEN AT THE ROW, COMPILED TO NOTHING. A row says its shape with KGENOME_SHAPE("<spec>") as the last member of its
+ * initializer - `{ .name = "CreateThread", .cap = KGENOME_NUCLEO_THREAD, KGENOME_SHAPE("tgt2 val3 entry2 res=handle") }` - and the
+ * macro is empty: tools/gen_nucleo_index.py reads the spec out of the source and writes the shapes, deduplicated, into nucleo_index.c
+ * with one shape index per row (kgenome_nucleo_row_shape, by the row's position over the tables laid end to end). So the one carrier
+ * of "argument 2 of CreateThread is where execution goes" is the row's line; what the run time reads is generated from it. A row with
+ * no KGENOME_SHAPE has its capability's shape (nucleo_capshape.c), and a capability without one has the empty shape (no input read,
+ * the result a status).
+ *
+ * THE SPEC, words separated by spaces (the generator refuses anything else):
+ *   fd<k> buf<k> src<k> path<k> val<k> tgt<k>  argument k (0-based, in the API's documented order, k < 8) plays that role -
+ *                                               KGENOME_DIAG_ROLE_FD, _BUFFER, _SOURCE, _PATH, _VALUE, _TARGET (diag_vocab.h);
+ *                                               a role at most once in a shape (the invariant kgenome_diag_note_in rests on)
+ *   field<k>                                    argument k's input is a FIELD of the struct it points at (WSABUF.buf,
+ *                                               OBJECT_ATTRIBUTES.ObjectName, SERVICE_TABLE_ENTRY.lpServiceProc), not the argument
+ *   res=<kind>                                  status (the default), status0 (0 is success), value, handle, pointer, codeptr, void,
+ *                                               noret: KGENOME_NUCLEO_RES_*
+ *   out<k>                                      the object the call makes is written through argument k (at most two)
+ *   entry<k> [entry=field|remote]               argument k is code the system will call: an indirect entry
+ *   rel<k>                                      the call ends the object argument k holds
+ *   name<k> | nameobj<k>                        the kernel symbol name the call is about: argument k is the C string
+ *                                               (KGENOME_NAME_DIRECT) or points at an object holding it (KGENOME_NAME_OBJECT)
+ */
+#define KGENOME_SHAPE(spec)
+
+struct kgenome_nucleo_shape {
+	uint8_t role[8];         /* enum kgenome_diag_role per argument; 0 (NONE) where the argument is not an input */
+	uint8_t field;           /* bit k: argument k's input is a field of what it points at */
+	uint8_t res;             /* KGENOME_NUCLEO_RES_* */
+	uint8_t out[2];          /* KGENOME_NUCLEO_ARG_NONE where absent */
+	uint8_t entry, entry_how;
+	uint8_t release;
+	uint8_t name, name_kind; /* KGENOME_NUCLEO_ARG_NONE and 0 where absent */
+};
+
+/* Generated (nucleo_index.c): the shapes; the shape of each row over the tables laid end to end; the shape of each capability that has one. */
+extern const struct kgenome_nucleo_shape kgenome_nucleo_shapes[];
+extern const uint16_t kgenome_nucleo_row_shape[];
+extern const uint32_t kgenome_nucleo_rows_n;
+extern const uint16_t kgenome_nucleo_capshape_shape[];
+/* Written by hand (nucleo_capshape.c): the capabilities that have a shape, in the order kgenome_nucleo_capshape_shape follows. */
+extern const uint16_t kgenome_nucleo_capshape_cap[];
+extern const uint32_t kgenome_nucleo_capshape_n;
+
 struct kgenome_nucleo_names {
 	uint8_t                              target;   /* enum kgenome_nucleo_target */
 	uint8_t                              fold;     /* names are not case sensitive (php, vbscript, batch, powershell, cfml, .NET) */

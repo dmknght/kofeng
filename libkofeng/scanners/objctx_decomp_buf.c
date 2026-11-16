@@ -11,6 +11,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -693,19 +694,27 @@ uint64_t oc_unpack_buffered(struct kof_scanner *sc,
 	enum kuncoat_status st;
 	uint64_t produced;
 
-	if (!buffered_size(sc, out_hint, &r))
+	KOF_TRACE("[decomp] buffered method=%u in_len=%llu out_hint=%llu peek=%d\n", (unsigned)method,
+		  (unsigned long long)in_len, (unsigned long long)out_hint, peek_out != NULL);
+	if (!buffered_size(sc, out_hint, &r)) {
+		KOF_TRACE("[decomp] buffered method=%u refused: could not size the output\n", (unsigned)method);
 		return 0;
+	}
 	buffered_ratio_clamp(method, in_len, out_hint, &r);
 	if (!buffered_place(sc, in, in_len, peek_out, &r)) {
+		KOF_TRACE("[decomp] buffered method=%u refused: could not place the input/output\n", (unsigned)method);
 		buffered_cut(sc, &r, peek_out != NULL);
 		return 0;
 	}
 	if (!buffered_coding(sc, q, &r, &st, &produced)) {
+		KOF_TRACE("[decomp] buffered method=%u refused: the coding itself declined\n", (unsigned)method);
 		buffered_cut(sc, &r, peek_out != NULL);
 		return 0;
 	}
 	buffered_note(sc, st, out_hint, &r);
 	produced = buffered_deliver(sc, ctx, &r, produced, peek_out, peek_cap);
+	KOF_TRACE("[decomp] buffered method=%u produced %llu byte(s), status %d\n", (unsigned)method,
+		  (unsigned long long)produced, (int)st);
 	buffered_cut(sc, &r, peek_out != NULL);
 	return produced;
 }

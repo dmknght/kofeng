@@ -145,6 +145,28 @@ struct kgenome_textual_lang {
 	 * the text it was made from had something between them, or it would not be code - because that break would make the heredoc. */
 	uint8_t     heredoc_eol;
 	/*
+	 * A ";" at TOP LEVEL (f->depth 0: outside every "(", "[" and "{" the form is tracking) ends a statement, and the form gives it the
+	 * line break a statement end always gets - the same `pend`/`settle` mechanism a source's own line break already drives, asked for here
+	 * instead of only kept where the source happened to have one (owner, 2026-11-10: a flat chain of assignments built by an obfuscator,
+	 * `$k="...";$a="...";...;`, formed to one line because nothing in the SOURCE ever broke it, and "normalise" must not mean "say only what
+	 * the file's own spacing said" - see objctx_script.c's header). Requires the language's depth to be tracked (`f->track`, below): set only
+	 * where a ";" truly ends a statement and not a word of one (php; not sh, tcl, batch, whose words a line break would read as separate
+	 * commands differently than a ";" does). NOT for a "(" or "[" one - `for ($i=0;$i<9;$i++)` keeps its three clauses on one line, because
+	 * depth is nonzero inside the loop's own "(" - and not for one inside a "{" block (an if/function body): a function's own statements are
+	 * a later round (see objctx_script.c's header), not this one; a flat top-level chain is the shape this answers. */
+	uint8_t     stmt_semi;
+	/*
+	 * This language ends a statement, inside a block, with a ";" that is not also a word of one (php, js, perl -
+	 * not sh, tcl, batch: same exclusion as `stmt_semi`, a different question). Read ONLY by kgenome_textual_pretty
+	 * (textual.h) to decide whether it can indent a language's CODE by block nesting at all, and NOT by
+	 * kgenome_textual_form: `stmt_semi` is form's own depth-0 reflow gate, proven since Merge 172 for the languages
+	 * that carry it, and setting it for a language changes form's tested, re-entered output for every caller of
+	 * that mechanism - the two were briefly ONE field (2026-11-11, this field's own addition undoes that: turning
+	 * `stmt_semi` on for js and perl so the new renderer could indent them broke textual_js.c's and
+	 * textual_perl.c's own, already-passing, form tests, which know nothing about indentation and were never
+	 * asked to accept it). A language may set one, the other, both, or neither. */
+	uint8_t     stmt_delim;
+	/*
 	 * The decoders a literal is put through, from the code in front of it. `tail` holds the last
 	 * `n` bytes of code, white space and comments left out, ending where the literal begins.
 	 * Writes the kgenome_textual_decoder of each call that wraps the literal as its first

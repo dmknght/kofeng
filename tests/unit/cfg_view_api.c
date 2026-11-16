@@ -1,4 +1,10 @@
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when kof_cfgview_build is out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * cfg_view_api - the engine's answer to "what is the shape of this function" (kof_cfgview_build, analyzers/cfgview.c), which the viewer's
  * press on the name of a function row asks and shows without computing anything of its own.
  *
@@ -361,7 +367,7 @@ static void calls(void)
 		snprintf(want, sizeof want, "fcn_%08llx", (unsigned long long)s.fs.v[1].off);
 		CKM(!strcmp(v.call[0].name, want), "name '%s' want '%s'", v.call[0].name, want);
 		CK(v.call[1].kind == KGENOME_CFG_CK_INDIRECT && !strcmp(v.call[1].name, "indirect") && v.call[1].target == KGENOME_BROKEN);
-		CK(v.call[2].kind == KGENOME_CFG_CK_SYSCALL && !strcmp(v.call[2].name, "syscall"));
+		CKM(v.call[2].kind == KGENOME_CFG_CK_SYSCALL && !strcmp(v.call[2].name, "syscall, number not known here"), "'%s'", v.call[2].name);   /* rax is a call's result */
 		CK(v.call[3].kind == KGENOME_CFG_CK_DIRECT && !strcmp(v.call[3].name, "outside the object") && v.call[3].target == KGENOME_BROKEN);
 		/* the block of each: the calls before the jz are in block 0, the ones after it in the blocks the view lists next */
 		CK(v.call[0].blk == 0 && v.call[1].blk == 0 && v.call[2].blk > 0 && v.call[3].blk >= v.call[2].blk);
@@ -369,6 +375,32 @@ static void calls(void)
 			CK(v.call[i].blk < v.view.n_blk);
 	}
 	CK(v.text && strstr(v.text, "calls: 4") && strstr(v.text, "-> fcn_") && strstr(v.text, "syscall") && !strstr(v.text, "not evidence") && strstr(v.text, "calls: 4\n"));
+	kof_cfgview_free(&v);
+	scene_free(&s);
+}
+
+/*
+ * WHICH SYSCALL (owner 2026-11-14: the table said `syscall` and not what it was). The name is the code notes' spelling of the number the object's code
+ * map reads in the syscall register over the straight run (kof_syscall_spell, codemap.c): one reading, one spelling, here and beside the disassembly.
+ * Simulated bytes: mov eax,41; syscall; mov eax,60; syscall; syscall (rax is the last call's result); ret.
+ */
+static void syscall_names(void)
+{
+	static const uint8_t code[] = { 0xb8, 0x29, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x0f, 0x05, 0xc3 };
+	struct scene s;
+	struct kof_cfgview_req rq;
+	struct kof_cfgview v;
+
+	scene_make(&s, &ISAS[0], code, sizeof code);
+	request(&rq, &s);
+	CK(kof_cfgview_build(&rq, &v) == 1);
+	CKM(v.n_call == 3, "n_call %u", v.n_call);
+	if (v.n_call == 3) {
+		CKM(v.call[0].kind == KGENOME_CFG_CK_SYSCALL && !strcmp(v.call[0].name, "socket (41)"), "'%s'", v.call[0].name);
+		CKM(!strcmp(v.call[1].name, "exit (60)"), "'%s'", v.call[1].name);
+		CKM(!strcmp(v.call[2].name, "syscall, number not known here"), "'%s'", v.call[2].name);
+	}
+	CK(v.text && strstr(v.text, "socket (41)") && strstr(v.text, "exit (60)"));
 	kof_cfgview_free(&v);
 	scene_free(&s);
 }
@@ -614,6 +646,7 @@ int main(void)
 	truncated();
 	anchor();
 	calls();
+	syscall_names();
 	calls_blocks_and_counts();
 	text_is_the_facts();
 	budget_and_time();
@@ -624,3 +657,4 @@ int main(void)
 	printf("cfg_view_api: ok\n");
 	return 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

@@ -23,6 +23,7 @@
 #include "../kofcore/kofhash.h"   /* KOF_ERR_* */
 #include "../kofcore/kofbudget.h"
 #include "../kofcore/range.h"
+#include "../kofcore/kofdebug.h"
 
 
 #include "../kofcore/kofplatform.h"
@@ -118,6 +119,9 @@ struct kof_objsrc {
 	 * because the calloc'd zero would mean entry 0. */
 	uint32_t           entry_of;
 	uint32_t           kind;
+	/* See kof_src_declare_evidence_only in objsrc.h. Zero (the calloc'd
+	 * default) is the ordinary object: a scan target like any other. */
+	uint8_t            evidence_only;
 
 	/* What the producer said this object's regions are - see the note in
 	 * objsrc.h. Empty for every source but a normalised view. */
@@ -253,6 +257,8 @@ int kof_src_declare_regions(struct kof_objsrc *s, uint8_t fmt,
 	if (n) {
 		own = malloc((size_t)n * sizeof *own);
 		if (!own) {
+			KOF_TRACE("[src] declare_regions: %u-entry table could not be allocated, view carries none\n",
+				  (unsigned)n);
 			free(s->rgn);
 			s->rgn = NULL;
 			s->n_rgn = 0;
@@ -299,6 +305,17 @@ uint32_t kof_src_kind_of(const struct kof_objsrc *s)
 	return s ? s->kind : 0u;
 }
 
+void kof_src_declare_evidence_only(struct kof_objsrc *s, int evidence_only)
+{
+	if (s)
+		s->evidence_only = (uint8_t)(evidence_only != 0);
+}
+
+int kof_src_evidence_only_of(const struct kof_objsrc *s)
+{
+	return s && s->evidence_only;
+}
+
 uint8_t kof_src_fmt_of(const struct kof_objsrc *s)
 {
 	return s ? s->fmt : 0u;
@@ -325,6 +342,8 @@ void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 		return;
 	if (len > KOF_SRC_NAME_MAX) {
 		/* Past anything a container's standard allows: invalid, not truncated. */
+		KOF_TRACE("[src] label: %llu byte(s) over KOF_SRC_NAME_MAX, invalid name\n",
+			  (unsigned long long)len);
 		s->name_bad = 1;
 		return;
 	}
@@ -349,6 +368,8 @@ void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 		 * carries KOF_BROKEN_LIMIT, which the walk reads back as its result, the same as the names
 		 * quota being full (oc_names_take, whose caller says oc_scan_limit). The sweep that found this
 		 * is tests/unit/cov_oom_formats.c. */
+		KOF_TRACE("[src] label: %llu byte(s) could not be allocated, unnamed and LIMIT\n",
+			  (unsigned long long)n + 1u);
 		kof_src_mark_cut(s, KOF_BROKEN_LIMIT);
 		return;
 	}
@@ -361,6 +382,7 @@ void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 
 	/* "." and ".." are directory references, not names. */
 	if (strcmp(lab, ".") == 0 || strcmp(lab, "..") == 0) {
+		KOF_TRACE("[src] label: \"%s\" is a directory reference, not a name\n", lab);
 		free(lab);
 		return;
 	}
@@ -576,11 +598,15 @@ static int spill_copy(struct kof_objsrc *s, const struct kof_src_file_req *rq,
 		uint64_t got = read_full(io, fd, chunk, want);
 
 		if (got && !rq->spill_write(rq->spill_user, out, chunk, got)) {
+			KOF_TRACE("[src] spill: write failed at %llu of %llu byte(s), LIMIT\n",
+				  (unsigned long long)done, (unsigned long long)size);
 			s->cut = KOF_BROKEN_LIMIT;
 			break;
 		}
 		done += got;
 		if (got < want) {
+			KOF_TRACE("[src] spill: short read at %llu of %llu byte(s), DAMAGED\n",
+				  (unsigned long long)done, (unsigned long long)size);
 			s->cut = KOF_BROKEN_DAMAGED;
 			break;
 		}
@@ -595,10 +621,15 @@ static int spill_copy(struct kof_objsrc *s, const struct kof_src_file_req *rq,
 		}
 	}
 	close(out);
-	if (done && !s->map)
+	if (done && !s->map) {
+		KOF_TRACE("[src] spill: no address space for %llu byte(s), nothing held\n",
+			  (unsigned long long)done);
 		s->cut = KOF_BROKEN_LIMIT;      /* no address space for it: nothing of it is held */
+	}
 	if (done < size && !s->cut)
 		s->cut = KOF_BROKEN_LIMIT;
+	KOF_TRACE("[src] spill done: %llu of %llu byte(s), cut=%u\n", (unsigned long long)done,
+		  (unsigned long long)size, (unsigned)s->cut);
 	return 1;
 }
 
@@ -656,6 +687,8 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 	if (want > SIZE_MAX)
 		want = SIZE_MAX;
 	if (want > rq->room || (rq->budget && kof_budget_ask(rq->budget, want) < want)) {
+		KOF_TRACE("[src] file: %llu byte(s) over the heap room, trying the spill file\n",
+			  (unsigned long long)want);
 		if (rq->spill_open && rq->spill_write &&
 		    spill_copy(s, rq, io, fd, (uint64_t)sb.st_size)) {
 			close(fd);
@@ -665,6 +698,8 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 			want = rq->limit;
 		if (rq->budget && want)
 			want = kof_budget_ask(rq->budget, want);
+		KOF_TRACE("[src] file: no spill file, holding %llu of %llu byte(s) on the heap\n",
+			  (unsigned long long)want, (unsigned long long)sb.st_size);
 	}
 	/* Atomic against the other scanners: a charge that loses the race holds nothing. */
 	if (rq->budget && want && !kof_budget_charge(rq->budget, want))
@@ -672,11 +707,15 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 	if ((uint64_t)sb.st_size > want)
 		s->cut = KOF_BROKEN_LIMIT;
 	if (want == 0) {
+		KOF_TRACE("[src] file: nothing affordable of %llu byte(s), empty object marked LIMIT\n",
+			  (unsigned long long)sb.st_size);
 		close(fd);
 		return s;               /* nothing affordable: an empty object marked LIMIT */
 	}
 	buf = malloc((size_t)want);
 	if (!buf) {
+		KOF_TRACE("[src] file: %llu byte(s) could not be allocated, LIMIT\n",
+			  (unsigned long long)want);
 		if (rq->budget)
 			kof_budget_release(rq->budget, want);
 		s->cut = KOF_BROKEN_LIMIT;
@@ -685,8 +724,11 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 	}
 	got = read_full(io, fd, buf, want);
 	close(fd);
-	if (got < want)
+	if (got < want) {
+		KOF_TRACE("[src] file: short read, got %llu of %llu byte(s) wanted, DAMAGED\n",
+			  (unsigned long long)got, (unsigned long long)want);
 		s->cut = KOF_BROKEN_DAMAGED;    /* ended early or failed: said, whatever else was cut */
+	}
 	s->heap = buf;
 	s->p = buf;
 	s->n = got;
@@ -696,6 +738,7 @@ struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
 		s->on_free = file_release;
 		s->on_free_arg = rq->budget;
 	}
+	KOF_TRACE("[src] file done: %llu byte(s) held, cut=%u\n", (unsigned long long)got, (unsigned)s->cut);
 	return s;
 }
 
@@ -711,8 +754,11 @@ struct kof_objsrc *kof_src_window(struct kof_objsrc *parent, uint64_t off,
 	 * a range that runs past the end is the normal hostile case rather than a
 	 * programming error. */
 	got = kof_clip_len(parent->n, off, len);
-	if (got == 0)
+	if (got == 0) {
+		KOF_TRACE("[src] window: off=%llu len=%llu refused, nothing of it fits the parent\n",
+			  (unsigned long long)off, (unsigned long long)len);
 		return NULL;
+	}
 
 	s = src_new();
 	if (!s)
@@ -825,8 +871,10 @@ int kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
 	if (!s || !b || !n)
 		return 1;
 	own = malloc(n);
-	if (!own)
+	if (!own) {
+		KOF_TRACE("[src] declare_syms: %u byte(s) could not be allocated, view arrives without them\n", n);
 		return 0;       /* the view arrives without them, and the caller says so (engine_defect2 E2) */
+	}
 	memcpy(own, b, n);
 	free(s->syms);
 	s->syms = own;
@@ -842,8 +890,11 @@ int kof_src_declare_funcs(struct kof_objsrc *s, const struct kgenome_func *v,
 	if (!s || !v || !n)
 		return 1;
 	own = malloc((size_t)n * sizeof *own);
-	if (!own)
+	if (!own) {
+		KOF_TRACE("[src] declare_funcs: %u-entry table could not be allocated, view arrives without them\n",
+			  (unsigned)n);
 		return 0;       /* the view arrives without them, and the caller says so (engine_defect2 E2) */
+	}
 	memcpy(own, v, (size_t)n * sizeof *own);
 	free(s->funcs);
 	s->funcs = own;
@@ -858,8 +909,11 @@ int kof_src_declare_fixed(struct kof_objsrc *s, const struct kof_range *v, uint3
 	if (!s || !v || !n)
 		return 1;
 	own = malloc((size_t)n * sizeof *own);
-	if (!own)
+	if (!own) {
+		KOF_TRACE("[src] declare_fixed: %u-entry table could not be allocated, view arrives cut as its own bytes say\n",
+			  (unsigned)n);
 		return 0;       /* the view arrives cut as its own bytes say, and the caller says so (E2) */
+	}
 	memcpy(own, v, (size_t)n * sizeof *own);
 	free(s->fixed);
 	s->fixed = own;
@@ -874,8 +928,11 @@ int kof_src_declare_desc(struct kof_objsrc *s, const struct kof_src_desc *d)
 	if (!s || !d || !d->info || !d->info_len)
 		return 1;
 	own = malloc(d->info_len);
-	if (!own)
+	if (!own) {
+		KOF_TRACE("[src] declare_desc: %u byte(s) could not be allocated, view arrives without it\n",
+			  (unsigned)d->info_len);
 		return 0;       /* the view arrives without it, and is raw: the caller says so (E2) */
+	}
 	memcpy(own, d->info, d->info_len);
 	free(s->desc_info);
 	s->desc = *d;
@@ -1054,6 +1111,7 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first)
 		 * traverse to, nothing to race, and nothing to clean up. */
 		fd = open(d, O_TMPFILE | O_RDWR | O_EXCL, 0600);
 		if (fd >= 0) {
+			KOF_TRACE("[src] tmpfile: O_TMPFILE made in %s\n", d);
 			if (dir_out)
 				snprintf(dir_out, dir_cap, "%s", d);
 			return fd;
@@ -1094,11 +1152,13 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first)
 		fd = mkstemp(path);
 		if (fd >= 0) {
 			unlink(path);
+			KOF_TRACE("[src] tmpfile: mkstemp made in %s, unlinked at once\n", d);
 			if (dir_out)
 				snprintf(dir_out, dir_cap, "%s", d);
 			return fd;
 		}
 #endif
 	}
+	KOF_TRACE("[src] tmpfile: no directory of the list could make one\n");
 	return -1;
 }

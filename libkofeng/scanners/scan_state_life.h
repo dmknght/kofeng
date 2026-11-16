@@ -26,6 +26,11 @@ struct kof_scan_obj_sym {
 	/* The functions the same symbols name, built once beside the block - see
 	 * oc_funcs. */
 	struct kgenome_func_set funcs;
+	/* A SCRIPT'S ISLANDS (celllysis/script_islands.h), built with its function table from the same one lex (funcs_of,
+	 * kof_script_parts_build) and charged to the ledger for as long as the object lives (`isl_charged`). NULL for any other
+	 * format, or when the ledger could not hold them (said: oc_scan_limit). */
+	struct kgenome_script_islands *isl;
+	uint64_t isl_charged;
 	uint8_t bound;       /* bound to the block built for THIS object */
 	uint8_t ext_done[2];
 };
@@ -38,7 +43,7 @@ struct kof_scan_obj_sym {
  * Owner: objctx_diag.c builds them, objprod.c lends and takes them, scan.c
  * releases them. Files that touch it: objctx_diag.c, objctx.c, scan.c,
  * objprod.c, tests/unit/diag_ledger_e2e.c, scan_pipeline.c, scan_verdict.c,
- * scan_unpack.c.
+ * scan_unpack.c, objctx_diag_gate.c.
  */
 struct kof_scan_obj_diag {
 	/* The scan's diagnose lines were said for this object (oc_diag_trace_scan). */
@@ -114,6 +119,14 @@ struct kof_scan_obj_diag {
 	 * reads yet, which is exactly the one that is being written.
 	 */
 	int all;
+	/*
+	 * A SIGNATURE'S NUCLEO GATE ASKED FOR THE ANALYSIS on this object (objctx_diag_gate.c): the routes the format serves
+	 * run, as for an author's explain, because the list the researcher picked the capability from was made by those
+	 * routes (oc_diag_author_routes). And WHICH ROUTES THE ANALYSIS RAN (KGENOME_DIAG_RUN_*, 0 when it did not run): a
+	 * capability that is not in the graph is a NO only when every route that list is made by ran. Per object.
+	 */
+	uint8_t author;
+	unsigned run;
 	/* The walk of the code, decoded once for whoever needs it: the entries the
 	 * functions are cut from and the wrapper resolution's sites and trace.
 	 * Filled by the first reader - see oc_walk. Per object. */
@@ -197,6 +210,14 @@ struct kof_scan_obj_emu {
 	 * one's answer. A module cannot see it: a module asks, the host answers.
 	 */
 	enum kof_emu_stance stance;
+	/*
+	 * THE PE'S MACHINE, KEPT BETWEEN ITS TWO READERS (EA8). The API-resolution run (RECOVER, through
+	 * oc_emu_apihash) starts the program at its entry and leaves the machine here; the unpack run
+	 * (UNPACK, kof_scan_emu_unpack) carries it on instead of running the program again. Charged to
+	 * the scanner's ledger like any machine (emu_account). Released by oc_emu_kept_drop: when the
+	 * UNPACK row ends (scan_pipeline.c), at the next object, when the scanner is freed.
+	 */
+	struct kgenome_emu_unp_kept kept;
 };
 
 /*
@@ -214,6 +235,7 @@ struct kof_scan_obj_emu {
  * Owner: objctx_textscan.c. Files that touch it: objctx_script_consts.c (holds), objctx_diag_text.c (takes), scan.c (drops).
  */
 struct oc_consts;
+struct kgenome_diag_text_island_set;
 
 struct kof_scan_obj_text {
 	const uint8_t *base;
@@ -231,6 +253,17 @@ struct kof_scan_obj_text {
 	uint8_t        names_lost;
 	/* what the evaluator reported as constants, when the scan was asked for them */
 	struct oc_consts *consts;
+	/* every island the same walk resolved (diag_text_walk.c's layer_of_call), when the constants
+	 * were asked for: malloc'ed alongside `consts`, freed with it. NULL when none was asked, or
+	 * the small allocation for the set itself could not be made (oc_scan_limit says so). */
+	struct kgenome_diag_text_island_set *islands;
+	/* the obfuscation measure of the text (kgenome_diag_text_obf, EXPERIMENTAL 2026-11-13): asked of every walk, freed with the scan; `obf_told` keeps the fact
+	 * (oc_text_obf_tell) to one per object however many walks the object's stages made */
+	struct kgenome_diag_text_obf_set *obf;
+	uint8_t        obf_told;
+	/* the object in hand when it is a script, whose islands (oc_script_islands: the engine's table) the measure is handed - borrowed for the object's
+	 * life, NULL for any other object: set by oc_text_page, kept across scans of the text and wiped with the object */
+	const struct kof_obj_ctx *page_ctx;
 	/* how many scans of the text were made for this object (one is the aim; a stage that finds the scan not what it needs makes its own: tests/unit/text_scan_hold.c reads it) */
 	uint8_t        made;
 };

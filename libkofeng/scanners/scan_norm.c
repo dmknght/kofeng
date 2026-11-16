@@ -26,6 +26,7 @@
 #include "../kofcore/kofplatform.h"
 #include "../analyzers/normalize/executables.h"
 #include "../analyzers/genome_obj.h"
+#include "../kofcore/kofdebug.h"
 #include <genotype/image/offmap.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,8 +223,10 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (ctx->content && ctx->content->region_entropy &&
 	    ctx->content->region_entropy(ctx, NORM_CODE_MASK) >=
-	    NORM_DENSE_EIGHTHS)
+	    NORM_DENSE_EIGHTHS) {
+		KOF_TRACE("[norm] gate closed: code is too dense to be anything but already-compressed, no view attempted\n");
 		return 0;
+	}
 	return 1;
 }
 
@@ -256,8 +259,10 @@ static int norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
 		return 1;
 	w->rgn = malloc(((size_t)n + 2u) * sizeof *w->rgn);
 	w->rgn0 = malloc((size_t)n * sizeof *w->rgn0);
-	if (!w->rgn || !w->rgn0)
+	if (!w->rgn || !w->rgn0) {
+		KOF_TRACE("[norm] regions: refused, %u-entry table could not be allocated\n", n);
 		return 0;
+	}
 	w->nr = sx_norm_gather(ctx, w->rgn, n);
 	/*
 	 * THE PARENT'S OWN COORDINATES, KEPT. `rgn` is rewritten into the
@@ -417,19 +422,32 @@ static int norm_view_possible(const struct norm_work *w, kof_buf buf)
 	/* A big-endian object that has a twin is a view by its plan alone: the
 	 * swap changes the bytes the probes below read as they are, so they cannot
 	 * be asked about it. */
-	if (w->en.eligible && w->en.plan.n)
+	if (w->en.eligible && w->en.plan.n) {
+		KOF_TRACE("[norm] possible: yes, big-endian twin\n");
 		return 1;
+	}
 	for (a = 0; a < w->lib->n; a++)
-		if (w->lib->span[a].off < buf.n && w->lib->span[a].len)
+		if (w->lib->span[a].off < buf.n && w->lib->span[a].len) {
+			KOF_TRACE("[norm] possible: yes, the static library has a span to cut\n");
 			return 1;
+		}
 	/* The cheaper question first, and each stops at its first yes: an object that makes a
 	 * view pays for the part of it read before the evidence. */
-	if (kof_exe_has_wide(buf.p, buf.n))
+	if (kof_exe_has_wide(buf.p, buf.n)) {
+		KOF_TRACE("[norm] possible: yes, wide (UTF-16) text to narrow\n");
 		return 1;
-	if (kof_exe_decode_would_change(buf.p, buf.n))
+	}
+	if (kof_exe_decode_would_change(buf.p, buf.n)) {
+		KOF_TRACE("[norm] possible: yes, a layered decode would change a byte\n");
 		return 1;
+	}
 	/* The string table of a one-byte coding (executables_strtab.c): the costliest read, so last. */
-	return kof_exe_strtab_would_change(buf.p, buf.n);
+	if (kof_exe_strtab_would_change(buf.p, buf.n)) {
+		KOF_TRACE("[norm] possible: yes, the string table coding would change a byte\n");
+		return 1;
+	}
+	KOF_TRACE("[norm] possible: no, none of the four probes found anything to do\n");
+	return 0;
 }
 
 /*
@@ -743,6 +761,7 @@ static int norm_collapse(struct norm_work *w, kof_buf buf)
 	 * proved to create no match that the parent does not already have.
 	 */
 	if (!(w->fired & (KOF_EXE_NORM_UNWIDE | KOF_EXE_NORM_CUTLIB)) && !w->changed) {
+		KOF_TRACE("[norm] collapse: no view, only zero runs collapsed - that reveals nothing new\n");
 		norm_free_all(w);
 		return 0;
 	}
@@ -774,9 +793,12 @@ static int norm_collapse(struct norm_work *w, kof_buf buf)
 		if (w->n_mark)
 			memcpy(w->mk_to, w->mk, (size_t)w->n_mark * sizeof *w->mk);
 	} else if (!w->n) {
+		KOF_TRACE("[norm] collapse: no view, the library covered the whole object - an empty view is refused\n");
 		norm_free_all(w);
 		return 0;
 	}
+	KOF_TRACE("[norm] collapse: view made, fired=0x%x %llu -> %llu byte(s)\n",
+		  w->fired, (unsigned long long)buf.n, (unsigned long long)w->n);
 	w->tmp = NULL;
 	norm_free_drop(w);
 	return 1;
@@ -981,6 +1003,8 @@ static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
 	if (w->n > sc->ledger.obj_cap || w->n > sc->ledger.budget ||
 	    sc->ledger.resident > sc->ledger.resident_max ||
 	    w->n > sc->ledger.resident_max - sc->ledger.resident) {
+		KOF_TRACE("[norm] fits: no, the %llu byte view is over a ceiling - not offered\n",
+			  (unsigned long long)w->n);
 		norm_free_all(w);
 		oc_scan_limit(sc);      /* a view was made and cannot be offered: said */
 		return 0;
@@ -1027,41 +1051,16 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * copied) is raw, which is what it always was without regions.
 	 */
 	sc->pend.fmt = (uint8_t)KOF_FMT_DECLARED_RAW;
-	if (w->img) {
-		if (sc->pend.desc_cap < w->img_len) {
-			uint8_t *g = realloc(sc->pend.desc_buf, w->img_len);
-
-			if (g) {
-				sc->pend.desc_buf = g;
-				sc->pend.desc_cap = w->img_len;
-			} else {
-				OC_LIMIT(sc, "view image description not allocated");
-			}
-		}
-		if (sc->pend.desc_cap >= w->img_len) {
-			memcpy(sc->pend.desc_buf, w->img, w->img_len);
-			sc->pend.desc.fmt = ctx->format;
-			sc->pend.desc.arch = ctx->arch;
-			sc->pend.desc.subtype = ctx->subtype;
-			sc->pend.desc.entry_off = w->entry_off;
-			sc->pend.desc.info = sc->pend.desc_buf;
-			sc->pend.desc.info_len = w->img_len;
-			sc->pend.desc_set = 1;
-		}
-	}
+	if (w->img)
+		oc_child_desc(ctx, ctx->format, ctx->arch, ctx->subtype, w->entry_off, w->img, w->img_len);
 	/*
-	 * AND THE LANGUAGE WITH IT, for a view that is declared a format at
-	 * all. The decode rewrites the view's own text, so a re-read of it can
-	 * come back a different language than the object it is a view OF - a
-	 * shell dropper whose payload decodes to PHP reads as PHP, and every
-	 * shell rule is then declined on the one object that finally holds the
-	 * evidence. See kof_src_declare_lang.
+	 * AND NO LANGUAGE. This stage renders only an ELF or a PE (norm_wanted), and what such a view
+	 * is - format, architecture, subtype - is the description above. A declared language is the
+	 * script normaliser's fact (objctx_script.c, kof_src_declare_lang): said here it reached the
+	 * host as kof_result.lang_known on every executable view, and a host reads that as "a script
+	 * of this family" - every PE view printed `format Script any Shell` with its PE region bits
+	 * named in the script vocabulary (NV-1, 2026-11-15, norm_defect_engine nv1_view_format).
 	 */
-	if (w->nr) {
-		sc->pend.subtype = ctx->subtype;
-		sc->pend.subfam  = ctx->subfamily;
-		sc->pend.lang    = 1;
-	}
 	/*
 	 * AND WHAT IT IS, in the enum every consumer already reads.
 	 *
@@ -1340,6 +1339,8 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (sc->ledger.resident > sc->ledger.resident_max ||
 	    buf.n > (sc->ledger.resident_max - sc->ledger.resident) / 2u) {
+		KOF_TRACE("[norm] emit: a view is possible but the %llu byte object does not fit held twice - lost\n",
+			  (unsigned long long)buf.n);
 		oc_scan_limit(sc);
 		return;
 	}
@@ -1408,6 +1409,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	memset(&w, 0, sizeof w);
 	w.sc = sc;
 	norm_emit_work(sc, ctx, buf, &w);
+	KOF_TRACE("[norm] emit done: %s\n", sc->child.n_views > views0 ? "a view was produced" : "no view was produced");
 	sx_endian_finish(sc, ctx, buf, &w.en, sc->child.n_views > views0);
 	kgenome_endian_plan_free(&w.en.plan);
 	/* The boundary table and the description's copy outlive every early

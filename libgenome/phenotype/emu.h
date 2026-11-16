@@ -288,10 +288,10 @@ void     kgenome_emu_set_seg_base(struct kgenome_emu *e, unsigned seg, uint64_t 
  * ---- THE WINDOWS ENVIRONMENT ----------------------------------------------
  *
  * A Windows guest has no syscall it may use: it asks kernel32, and to ask it
- * must first find it. emu_interp.c carries the answers; emu_unpack_pe_module.c builds the
+ * must first find it. emu_winapi.c carries the answers; emu_unpack_pe_module.c builds the
  * kernel32 to find. The two have to agree on the name, the trap number and -
  * on i386, where the callee pops - the argument count of every function, so
- * the table lives in emu_interp.c and is read through these.
+ * the table lives in emu_win.c and is read through these.
  *
  * KGENOME_EMU_WIN_STUB is how far apart the stubs are. Eight bytes is what one
  * needs (load the trap number, trap, return) and sixteen leaves the next one
@@ -545,6 +545,25 @@ uint64_t kgenome_emu_last_write(const struct kgenome_emu *e);
 void     kgenome_emu_set_max_insn(struct kgenome_emu *e, uint64_t n);
 
 /*
+ * A MACHINE ONE READER STARTED, CARRIED ON BY THE NEXT (EA8: a PE was run twice from its entry).
+ *
+ * The API-resolution run and the unpack run of a PE start the same machine at the same entry; the
+ * second reader takes the machine the first one left instead of building another. `cfg` is the new
+ * owner's: `max_insn` is the run's whole ceiling counted from the entry (what a fresh machine would
+ * have been given, so the carried run stops where a fresh one would have stopped; zero keeps the
+ * ceiling), `insn_spent` replaces the first owner's count (the first owner has been told what ran up
+ * to here and is not told again), and the wall-clock bound is dropped, as a fresh machine has none.
+ * `account` must be the one the machine was built with: what it took is charged there, and the pages
+ * the table was sized for (`max_pages`) are not changed. Answers 1 when the machine may run on (its
+ * last stop was a bound: the budget, a stall), 0 when the program itself ended the run (exit, a
+ * fault, a handover: the new owner reads what the run left and runs nothing), and -1, with nothing
+ * changed, when the account differs or an argument is NULL.
+ */
+int      kgenome_emu_adopt(struct kgenome_emu *e, const struct kgenome_emu_cfg *cfg);
+/* Why the machine last stopped (KGENOME_EMU_STOP_BUDGET for one that has not run). */
+enum kgenome_emu_stop kgenome_emu_last_stop(const struct kgenome_emu *e);
+
+/*
  * THE INSTRUCTION CACHE ON OR OFF. On by default. It is an acceleration and changes no result:
  * a run with it off and the same run with it on make the same stops, registers and instruction
  * counts. This exists so a test can run one fixture both ways and compare them - that
@@ -621,7 +640,7 @@ uint64_t    kgenome_emu_insn_count(const struct kgenome_emu *e);
 
 /* Faults offered to a guest exception handler, faults a handler took, and how
  * many vectored handlers the guest registered. See the exception dispatcher in
- * emu_interp.c for why the first two are counted separately. */
+ * emu_win_exc.c for why the first two are counted separately. */
 void kgenome_emu_exc_counts(const struct kgenome_emu *e, uint32_t *raised,
 			uint32_t *taken, uint32_t *veh);
 

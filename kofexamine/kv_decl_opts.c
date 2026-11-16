@@ -253,6 +253,27 @@ int draw_decl_opts(struct out *o, struct view *v, int r)
 		out_str(o, A_BAD "[x]" A_OFF);
 		hit_add(v, y, 0, g_cols - 1, hit_row_opt, i);
 	}
+	/*
+	 * THE GATE OF THE SIGNATURE (kof_draft.gate, owner 2026-11-17): a row a condition, in the order they were added, below the
+	 * options because they are declarations of the same kind - what every unit the draft generates states. Read only: the
+	 * owner named adding them (the [+ Options] rows "Anomaly" and "Nucleo") and nothing else, so a row has no control.
+	 */
+	for (i = 0; i < v->ed.dr.n_gate && i < KOF_DIAG_MAX_WHEN; i++) {
+		char t[96];
+		int y;
+
+		if (!PR_VIS(r)) {
+			r++;
+			continue;
+		}
+		y = PR(r);
+		r++;
+		if (!draft_gate_text(&v->ed.dr.gate[i], t, sizeof t))
+			t[0] = 0;
+		row_start(o, y, 1);
+		out_fmt(o, "   %s%-20s" A_OFF " ", A_DIM, gate_word(v->ed.dr.gate[i].fact));
+		out_fmt(o, "%s%s" A_OFF, A_ID, t);
+	}
 
 	/*
 	 * What the finished source will declare, read only.

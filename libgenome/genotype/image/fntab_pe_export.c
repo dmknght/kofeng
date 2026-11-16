@@ -18,7 +18,7 @@
 void kgenome_fntab_pe_export(kof_buf file, const struct kgenome_pe_info *p, struct kgenome_fntab_list *out)
 {
 	const struct kgenome_pe_dir *d;
-	uint64_t dir, eat, i, n, lo, hi;
+	uint64_t dir, eat, i, n;
 	uint32_t nfun, aof;
 
 	if (!file.p || !p || !p->valid)
@@ -37,8 +37,6 @@ void kgenome_fntab_pe_export(kof_buf file, const struct kgenome_pe_info *p, stru
 	n = nfun;
 	if (n > (file.n - eat) / 4u)
 		n = (file.n - eat) / 4u;
-	lo = d->rva;
-	hi = d->rva + d->size;
 	for (i = 0; i < n; i++) {
 		uint32_t rva;
 		uint64_t off, end;
@@ -48,7 +46,7 @@ void kgenome_fntab_pe_export(kof_buf file, const struct kgenome_pe_info *p, stru
 			break;
 		if (!rva)
 			continue;
-		if (rva >= lo && rva < hi) {                       /* a forwarder string */
+		if (kgenome_pe_export_is_forwarder(p, rva)) {      /* a forwarder string */
 			out->n_bad++;
 			continue;
 		}
@@ -58,6 +56,10 @@ void kgenome_fntab_pe_export(kof_buf file, const struct kgenome_pe_info *p, stru
 		}
 		memset(&f, 0, sizeof f);
 		f.off = off;
+		/* The pair the symbol block keys the export's name on (pe_sym.c, export_put: value = the RVA, shndx 0xffff, "not a section"), so kof_func_name finds it.
+		 * Without it every export was fcn_<off> (NM-1, measured on four x64 DLLs: 19/19, 1/1, 76/76, 4/4 exports unnamed). An export by ordinal has no record and stays unnamed. */
+		f.value = rva;
+		f.shndx = 0xffffu;
 		f.source = KGENOME_FN_S_EXPORT;
 		if (!kgenome_fntab_list_add(out, &f))
 			return;

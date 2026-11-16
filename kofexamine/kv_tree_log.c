@@ -89,6 +89,7 @@ static void log_win_reset(struct view *v, const struct kofevt_log_hdr *h)
 		 * kept so that returning to an object does not read it again.
 		 */
 		free(v->obj[i].carve);
+		free(v->obj[i].pretty_p);
 		dash_drop(&v->obj[i]);
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
 	}

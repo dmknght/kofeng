@@ -700,9 +700,11 @@ static void t_nucleo(void)
 			if (!nm)
 				break;
 			last = id;
-			/* the id says the table it came from: asked of that target, the name gives the id back and has a word */
+			/* the id says the table it came from: asked of that target, the name gives the id back and has a word - or is a row
+			 * of no word (a fact-only row, 2026-11-15: nucleo.h, "THE ROW OF A CALL AND ITS SHAPE"), whose row says so */
 			for (t = KGENOME_NUCLEO_T_ELF; t <= KGENOME_NUCLEO_T_CFML; t++)
-				if (kgenome_nucleo_name_id(t, nm) == id && kgenome_nucleo_cap_of_name(t, nm) != KGENOME_NUCLEO_NONE)
+				if (kgenome_nucleo_name_id(t, nm) == id &&
+				    kgenome_nucleo_cap_of_name(t, nm) == kgenome_nucleo_row_cap((uint16_t)id))
 					own = 1;
 			CK(own);
 		}
@@ -845,7 +847,8 @@ static void t_nucleo(void)
 	/* which calls hand the guest something to hold */
 	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC, "mmap") == 1);
 	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC, "mprotect") == 0);
-	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC, "mprotect64") == 0);
+	/* no table and no syscall label holds "mprotect64" (the old name list exempted it by hand): the capability's answer */
+	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC, "mprotect64") == 1);
 	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC, NULL) == 1);
 	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_ALLOC_EXEC, "VirtualAlloc") == 1);
 	CK(kgenome_nucleo_hands_on(KGENOME_NUCLEO_NET_OPEN, NULL) == 1 && kgenome_nucleo_hands_on(KGENOME_NUCLEO_FILE_OPEN, "open") == 1);

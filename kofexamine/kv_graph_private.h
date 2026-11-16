@@ -32,7 +32,7 @@ struct kv_graph_wr {                     /* one drawn edge */
 	uint32_t p0;                    /* the first piece */
 	uint32_t j, k;                  /* this is the j-th of the k drawn edges of its source */
 	uint8_t  cond, loop, back, skip, self;
-	uint8_t  out_shared;
+	uint8_t  out_shared, sure;
 	int32_t  out_col, in_col, lane_col;
 	uint32_t lane;                  /* 0 nearest the boxes */
 	uint32_t ce, ci;                /* the channels of a lane edge: below the tail, below the head (the head is entered from below) */

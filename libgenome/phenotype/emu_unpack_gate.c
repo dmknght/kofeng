@@ -4,6 +4,15 @@
  * Part of the emulated unpack; see emu_unpack.h for what it is for and emu_unpack_private.h for what the
  * files share.
  */
+/*
+ * IMPROVE emu-detect-1 (owner, 2026-11-05; NOTE ONLY, nothing built): experiment with detection running
+ * WHILE the emulator executes (behavioral/dynamic signal during this run), not only static re-scan of
+ * the unpacked result afterward as the engine does today. Needs deep research into how commercial AV
+ * engines actually do this (API-call sequence monitoring, behavioral matching on the emulated
+ * syscall/API trace, sandboxed-execution heuristics) before any design. Existing surface to read first:
+ * diag_emu* (the emulate-route diagnose evidence already produced during a run) and kof_emu_decl
+ * (value/API shims declared before a run) - the closest existing precedent, not yet used this way.
+ */
 #include "emu_unpack_private.h"
 
 /*
@@ -11,8 +20,19 @@
  *
  * Eighths rather than a float: this runs inside the engine, and an integer
  * comparison cannot round differently on a different build.
+ *
+ * LIMIT: A SMALL ENCODED STAGER IS NEVER RUN (owner question 2026-11-15, measured). samples/msfvenom-encr/
+ * shikata_ga_nai (ELF x64, 439 bytes, one RWX PT_LOAD) has 319 code bytes at 7.31 bits/byte: under DENSE_MIN
+ * and under DENSE_EIGHTHS, and no loader blob, so the gate refuses, the generic module (bases/unp/emu_generic_00.c)
+ * runs 0 instructions, and no static unpacker knows the encoder: the examiner says "unpacked nothing". The
+ * density test cannot see it - the decoder stub is ordinary code and the payload is short. The evidence that IS
+ * there is the stub's shape: an x87 GetPC (`fnstenv [rsp-0xc]` / `fstenv`, then `pop reg`), a counter load, and a
+ * `xor [reg+imm], key` loop that walks the same region it executes from (self-modifying). Next: a gate reason
+ * of its own for "a GetPC whose register is the base of a store into the executing region" (read once from the
+ * walk's trace, no second decode), or a family module that recognises the stub and asks for a vouched run;
+ * the same shape covers the other msfvenom XOR/ADD encoders. Not built.
  */
-#define DENSE_EIGHTHS  60u             /* 7.5 bits per byte */
+#define DENSE_EIGHTHS  60u            /* 7.5 bits per byte */
 #define DENSE_MIN      512u            /* below this the estimate is noise */
 
 /*
@@ -277,7 +297,7 @@ enum kgenome_emu_unp_why kgenome_emu_unp_gate_pe(const struct kgenome_obj *obj,
 		const struct kgenome_pe_sec *s = &info->sec[i];
 		uint64_t off, len;
 
-		if (!kgenome_pe_sec_is_code(s))
+		if (!kgenome_pe_sec_is_code(info, s))
 			continue;
 		len = kgenome_pe_sec_extent(s, n, &off);
 		if (!len)

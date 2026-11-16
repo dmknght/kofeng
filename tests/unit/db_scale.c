@@ -3,7 +3,7 @@
  *
  * Every other test here runs against the eighteen modules in bases/, where nothing
  * about size can go wrong because there is no size. The numbers that decide whether
- * this engine can hold a real database - Kaspersky shipped four million records -
+ * this engine can hold a real database - commercial ones ship millions of records -
  * are all per-record, and a per-record cost is invisible until it is multiplied.
  *
  * So this builds a pack with a lot of modules in it, loads it, and reports what the

@@ -10,6 +10,7 @@
 #include "../detectors/linkage/kofdiag.h"
 
 #include "objctx_int.h"
+#include <celllysis/nucleo.h>
 #include "../analyzers/genome_obj.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,4 +223,50 @@ struct kgenome_frame_cache *oc_frames(const struct kof_obj_ctx *ctx)
 		sc->obj.diag.frames = kgenome_frame_cache_new(&(const struct kgenome_cfg_mem){ oc_cfg_alloc, oc_cfg_release, sc },
 								      oc_scan_room(sc) / 4u);       /* what it keeps: a quarter of the object's room (frame.h) */
 	return sc->obj.diag.frames;
+}
+
+/*
+ * THE CAPABILITIES THE LOADED DIAGNOSES NAME: every node's capability (a group, matched with its members by the lib) and the two calls of a
+ * sequence. The node table's keep rule keeps a node of one of them even when nothing links it (a one-node diagnose). Allocated per scan from
+ * the few diagnoses a database holds; NULL with *n 0 when there are none or the memory was refused (then linked nodes only are kept, and
+ * the refusal is said).
+ *
+ * TODO(owner): decision 3 of fix_lgtab/owner_decisions.txt - which consumer gets which lineage. Default implemented: the lineage is the whole
+ * object's, computed once by this scan and shared by the matcher, the snapshot and the viewer; a per-function lineage is only the viewer's
+ * fallback for an object the scan did not analyse (not built). Alternative: per-function lineage on demand for the viewer always, the
+ * whole-object one only when a rule reads a node.
+ */
+uint16_t *oc_diag_keep_caps(struct kof_scanner *sc, uint32_t *n)
+{
+	uint32_t i, j, cap = 0, k = 0;
+	uint16_t *v;
+
+	*n = 0;
+	/* ... and the capability of every nucleo condition of a signature's gate (objctx_diag_gate.c): a node the keep rule dropped
+	 * would turn that condition's YES into a NO - a cap deleting the evidence a declaration asked about. */
+	for (i = 0; i < sc->eng->n_diag; i++)
+		cap += sc->eng->diag[i].n_node + 2u + sc->eng->diag[i].n_when;
+	if (!cap)
+		return NULL;
+	v = malloc((size_t)cap * sizeof *v);
+	if (!v) {
+		OC_LIMIT(sc, "diagnose capability list not allocated");
+		return NULL;
+	}
+	for (i = 0; i < sc->eng->n_diag; i++) {
+		const struct kof_diag *d = &sc->eng->diag[i];
+
+		for (j = 0; j < d->n_node; j++)
+			if (d->node[j].cap != KGENOME_NUCLEO_NONE)
+				v[k++] = d->node[j].cap;
+		if (d->seq_first)
+			v[k++] = d->seq_first;
+		if (d->seq_then)
+			v[k++] = d->seq_then;
+		for (j = 0; j < d->n_when; j++)
+			if (d->when[j].fact == KOF_FACT_NUCLEO)
+				v[k++] = (uint16_t)d->when[j].val;
+	}
+	*n = k;
+	return v;
 }

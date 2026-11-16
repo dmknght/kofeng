@@ -46,7 +46,7 @@ void kof_famcat_file_name(const char *family, char *out, size_t cap)
 size_t kof_famcat_family_text(const struct kof_famcat *c, uint32_t fam, char *out, size_t cap)
 {
 	size_t at = 0;
-	uint32_t last = 0u, done, i, t;
+	uint32_t last = 0u, i, t;
 	char letters[16];
 
 #define PUT(...) do { int k_ = snprintf(out ? out + at : NULL, out && at < cap ? cap - at : 0u, __VA_ARGS__); at += (size_t)k_; } while (0)
@@ -62,7 +62,7 @@ size_t kof_famcat_family_text(const struct kof_famcat *c, uint32_t fam, char *ou
 	if (kof_famcat_letter_text(c->fam[fam].next, letters, sizeof letters))
 		PUT("%s(\"%s\");\n", kw_next, letters);
 	/* the variants in letter order: the smallest letter above the one written last, until none is left */
-	for (done = 0; ; done++) {
+	for (;;) {
 		uint32_t best = UINT32_MAX;
 
 		for (i = 0; i < c->n_var; i++)

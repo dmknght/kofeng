@@ -32,7 +32,7 @@ static void put_seg(struct kv_graph *g, struct kv_graph_wire *wr, int32_t x0, in
 	g->n_seg++;
 }
 
-static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t kind)
+static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t kind, uint8_t sure)
 {
 	int32_t x = s->x0, y = s->y0;
 	const int dx = s->x1 > s->x0 ? 1 : s->x1 < s->x0 ? -1 : 0, dy = s->y1 > s->y0 ? 1 : s->y1 < s->y0 ? -1 : 0;
@@ -48,8 +48,13 @@ static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t
 				c->mask |= dy > 0 ? KV_GM_S : dy < 0 ? KV_GM_N : dx > 0 ? KV_GM_E : KV_GM_W;
 			if (!first)
 				c->mask |= dy > 0 ? KV_GM_N : dy < 0 ? KV_GM_S : dx > 0 ? KV_GM_W : KV_GM_E;
-			if (!c->kind)
+			/* KNOWN DEFECT LV-D5 (2026-11-17, M) [sev L]: paint_line keeps the FIRST wire's kind and sure on a shared cell, so a MAY/UNKNOWN/BROKEN wire whose straight cells are all shared
+			 * shows no dash. Trigger: parallel links from one producer (lgf rand ... dag: 2/14/14 graphs in 3000); 0 in set356. Effect: a link drawn as more certain than it is.
+			 * Fix: on a shared straight cell keep the least sure of the wires (or give each wire its own column). */
+			if (!c->kind) {
 				c->kind = kind;
+				c->sure = sure;
+			}
 		}
 		if (last)
 			break;
@@ -161,11 +166,12 @@ int kv_graph_step_emit(struct kv_graph_ctx *c)
 		o->n_seg = 0;
 		o->cond = w->cond;
 		o->loop = w->loop;
+		o->sure = w->sure;
 		o->back = w->back;
 		o->letter = w->cond == KV_GC_T ? 'T' : w->cond == KV_GC_F ? 'F' : 0;
 		o->ly = -1;
 		if (!w->back) {
-			o->arrow = 'v';
+			o->arrow = w->sure == KV_GSR_UNKNOWN ? '?' : w->sure == KV_GSR_BROKEN ? 'x' : 'v';
 			for (q = 0; q <= w->nc; q++) {
 				const uint32_t a = L->pc_a[w->p0 + q], b = L->pc_b[w->p0 + q];
 				const uint32_t ch = L->layer[a] + 1u;
@@ -222,7 +228,7 @@ int kv_graph_step_emit(struct kv_graph_ctx *c)
 		uint32_t q;
 
 		for (q = 0; q < o->n_seg; q++)
-			paint_line(g, &g->seg[o->seg0 + q], k);
+			paint_line(g, &g->seg[o->seg0 + q], k, o->sure);
 	}
 	for (e = 0; e < nw; e++) {
 		const struct kv_graph_wire *o = &wv[e];
@@ -265,9 +271,10 @@ unsigned kv_graph_cell_attr(const struct kv_graph_cell *c)
 	return c->kind;
 }
 
-/* The glyph of a line cell from the sides it connects to. The straight runs of a loop link are dotted and those of a retreating edge are dotted another way; a corner
- * and a junction are the same for every kind (there is no dotted corner), so what is drawn there is still a function of the sides alone. */
-static const char *line_glyph(unsigned mask, int ascii, unsigned loop)
+/* The glyph of a line cell from the sides it connects to. The straight runs of a loop link are dotted and those of a retreating edge are dotted another way, and a
+ * lineage's link that is not SURE is dashed by how sure it is (kv_graph.h, enum kv_graph_sure); a corner and a junction are the same for every kind (there is no
+ * dotted corner), so what is drawn there is still a function of the sides alone. */
+static const char *line_glyph(unsigned mask, int ascii, unsigned loop, unsigned sure)
 {
 	static const char *const asc[16] = { " ", "|", "-", "'", "|", "|", ".", "+", "-", "'", "-", "+", ".", "+", "+", "+" };
 	static const char *const uni[16] = {
@@ -275,6 +282,8 @@ static const char *line_glyph(unsigned mask, int ascii, unsigned loop)
 		"\xe2\x94\x80", "\xe2\x94\x98", "\xe2\x94\x80", "\xe2\x94\xb4", "\xe2\x94\x90", "\xe2\x94\xa4", "\xe2\x94\xac", "\xe2\x94\xbc" };
 	const int vert = mask == KV_GM_N || mask == KV_GM_S || mask == (KV_GM_N | KV_GM_S), horz = mask == KV_GM_E || mask == KV_GM_W || mask == (KV_GM_E | KV_GM_W);
 
+	/* KNOWN DEFECT LV-D6 (2026-11-17, R) [sev L]: line_glyph decides by `loop` before `sure`, so a lineage link that closes a cycle is drawn retreating whatever its certainty:
+	 * its MAY/UNKNOWN/BROKEN is not visible. Trigger: a lineage cycle (0 back edges in set356). Reproducer: lgf rand SEED N 12 (cyclic). Fix: a sure-specific dotted run for back edges. */
 	if (loop == KV_GL_LOOP) {
 		if (vert)
 			return ascii ? ":" : "\xe2\x94\x86";            /* U+2506 */
@@ -285,6 +294,21 @@ static const char *line_glyph(unsigned mask, int ascii, unsigned loop)
 			return ascii ? "!" : "\xe2\x94\x8a";            /* U+250A */
 		if (horz)
 			return ascii ? "~" : "\xe2\x94\x88";            /* U+2508 */
+	} else if (sure == KV_GSR_MAY) {
+		if (vert)
+			return ascii ? ";" : "\xe2\x95\x8e";            /* U+254E */
+		if (horz)
+			return ascii ? "_" : "\xe2\x95\x8c";            /* U+254C */
+	} else if (sure == KV_GSR_UNKNOWN) {
+		if (vert)
+			return ascii ? "?" : "\xe2\x95\x8f";            /* U+254F */
+		if (horz)
+			return ascii ? "?" : "\xe2\x95\x8d";            /* U+254D */
+	} else if (sure == KV_GSR_BROKEN) {
+		if (vert)
+			return ascii ? "x" : "\xe2\x94\x8b";            /* U+250B */
+		if (horz)
+			return ascii ? "x" : "\xe2\x94\x89";            /* U+2509 */
 	}
 	return ascii ? asc[mask & 15u] : uni[mask & 15u];
 }
@@ -299,7 +323,7 @@ static const char *cell_glyph(const struct kv_graph_cell *c, int ascii, char *tm
 		tmp[1] = 0;
 		return tmp;
 	case KV_GG_LINE:
-		return line_glyph(c->mask, ascii, c->kind ? (c->kind - 1u) / 3u : 0u);
+		return line_glyph(c->mask, ascii, c->kind ? (c->kind - 1u) / 3u : 0u, c->sure);
 	case KV_GG_BTL: return ascii ? "." : G_TL;
 	case KV_GG_BTR: return ascii ? "." : G_TR;
 	case KV_GG_BBL: return ascii ? "`" : G_BL;
@@ -310,6 +334,30 @@ static const char *cell_glyph(const struct kv_graph_cell *c, int ascii, char *tm
 	}
 }
 
+/* Is cell (x, y) on the wire of an edge the style lights? A run of the wires of the lit edges, which are the reader's few picks; nothing is kept between calls. */
+static int lit_at(const struct kv_graph *g, const struct kv_graph_style *st, int32_t x, int32_t y)
+{
+	uint32_t w, q;
+
+	for (w = 0; w < g->n_wire; w++) {
+		const struct kv_graph_wire *o = &g->wire[w];
+
+		if (o->edge >= st->n_lit || !st->lit[o->edge])
+			continue;
+		for (q = 0; q < o->n_seg; q++) {
+			const struct kv_graph_seg *s = &g->seg[o->seg0 + q];
+			const int32_t xa = s->x0 < s->x1 ? s->x0 : s->x1, xb = s->x0 < s->x1 ? s->x1 : s->x0;
+			const int32_t ya = s->y0 < s->y1 ? s->y0 : s->y1, yb = s->y0 < s->y1 ? s->y1 : s->y0;
+
+			if (x >= xa && x <= xb && y >= ya && y <= yb)
+				return 1;
+		}
+		if (x == o->ax && y == o->ay)
+			return 1;
+	}
+	return 0;
+}
+
 size_t kv_graph_window(const struct kv_graph *g, uint32_t row, uint32_t x0, uint32_t ncols, const struct kv_graph_style *st, char *out, size_t cap)
 {
 	size_t w = 0;
@@ -317,25 +365,27 @@ size_t kv_graph_window(const struct kv_graph *g, uint32_t row, uint32_t x0, uint
 	unsigned cur = 0;
 	char tmp[2];
 	const char *off = st->off ? st->off : "";
+	const int any_lit = st->lit && st->n_lit && st->lit_attr;
 
 	if (!cap)
 		return 0;
 	for (c = 0; c < ncols; c++) {
 		const struct kv_graph_cell *cell = (row < g->height && x0 + c < g->width && x0 + c >= x0) ? &g->cell[(size_t)row * g->width + x0 + c] : NULL;
-		const unsigned a = cell ? kv_graph_cell_attr(cell) : 0u;
+		const unsigned a = !cell ? 0u : any_lit && (cell->g == KV_GG_LINE || cell->g == KV_GG_ARROW || cell->g == KV_GG_LABEL) &&
+				   lit_at(g, st, (int32_t)(x0 + c), (int32_t)row) ? KV_GRAPH_KINDS : kv_graph_cell_attr(cell);
 		const char *gl = cell ? cell_glyph(cell, st->ascii, tmp) : " ";
 		const char *at;
 		size_t n;
 
 		if (a != cur) {
-			if (cur && st->attr[cur]) {
+			if (cur && (cur == KV_GRAPH_KINDS ? st->lit_attr != NULL : st->attr[cur] != NULL)) {
 				n = strlen(off);
 				if (w + n + 1u > cap)
 					break;
 				memcpy(out + w, off, n);
 				w += n;
 			}
-			at = a ? st->attr[a] : NULL;
+			at = a == KV_GRAPH_KINDS ? st->lit_attr : a ? st->attr[a] : NULL;
 			if (at) {
 				n = strlen(at);
 				if (w + n + 1u > cap)
@@ -351,7 +401,7 @@ size_t kv_graph_window(const struct kv_graph *g, uint32_t row, uint32_t x0, uint
 		memcpy(out + w, gl, n);
 		w += n;
 	}
-	if (cur && st->attr[cur] && w + strlen(off) + 1u <= cap) {
+	if (cur && (cur == KV_GRAPH_KINDS ? st->lit_attr != NULL : st->attr[cur] != NULL) && w + strlen(off) + 1u <= cap) {
 		memcpy(out + w, off, strlen(off));
 		w += strlen(off);
 	}

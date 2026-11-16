@@ -664,9 +664,36 @@ static int ch_open_opt(struct view *v, struct chooser *c, uint32_t arg)
 		ch_add(c, opt_word[OPT_ARCH]);
 	if (ch_opt_offerable(v, OPT_SUBTYPE))
 		ch_add(c, opt_word[OPT_SUBTYPE]);
+	/* THE GATE (owner, 2026-11-17): each row opens the engine's list beside it, and is offered while that list has a
+	 * condition the draft does not state yet (ch_gate_offers). */
+	if (ch_gate_offers(v, KOF_FACT_ANOMALY, NULL, 0))
+		ch_add_verb_sub(c, gate_word(KOF_FACT_ANOMALY), CH_OPT_V_ANOM);
+	if (ch_gate_offers(v, KOF_FACT_NUCLEO, NULL, 0))
+		ch_add_verb_sub(c, gate_word(KOF_FACT_NUCLEO), CH_OPT_V_NUC);
 	if (!c->n)
 		return 0;
 	return 1;
+}
+
+/* The engine's offers for the gate, one row each in the words a person reads them by (draft_gate_text). */
+static int ch_open_gate(struct view *v, struct chooser *c, uint32_t arg)
+{
+	struct kof_diag_when w[CH_ITEMS];
+	uint32_t n, k;
+
+	(void)arg;
+	n = ch_gate_offers(v, c->what == CH_GATE_ANOM ? (uint16_t)KOF_FACT_ANOMALY : (uint16_t)KOF_FACT_NUCLEO, w, CH_ITEMS);
+	for (k = 0; k < n && k < CH_ITEMS; k++) {
+		char t[CH_W];
+
+		if (!draft_gate_text(&w[k], t, sizeof t))
+			t[0] = 0;
+		ch_add(c, t);
+	}
+	/* Past the list's rows: counted and said on the last row, never dropped unseen (ch_add). */
+	if (n > CH_ITEMS)
+		c->more += (int)(n - CH_ITEMS);
+	return c->n > 0;
 }
 
 /* Every architecture. */

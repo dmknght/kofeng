@@ -31,10 +31,12 @@
  * widens what is computed per function (a richer label such as the call factor of the wl1call experiment costs about 41 ns of 412 ns here, agent-reported).
  * To be optimised later; measure first (callgrind Ir of the whole signing, decode excluded), do not guess.
  *
- * IMPROVE cfg-small-1 (owner, 2026-11-01): the floor of 12 reachable blocks is removed, so a function of any size with a reachable block is
- * signed. Functions of up to 4 blocks are not separable by shape alone (measured earlier, agent-reported): many different small functions share one
- * sketch, and a function of 5 to 11 blocks has fewer than 12 keys. Where to look when that matters: a richer label (the call factor of the
- * wl1call experiment, cfg-cost-1 above), the callee sketch (`ckey`), or the user's own threshold on the block; not here.
+ * CFG-SMALL-1 RESOLVED (owner, 2026-11-01 removed the floor of 12; owner, 2026-11-07 raised it back to 5, measured): functions of up to
+ * 4 blocks are not separable by shape alone (measured here, agent-reported, before the fix existed), and a MalwareLab survey confirmed
+ * the cost of signing them anyway at full confidence - cfg_anchor.c's own comment and cfg.h's KGENOME_CFG_ANCHOR_MIN have the numbers and
+ * the decision. A function of 5 to 11 blocks still has fewer than the old 12 keys and is signed exactly as before (unaffected by the
+ * floor move); a richer label (the call factor of the wl1call experiment, cfg-cost-1 above) or the callee sketch (`ckey`) remain open for
+ * that population if a future measurement calls for it - not changed here.
  *
  * KNOWN LIMIT, from the survey and not repeated as a claim: WL1 does not separate graphs that a deeper
  * refinement would (the regular-graph collisions); tests/lib/genome/cfg_sign.c lists the ones found over every
@@ -44,6 +46,12 @@
 
 #include "cfg_private.h"
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out, the declarations in cfg.h ("the signature") and the callers: kof_cfgsign_function (analyzers/cfgsign.c), kof_mutation_cfg_unit (kofmutation.c), and kgenome_mutation_signature answering KGENOME_MUTATION_SIG_CFG again.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* the largest label arrays of one call: 4 per block (current, next, predecessor sum, successor sum) */
 #define WORK_PER_BLOCK (4u * sizeof(uint64_t))
 
@@ -384,3 +392,4 @@ uint32_t kgenome_cfg_pct_callee(const struct kgenome_cfg_sign *a, const struct k
 {
 	return pct_keys(a->ckey, a->n_ckey, b->ckey, b->n_ckey);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

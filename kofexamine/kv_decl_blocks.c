@@ -56,8 +56,14 @@ static void hit_plg_tick(struct view *v, uint32_t i)
 		say_err(&v->ed, "These blocks are not in this object");
 		return;
 	}
-	/* A function the engine did not sign (mtn_block.nosig: below the floor, undecodable, ...) has no keys: a rule made of it would carry no hash, so it
-	 * is not offered for ticking, and the status line says which reason the engine gave. A signed function row is ticked like every other row. */
+	/* A function row has no signature (mtn_block.nosig: KGENOME_MUTATION_SIG_NONE) and no keys: a rule made of it would carry no hash, so it is not offered for
+	 * ticking, and the status line says the engine's one reason. The reason a CFG-signed unit was left unsigned (below the floor, undecodable, ...) was said here:
+	 * DISABLED by the owner 2026-11-15 with CFG signing; to re-enable, take this #if 0 out and drop the line before it. */
+	if (i < v->ed.dr.n_blk && v->ed.dr.blk[i].nosig && !v->ed.dr.blk[i].picked) {
+		say_err(&v->ed, "%s", "This function has no similarity signature (" KGENOME_MUTATION_SIG_NONE_WHY "): it cannot be ticked");
+		return;
+	}
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (i < v->ed.dr.n_blk && v->ed.dr.blk[i].nosig && !v->ed.dr.blk[i].picked) {
 		char why[160];
 
@@ -67,6 +73,7 @@ static void hit_plg_tick(struct view *v, uint32_t i)
 		say_err(&v->ed, "%s", why);
 		return;
 	}
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (i < v->ed.dr.n_blk)
 		blk_set_picked(&v->ed, i, !v->ed.dr.blk[i].picked);
 }
@@ -137,11 +144,17 @@ int blk_section_shown(struct view *v)
 	 * ctx.format directly, this said no to every view - the panel was drawn
 	 * for the file and vanished when the reader stepped onto its normalised
 	 * form, which is the one place the blocks are most comparable.
+	 *
+	 * WHICH FORMATS EVER CARVE A BLOCK is the engine's own list
+	 * (kgenome_mutation_has_blocks, celllysis/mutation.h), not a second one
+	 * kept here: this used to read `fm == KOF_FMT_ELF || fm == KOF_FMT_PE`
+	 * by hand, and a script growing real blocks (kgenome_script_funcs_build)
+	 * went on saying "no executable code to cut blocks from" because nobody
+	 * remembered to add a third format to this one spot.
 	 */
 	uint8_t fm = obj_repr_fmt(cur_obj(v));
 
-	return v->ed.dr.n_blk &&
-	       (fm == KOF_FMT_ELF || fm == KOF_FMT_PE);
+	return v->ed.dr.n_blk && kgenome_mutation_has_blocks(fm);
 }
 
 
@@ -160,17 +173,28 @@ static uint32_t mtn_n_picked(const struct view *v)
 
 
 /*
- * A press on the NAME of a function row (signed or not): the engine's CFG of that function (kof_cfgview_build, on request, nothing cached) is drawn by the CFG dialog (kv_cfgdlg.c: the
- * frame of the catalog dialogs, the graph laid out by kv_graph.c). Nothing here lays out or computes anything of the graph; a function the engine cannot make a graph of
- * gets the engine's own sentence in the dialog.
+ * A press on the NAME of a function row: the function's dialog (kv_cfgdlg.c: the frame of the catalog dialogs; Overview, Disasm, Lineage - its content is the lineage).
+ * The engine's CFG of the function (kof_cfgview_build, the Graph tab and the Overview's CFG facts) is DISABLED by the owner 2026-11-15: the request for it below is in
+ * #if 0; to re-enable, take it out and hand `&rq` to cfgd_open again (kv_cfgdlg.c says what else).
  */
 static void hit_plg_cfg(struct view *v, uint32_t i)
 {
 	struct object *o = cur_obj(v);
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kof_cfgview_req rq;
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 	if (!o || !o->buf.p || i >= v->ed.dr.n_blk)
 		return;
+	/*
+	 * READING THE LINEAGE TAB IS ASKING FOR IT, the same rule the engine's own diagnose
+	 * surface follows: a reader opening this dialog is the demand, and the Lineage tab
+	 * must not show a stale (or never-pulled) answer because no OTHER panel happened to
+	 * ask first. view_explain is cached per object/root (kv_collect.c), so a dialog
+	 * opened a second time costs nothing more.
+	 */
+	view_explain(v, o);
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	memset(&rq, 0, sizeof rq);
 	rq.ctx = &o->ctx;
 	rq.data = o->buf;
@@ -180,7 +204,11 @@ static void hit_plg_cfg(struct view *v, uint32_t i)
 	rq.sym = o->sym;
 	rq.sym_n = o->sym_n;
 	rq.names = o->calls_done ? &o->calls : NULL;
-	cfgd_open(v, &rq);
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+	/* KNOWN DEFECT LV-D3 (2026-11-17, M) [sev M]: hit_plg_cfg hands cfgd_open the function's FIRST range (fn_off/fn_len = first->off/len, kv_mutation.c), so a node in a further
+	 * range (kgenome_funcs_range) is in no dialog. Trigger: a function with a chained or derived further range. Effect: 693 of 90,615 set356 records shown nowhere; 11 more are in no function at all.
+	 * Reproducer: lin_truth drv/lgf check (rec ... in a further range). Fix: pass every range of the function to kof_lineageview_build (a list of extents). */
+	cfgd_open(v, v->ed.dr.blk[i].fn_off, v->ed.dr.blk[i].fn_len, o);
 }
 
 static void hit_plg_light(struct view *v, uint32_t i)
@@ -525,7 +553,7 @@ int draw_decl_blocks(struct out *o, struct view *v, int r)
 			/*
 			 * THE OFFSET LIGHTS THE BLOCK: pressing it does what pressing the hash does for now (hit_plg_light) - the block's bytes in the hex
 			 * pane take the block's colour and the pane scrolls to them, a second press puts them out. The cell takes the block's colour
-			 * while lit, as the hash does. (On a function row the NAME opens its CFG instead.)
+			 * while lit, as the hash does. (On a function row the NAME opens its dialog instead.)
 			 */
 			out_str(o, " ");
 			c0 = 1 + (int)o->col_hint;
@@ -565,7 +593,7 @@ int draw_decl_blocks(struct out *o, struct view *v, int r)
 		 * what the rule matches.
 		 */
 		/*
-		 * THE NAME OF A FUNCTION IS A CONTROL: pressing it asks the engine for that function's CFG and shows it in the CFG dialog (hit_plg_cfg). Only the text of the
+		 * THE NAME OF A FUNCTION IS A CONTROL: pressing it opens the function's dialog, whose content is its lineage (hit_plg_cfg; its CFG DISABLED 2026-11-15). Only the text of the
 		 * name is the target - not the padding after it - and only on a function row (a unit cut from a function; a data row has no name to press).
 		 * It looks like every other name: plain. A press there did nothing before.
 		 */

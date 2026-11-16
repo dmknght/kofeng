@@ -19,10 +19,18 @@
  * The facts are the engine's lines, listed as they came; the owner reviews their layout later. Nothing here decides a thing of the graph.
  */
 
+/* DISABLED by the owner 2026-11-15 (CFG): the Overview's CFG facts and the Graph tab below are inside #if 0; the palette (kv_cfgbody_edge_attr, _mark_attr, _style) is
+ * compiled, the Lineage tab draws with it (kv_lineagebody.c). */
 #define CFG_MAX_COLS 1600u              /* the canvas of the drawing: at most this wide and this tall (kv_graph.h also bounds the cells) */
 #define CFG_MAX_ROWS 2400u
 #define CFG_INDEX_ENT 8u                /* nodes named on a line of the index of the nodes not drawn */
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out (and the one below kv_cfgbody_style) with analyzers/cfgview.[ch] (kof_cfgview_build) and kv_cfgbody.h's; kv_cfgdlg.c calls kv_cfgbody_make again.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void list_free(char ***l, uint32_t *n)
 {
 	uint32_t i;
@@ -140,6 +148,7 @@ static uint8_t box_mark(void *user, uint32_t node, int32_t line)
 	return KV_CFG_MK_NONE;
 }
 
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 const char *kv_cfgbody_edge_attr(unsigned cond, unsigned loop)
 {
 	if (cond == KGENOME_GV_COND_T)
@@ -177,6 +186,12 @@ struct kv_graph_style kv_cfgbody_style(void)
 	return st;
 }
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out (and the one above kv_cfgbody_edge_attr) with analyzers/cfgview.[ch] (kof_cfgview_build) and kv_cfgbody.h's; kv_cfgdlg.c calls kv_cfgbody_make again.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void lay_out(struct kv_cfg_body *u)
 {
 	struct kv_graph_in in;
@@ -484,3 +499,4 @@ void kv_cfgbody_row(const void *user, uint32_t row, uint32_t hoff, uint32_t ncol
 	if (t && hoff < strlen(t))
 		snprintf(out + 1, cap - 1u, "%.*s", (int)(ncols - 1u), t + hoff);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

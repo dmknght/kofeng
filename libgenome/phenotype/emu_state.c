@@ -1,12 +1,12 @@
 /*
  * emu_state.c - what an instruction reads and writes: the registers, the flags, an operand
- * (register, memory, vector). The loop in emu_interp.c decides WHICH instruction
+ * (register, memory, vector). The x86 entry's switch in emu_x86.c decides WHICH instruction
  * runs and what it does, and keeps push and pop, which it inlines; this is how the machine's visible state is addressed.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c and emu_x86_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 /* ---- registers ------------------------------------------------------------
  *
@@ -100,12 +100,7 @@ static int parity8(uint64_t v)
  * answer here is worse than no answer, because it is the guest's key that goes
  * wrong and the failure surfaces somewhere else entirely.
  */
-#if defined(__x86_64__)
-#define KGENOME_EMU_HOST_DSHIFT 1
-/* KNOWN DEFECT DEAD2-1 (2026-10-29, M) [sev M]: kgenome_emu_host_dshift16 is never called. KGENOME_EMU_HOST_DSHIFT is defined here, in emu_state.c, but tested by `#ifdef` in emu_ops.c, which never sees it, so a 16 bit SHLD/SHRD with a count past the operand size takes the `goto unsupported` arm.
- * Trigger: a 16 bit double shift with count 17..31 (the VMProtect `shrd cx, ax, 0x51` the comments here and in emu_ops.c describe). Effect: the run stops on that instruction; the comments say it runs on the host.
- * Reproducer: nm on ph_emu_state.o shows the definition and no relocation against it in any other object (analysis build, /mnt/games/normtest/fix_dead2/an).
- * Fix: define the macro in emu_private.h (a behaviour change on a hostile path: add a test that compares with the host CPU first), or delete this function, the #ifdef arm in emu_ops.c and the two comments. */
+#ifdef KGENOME_EMU_HOST_DSHIFT   /* emu_x86_private.h: where the x86 files that call this see it too */
 uint16_t kgenome_emu_host_dshift16(uint16_t dst, uint16_t src, uint8_t cnt,
 			      int left, uint64_t *fl)
 {
@@ -332,7 +327,7 @@ uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *
 {
 	if (op->type != KGENOME_X86_OP_REG || op->rtype != KGENOME_X86_REG_SSE || op->reg >= 16u)
 		return NULL;
-	return e->xmm[op->reg];
+	return e->x86.xmm[op->reg];
 }
 
 /* ---- operands -------------------------------------------------------------- */
@@ -472,11 +467,11 @@ int kgenome_emu_vec_rd(struct kgenome_emu *e, const struct kgenome_emu_insn *ix,
 		if (op->rtype == KGENOME_X86_REG_SSE) {
 			if (op->reg >= 16)
 				return 0;
-			memcpy(buf, e->xmm[op->reg], n);
+			memcpy(buf, e->x86.xmm[op->reg], n);
 		} else if (op->rtype == KGENOME_X86_REG_MMX) {
 			if (op->reg >= 8 || n > 8)
 				return 0;
-			memcpy(buf, e->mmx[op->reg], n);
+			memcpy(buf, e->x86.mmx[op->reg], n);
 		} else if (op->rtype == KGENOME_X86_REG_GPR) {
 			uint64_t v = kgenome_emu_reg_rd(e, op->reg,
 					    op->rsize, 0);
@@ -519,8 +514,8 @@ int kgenome_emu_vec_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix,
 		if (op->rtype == KGENOME_X86_REG_SSE) {
 			if (op->reg >= 16)
 				return 0;
-			memset(e->xmm[op->reg], 0, 16);
-			memcpy(e->xmm[op->reg], buf, n);
+			memset(e->x86.xmm[op->reg], 0, 16);
+			memcpy(e->x86.xmm[op->reg], buf, n);
 			return 1;
 		}
 		if (op->rtype == KGENOME_X86_REG_MMX) {
@@ -533,8 +528,8 @@ int kgenome_emu_vec_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ix,
 			 */
 			if (op->reg >= 8 || n > 8)
 				return 0;
-			memset(e->mmx[op->reg], 0, 8);
-			memcpy(e->mmx[op->reg], buf, n);
+			memset(e->x86.mmx[op->reg], 0, 8);
+			memcpy(e->x86.mmx[op->reg], buf, n);
 			return 1;
 		}
 		if (op->rtype == KGENOME_X86_REG_GPR) {

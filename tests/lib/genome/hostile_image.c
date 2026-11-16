@@ -334,7 +334,7 @@ static void walk_pe(const uint8_t *p, size_t n, const struct kgenome_pe_info *us
 	for (i = 0; i < e->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++) {
 		if (kgenome_pe_sec_extent(&e->sec[i], n, &off) > n)
 			bad("pe sec extent longer than the object", n);
-		(void)kgenome_pe_sec_is_code(&e->sec[i]);
+		(void)kgenome_pe_sec_is_code(e, &e->sec[i]);
 		(void)kgenome_pe_sec_at_off(e, e->sec[i].file_off);
 	}
 	for (i = 0; i < 6; i++) {

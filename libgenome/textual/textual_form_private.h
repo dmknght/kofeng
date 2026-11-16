@@ -162,6 +162,20 @@ struct kgenome_tform {
 	uint32_t       syn_used;
 	uint32_t       n_calls;
 	uint32_t       n_fn[KGENOME_TEXTUAL_DEC_COUNT];
+	/*
+	 * STATEMENT-END LINE BREAKS THE TEXT DID NOT HAVE (textual_lang.h's `stmt_semi`): `n_stmt` counts a
+	 * line break `settle` actually WROTE (a byte the text did not have) for that reason alone, never one
+	 * the text's own line break would have written anyway - `stmt_synth` is which reason is standing
+	 * right now (set where `code_token_byte` asks for one, cleared the moment a REAL line break, in the
+	 * text, says so too: at that point the break is no longer only this mechanism's, and settle's own
+	 * `f->pend = 0` at the end of every byte retires it with the rest of `pend`). A well-formatted file,
+	 * every statement already on its own line, asks for the same break its own line break already gives -
+	 * `n_stmt` stays 0, because nothing NEW was written for it - so this is 0 for the common case and
+	 * counts only the hostile-minified one the floor in objctx_script.c otherwise has no way to tell from
+	 * noise (oc_script_form folds it into its own `n_dec` out-parameter, the same signal a decode is).
+	 */
+	uint32_t       n_stmt;
+	uint8_t        stmt_synth;
 };
 
 /* The bytes of a span: the text's, or the output's own for one the form made. */

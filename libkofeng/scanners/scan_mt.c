@@ -17,6 +17,7 @@
 
 #include "../kofcore/kofplatform.h"
 #include "scan_int.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -147,17 +148,23 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	 * threads entirely - including the object ORDER, which a caller that
 	 * asked for one scanner has every reason to expect unchanged.
 	 */
-	if (n_sc == 1)
+	if (n_sc == 1) {
+		KOF_TRACE("[mt] one scanner: the ordinary single-threaded walk, no queue\n");
 		return kof_scan_walk(scs[0], path, opt, cb, user);
+	}
 
 	/* lstat, never stat: the engine does not follow symlinks (kofoption.h). */
 	if (kof_lstat(path, &sb) != 0)
 		return KOF_ERR_OPEN;
 	/* A single file has nothing to spread. */
-	if (!S_ISDIR(sb.st_mode))
+	if (!S_ISDIR(sb.st_mode)) {
+		KOF_TRACE("[mt] path is a single file: nothing to spread across workers\n");
 		return kof_scan_walk(scs[0], path, opt, cb, user);
-	if (!opt->recurse_dirs)
+	}
+	if (!opt->recurse_dirs) {
+		KOF_TRACE("[mt] refused: a directory with recurse_dirs off\n");
 		return KOF_ERR_OPEN;
+	}
 
 	memset(&q, 0, sizeof q);
 	/* Four slots per worker: enough that a worker starting a small file does
@@ -196,6 +203,8 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 		started++;
 	}
 
+	KOF_TRACE("[mt] %u of %u worker(s) started, queue capacity %zu\n", (unsigned)started,
+		  (unsigned)n_sc, q.cap);
 	/*
 	 * The producer runs on this thread, and it is the existing walk with the
 	 * queue attached: same directory reading, same symlink policy, same depth
@@ -206,6 +215,7 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	prod.opt = opt;
 	prod.q   = started ? &q : NULL;
 	if (!started) {
+		KOF_TRACE("[mt] no worker thread could be started: falling back to the single-threaded walk\n");
 		for (i = 0; i < n_sc; i++)
 			if (scs[i])
 				scs[i]->share = 1;
@@ -276,5 +286,7 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	scs[0]->share = 1;
 
 	rc = (int)total;
+	KOF_TRACE("[mt] walk done: %llu object(s) across %u worker(s)\n", (unsigned long long)total,
+		  (unsigned)started);
 	return rc;
 }

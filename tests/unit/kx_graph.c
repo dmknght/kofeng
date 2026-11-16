@@ -16,6 +16,8 @@
  *               dropped silently; hostile graphs: a self-loop, a 100-way fan-out, every edge to the last block, thirty nested loops, sixty loop links into one head, a
  *               chain of 5000, 200000 nodes in a time bound.
  *   MEMORY      an allocator that refuses the Nth call for every N: NOMEM or a smaller drawing, nothing held afterwards.
+ *   LINEAGE     no crossing that the order of the tracks can avoid (a box's edges to targets on its right), the four kinds of a link drawn apart (straight runs and
+ *               arrowhead), the lit links of a style (every cell of the lit wire and no other).
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -896,6 +898,187 @@ static void memory(void)
 	free(t);
 }
 
+/* ---- a lineage's drawing: crossings, the four kinds of link, the lit links ---- */
+
+/* The crossings of a drawing: a vertical run of one wire through the inside of a horizontal run of another. */
+static unsigned crossings(const struct kv_graph *g)
+{
+	unsigned n = 0;
+	uint32_t a, b, q1, q2;
+
+	for (a = 0; a < g->n_wire; a++)
+		for (b = 0; b < g->n_wire; b++)
+			for (q1 = 0; a != b && q1 < g->wire[a].n_seg; q1++) {
+				const struct kv_graph_seg *v = &g->seg[g->wire[a].seg0 + q1];
+				const int32_t vy0 = v->y0 < v->y1 ? v->y0 : v->y1, vy1 = v->y0 < v->y1 ? v->y1 : v->y0;
+
+				if (v->x0 != v->x1 || v->y0 == v->y1)
+					continue;
+				for (q2 = 0; q2 < g->wire[b].n_seg; q2++) {
+					const struct kv_graph_seg *h = &g->seg[g->wire[b].seg0 + q2];
+					const int32_t hx0 = h->x0 < h->x1 ? h->x0 : h->x1, hx1 = h->x0 < h->x1 ? h->x1 : h->x0;
+
+					if (h->y0 == h->y1 && h->x0 != h->x1 && v->x0 > hx0 && v->x0 < hx1 && h->y0 > vy0 && h->y0 < vy1)
+						n++;
+				}
+			}
+	return n;
+}
+
+/*
+ * NO CROSSING THAT ORDER CAN AVOID (2026-11-14). The Lineage tab of msfvenom's Windows stager: L1 (a socket) feeds L2, L3 and L5, L4 feeds L5 and L6; the two edges that
+ * left L1 side by side for targets on its right were drawn `│└┼──┐`, the left one on the upper track, so the other's line went down through it - a junction of links
+ * that do not meet. The same for a box with k = 2..6 edges to the rank below, all of its targets to its right (its own box first in the rank). A run whose top column
+ * is inside another's span lies above it: none of these crosses. Base: 2 crossings on the stager, and (k - 1)(k - 2) on the fan (0, 2, 6, 12, 20).
+ */
+static void no_avoidable_crossing(void)
+{
+	static struct tg t;
+	struct kv_graph_in in;
+	struct kv_graph g;
+	uint32_t k, i;
+
+	memset(&t, 0, sizeof t);
+	t.n = 7;
+	add(&t, 1, 2, C0, L0);
+	add(&t, 1, 3, C0, L0);
+	add(&t, 1, 5, C0, L0);
+	add(&t, 4, 5, C0, L0);
+	add(&t, 4, 6, C0, L0);
+	in_of(&in, &t);
+	in.sources_first = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	CKM(crossings(&g) == 0u, "the stager's lineage: %u crossing(s)", crossings(&g));
+	check_invariants(&t, &in, &g, "stager lineage");
+	kv_graph_free(&g);
+	for (k = 2; k <= 6u; k++) {
+		memset(&t, 0, sizeof t);
+		t.n = 2u + k;
+		for (i = 0; i < k; i++)
+			add(&t, 1, 2u + i, C0, L0);
+		t.wide[0] = 40;                 /* a wide box left of the source, so the source's targets stand to its right */
+		in_of(&in, &t);
+		in.sources_first = 1;
+		CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+		CKM(crossings(&g) == 0u, "a fan of %u: %u crossing(s)", k, crossings(&g));
+		check_invariants(&t, &in, &g, "fan");
+		kv_graph_free(&g);
+	}
+}
+
+/* THE FOUR KINDS OF A LINEAGE'S LINK are drawn apart without a colour: the straight runs (kv_graph.h, enum kv_graph_sure) and the arrowhead (`v` `v` `?` `x`). */
+static void link_kinds(void)
+{
+	static struct tg t;
+	static const char *const vert_u[4] = { "\xe2\x94\x82", "\xe2\x95\x8e", "\xe2\x95\x8f", "\xe2\x94\x8b" };
+	static const char vert_a[4] = { '|', ';', '?', 'x' }, arrow[4] = { 'v', 'v', '?', 'x' };
+	struct kv_graph_in in;
+	struct kv_graph g;
+	struct kv_graph_style st = kv_graph_style_default();
+	uint32_t k, w, q;
+
+	for (k = 0; k < 4u; k++) {
+		memset(&t, 0, sizeof t);
+		t.n = 3;
+		add(&t, 0, 2, C0, L0);          /* a long edge: two ranks down, through a virtual node, so it has a straight vertical run */
+		add(&t, 1, 2, C0, L0);
+		add(&t, 0, 1, C0, L0);
+		t.e[0] = t.e[2];                /* keep the edges sorted by `from`: 0->1, 0->2, 1->2 */
+		t.e[0].to = 1;
+		t.e[1].from = 0;
+		t.e[1].to = 2;
+		t.e[2].from = 1;
+		t.e[2].to = 2;
+		t.e[1].sure = (uint8_t)k;
+		in_of(&in, &t);
+		in.sources_first = 1;
+		CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+		for (w = 0; w < g.n_wire; w++) {
+			const struct kv_graph_wire *o = &g.wire[w];
+
+			if (o->edge != 1u)
+				continue;
+			CKM(o->sure == k && o->arrow == arrow[k], "kind %u: the arrowhead is %c", k, o->arrow);
+			for (q = 0; q < o->n_seg; q++) {
+				const struct kv_graph_seg *s = &g.seg[o->seg0 + q];
+
+				if (s->x0 == s->x1 && s->y1 > s->y0 + 1) {      /* a vertical run: its middle cell is a straight one */
+					const struct kv_graph_cell *c = &g.cell[(size_t)(s->y0 + 1) * g.width + (uint32_t)s->x0];
+					char tmp[4], row[256];
+
+					CKM(!strcmp(cell_glyph(c, 0, tmp), vert_u[k]) && !strcmp(cell_glyph(c, 1, tmp), (char[2]){ vert_a[k], 0 }),
+					    "kind %u: the straight run is drawn %s", k, cell_glyph(c, 1, tmp));
+					st.ascii = 1;
+					kv_graph_window(&g, (uint32_t)(s->y0 + 1), (uint32_t)s->x0, 1, &st, row, sizeof row);
+					CK(row[0] == vert_a[k]);
+					break;
+				}
+			}
+		}
+		kv_graph_free(&g);
+	}
+}
+
+/* THE LIT LINKS (the Lineage tab's ticked rows): every cell of a lit edge's wire, its arrowhead included, is written after lit_attr, and no cell of another wire is. */
+static void lit_links(void)
+{
+	static struct tg t;
+	struct kv_graph_in in;
+	struct kv_graph g;
+	struct kv_graph_style st = kv_graph_style_default();
+	uint8_t lit[3] = { 0, 1, 0 };
+	uint32_t w, q, r, lit_cells = 0, other_lit = 0;
+
+	memset(&t, 0, sizeof t);
+	t.n = 4;
+	add(&t, 0, 1, C0, L0);
+	add(&t, 0, 2, C0, L0);
+	add(&t, 1, 3, C0, L0);
+	in_of(&in, &t);
+	in.sources_first = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	st.ascii = 1;
+	st.lit = lit;
+	st.n_lit = 3;
+	st.lit_attr = "<";
+	st.off = ">";
+	for (r = 0; r < g.height; r++) {
+		char row[1024];
+		uint32_t x;
+		size_t at = 0;
+		int on = 0;
+
+		kv_graph_window(&g, r, 0, g.width, &st, row, sizeof row);
+		for (x = 0; x < g.width && row[at]; x++) {           /* the column of every byte: the markers take none */
+			while (row[at] == '<' || row[at] == '>')
+				on = row[at++] == '<';
+			if (!row[at])
+				break;
+			{
+				int on_lit = 0, on_other = 0;
+
+				for (w = 0; w < g.n_wire; w++)
+					for (q = 0; q < g.wire[w].n_seg; q++)
+						if (seg_has(&g.seg[g.wire[w].seg0 + q], (int32_t)x, (int32_t)r)) {
+							if (g.wire[w].edge == 1u)
+								on_lit = 1;
+							else
+								on_other = 1;
+						}
+				if (on_lit)
+					lit_cells += on ? 1u : 0u;
+				else if (on)
+					other_lit++;
+				CKM(!on_lit || on, "a cell of the lit link at (%u,%u) is not lit", x, r);
+				(void)on_other;
+			}
+			at++;
+		}
+	}
+	CK(lit_cells > 0u && other_lit == 0u);
+	kv_graph_free(&g);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "--dump"))
@@ -909,6 +1092,9 @@ int main(int argc, char **argv)
 	bounds();
 	big();
 	memory();
+	no_avoidable_crossing();
+	link_kinds();
+	lit_links();
 	if (fails) {
 		printf("kx_graph: %d failure(s)\n", fails);
 		return 1;

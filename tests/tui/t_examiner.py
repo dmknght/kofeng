@@ -49,10 +49,9 @@ def blocks_lists_units_with_functions_and_a_block_each():
     # CFG step 2c: a function unit has no windows; it is signed by the shape of its function (cfg_blocks=N, an id, 12..32 keys) when N reaches the floor
     # (12 reachable blocks), and says it is not (block_id=-, no block line) when it does not. A data unit has windows and a block.
     check(all(x['windows'] is None for x in u if x['func']), 'a function unit carries windows')
-    signed = [x for x in u if x['func'] and x['cfg'] is not None]
-    check(signed, 'no function unit is signed by its CFG')
-    check(all(x['cfg'] >= 12 and re.fullmatch(r'[0-9a-f]{8}', x['id']) and 12 <= len(x['block']) <= min(32, x['cfg']) for x in signed), 'a signed function unit: blocks below the floor, no id or keys outside 12..32')
-    check(all(x['id'] == '-' and not x['block'] for x in u if x['func'] and x['cfg'] is None), 'an unsigned function unit carries an id or a block')
+    # FLIPPED 2026-11-15 (owner: CFG signing DISABLED): no function unit is signed - no cfg_blocks, block_id `-`, no block line.
+    check(not [x for x in u if x['func'] and x['cfg'] is not None], 'a function unit printed cfg_blocks (CFG signing is disabled)')
+    check(all(x['id'] == '-' and not x['block'] for x in u if x['func']), 'a function unit carries an id or a block')
     check([x for x in u if not x['func'] and x['windows'] and x['block']], 'no data unit with a block')
     for x in u:
         check(len(x['block']) <= 32, 'a block has more than K values')
@@ -92,6 +91,34 @@ def the_normalised_view_is_listed_on_its_own_with_a_database():
     check(view, 'the view has no units')
     check(not [x for x in view if x['side'] == 'LIB'], 'the view still offers library units')
 
+
+@case(A)
+def a_scripts_normalised_view_keeps_its_function_names():
+    """KXA-17: a script has no image header the generic parent-remap can read (kof_genome_obj
+    leaves it with nothing kgenome_diag_funcs_of_view's exact-byte search can even start from), and
+    that search would not find much anyway - a script's view is REFORMATTED, not padding-collapsed,
+    so a function's own body is rarely byte-identical to the parent's there. The raw object's own
+    function-finder already names these units correctly; the fix is to run that SAME finder on the
+    view's own bytes too (still the same functions, under the same names, just reformatted) rather
+    than take the image-only path. RED on the code before this: the view fell back to one opaque
+    block_N unit, 0 function units."""
+    d = os.path.join(VT, 'work', 'kxa17')
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, 'kxa17.js')
+    with open(p, 'w') as f:
+        f.write(
+            'function alpha(x) {\n    return x + 1;\n}\n\n'
+            'function beta(y) {\n    // a comment the normalised form strips\n    return y * 2;\n}\n\n'
+            'function gamma(z) {\n    return alpha(z) + beta(z);\n}\n\n'
+            'var r = gamma(5);\nconsole.log(r);\n')
+    os.chmod(p, 0o444)
+    lines = run('--blocks', '--db', REPO + '/build/release/databases', p)
+    raw = units(lines[:[i for i, l in enumerate(lines) if 'normalised view' in l][0]])
+    view = units(lines[[i for i, l in enumerate(lines) if 'normalised view' in l][0]:])
+    raw_names = sorted(x['func'] for x in raw if x['func'] and not x['func'].startswith('block_'))
+    view_names = sorted(x['func'] for x in view if x['func'] and not x['func'].startswith('block_'))
+    check(raw_names == ['alpha', 'beta', 'gamma'], 'the raw object itself lost a function name: %r' % raw_names)
+    check(view_names == ['alpha', 'beta', 'gamma'], 'the view does not keep the function names: %r' % view_names)
 
 
 RUN1 = os.environ.get('KOF_RUN1', '/mnt/games/normtest/scan_run1/run1')

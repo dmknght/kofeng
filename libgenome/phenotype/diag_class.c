@@ -4,7 +4,7 @@
  */
 #include <stdint.h>
 
-#include "diag_lineage.h"
+#include "diag_lineage_private.h"
 #include <genotype/image/elf_types.h>
 #include <genotype/image/elf_image.h>
 #include <genotype/image/pe_types.h>
@@ -20,9 +20,14 @@ unsigned kgenome_diag_class_of(const struct kgenome_obj *obj)
 	if (!obj || !obj->file_header)
 		return 0;
 	if (obj->arch == KGENOME_ARCH_X86_64)
-		c |= KGENOME_CLASS_WIDE | KGENOME_CLASS_X86;
-	else if (obj->arch == KGENOME_ARCH_X86)
-		c |= KGENOME_CLASS_X86;
+		c |= KGENOME_CLASS_WIDE;
+	/* the architecture the stages read is one the table has a row for (diag_lineage_arch.c): asked of the table, not written again */
+	{
+		struct kgenome_lineage_abi row;
+
+		if (kgenome_lineage_arch_of(obj, &row))
+			c |= KGENOME_CLASS_X86;
+	}
 	if (obj->format == KGENOME_FMT_ELF) {
 		const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
 
@@ -77,16 +82,22 @@ unsigned kgenome_diag_class_of(const struct kgenome_obj *obj)
  *   ELF static, symbols  +144   x1.37   +402 (11%) x0.02  +1179 (32%) 460/s     +112 (3.0%) 460/s      ALL
  *   ELF static, stripped +127   x1.15   +46 (1.9%) x0.02  +266 (11%) 20/s       +100 (4.1%) 48/s       ALL
  *   ELF no sections      +7     x0.93   +8 (4.8%) x0      +19 (11%) 1.5/s       +9 (5.4%) 4.5/s        FLOW LOCS
- *   PE                   +27    x2.5    +0                 +60 (67%) 19/s        +2 (2.2%) 14/s         FLOW SUMM
+ *   PE                   +27    x2.5    +24 (see below)    +60 (67%) 19/s        +2 (2.2%) 14/s         FLOW LOCS SUMM
  *   PE self-resolved     +1     x0.6    +0                 +0                    +0                     (the PE row: nothing to read)
  *
  * What the rows leave out and why: SEED in dynamic ELF with symbols (+0 of 1071 links - the partition is the symbol table's and
- * leaves no code unreached); LOCS in PE (+0 links; the PE code the cells hold keeps no descriptor in a global or a field); SEED in
+ * leaves no code unreached); SEED in
  * PE (+2 links of 89, 2.2%, for 3% more time); SUMM and SEED in an ELF with no sections (+19 and +9 links for x3.2 and x0.4 more
  * time: 1.5 and 4.5 links a second, a tenth of the others). A RELOCATABLE ELF has a row of no stages: 100 kernel modules
  * (the REL cell, .ko) went through every stage (the node of a call is the field its relocation patches; the stages match it
  * inside the instruction) and added 0 links to the 21 the route made, in x10 the time (35 ms -> 352 ms for the 100): what a module
  * passes to the kernel is a pointer or a constant, not a producer's result. Managed PEs have no native code.
+ *
+ * LOCS IN PE IS ON BY THE RULE'S SECOND ARM (under 3% of the time, and it adds links). While the stages read roles by capability it
+ * added +0 links (the PE code the cells hold kept no descriptor in a global or a field); once they read the node's ROW (kgenome_diag_hit.row,
+ * fix_linrow 2026-11-15) the module handles kept in globals are inputs, and with/without LOCS on the 356-file set + pe124 (360 files, the
+ * tree otherwise): links 8651 -> 8675 (+24), 0 lost; warm time of the diagnose scan, best of 3 per file, two runs each: 20.73 / 20.60 s
+ * without, 20.58 / 21.16 s with - inside the run-to-run noise (about 1.5%). fix_aptgap's lg6 (a handle kept in a global) is the test.
  *
  * READING AN UNREAD CALLEE ON DEMAND (KGENOME_LINEAGE_S_DEMAND) is on in no class: a function with no node in it and nothing useful
  * below it is not read, and the helper that only hands a parameter back is the price; reading it when a caller's result reaches a
@@ -111,7 +122,7 @@ static const struct lineage_row lineage_plan[] = {
 	{ C(ELF) | C(DYNAMIC) | C(SYMBOLS),         C(ELF) | C(DYNAMIC) | C(SYMBOLS),         S_FLOW | S_LOCS | S_SUMM },
 	{ C(ELF) | C(DYNAMIC),                      C(ELF) | C(DYNAMIC),                      S_FLOW | S_LOCS | S_SUMM | S_SEED },
 	{ C(ELF),                                   C(ELF),                                   S_FLOW | S_LOCS | S_SUMM | S_SEED },
-	{ C(PE),                                    C(PE),                                    S_FLOW | S_SUMM },
+	{ C(PE),                                    C(PE),                                    S_FLOW | S_LOCS | S_SUMM },
 	{ 0, 0, 0 }
 };
 

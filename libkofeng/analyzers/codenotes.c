@@ -99,7 +99,7 @@ static void place_name(const struct nb *b, uint64_t off, int entry, char *out, s
 		return;
 	i = kgenome_funcs_start(b->funcs, off);
 	if (i != KGENOME_FUNCS_NONE)
-		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, out, cap);
+		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, b->data.p, b->data.n, out, cap);
 	else if (entry)
 		kof_fcn_name(off, out, cap);
 	else
@@ -155,7 +155,7 @@ static void add_places(struct nb *b)
 	char nm[160], xr[200];
 
 	for (i = 0; i < b->funcs->n; i++) {
-		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, nm, sizeof nm);     /* its symbol, else `fcn_<offset>` */
+		(void)kof_func_name(&b->funcs->v[i], b->sym, b->sym_n, b->data.p, b->data.n, nm, sizeof nm);     /* its symbol, a script's own name, else `fcn_<offset>` */
 		xref_text(b, b->funcs->v[i].off, xr, sizeof xr);
 		note_add(b, b->funcs->v[i].off, KOF_NOTE_FUNC, "%s:%s", nm, xr);
 	}
@@ -184,41 +184,49 @@ static void add_places(struct nb *b)
 	}
 }
 
-/* The name of a syscall number on this object, "" when the vocabulary has none for it. */
-static const char *sys_name(const struct nb *b, const struct kgenome_codemap_ref *r)
+/* The name of a syscall number for an object of this architecture (enum kgenome_arch), "" when the vocabulary has none for it. */
+static const char *sys_name(unsigned arch, const struct kgenome_codemap_ref *r)
 {
 	const struct kgenome_nucleo_abi *fx;
 
-	if (b->arch == KGENOME_ARCH_X86 || b->arch == KGENOME_ARCH_X86_64) {
-		unsigned bits = (r->flags & KGENOME_CMF_INT80) || b->arch == KGENOME_ARCH_X86 ? 32u : 64u;
+	if (arch == KGENOME_ARCH_X86 || arch == KGENOME_ARCH_X86_64) {
+		unsigned bits = (r->flags & KGENOME_CMF_INT80) || arch == KGENOME_ARCH_X86 ? 32u : 64u;
 		const char *nm = kgenome_nucleo_sys_name_all(bits, r->nr);
 
 		return nm ? nm : "";
 	}
-	fx = kgenome_nucleo_abi_of(b->arch);
+	fx = kgenome_nucleo_abi_of(arch);
 	return fx && kgenome_nucleo_sys_name_abi(fx, r->nr) ? kgenome_nucleo_sys_name_abi(fx, r->nr) : "";
 }
 
 /*
- * A SYSCALL'S COMMENT. The vocabulary is Linux's, and a number means that only where the object is Linux's to say so: an ELF. A PE's `syscall` carries
+ * A SYSCALL'S SPELLING. The vocabulary is Linux's, and a number means that only where the object is Linux's to say so: an ELF. A PE's `syscall` carries
  * a Windows service number (0x3b there is not execve), so it gets the number and no name; a blob with no header could be either, so its name is
  * given with the word that says whose table it came from.
  */
-static void add_syscall(struct nb *b, const struct kgenome_codemap_ref *r)
+void kof_syscall_spell(int format, unsigned arch, const struct kgenome_codemap_ref *r, char *out, size_t cap)
 {
 	const char *nm;
 
-	if (!(r->flags & KGENOME_CMF_NR)) {
-		note_add(b, r->at, KOF_NOTE_COMMENT, "syscall, number not known here");
+	if (!r || !(r->flags & KGENOME_CMF_NR)) {
+		snprintf(out, cap, "syscall, number not known here");
 		return;
 	}
-	nm = b->format == KOF_FMT_PE ? "" : sys_name(b, r);
+	nm = format == KOF_FMT_PE ? "" : sys_name(arch, r);
 	if (!nm[0])
-		note_add(b, r->at, KOF_NOTE_COMMENT, "syscall %u", r->nr);
-	else if (b->format == KOF_FMT_ELF)
-		note_add(b, r->at, KOF_NOTE_COMMENT, "%s (%u)", nm, r->nr);
+		snprintf(out, cap, "syscall %u", r->nr);
+	else if (format == KOF_FMT_ELF)
+		snprintf(out, cap, "%s (%u)", nm, r->nr);
 	else
-		note_add(b, r->at, KOF_NOTE_COMMENT, "linux: %s (%u)", nm, r->nr);
+		snprintf(out, cap, "linux: %s (%u)", nm, r->nr);
+}
+
+static void add_syscall(struct nb *b, const struct kgenome_codemap_ref *r)
+{
+	char t[96];
+
+	kof_syscall_spell(b->format, b->arch, r, t, sizeof t);
+	note_add(b, r->at, KOF_NOTE_COMMENT, "%s", t);
 }
 
 static void add_branch(struct nb *b, const struct kgenome_codemap_ref *r, const struct kgenome_elf_relocs *rel)

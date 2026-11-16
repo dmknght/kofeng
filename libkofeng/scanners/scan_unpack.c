@@ -16,6 +16,14 @@
 #include <string.h>
 
 
+/* The module that RUNS the object and harvests the run: see the ONLY test in sx_unp_eligible. */
+static int sx_unp_is_interpreter(const struct kof_scanner *sc, const struct kof_module *m)
+{
+	const char *c = kof_db_content(sc->eng, m);
+
+	return c && !strcmp(c, "Generic-Emulation");
+}
+
 static int sx_unp_eligible(const struct kof_scanner *sc,
 			const struct kof_module *m,
 			const struct kof_obj_ctx *ctx,
@@ -26,7 +34,14 @@ static int sx_unp_eligible(const struct kof_scanner *sc,
 	 * still has to be opened by the code that knows its format - there is
 	 * nothing to interpret in a zip.
 	 */
-	if (opt->emu_use == KOF_EMU_ONLY && kof_step_hides_program(m->step))
+	/* THE INTERPRETER'S OWN RECEIVER STAYS (EMU-ONLY-1, fixed 2026-11-15). ONLY replaces the modules that take a
+	 * program out by READING it; the generic module (bases/unp/emu_generic_00.c) is the one that runs it and harvests
+	 * what the run wrote, so dropping it with the others left ONLY with nothing to interpret (0 instructions on
+	 * samples/msfvenom-encr/shikata_ga_nai). It is recognised by the content kind it declares, KOF_TARGET_CONTENT
+	 * "Generic-Emulation" - the one declared fact that says "this module is the interpreter's receiver".
+	 * TODO(owner): a declared flag (or an ANALYZE step of its own) would say it without a string; that moves the
+	 * module record (pack layout), so the default is the declared content kind. */
+	if (opt->emu_use == KOF_EMU_ONLY && kof_step_hides_program(m->step) && !sx_unp_is_interpreter(sc, m))
 		return 0;
 	/*
 	 * AND NEVER ITS OWN OUTPUT.
@@ -92,9 +107,12 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	{
 		uint32_t k0 = sc->child.n;
 
-	KOF_TIME_BEGIN(KOF_T_UNPACK);
-	m->fn(ctx);
-	KOF_TIME_END(KOF_T_UNPACK);
+		KOF_TRACE("[unpack] module %u turn: step=%u\n", (unsigned)(m - sc->eng->unp), (unsigned)m->step);
+		KOF_TIME_BEGIN(KOF_T_UNPACK);
+		m->fn(ctx);
+		KOF_TIME_END(KOF_T_UNPACK);
+		KOF_TRACE("[unpack] module %u produced %u child(ren)\n", (unsigned)(m - sc->eng->unp),
+			  (unsigned)(sc->child.n - k0));
 		/* A module that has not read a table the object has - see sx_walk_check. */
 		sx_walk_check(sc, ctx, m);
 		/* What a carve produced does not make its host
@@ -224,8 +242,10 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * early return that skipped them would leave the previous object's
 	 * state standing for this one.
 	 */
-	if (!kof_objtree_may_open(opt))
+	if (!kof_objtree_may_open(opt)) {
+		KOF_TRACE("[unpack] gate closed: deep scan is off\n");
 		return 0;
+	}
 
 	/*
 	 * A VIEW IS NOT OPENED, ONLY MATCHED.
@@ -248,9 +268,12 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * view and every rule searches them, which is what the view is for; it
 	 * is the structure that is not recovered.
 	 */
-	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED) {
+		KOF_TRACE("[unpack] gate closed: a normalised view is matched, not opened\n");
 		return 0;
+	}
 
+	KOF_TRACE("[unpack] gate open: emu_stance=%u\n", (unsigned)sc->obj.emu.stance);
 	kof_mod_unpack_mode(ctx, 1);
 	return 1;
 }
@@ -282,6 +305,7 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint32_t kids0 = sc->child.n;
 	uint32_t carved0 = sc->child.n_carved;
 
+	KOF_TRACE("[unpack] family pass: predict=%s, %u module(s) in the database\n", predict, (unsigned)sc->eng->n_unp);
 	for (i = 0; i < sc->eng->n_unp && !sc->obj.open.broken; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
@@ -305,7 +329,13 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * analyze_object.
 	 */
 
-	return sc->child.n - kids0 > sc->child.n_carved - carved0;
+	{
+		int opened = sc->child.n - kids0 > sc->child.n_carved - carved0;
+
+		KOF_TRACE("[unpack] family pass done: opened=%d (%u child(ren), %u carved)\n", opened,
+			  (unsigned)(sc->child.n - kids0), (unsigned)(sc->child.n_carved - carved0));
+		return opened;
+	}
 }
 
 	/*
@@ -343,18 +373,23 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 {
 	uint32_t i;
 
+	KOF_TRACE("[unpack] general pass: step=%u, %u module(s) in the database\n", (unsigned)step, (unsigned)sc->eng->n_unp);
 	for (i = 0; i < sc->eng->n_unp; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
 		if (m->step != (uint32_t)step)
 			continue;
-		if (!sx_unp_eligible(sc, m, ctx, opt))
+		if (!sx_unp_eligible(sc, m, ctx, opt)) {
+			KOF_TRACE("[unpack] module %u not eligible (precondition/emu-only/own-output)\n", (unsigned)i);
 			continue;
+		}
 		/* Skip what the family pass already tried. Guarded on `predict`
 		 * so the resolve-and-compare is not paid on the overwhelming
 		 * majority of objects, which no rule spoke for. */
-		if (predict && sx_unp_is_family(sc, m, predict))
+		if (predict && sx_unp_is_family(sc, m, predict)) {
+			KOF_TRACE("[unpack] module %u skipped: already tried by the family pass\n", (unsigned)i);
 			continue;
+		}
 
 		*applies = 1;
 		/*
@@ -373,8 +408,11 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * The budget is the one thing that genuinely stops the tree,
 		 * and it is the only thing this now stops for.
 		 */
-		if (sc->obj.open.broken == KOF_BROKEN_LIMIT)
+		if (sc->obj.open.broken == KOF_BROKEN_LIMIT) {
+			KOF_TRACE("[unpack] general pass stopped early: the tree's budget is gone (module %u not tried)\n",
+				  (unsigned)i);
 			return 0;       /* nothing left to spend on this tree */
+		}
 		unpack_turn(sc, ctx, res, m);
 	}
 	return 1;
@@ -583,5 +621,7 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * that on an object no unpacker would have touched anyway is noise that
 	 * makes the real case harder to see.
 	 */
+	KOF_TRACE("[unpack] open stage done: applies=%d children=%u broken=%u\n", applies,
+		  (unsigned)sc->child.n, (unsigned)sc->obj.open.broken);
 	return applies ? sc->obj.open.broken : 0;
 }

@@ -2,7 +2,7 @@
  * emu_ops_ext.c - the integer instructions a compiler emits for a newer CPU and a few old ones a program still meets:
  * BMI1 and BMI2 (ANDN BEXTR BLSI BLSMSK BLSR BZHI MULX PDEP PEXT RORX SARX SHLX SHRX), ADCX and ADOX, MOVBE, CRC32,
  * CMPXCHG8B and CMPXCHG16B, ENTER, XLATB, AAM and AAD.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c and emu_x86_private.h.
  *
  * WHY THESE. They are the integer rows of the instruction histogram that were left to stop a run as UNSUPPORTED (the
  * numbers are in tests/lib/genome/diff_decode_cover.c): RORX, MULX, SHLX, SHRX and ANDN come from code built for Haswell
@@ -16,7 +16,7 @@
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 /* the arithmetic flags SF ZF PF from a result of `w` bytes, CF and OF as given, AF left alone */
 static void fl_zs(struct kgenome_emu *e, uint64_t r, unsigned w, int cf, int of)

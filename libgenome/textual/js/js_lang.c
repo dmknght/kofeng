@@ -279,4 +279,5 @@ const struct kgenome_textual_lang kgenome_textual_lang_js = {
 	.value = kgenome_textual_js_value,
 	.concat = '+',
 	.quote = &quote,
+	.stmt_delim = 1,
 };

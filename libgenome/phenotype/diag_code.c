@@ -212,10 +212,11 @@ uint64_t kgenome_diag_extent(const struct kgenome_obj *obj, uint32_t i, uint64_t
 	if (obj->format == KGENOME_FMT_ELF)
 		return kgenome_diag_walk_range(obj, kgenome_obj_elf(obj), i, size, at);
 	if (obj->format == KGENOME_FMT_PE) {
-		const struct kgenome_pe_sec *sc = &kgenome_obj_pe(obj)->sec[i];
+		const struct kgenome_pe_info *p = kgenome_obj_pe(obj);
+		const struct kgenome_pe_sec *sc = &p->sec[i];
 		uint64_t have;
 
-		if (!kgenome_pe_sec_is_code(sc))
+		if (!kgenome_pe_sec_is_code(p, sc))
 			return 0;
 		have = kgenome_pe_sec_extent(sc, size, at);
 		/* The loader maps min(raw size, VirtualSize) bytes of a section: the raw bytes past VirtualSize are the file's alignment, not code. A section that declares no

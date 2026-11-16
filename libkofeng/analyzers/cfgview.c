@@ -11,15 +11,23 @@
 #include <string.h>
 
 #include <genotype/image/image_addr.h>
+#include <phenotype/codemap.h>
 #include <phenotype/diag_scan.h>
 
 #include "callnames.h"
 #include "cfgsign.h"
 #include "cfgview.h"
+#include "codenotes.h"
 #include "genome_obj.h"
 #include "parsers/binaries/funcs.h"
 #include <kofmod/kofmutation.h>
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and the one in cfgview.h; the viewer's function dialog asks it again (kv_cfgdlg.c cfgd_open calling kv_cfgbody_make, the Graph tab title back in cfg_tab_title).
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define NAMED_CALLS KOF_CFGVIEW_XLINES
 
 static void fail(struct kof_cfgview *out, enum kgenome_status st, const char *why)
@@ -44,7 +52,7 @@ static void func_name(const struct kof_cfgview_req *rq, uint64_t off, char *out,
 	const uint32_t i = kgenome_funcs_start(rq->funcs, off);
 
 	if (i != KGENOME_FUNCS_NONE)
-		(void)kof_func_name(&rq->funcs->v[i], rq->sym, rq->sym_n, out, cap);
+		(void)kof_func_name(&rq->funcs->v[i], rq->sym, rq->sym_n, rq->data.p, rq->data.n, out, cap);
 	else
 		kof_fcn_name(off, out, cap);
 }
@@ -53,10 +61,6 @@ static void func_name(const struct kof_cfgview_req *rq, uint64_t off, char *out,
 static void callee_name(const struct kof_cfgview_req *rq, const struct kof_cfgview_call *c, int direct, char *out, size_t cap)
 {
 	out[0] = 0;
-	if (c->kind == KGENOME_CFG_CK_SYSCALL) {
-		snprintf(out, cap, "syscall");
-		return;
-	}
 	if (!direct) {
 		if (rq->names)
 			(void)kof_callnames_name(rq->names, rq->data, KOF_CALLNAME_VIA_SITE, c->at, out, cap);
@@ -78,12 +82,22 @@ static int calls_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out,
 		      const struct kgenome_cell_insn *in, const struct kgenome_obj *gobj)
 {
 	uint32_t j, bi = 0, rank = 0;
+	struct kgenome_codemap cm;
+	int have_cm = 0;
 
 	if (!g->n_call)
 		return 1;
 	out->call = calloc(g->n_call, sizeof *out->call);
 	if (!out->call)
 		return 0;
+	/* WHICH SYSCALL: the number the object's code map reads in the syscall register over the straight run - the reading the code notes and the
+	 * lineage make (codemap.c), asked only when the function holds a syscall; spelled once (kof_syscall_spell). The map reads the whole object's
+	 * code: a run of the function alone would start mid-run where a branch of another function lands. Refused for memory: said, not "unknown". */
+	if (g->n_sys) {
+		have_cm = kgenome_codemap_build(gobj, rq->data.p, rq->data.n, NULL, NULL, &cm);
+		if (!have_cm && cm.status == KGENOME_NOMEM)
+			out->status = kgenome_status_merge(out->status, KGENOME_NOMEM);
+	}
 	for (j = 0; j < g->n_call; j++) {
 		const struct kgenome_cfg_call *k = &g->call[j];
 		struct kof_cfgview_call *c = &out->call[j];
@@ -103,10 +117,16 @@ static int calls_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out,
 			if (t != KGENOME_BROKEN && t < rq->data.n)
 				c->target = t;
 		}
-		if (j < NAMED_CALLS)
+		if (j >= NAMED_CALLS)
+			continue;
+		if (c->kind == KGENOME_CFG_CK_SYSCALL)
+			kof_syscall_spell((int)rq->ctx->format, gobj->arch, have_cm ? kgenome_codemap_at(&cm, c->at) : NULL, c->name, sizeof c->name);
+		else
 			callee_name(rq, c, ci->op == KGENOME_CELL_CALL && !(ci->flags & KGENOME_CELL_F_INDIRECT), c->name, sizeof c->name);
 	}
 	out->n_call = g->n_call;
+	if (have_cm)
+		kgenome_codemap_free(&cm);
 	return 1;
 }
 
@@ -219,6 +239,10 @@ static int text_make(const struct kof_cfgview_req *rq, struct kof_cfgview *out)
 			if (per_blk++ >= KGENOME_GV_BOX_X)
 				continue;
 			out->gv.xline[k].node = c->blk;
+			/* KNOWN DEFECT CFGVIEW-TRUNC-1 (2026-11-12, R) [sev L]: c->name (an untrusted label, up to
+			 * KOF_CFGVIEW_NAME) can be longer than KGENOME_GV_LINE leaves room for after kind_word's
+			 * prefix. Trigger: a call target named by a long symbol. Effect: snprintf truncates silently,
+			 * no "..." said; safe (bounded), just an incomplete box line. Fix: shorten with an ellipsis. */
 			snprintf(out->gv.xline[k].text, KGENOME_GV_LINE, "%s%s%s", kind_word(c->kind), c->name[0] ? " " : "", c->name);
 			k++;
 		}
@@ -378,3 +402,4 @@ void kof_cfgview_free(struct kof_cfgview *v)
 	free(v->text);
 	memset(v, 0, sizeof *v);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

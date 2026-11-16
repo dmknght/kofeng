@@ -49,6 +49,8 @@
 #include <kofmod/kofdiagtree.h>
 #include <kofmod/kofsig.h>
 #include "../../libkofeng/scanners/scan.h"
+#include "../../libkofeng/analyzers/parsers/kofformat.h"
+#include "../../libkofeng/databases/diagsrc.h"
 
 static int failures;
 static char root[256];
@@ -1220,6 +1222,65 @@ static void loader(void)
 	kof_form_free(f);
 }
 
+/* ---- the loader and the gate: a record names an anomaly and a capability the engine's tables have, or it is refused --------
+ * (kof_diag_gate_valid, the check the reader makes too). Why the old tests missed it: (a) the facts did not exist; an old loader
+ * refuses every gate record (an unknown fact), so "a good gate record loads" is the RED row. */
+static size_t when_section(uint8_t *out, uint16_t fact, uint64_t val)
+{
+	size_t k = 0;
+	unsigned t;
+
+	out[k++] = KDIG_SEC_WHEN;
+	out[k++] = 10;
+	out[k++] = (uint8_t)fact;
+	out[k++] = (uint8_t)(fact >> 8);
+	for (t = 0; t < 8u; t++)
+		out[k++] = (uint8_t)(val >> (8u * t));
+	return k;
+}
+
+static void loader_gate(void)
+{
+	struct kof_form *f = simple_form();
+	uint8_t wire[2048], sections[2048], rec[4096], body[4096];
+	size_t wn = kof_form_wire_write(f, wire), sn = kof_form_section_write(wire, wn, sections), rn, bn;
+	struct kof_diag_node node[KOF_DIAG_MAX_NODE];
+	char name[64], needs[4200];
+	struct kof_diag_store st = { node, name, needs, sizeof name, sizeof needs, KOF_DIAG_MAX_NODE };
+	struct kof_diag d;
+	const struct kof_parser *ep = kof_parser_of(KOF_FMT_ELF);
+	int unnamed = -1, b;
+	size_t i;
+	struct { const char *what; uint16_t nodes; uint16_t fact; uint64_t val; int want; } c[] = {
+		{ "a form with an anomaly the ELF parser names", 0, KOF_FACT_ANOMALY, (uint64_t)KOF_FMT_ELF << 32, 1 },
+		{ "a form with a capability nucleo names", 0, KOF_FACT_NUCLEO, KOF_NUCLEO_ALLOC_EXEC, 1 },
+		{ "an anomaly bit the parser does not name", 0, KOF_FACT_ANOMALY, 0, 0 },
+		{ "an anomaly value with a bit between the bit and the format", 0, KOF_FACT_ANOMALY, ((uint64_t)KOF_FMT_ELF << 32) | 0x40u, 0 },
+		{ "an anomaly of a format past the table", 0, KOF_FACT_ANOMALY, (uint64_t)0x1ff << 32, 0 },
+		{ "the capability NONE", 0, KOF_FACT_NUCLEO, 0, 0 },
+		{ "a capability past 16 bits", 0, KOF_FACT_NUCLEO, 0x10000u + KOF_NUCLEO_ALLOC_EXEC, 0 },
+		{ "a graph with a nucleo condition", 1, KOF_FACT_NUCLEO, KOF_NUCLEO_ALLOC_EXEC, 0 },
+	};
+
+	for (b = 63; b >= 0 && unnamed < 0; b--)
+		if (!ep->anomaly_name((unsigned)b))
+			unnamed = b;
+	c[2].val = ((uint64_t)KOF_FMT_ELF << 32) | (uint64_t)unnamed;
+	OKF(unnamed >= 0, "the ELF parser leaves a bit unnamed");
+	for (i = 0; i < sizeof c / sizeof c[0]; i++) {
+		bn = when_section(body, c[i].fact, c[i].val);
+		if (!c[i].nodes) {
+			memcpy(body + bn, sections, sn);
+			bn += sn;
+		}
+		rn = record(rec, c[i].nodes, "gate_rec", body, bn);
+		memset(&d, 0, sizeof d);
+		OKF(kof_diag_load(kof_buf_make(rec, rn), &d, &st) == c[i].want, "%s: %s", c[i].what, c[i].want ? "loads" : "is refused");
+		kof_diag_form_free(&d);
+	}
+	kof_form_free(f);
+}
+
 /* ---- the loader, attacked: a record of every kind of item, with bytes changed at random ------------------------------------- */
 
 static void loader_fuzz(void)
@@ -1281,6 +1342,337 @@ static void loader_fuzz(void)
 	kof_form_free(f);
 }
 
+/* ---- the gate of a signature: an anomaly the parse raised, a nucleo the analysis saw (scanners/objctx_diag_gate.c) ------------
+ *
+ * Why the old tests missed it: (a) the conditions did not exist - the reader warned "unknown declaration" for both macros and
+ * built the form without them, so on the old tree every NO case below matches and the first assertion fails (RED).
+ *
+ * WHAT IS PINNED, each with both answers:
+ *   anomaly    the result publishes the ELF's anomaly word (kof_result.anomalies) as the parser, run alone, makes it; for EVERY
+ *              anomaly the ELF parser names, a form gated on it matches the ELF iff that word has the bit (a differential over
+ *              the whole name table against the parser run outside the scan); another format's anomaly is
+ *              UNKNOWN on an ELF and does not block; on a plain text every anomaly condition is UNKNOWN and none blocks
+ *   nucleo     every capability the report lists for the ELF (kdet_nucleo_seen) passes its gate; a capability it does not list
+ *              is NO (the routes ran, the graph is whole) and blocks, or UNKNOWN and does not - never a silent NO; a form whose
+ *              markers are absent leaves its nucleo condition NOT_ASKED; a plain text has no route, so UNKNOWN
+ *   AND        an anomaly and a nucleo condition that both hold match; one NO blocks
+ *   no report  a plain scan (the gate's own ask for the analysis, not the explain run's) reaches the same verdicts
+ */
+static const char MMAP_STUB[] = "\x31\xff\x6a\x09\x58\x99\xb6\x10\x48\x89\xd6\x4d\x31\xc9\x6a\x22\x41\x5a\x6a\x07\x5a\x0f\x05";
+
+struct gseen {
+	unsigned n;
+	char     name[128][48];
+	uint8_t  state[128];
+	uint8_t  n_gate[128];
+	uint8_t  gate[128][KOF_DIAG_REPORT_GATE];
+	uint16_t caps[256];
+	uint32_t n_caps;
+	int      first;
+	uint64_t anomalies;
+	uint8_t  anomaly_fmt;
+	unsigned n_vdiag;
+	char     vdiag[32][48];
+	const kof_engine *eng;
+};
+
+static int on_gate(const char *name, const void *bytes, uint64_t len, const struct kof_result *res, void *user)
+{
+	struct gseen *g = user;
+	uint32_t i;
+
+	(void)bytes; (void)len;
+	if (!res)
+		return 0;
+	/* every object's verdict: the one a file's verdict is made on may be its view */
+	for (i = 0; res->has_verdict && i < res->verdict.n_diag && g->n_vdiag < 32u; i++) {
+		const char *dn = kdb_diagnose_name(g->eng, res->verdict.diag[i]);
+
+		snprintf(g->vdiag[g->n_vdiag++], sizeof g->vdiag[0], "%s", dn ? dn : "?");
+	}
+	/* the report of the file itself (its view is another object) */
+	if (g->first || strstr(name, KOF_OBJ_SEP))
+		return 0;
+	g->first = 1;
+	g->n_caps = kdet_nucleo_seen(res, g->caps, 256u);
+	g->anomalies = res->anomalies;
+	g->anomaly_fmt = res->anomaly_fmt;
+	for (i = 0; i < res->n_diag && g->n < 128u; i++) {
+		snprintf(g->name[g->n], sizeof g->name[0], "%s", res->diag[i].name);
+		g->state[g->n] = res->diag[i].state;
+		g->n_gate[g->n] = res->diag[i].n_gate;
+		memcpy(g->gate[g->n], res->diag[i].gate, sizeof g->gate[0]);
+		g->n++;
+	}
+	return 0;
+}
+
+static void gscan(kof_scanner *sc, const kof_engine *eng, const void *p, size_t n, int report, struct gseen *g)
+{
+	struct kof_scan_option opt;
+
+	memset(&opt, 0, sizeof opt);
+	memset(g, 0, sizeof *g);
+	g->eng = eng;
+	(void)kof_scan_set_explain(sc, report ? 1 : 0);
+	kscan_bytes(sc, p, n, "sample", &opt, on_gate, g);
+}
+
+static int gfind(const struct gseen *g, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < g->n; i++)
+		if (!strcmp(g->name[i], name))
+			return (int)i;
+	return -1;
+}
+
+static int gverdict(const struct gseen *g, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < g->n_vdiag; i++)
+		if (!strcmp(g->vdiag[i], name))
+			return 1;
+	return 0;
+}
+
+static int has_cap(const struct gseen *g, uint16_t cap)
+{
+	uint32_t i;
+
+	for (i = 0; i < g->n_caps && i < 256u; i++)
+		if (g->caps[i] == cap)
+			return 1;
+	return 0;
+}
+
+#define GATE_FORM "KOF_TARGET_RANGE(whole, KOF_SCAN_ALL);\nKOF_DEFINE_STR(alpha, \"alpha\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);\n" \
+		  "KOF_DIAG_FIND(m0, KOF_FIND_ANY, whole, alpha);\n"
+#define GATE_ZETA "KOF_TARGET_RANGE(whole, KOF_SCAN_ALL);\nKOF_DEFINE_STR(zeta, \"zeta\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);\n" \
+		  "KOF_DIAG_FIND(m0, KOF_FIND_ANY, whole, zeta);\n"
+
+static void gate_src(struct scene *s, const char *name, const char *form, const char *gate, const char *disease)
+{
+	char t[2000];
+
+	snprintf(t, sizeof t, "KOF_DIAG_NAME(%s);\n%s%s%s", name, disease ? disease : "", form, gate);
+	scene_src(s, name, t);
+}
+
+static void gate(void)
+{
+	const struct kof_parser *ep = kof_parser_of(KOF_FMT_ELF), *pp = kof_parser_of(KOF_FMT_PE);
+	static uint8_t elf[0x300];
+	static const char text[] = "alpha beta";
+	uint8_t raised[64];
+	uint32_t n_raised = 0, b, k, n_named = 0, n_nu;
+	uint64_t word = 0;
+	uint16_t absent = 0;
+	int yes_bit = -1, no_bit = -1, absent_no = 0;
+	struct scene sl, sg, sn;
+	kof_engine *eng;
+	kof_scanner *scn;
+	struct gseen *g = calloc(1, sizeof *g);
+	char gl[400], nm[64];
+
+	if (!g || !ep || !pp) {
+		OKF(0, "the gate test cannot start");
+		free(g);
+		return;
+	}
+	make_elf(elf, MMAP_STUB, "alpha");
+	/* THE ORACLE OF THE ANOMALY CASES: the ELF parser run on the bytes directly, outside a scan - its word, bit by bit */
+	{
+		struct kof_obj_ctx ctx;
+		void *view = calloc(1, ep->view_size);
+
+		memset(&ctx, 0, sizeof ctx);
+		if (view && ep->parse(kof_buf_make(elf, sizeof elf), view, &ctx)) {
+			word = ep->anomalies(view);
+			for (b = 0; b < 64u; b++)
+				if ((word >> b) & 1u)
+					raised[n_raised++] = (uint8_t)b;
+		}
+		free(view);
+	}
+	/* THE ORACLE OF THE NUCLEO CASES: the list the report gives a tool for the file (the viewer's list) */
+	scene_new(&sl, "gate_list");
+	gate_src(&sl, "gl_any", GATE_FORM, "", NULL);
+	OKF(scene_build(&sl) == 0, "the list scene builds");
+	eng = keng_open(sl.db);
+	scn = eng ? kscan_new(eng) : NULL;
+	if (!scn) {
+		OKF(0, "the list database does not open");
+		free(g);
+		return;
+	}
+	gscan(scn, eng, elf, sizeof elf, 1, g);
+	kscan_free(scn);
+	keng_close(eng);
+	OKF(g->anomaly_fmt == KOF_FMT_ELF && g->anomalies == word,
+	    "the result publishes the ELF's anomaly word as the parser makes it (fmt %u, %llx, parser %llx)", g->anomaly_fmt,
+	    (unsigned long long)g->anomalies, (unsigned long long)word);
+	OKF(g->n_caps >= 1u, "the ELF's analysis lists a capability (got %u): the nucleo cases need one", (unsigned)g->n_caps);
+	n_nu = g->n_caps < 6u ? g->n_caps : 6u;
+	{
+		uint16_t caps[6];
+		size_t ci;
+		uint16_t c;
+
+		memcpy(caps, g->caps, n_nu * sizeof caps[0]);
+		for (ci = 0; kof_dsrc_cap_at(ci, &c); ci++)
+			if (!has_cap(g, c)) {
+				absent = c;
+				break;
+			}
+		OKF(absent != 0, "a capability the ELF does not show exists");
+
+		/* the gate scene */
+		scene_new(&sg, "gate");
+		for (b = 0; b < 64u; b++) {
+			const char *an = ep->anomaly_name(b);
+
+			if (!an || kof_parser_anomaly_bit(ep, an) != (int)b)
+				continue;
+			n_named++;
+			snprintf(nm, sizeof nm, "g_an_%u", (unsigned)b);
+			snprintf(gl, sizeof gl, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\n", an);
+			gate_src(&sg, nm, GATE_FORM, gl, NULL);
+		}
+		snprintf(gl, sizeof gl, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_PE, %s);\n", pp->anomaly_name(0));
+		gate_src(&sg, "g_an_pe", GATE_FORM, gl, NULL);
+		for (k = 0; k < n_nu; k++) {
+			snprintf(nm, sizeof nm, "g_nu_%u", (unsigned)k);
+			snprintf(gl, sizeof gl, "KOF_DIAG_HAS_NUCLEO(%s);\n", kof_dsrc_cap_word(caps[k]));
+			gate_src(&sg, nm, GATE_FORM, gl, NULL);
+		}
+		snprintf(gl, sizeof gl, "KOF_DIAG_HAS_NUCLEO(%s);\n", kof_dsrc_cap_word(absent));
+		gate_src(&sg, "g_nu_absent", GATE_FORM, gl, NULL);
+		snprintf(gl, sizeof gl, "KOF_DIAG_HAS_NUCLEO(%s);\n", kof_dsrc_cap_word(caps[0]));
+		gate_src(&sg, "g_nu_not_asked", GATE_ZETA, gl, NULL);
+		for (k = 0; k < n_raised && yes_bit < 0; k++)
+			yes_bit = raised[k];
+		for (b = 0; b < 64u && no_bit < 0; b++) {
+			const char *an = ep->anomaly_name(b);
+			int up = 0;
+
+			for (k = 0; k < n_raised; k++)
+				up |= raised[k] == b;
+			if (an && !up && kof_parser_anomaly_bit(ep, an) == (int)b)
+				no_bit = (int)b;
+		}
+		OKF(yes_bit >= 0 && no_bit >= 0, "the ELF raises an anomaly (%d) and leaves one (%d)", yes_bit, no_bit);
+		if (yes_bit >= 0 && no_bit >= 0) {
+			snprintf(gl, sizeof gl, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\nKOF_DIAG_HAS_NUCLEO(%s);\n",
+				 ep->anomaly_name((unsigned)yes_bit), kof_dsrc_cap_word(caps[0]));
+			gate_src(&sg, "g_and_yes", GATE_FORM, gl, NULL);
+			snprintf(gl, sizeof gl, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\nKOF_DIAG_HAS_NUCLEO(%s);\n",
+				 ep->anomaly_name((unsigned)no_bit), kof_dsrc_cap_word(caps[0]));
+			gate_src(&sg, "g_and_no", GATE_FORM, gl, NULL);
+		}
+		OKF(scene_build(&sg) == 0, "the gate scene builds");
+		eng = keng_open(sg.db);
+		scn = eng ? kscan_new(eng) : NULL;
+		if (!scn) {
+			OKF(0, "the gate database does not open");
+			free(g);
+			return;
+		}
+		/* the ELF, with the report */
+		gscan(scn, eng, elf, sizeof elf, 1, g);
+		for (b = 0; b < 64u; b++) {
+			int x, up = 0;
+
+			snprintf(nm, sizeof nm, "g_an_%u", (unsigned)b);
+			if ((x = gfind(g, nm)) < 0)
+				continue;
+			for (k = 0; k < n_raised; k++)
+				up |= raised[k] == b;
+			OKF((g->state[x] == KOF_DIAG_ST_MATCH) == up, "%s (%s) matched %d, the parse raised it %d", nm, ep->anomaly_name(b),
+			    g->state[x] == KOF_DIAG_ST_MATCH, up);
+			OKF(g->n_gate[x] == 1u && g->gate[x][0] == (up ? KOF_GATE_YES : KOF_GATE_NO), "%s gate state %u", nm, g->gate[x][0]);
+		}
+		{
+			int x = gfind(g, "g_an_pe");
+
+			OKF(x >= 0 && g->state[x] == KOF_DIAG_ST_MATCH && g->gate[x][0] == KOF_GATE_UNKNOWN,
+			    "a PE anomaly on an ELF is UNKNOWN and does not block (state %d gate %d)", x >= 0 ? g->state[x] : -1,
+			    x >= 0 ? g->gate[x][0] : -1);
+		}
+		for (k = 0; k < n_nu; k++) {
+			int x;
+
+			snprintf(nm, sizeof nm, "g_nu_%u", (unsigned)k);
+			x = gfind(g, nm);
+			OKF(x >= 0 && g->state[x] == KOF_DIAG_ST_MATCH && g->gate[x][0] == KOF_GATE_YES,
+			    "%s (a capability the report lists) passes: state %d gate %d", nm, x >= 0 ? g->state[x] : -1, x >= 0 ? g->gate[x][0] : -1);
+		}
+		{
+			int x = gfind(g, "g_nu_absent");
+
+			OKF(x >= 0 && (g->gate[x][0] == KOF_GATE_NO || g->gate[x][0] == KOF_GATE_UNKNOWN), "g_nu_absent is NO or UNKNOWN (%d)",
+			    x >= 0 ? g->gate[x][0] : -1);
+			OKF(x >= 0 && (g->state[x] == KOF_DIAG_ST_MATCH) == (g->gate[x][0] == KOF_GATE_UNKNOWN),
+			    "g_nu_absent matches only when its condition is UNKNOWN (state %d)", x >= 0 ? g->state[x] : -1);
+			absent_no = x >= 0 && g->gate[x][0] == KOF_GATE_NO;
+			OKF(absent_no, "on a static ELF whose routes all ran, an absent capability is NO, not UNKNOWN");
+			x = gfind(g, "g_nu_not_asked");
+			OKF(x >= 0 && g->state[x] != KOF_DIAG_ST_MATCH && g->gate[x][0] == KOF_GATE_NOT_ASKED,
+			    "a form whose markers are absent leaves its nucleo condition NOT_ASKED (state %d gate %d)", x >= 0 ? g->state[x] : -1,
+			    x >= 0 ? g->gate[x][0] : -1);
+			x = gfind(g, "g_and_yes");
+			OKF(x >= 0 && g->state[x] == KOF_DIAG_ST_MATCH && g->n_gate[x] == 2u && g->gate[x][0] == KOF_GATE_YES &&
+			    g->gate[x][1] == KOF_GATE_YES, "two conditions that hold match (AND)");
+			x = gfind(g, "g_and_no");
+			OKF(x >= 0 && g->state[x] != KOF_DIAG_ST_MATCH && g->gate[x][0] == KOF_GATE_NO, "one NO blocks the AND");
+		}
+		/* a plain text: no ELF parse, no route - every condition UNKNOWN, none blocks */
+		gscan(scn, eng, text, sizeof text - 1u, 1, g);
+		{
+			unsigned x, unk_an = 0, unk_nu = 0;
+
+			for (x = 0; x < g->n; x++) {
+				if (!strncmp(g->name[x], "g_an_", 5) && g->state[x] == KOF_DIAG_ST_MATCH && g->gate[x][0] == KOF_GATE_UNKNOWN)
+					unk_an++;
+				if (!strncmp(g->name[x], "g_nu_", 5) && strcmp(g->name[x], "g_nu_not_asked") && g->state[x] == KOF_DIAG_ST_MATCH &&
+				    g->gate[x][0] == KOF_GATE_UNKNOWN)
+					unk_nu++;
+			}
+			OKF(unk_an == n_named + 1u, "on a text every anomaly condition is UNKNOWN and matches: %u of %u", unk_an, n_named + 1u);
+			OKF(unk_nu == n_nu + 1u, "on a text every nucleo condition is UNKNOWN and matches: %u of %u", unk_nu, n_nu + 1u);
+		}
+		kscan_free(scn);
+		keng_close(eng);
+
+		/* a plain scan, no report: the gate asks for the analysis itself; the verdict reads the diagnoses that pass */
+		scene_new_with(&sn, "gate_plain", "unpack-raw.ksig");
+		snprintf(gl, sizeof gl, "KOF_DIAG_HAS_NUCLEO(%s);\n", kof_dsrc_cap_word(caps[0]));
+		gate_src(&sn, "p_nu_yes", GATE_FORM, gl, "KOF_DECLARE_DISEASE(KOF_MALTYPE_TROJAN, \"gate/yes\");\n");
+		snprintf(gl, sizeof gl, "KOF_DIAG_HAS_NUCLEO(%s);\n", kof_dsrc_cap_word(absent));
+		gate_src(&sn, "p_nu_absent", GATE_FORM, gl, "KOF_DECLARE_DISEASE(KOF_MALTYPE_TROJAN, \"gate/absent\");\n");
+		if (no_bit >= 0) {
+			snprintf(gl, sizeof gl, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, %s);\n", ep->anomaly_name((unsigned)no_bit));
+			gate_src(&sn, "p_an_no", GATE_FORM, gl, "KOF_DECLARE_DISEASE(KOF_MALTYPE_TROJAN, \"gate/an\");\n");
+		}
+		OKF(scene_build(&sn) == 0, "the plain scene builds");
+		eng = keng_open(sn.db);
+		scn = eng ? kscan_new(eng) : NULL;
+		if (scn) {
+			gscan(scn, eng, elf, sizeof elf, 0, g);
+			OKF(gverdict(g, "p_nu_yes"), "a plain scan: a nucleo the file shows passes its gate and is in the verdict");
+			OKF(!gverdict(g, "p_nu_absent") || !absent_no, "a plain scan: an absent nucleo (NO) blocks");
+			OKF(!gverdict(g, "p_an_no"), "a plain scan: an anomaly the parse did not raise blocks");
+		} else {
+			OKF(0, "the plain database does not open");
+		}
+		kscan_free(scn);
+		keng_close(eng);
+	}
+	free(g);
+}
+
 int main(void)
 {
 	char d[300];
@@ -1305,6 +1697,8 @@ int main(void)
 	api();
 	loader();
 	loader_fuzz();
+	loader_gate();
+	gate();
 	if (!failures)
 		rm_all(root);       /* a failing run leaves its scratch tree for whoever reads the failure */
 	if (failures) {

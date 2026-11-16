@@ -68,7 +68,7 @@ static void t_value_zero_is_unreachable(void)
 	/* CONTROL: a record whose value is nonzero is found - the block and the
 	 * records in it are good, so a failure of the next check is the value==0
 	 * guard and nothing else. */
-	CK(kof_func_name(&f1, blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&f1, blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "func_at_value_0x40"));
 
 	/* RED: the same lookup, same block, a record that is genuinely there at
@@ -76,7 +76,7 @@ static void t_value_zero_is_unreachable(void)
 	 * On the CURRENT code this fails (returns 0, out == "fcn_00001000"); the
 	 * defect is the `if (!value) return;` sentinel in kof_sym_name_at treating
 	 * a real address-0 symbol the same as "no symbol was asked for". */
-	CK(kof_func_name(&f0, blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&f0, blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "func_at_value_zero"));
 }
 
@@ -97,9 +97,9 @@ static void t_size_is_not_the_variable(void)
 	memset(&f1, 0, sizeof f1); f1.off = 0x1040u; f1.value = 0x40u; f1.shndx = 1u;
 	/* Both are size-0 symbols (see build_blk: r.size is never set non-zero) and
 	 * BOTH are found when neither value is 0 - size-0 alone is not the gap. */
-	CK(kof_func_name(&f0, blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&f0, blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "func_at_value_zero"));
-	CK(kof_func_name(&f1, blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&f1, blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "func_at_value_0x40"));
 }
 
@@ -133,11 +133,42 @@ static void t_sym_name_at_direct(void)
 	CK(out[0] == 0);
 }
 
+/* A function that carries NO symbol (value 0, section 0: the walk's, .pdata's) in an object whose block holds an UNDEFINED record of value 0 (an ELF import,
+ * section 0): the lookup must not name the body after the import. RED on the old kof_func_name (it looked up section 0 too): measured on /usr/bin/ls,
+ * the function at 0x74d0 was named `__ctype_toupper_loc`. Missed because (b): every row's function had a symbol, none had section 0, and no block held an
+ * undefined record. A defined record at value 0 (section 1) is still found for a function that names section 1 (the control). */
+static void t_no_symbol_is_not_an_import(void)
+{
+	uint8_t blk[512];
+	struct kof_symw w;
+	struct kof_symrec r;
+	struct kgenome_func f;
+	uint32_t n;
+	char out[64];
+
+	kof_symw_begin(&w, blk, sizeof blk, 2u, 0u);
+	memset(&r, 0, sizeof r);
+	r.type = 2u; r.bind = 1u; r.shndx = 0u; r.value = 0u;
+	r.name = "an_import"; r.name_len = (uint32_t)strlen(r.name);
+	CK(kof_symw_put(&w, &r));
+	r.shndx = 1u; r.name = "defined_at_zero"; r.name_len = (uint32_t)strlen(r.name);
+	CK(kof_symw_put(&w, &r));
+	n = kof_symw_end(&w);
+	memset(&f, 0, sizeof f);
+	f.off = 0x74d0u;
+	CK(kof_func_name(&f, blk, n, NULL, 0, out, sizeof out) == 0);
+	CK(!strcmp(out, "fcn_000074d0"));
+	f.shndx = 1u;
+	CK(kof_func_name(&f, blk, n, NULL, 0, out, sizeof out) == 1);
+	CK(!strcmp(out, "defined_at_zero"));
+}
+
 int main(void)
 {
 	t_value_zero_is_unreachable();
 	t_size_is_not_the_variable();
 	t_sym_name_at_direct();
+	t_no_symbol_is_not_an_import();
 	printf("fn_name_value_zero: %d failure(s)\n", fails);
 	return fails != 0;
 }

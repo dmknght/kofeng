@@ -6,6 +6,7 @@
  */
 
 #include "objtree.h"
+#include "../kofcore/kofdebug.h"
 
 /*
  * One place, so that every step of descending asks the same question of the
@@ -67,14 +68,17 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 	const struct kof_entry *tab = NULL;
 	uint32_t n, i, made = 0;
 
-	if (!kof_objtree_may_open(opt))
+	if (!kof_objtree_may_open(opt)) {
+		KOF_TRACE("[tree] declared carried files: gate closed, deep scan is off\n");
 		return 0;
+	}
 	if (!ctx->entries || !ctx->content || !ctx->content->window)
 		return 0;
 	n = ctx->entries(ctx, &tab);
 	if (!tab)
 		return 0;
 
+	KOF_TRACE("[tree] declared carried files: %u entr(y/ies) to consider\n", (unsigned)n);
 	for (i = 0; i < n; i++) {
 		const struct kof_entry *e = &tab[i];
 
@@ -89,8 +93,10 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 		 * with the entry-opening path and not here, so it is skipped
 		 * rather than half-done.
 		 */
-		if (e->flags & KOF_ENT_F_SCATTERED)
+		if (e->flags & KOF_ENT_F_SCATTERED) {
+			KOF_TRACE("[tree] entry %u skipped: scattered, a chain and not a range\n", (unsigned)i);
 			continue;
+		}
 		/*
 		 * AND NOT ONE WHOSE BYTES ARE NOT WHAT THEY ARE.
 		 *
@@ -103,12 +109,17 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 		 * KOF_ENT_F_CODED_UNKNOWN is the same answer with the chain
 		 * left empty, so it is tested beside it rather than after.
 		 */
-		if (e->coding[0] || (e->flags & KOF_ENT_F_CODED_UNKNOWN))
+		if (e->coding[0] || (e->flags & KOF_ENT_F_CODED_UNKNOWN)) {
+			KOF_TRACE("[tree] entry %u skipped: coded, a module decodes it, not a window\n", (unsigned)i);
 			continue;
+		}
 		if (!e->len)
 			continue;
-		if (e->off > ctx->obj_size || e->len > ctx->obj_size - e->off)
+		if (e->off > ctx->obj_size || e->len > ctx->obj_size - e->off) {
+			KOF_TRACE("[tree] entry %u skipped: off=%llu len=%llu does not fit the object\n",
+				  (unsigned)i, (unsigned long long)e->off, (unsigned long long)e->len);
 			continue;
+		}
 
 		/*
 		 * AND ONLY IF ANYTHING WOULD LOOK INSIDE IT.
@@ -127,8 +138,11 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 		 * decompressors get, without a second mechanism.
 		 */
 		if (ctx->content->fmt_wanted &&
-		    !ctx->content->fmt_wanted(ctx, e->format))
+		    !ctx->content->fmt_wanted(ctx, e->format)) {
+			KOF_TRACE("[tree] entry %u skipped: format %u not wanted\n", (unsigned)i,
+				  (unsigned)e->format);
 			continue;
+		}
 
 		/*
 		 * THE NAME THE ENTRY ALREADY CARRIES, and this is why the entry
@@ -183,9 +197,12 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 		 * already, and copying them would charge the budget for
 		 * something the scanner can look at through a different offset.
 		 */
-		if (!ctx->content->window(ctx, e->off, e->len))
+		if (!ctx->content->window(ctx, e->off, e->len)) {
+			KOF_TRACE("[tree] entry %u: window refused, kid_push has said why\n", (unsigned)i);
 			break;      /* refused, and kid_push has said why */
+		}
 		made++;
 	}
+	KOF_TRACE("[tree] declared carried files done: made=%u of %u\n", (unsigned)made, (unsigned)n);
 	return made;
 }

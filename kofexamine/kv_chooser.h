@@ -97,7 +97,14 @@ enum ch_what {
 	CH_CMATCH,      /* which matcher to put into a condition */
 	CH_CMATCH2,     /* what to do to one matcher a condition already names */
 	CH_CSWAP,       /* which other matcher to put in its place */
-	CH_DECLKIND     /* string, hex or regex - what [+ String] adds */
+	CH_DECLKIND,    /* string, hex or regex - what [+ String] adds */
+	/*
+	 * THE GATE OF THE SIGNATURE (owner, 2026-11-17): the two lists the [+ Options] rows "Anomaly" and "Nucleo" open, each
+	 * the ENGINE's - the anomalies the object's parse raised, the nucleo its analysis saw (draft_gate_offer) - less what the
+	 * draft already states. A row taken is a condition on the draft (draft_gate_add).
+	 */
+	CH_GATE_ANOM,
+	CH_GATE_NUC
 };
 
 /*

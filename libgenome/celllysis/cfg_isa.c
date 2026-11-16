@@ -34,7 +34,8 @@
  *   JMP out of the extent         exit (a tail call)
  *   CALL, rep, cmov, setcc, int   no rule
  * NOT HANDLED, said here so nobody reads silence as coverage: Thumb (the architecture value has no Thumb, the
- * caller decodes it), noreturn calls (a block goes on after `call exit`), a switch's indirect jump (an exit: the
+ * caller decodes it; the block layer asks kgenome_cfg_isa_interworks to leave an ARM `blx label` unread), noreturn calls in the graph of ONE function
+ * (cfg_build.c: a block goes on after `call exit`; the block layer, cfg_obj.c, proves them over the object from what it read, no name list), a switch's indirect jump (an exit: the
  * code reached only through its table is unreachable and is not part of the signature), the FP condition-code
  * NUMBER a COP1 BC branch tests (cc, decode_mips.c: this engine does not track FP flag values to resolve it,
  * only that a BC branch exists and whether it is a likely form).
@@ -130,4 +131,44 @@ enum kgenome_cfg_x kgenome_cfg_isa_class(const struct kgenome_cfg_isa *isa, cons
 	default:
 		return KGENOME_CFG_X_NONE;
 	}
+}
+
+int kgenome_cfg_isa_linked(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *prev, const struct kgenome_cell_insn *in)
+{
+	/* ARM: `mov lr, pc` (the decoder gives MOV with the link register written and the program counter its source) right before a jump through a register;
+	 * `pc` reads as the address of `prev` + 8, which is the instruction after `in`: the return address. */
+	if (!prev || isa->arch != KGENOME_ARCH_ARM || in->op != KGENOME_CELL_JMP || !(in->flags & KGENOME_CELL_F_INDIRECT))
+		return 0;
+	if (prev->op != KGENOME_CELL_MOV || prev->at + prev->len != in->at || prev->n_op < 2u)
+		return 0;
+	return prev->o[0].kind == KGENOME_CELL_O_REG && prev->o[0].reg == 14u && prev->o[1].kind == KGENOME_CELL_O_REG && prev->o[1].reg == 15u;
+}
+
+int kgenome_cfg_isa_interworks(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, const uint8_t *bytes, uint64_t n, int code_be)
+{
+	/* ARM `blx label`: cond = 0b1111 and bits 27..25 = 101 (ARM ARM A8.8.25, encoding A2); `bl` has a real condition there */
+	if (isa->arch != KGENOME_ARCH_ARM || in->op != KGENOME_CELL_CALL || (in->flags & KGENOME_CELL_F_INDIRECT) || !bytes || in->len != 4u ||
+	    in->at > n || n - in->at < 4u)
+		return 0;
+	return (bytes[in->at + (code_be ? 0u : 3u)] & 0xfeu) == 0xfau;
+}
+
+/* The trap a compiler puts right behind a call that does not return (PM5-D2: `call __libc_start_main; hlt`, `call abort; ud2`, `call f; int3`): an
+ * instruction defined to fault on every row (KGENOME_CELL_UD: ud2, ARM udf), and on x86 the one-byte `hlt` (f4) and `int3` (cc). Nothing else is: a byte
+ * that is neither is not taken as the call's (it may be the start of another function). */
+int kgenome_cfg_isa_trap(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in, const uint8_t *bytes, uint64_t n)
+{
+	if (in->op == KGENOME_CELL_UD)
+		return 1;
+	if ((isa->arch != KGENOME_ARCH_X86 && isa->arch != KGENOME_ARCH_X86_64) || !bytes || in->len != 1u || in->at >= n)
+		return 0;
+	return bytes[in->at] == 0xf4u || bytes[in->at] == 0xccu;
+}
+
+int kgenome_cfg_isa_returns(const struct kgenome_cfg_isa *isa, const struct kgenome_cell_insn *in)
+{
+	if (in->op == KGENOME_CELL_RET)
+		return 1;
+	return (isa->arch == KGENOME_ARCH_MIPS || isa->arch == KGENOME_ARCH_MIPS64) && in->op == KGENOME_CELL_JMP && (in->flags & KGENOME_CELL_F_INDIRECT) &&
+	       in->n_op == 1u && in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == 31u;
 }

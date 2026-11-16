@@ -152,6 +152,27 @@ enum kgenome_textual_status kgenome_textual_islands(const struct kgenome_textual
 	return w.refused ? KGENOME_TEXTUAL_REFUSED : st;
 }
 
+int kgenome_textual_lang_known(uint32_t lang)
+{
+	return kgenome_textual_lang_find(lang) != NULL;
+}
+
+uint32_t kgenome_textual_tag_own(uint32_t lang, const uint8_t *tag, uint32_t len, int close)
+{
+	const struct kgenome_textual_lang *l = kgenome_textual_lang_find(lang);
+
+	return l && l->tag_own ? l->tag_own(tag, len, close) : len;
+}
+
+enum kgenome_textual_block_syntax kgenome_textual_page_syntax(uint32_t lang, const uint8_t *in, uint32_t n, uint32_t at)
+{
+	const struct kgenome_textual_lang *l = kgenome_textual_lang_find(lang);
+
+	if (!l || !l->page || !in || at > n)
+		return KGENOME_TEXTUAL_SYN_NONE;
+	return kgenome_textual_page_syntax_of(l->page, in, n, at);
+}
+
 int kgenome_textual_glue_always(uint8_t a, uint8_t b)
 {
 	(void)a;

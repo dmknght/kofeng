@@ -62,6 +62,13 @@ struct object {
 	uint8_t   subtype;
 	uint8_t   subfamily;
 	/*
+	 * THIS OBJECT IS EVIDENCE, NOT A SCAN TARGET OF ITS OWN - see
+	 * kof_result.evidence_only. obj_label (kv_tree_label.c) reads it to mark
+	 * the row with something other than a real child's "//", so a reader does
+	 * not take it for a piece of the file's own structure (owner, 2026-11-10).
+	 */
+	uint8_t   evidence_only;
+	/*
 	 * Set when the engine handed the symbol records over with the object -
 	 * see kof_result.syms. sym_build must not overwrite them: the object is
 	 * a rendering whose own headers cannot produce a block, and building
@@ -180,6 +187,18 @@ struct object {
 	uint32_t                n_diag;
 	uint8_t                 explained;   /* diag was taken from the pull (view_explain), whether or not it held a row */
 	/*
+	 * THE OBJECT'S WHOLE VALUE-FLOW GRAPH - an owned copy of kof_result.lineage, which
+	 * the engine lends only for the callback, same pull as `diag` above (view_explain:
+	 * kscan_explain). Read by the Lineage tab of the CFG dialog (kv_cfgdlg.c), sliced to
+	 * one function's extent there; not drawn here.
+	 */
+	struct kof_diag_lineage_rec *lineage;
+	uint32_t                     n_lineage;
+	/* EVERY INPUT of those nodes (kof_result.lineage_in, a record's [in_first, in_first + n_all)), owned the same way: a record's in[] is a
+	 * four-input view without a system call's number, and the Lineage tab drew what the view held (2026-11-14). */
+	struct kof_diag_lineage_in  *lineage_in;
+	uint32_t                     n_lineage_in;
+	/*
 	 * THE FUNCTIONS ITS SYMBOLS NAME, built once beside the symbol block - see
 	 * funcs.h. Empty for an object with none, and for a normalised view, whose
 	 * headers describe its parent.
@@ -192,6 +211,20 @@ struct object {
 	/* What Analysis > Analyze disassembly found: the places that stand for an import, by file offset, from the engine (kof_callnames_build). Built once. */
 	struct kgenome_callnames    calls;
 	uint8_t                 calls_done;
+
+	/*
+	 * THE SCRIPT NORM CHILD, LAID OUT FOR A READER (kgenome_textual_pretty, textual.h) - owner,
+	 * 2026-11-11: "viết và hiển thị trong kofviewer thay thế nội dung phần norm". Built once, lazily,
+	 * only for the object this IS (ctx.format == KOF_FMT_SCRIPT, entry_kind == KOF_ENT_NORMALIZED):
+	 * `pretty_p` is an owned copy, NULL when there is none (not that kind of object, the language has
+	 * no textual row, or the call answered nothing) - `draw_text`/`text_under` then fall back to
+	 * `buf.p`/`buf.n` exactly as before. This is a DISPLAY rendering only: it is never what the engine
+	 * scans, matches against, or feeds back into itself - see kgenome_textual_pretty's own header for
+	 * why a text that may be re-lexed must never carry it.
+	 */
+	uint8_t  *pretty_p;
+	uint64_t  pretty_n;
+	uint8_t   pretty_done;
 
 	/*
 	 * The object's symbol records, in the KSYM layout kofsym.h fixes.
@@ -260,6 +293,10 @@ struct object {
 	 * object goes (dash_drop). Heap, sized to the rows. NULL until then. */
 	struct dash_infect *inf_data;
 	struct dash_shell  *shell_data;
+	/* The ObfScore of a script (kof_script_obf: the engine's text route), computed ONCE when the Overview first shows it (dash_islands) and kept until the
+	 * object goes (dash_drop). NULL until then, and after a failed allocation (obf_done says it was asked). */
+	struct kgenome_diag_text_obf_set *obf_data;
+	uint8_t             obf_done;
 	/*
 	 * WHICH MAPPED FILE OF A PROCESS VIEW THIS ROW IS, plus one - zero
 	 * means it is not one. An index into view.seen_path, which holds the

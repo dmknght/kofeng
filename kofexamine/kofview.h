@@ -222,6 +222,7 @@ void out_fmt(struct out *o, const char *fmt, ...);
 #define G_H  "-"
 #define G_V  "|"
 #define G_THUMB "#"
+#define G_THUMB_H "#"
 /*
  * HALF CELLS, so a thumb can start and stop BETWEEN rows.
  *
@@ -248,6 +249,10 @@ void out_fmt(struct out *o, const char *fmt, ...);
 /* The thumb of a scrollbar drawn INSIDE a border: it has to read as a mark on
  * the wall rather than as a gap in it, which a reversed space does not. */
 #define G_THUMB "\xe2\x94\x83"  /* U+2503, heavy vertical */
+/* The horizontal bar's own thumb: a vertical stroke (G_THUMB) drawn lying down read as a
+ * vertical tick mark crossing a horizontal rail, not as a thicker piece of the rail itself -
+ * the same reason G_HALF_L/_R are the heavy-horizontal partials and not G_HALF_T/_B. */
+#define G_THUMB_H "\xe2\x94\x81"  /* U+2501, heavy horizontal */
 /*
  * Half cells - see the note in the ASCII branch for what they buy.
  *

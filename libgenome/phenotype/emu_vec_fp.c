@@ -1,6 +1,6 @@
 /*
  * emu_vec_fp.c - packed and scalar SSE floating point, the conversions, and the arithmetic they share.
- * Part of the interpreter; see emu_interp.c, emu_vec.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c, emu_vec.c and emu_x86_private.h.
  *
  * THE ARITHMETIC IS THE HOST'S, THE ANSWERS THE HOST LEAVES TO ITS CPU ARE DECIDED HERE (Intel SDM Vol. 1
  * 4.8.3 Table 4-7, 11.5.2):
@@ -26,7 +26,7 @@
 
 #include <fenv.h>
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 /* ---- one lane --------------------------------------------------------------------------------- */
 
@@ -228,7 +228,7 @@ static int dst_rd(const struct kgenome_emu *e, const struct kgenome_emu_insn *ix
 
 	if (d->type != KGENOME_X86_OP_REG || d->rtype != KGENOME_X86_REG_SSE || d->reg >= 16u)
 		return 0;
-	memcpy(x, e->xmm[d->reg], 16);
+	memcpy(x, e->x86.xmm[d->reg], 16);
 	return 1;
 }
 
@@ -238,13 +238,13 @@ static int dst_wr(struct kgenome_emu *e, const struct kgenome_emu_insn *ixp, con
 
 	if (d->type != KGENOME_X86_OP_REG || d->rtype != KGENOME_X86_REG_SSE || d->reg >= 16u)
 		return 0;
-	memcpy(e->xmm[d->reg], q, 16);
+	memcpy(e->x86.xmm[d->reg], q, 16);
 	return 1;
 }
 
 static unsigned mx_rc(const struct kgenome_emu *e)
 {
-	return (e->mxcsr >> 13) & 3u;
+	return (e->x86.mxcsr >> 13) & 3u;
 }
 
 /* the operation an id performs, and whether it is the double or the single form, packed or scalar */
@@ -463,7 +463,7 @@ static int fp_blend(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		return KGENOME_EMU_RUN_UNSUPPORTED;
 	for (k = 0; k < 16u / lw; k++) {
 		const int take = (id == KGENOME_X86_I_BLENDPS || id == KGENOME_X86_I_BLENDPD)
-				 ? (int)((sel >> k) & 1u) : (int)(e->xmm[0][k * lw + lw - 1u] >> 7);
+				 ? (int)((sel >> k) & 1u) : (int)(e->x86.xmm[0][k * lw + lw - 1u] >> 7);
 
 		if (take)
 			memcpy(x + k * lw, y + k * lw, lw);

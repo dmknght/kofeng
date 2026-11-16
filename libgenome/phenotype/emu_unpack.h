@@ -185,6 +185,29 @@ struct kgenome_emu_unp_report {
 	 * different findings, and only the second one is about the file.
 	 */
 	const char          *refused;
+	/*
+	 * 1 when this run CARRIED ON the machine another reader of the object had started from the same
+	 * entry (kgenome_emu_unp_pe_req.resume) instead of building one: `insn` then counts from the
+	 * entry, the instructions the first reader ran included.
+	 */
+	int                  resumed;
+};
+
+/*
+ * THE MACHINE A RUN FROM A PE'S ENTRY LEFT, KEPT FOR THE NEXT READER OF THE SAME OBJECT (EA8).
+ *
+ * The API-resolution run (kgenome_diag_apihash_make) and the unpack run both build the PE's process
+ * image and start it at its entry. The first one leaves its machine here, with what its build said
+ * (`rep`: the entry, the stack, whether the mapping was improvised) and the bytes it was built from;
+ * the unpack run is handed it (kgenome_emu_unp_pe_req.resume) and carries it on, so nothing the
+ * first one executed is executed again. `em` is NULL when nothing is kept. The keeper frees `em`
+ * with kgenome_emu_free when no run takes it.
+ */
+struct kgenome_emu_unp_kept {
+	struct kgenome_emu            *em;
+	struct kgenome_emu_unp_report  rep;
+	const uint8_t                 *file;
+	uint64_t                       n;
 };
 
 /*
@@ -442,6 +465,15 @@ struct kgenome_emu_unp_pe_req {
 
 	/* THE RESULT: filled when non-NULL, zeroed first. */
 	struct kgenome_emu_unp_report  *rep;
+	/*
+	 * THE OBJECT'S MACHINE, ALREADY STARTED FROM THE ENTRY, or NULL (EA8). Taken over (`resume->em` is
+	 * NULL after the call, whatever it answers) and carried on to this request's ceiling when it was
+	 * built from the same bytes and this request declares nothing that changes the machine before its
+	 * first instruction - no patch, no instruction watch, no shim, no program range (`n_oep`); then
+	 * `rep->resumed` is 1. Otherwise it is freed and a machine is built as without it: a declaration
+	 * that applies from the entry cannot be applied to a machine that has run past it.
+	 */
+	struct kgenome_emu_unp_kept    *resume;
 };
 
 struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *rq);

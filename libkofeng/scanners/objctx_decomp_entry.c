@@ -10,6 +10,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 
 /*
@@ -36,6 +37,8 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (!oc_can_produce(sc))
 		return 0;
 	oc_entry_begin(sc);
+	KOF_TRACE("[decomp] entry %u method=%u out_hint=%llu\n", (unsigned)index, (unsigned)method,
+		  (unsigned long long)out_hint);
 	if (method == KOF_UNP_BCJ2)
 		return oc_unpack_bcj2(sc, ctx, index);
 	if (!ctx->resolve_entry)
@@ -156,6 +159,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	 * answer this engine must never give.
 	 */
 	if (e->flags & KOF_ENT_F_CODED_UNKNOWN) {
+		KOF_TRACE("[decomp] chain entry %u refused: a coding this build cannot express\n", (unsigned)index);
 		oc_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
 		return 0;
 	}
@@ -166,6 +170,8 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 
 	for (last = 0; last + 1u < 4u && e->coding[last + 1u]; last++)
 		;
+	KOF_TRACE("[decomp] chain entry %u: %u step(s), last coding=%u\n", (unsigned)index, (unsigned)(last + 1u),
+		  (unsigned)e->coding[last]);
 
 	off = e->off;
 	len = e->len;
@@ -261,22 +267,29 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	 * single-coding case and is why this also replaces a bare
 	 * kof_unpack_at for a container that has entries.
 	 */
-	if (!mid)
+	if (!mid) {
+		KOF_TRACE("[decomp] chain entry %u: single coding, straight into oc_unpack\n", (unsigned)index);
 		return oc_unpack(ctx, e->coding[last], off, len, e->out_hint);
+	}
 
 	/*
 	 * INFLATE ONLY, over an intermediate.
 	 *
 	 * oc_unpack reads the OBJECT, so it cannot be handed a buffer this
-	 * function made - and rather than widen it to take either, the one
-	 * chain that exists in the wild is served and anything else is
-	 * refused out loud. PDF writes /ASCII85Decode in front of a Flate;
-	 * a chain ending in something else, over an intermediate, has not
-	 * turned up, and inventing a path for it would be code nothing
-	 * exercises.
+	 * function made - the one chain that exists in the wild is served and
+	 * anything else is refused out loud. PDF writes /ASCII85Decode in front
+	 * of a Flate; a chain ending in something else, over an intermediate,
+	 * has not turned up, and inventing a path for it would be code nothing
+	 * exercises. The decode itself (zlib header strip, sc->cache.inf,
+	 * kuncoat_inflate, oc_stream_note) is inflate_span (objctx_decomp.h),
+	 * shared with oc_inflate_members's own first iteration (coordinator
+	 * fix after DF-9, 2026-11-12: two copies of this had drifted apart
+	 * before, see zlib_hdr_len's own "ONE COPY" note).
 	 */
 	if (e->coding[last] != KOF_UNP_ZLIB &&
 	    e->coding[last] != KOF_UNP_DEFLATE) {
+		KOF_TRACE("[decomp] chain entry %u refused: last coding %u over an intermediate is not zlib/deflate\n",
+			  (unsigned)index, (unsigned)e->coding[last]);
 		oc_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
 		free(mid);
 		oc_scan_release(sc, mid_cap);
@@ -284,7 +297,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	}
 	{
 		struct expand_sink snk = { 0 };
-		enum kuncoat_status st;
+		struct inflate_span_result r;
 		const uint8_t *p = mid;
 		uint64_t n = len;
 
@@ -305,15 +318,8 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		}
 		snk.ctx = ctx;
 		snk.left = expand_limit(n, e->out_hint);
-		{
-			struct kuncoat_io io = {
-				.in = { p, n }, .sink = oc_expand_sink_fn, .user = &snk,
-			};
-
-			st = kuncoat_inflate(sc->cache.inf, &io);
-			produced = io.produced;
-		}
-		oc_stream_note(sc, st, STREAM_STRICT, &snk);
+		r = inflate_span(sc, &snk, p, n);
+		produced = r.produced;
 	}
 	free(mid);
 	oc_scan_release(sc, mid_cap);

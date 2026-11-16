@@ -367,30 +367,35 @@ void hex_step(struct view *v, long lines)
 	 */
 	if (text_pane(v)) {
 		struct object *ob = cur_obj(v);
-		uint64_t n = ob ? ob->buf.n : 0;
-		const uint8_t *b = ob ? ob->buf.p : NULL;
+		uint64_t n;
+		const uint8_t *b;
+		int rendered = ob && txt_pretty_view(ob, &b, &n);
 		uint64_t a;
 
+		if (!rendered) {
+			n = ob ? ob->buf.n : 0;
+			b = ob ? ob->buf.p : NULL;
+		}
 		if (!b)
 			n = 0;
 		uint64_t top;
 
-		a = txt_line_start(v, b, n, v->rgn_at);
-		while (lines > 0 && a < v->rgn_len) {
-			uint64_t nx = txt_line_end(v, b, n, a);
+		a = txt_line_start(v, b, n, v->rgn_at, rendered);
+		while (lines > 0 && a < n) {
+			uint64_t nx = txt_line_end(v, b, n, a, rendered);
 
-			if (nx >= v->rgn_len)
+			if (nx >= n)
 				break;
 			a = nx;
 			lines--;
 		}
 		while (lines < 0 && a > 0) {
-			a = txt_line_start(v, b, n, a - 1u);
+			a = txt_line_start(v, b, n, a - 1u, rendered);
 			lines++;
 		}
 		/* And never past the point where the last line is on the
 		 * bottom row - see txt_max_top. */
-		top = txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1);
+		top = txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1, rendered);
 		v->rgn_at = a > top ? top : a;
 		return;
 	}

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "kv.h"
 #include "kv_decl_private.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 
 /*
@@ -155,6 +156,20 @@ static int mtn_mark(struct view *v, const struct object *o,
 		b->fn_off = first->off;
 		b->fn_len = first->len;
 	}
+	/* A FUNCTION UNIT HAS NO SIGNATURE (kgenome_mutation_signature: KGENOME_MUTATION_SIG_NONE, CFG signing disabled by the owner 2026-11-15): `nosig`, no hashes,
+	 * no id - its hash cell is a dash and nothing is computed for it. It stays listed (its name opens the function's dialog, whose content is the lineage). */
+	if (kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_NONE) {
+		b->nosig = 1;
+		b->colour = (uint8_t)(v->ed.dr.n_blk % MTN_COLOURS);
+		v->ed.dr.n_blk++;
+		return 1;
+	}
+	/*
+	 * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+	 * To re-enable: take this #if 0 out, with kof_cfgsign_function (analyzers/cfgsign.c) and kgenome_mutation_signature answering KGENOME_MUTATION_SIG_CFG.
+	 * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+	 */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG) {
 		struct kof_cfgsign cs;
 		struct kof_cfgsign_req rq;
@@ -178,6 +193,7 @@ static int mtn_mark(struct view *v, const struct object *o,
 		v->ed.dr.n_blk++;
 		return 1;
 	}
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	b->n_hash = kgenome_mutation_unit_minhash(first, base + lo, len, b->hash);
 	if (b->n_hash < kgenome_mutation_block_min(mask)) {
 		/*
@@ -379,10 +395,30 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
 	rn = (c->fp && c->fp->region_name && mask != KOF_SCAN_ALL)
 	   ? c->fp->region_name(mask) : NULL;
 	lbl = rn ? kof_region_label(rn) : "ALL";
-	/* A function is named by the engine: its symbol, or `fcn_<offset>` for one nothing names (kof_func_name). A piece that is not a function has no name. */
+	/*
+	 * A function is named by the engine: its symbol, a script's own declared name, or
+	 * `fcn_<offset>` for one nothing names (kof_func_name). A piece that is not a function has
+	 * no name - EXCEPT a script's own remainder unit (owner, 2026-11-06: "for the script case,
+	 * name a block with no function as block_<line_number>"): `first` is NULL here because
+	 * by_function already emitted the real functions and this piece is what mutation_units.c's
+	 * script_remainder() cuts from what is left between them, never an entry of the object's own
+	 * function table. A throwaway KGENOME_FN_SCRIPT entry is built HERE, for naming only, from
+	 * the unit's own (off, len) - and is never passed to mtn_mark below, which still reads the
+	 * real `first` (NULL), so fn_off/fn_len and the CFG-dialog press (kv_decl_blocks.c's
+	 * `fn_row = b->fn_len != 0`) stay exactly as they are today: this names the row, it does not
+	 * turn it into a function row or make its name clickable.
+	 */
 	if (first)
-		(void)kof_func_name(first, c->o->sym, c->o->sym_n, sym, sizeof sym);
-	else
+		(void)kof_func_name(first, c->o->sym, c->o->sym_n, c->o->buf.p, c->o->buf.n, sym, sizeof sym);
+	else if (c->o->ctx.format == KOF_FMT_SCRIPT) {
+		struct kgenome_func blk;
+
+		memset(&blk, 0, sizeof blk);
+		blk.off = off;
+		blk.len = len;
+		blk.kind = KGENOME_FN_SCRIPT;
+		(void)kof_func_name(&blk, NULL, 0, c->o->buf.p, c->o->buf.n, sym, sizeof sym);
+	} else
 		sym[0] = 0;
 	mtn_mark(c->v, c->o, off, off + len, mask, lbl, rn,
 		 (uint8_t)side, sym, first);
@@ -394,12 +430,26 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
  * has no headers to build them from, so they are its parent's, found again in
  * its bytes: the same kgenome_funcs_remap the scanner maps them with when it makes
  * the view, so the table lists the units the scanner will sketch.
+ *
+ * A SCRIPT builds through kof_script_funcs_build (script_route.h), the same engine-side
+ * adapter objctx_diag.c's funcs_of calls, so the viewer's live carve and the scanner's feed read
+ * one function table for one object, not two independently written ones (rule 2): PHP only
+ * today, see celllysis/script_funcs.c's own header for what is not yet covered.
+ *
+ * LIMIT (2026-11-16, partition from metadata only): the Blocks table lists every entry of this table as a function row, and does not show the entry's trust
+ * (funcs.h enum kgenome_fn_trust) or its further ranges (kgenome_funcs_range): an object with no function metadata shows ONE row per code extent named
+ * fcn_<offset> (trust none: an unpartitioned extent, not a function), and a function with a chained .pdata part far from its body shows its first range.
+ * kofexaminer --blocks prints both (trust=, ranges=). Showing them here is a UI change for the owner to ask for (no column was added).
+ * Round 4: a NONE unit holds the starts the start-only tables declare (kgenome_funcs_starts_in: the entry, init arrays, exports, exidx rows...); the
+ * table lists the unit once and does not show those starts (limit; kofexaminer --blocks prints their count, starts=).
  */
 const struct kgenome_func_set *mtn_funcs(struct view *v, struct object *o)
 {
 	if (!o->funcs_done) {
 		o->funcs_done = 1;
-		if (o->n_rgn) {
+		if (o->ctx.format == KOF_FMT_SCRIPT) {
+			kof_script_funcs_build(&o->ctx, o->buf.p, o->buf.n, &o->funcs);
+		} else if (o->n_rgn) {
 			const struct object *anc[MAX_OBJ];
 			uint32_t n = obj_ancestors(v, o, anc, MAX_OBJ);
 

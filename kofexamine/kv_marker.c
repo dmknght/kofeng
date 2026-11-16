@@ -218,14 +218,19 @@ void draw_marker_line(struct out *o, struct view *v)
 		 */
 		else if (text_pane(v)) {
 			struct object *tob = cur_obj(v);
-			uint64_t tn = tob ? tob->buf.n : 0;
-			const uint8_t *tb = tob ? tob->buf.p : NULL;
+			uint64_t tn;
+			const uint8_t *tb;
+			int rendered = tob && txt_pretty_view(tob, &tb, &tn);
 			uint64_t ls, line;
 
+			if (!rendered) {
+				tn = tob ? tob->buf.n : 0;
+				tb = tob ? tob->buf.p : NULL;
+			}
 			if (!tb)
 				tn = 0;
-			ls = txt_line_start(v, tb, tn, lo);
-			line = txt_line_of(v, tb, tn, ls) + 1u;
+			ls = txt_line_start(v, tb, tn, lo, rendered);
+			line = txt_line_of(v, tb, tn, ls, rendered) + 1u;
 			snprintf(right, sizeof right,
 				 "%llu B   line %llu col %llu   "
 				 "(offset 0x%08llx)",

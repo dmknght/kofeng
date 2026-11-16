@@ -260,6 +260,11 @@ static int eh_locate(kof_buf file, const struct kgenome_elf_info *e, struct rd *
 	return 1;
 }
 
+/* KNOWN DEFECT FPART-D1 (2026-11-17, M) [sev M]: kgenome_fntab_fde takes every FDE as one function's exact extent; hand-written assembly writes several per function.
+ * Trigger: stripped static glibc/OpenSSL (__clone, __clone3: FDE pieces with an undefined return address; poly1305_blocks_avx: three entry FDEs; pthread_cond_wait:
+ * one FDE over two symbols). Effect: HIGH units start or end inside a function (R1: 62 boundaries on 63 twins + 45 variants), stripped != unstripped (R2).
+ * Reproducer: /mnt/games/normtest/fix_part/h/r12.py (stripped twins, out/t4_twins/fail.txt). Fix: read each FDE by the descent (cfg_obj.c) and demote one whose last instruction
+ * runs on past its end, or whose first byte the FDE before runs into; an FDE over two symbols has no metadata answer (owner decision). */
 void kgenome_fntab_fde(kof_buf file, const struct kgenome_elf_info *e, struct kgenome_fntab_list *out)
 {
 	struct rd r;
@@ -365,7 +370,9 @@ void kgenome_fntab_fde(kof_buf file, const struct kgenome_elf_info *e, struct kg
 				goto next;
 			}
 			host = kgenome_elf_load_at_off(e, foff);
-			ok = host && kgenome_elf_seg_is_code(host) && !kgenome_fntab_in_stub_section(e, foff);
+			/* PMA-1 (audit, round 3): an FDE in ANY executable segment is a function - .init, .plt, .plt.got, a custom section (the FNTAB-COV-3 refusal of the
+			 * linker's sections turned their code into undeclared NONE units and said P_BAD_FDE of valid records) */
+			ok = host && kgenome_elf_seg_is_code(host);
 			if (!ok) {
 				out->n_bad++;                   /* data, or a stub section (.plt: the linker's code, FNTAB-COV-3): not a function of the program's code */
 				out->partial |= KGENOME_FNTAB_P_BAD_FDE;

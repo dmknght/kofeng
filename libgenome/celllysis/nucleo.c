@@ -165,6 +165,8 @@ uint16_t kgenome_nucleo_cap_of_name(unsigned target, const char *sym)
 	return kgenome_nucleo_name_lookup(target, sym, NULL);
 }
 
+/* A row with no capability (a fact-only row: an indirect entry, a release) answers KGENOME_NUCLEO_NONE with its id: a caller that
+ * makes a node reads the capability (diag_scan.c, the PE route), and a name the vocabulary has no word for makes none. */
 uint16_t kgenome_nucleo_name_lookup(unsigned target, const char *sym, uint16_t *id)
 {
 	uint32_t rid = 0;
@@ -173,6 +175,118 @@ uint16_t kgenome_nucleo_name_lookup(unsigned target, const char *sym, uint16_t *
 	if (id)
 		*id = row ? (uint16_t)rid : 0u;
 	return row ? row->cap : KGENOME_NUCLEO_NONE;
+}
+
+/* ---- the row's shape (see nucleo.h, "THE ROW OF A CALL AND ITS SHAPE") ---- */
+
+uint16_t kgenome_nucleo_row_of(unsigned target, const char *sym)
+{
+	uint32_t rid = 0;
+
+	return names_find(target, sym, &rid) ? (uint16_t)rid : 0u;
+}
+
+uint16_t kgenome_nucleo_row_cap(uint16_t row)
+{
+	size_t t;
+
+	if (!row)
+		return KGENOME_NUCLEO_NONE;
+	for (t = 0; t < sizeof tables / sizeof tables[0]; t++) {
+		if (row <= tables[t]->n)
+			return tables[t]->row[row - 1u].cap;
+		row = (uint16_t)(row - tables[t]->n);
+	}
+	return KGENOME_NUCLEO_NONE;
+}
+
+/* The shape of the capability: the hand-written list (nucleo_capshape.c) is short and read in turn; index 0 is the empty shape. */
+static const struct kgenome_nucleo_shape *cap_shape(uint16_t cap)
+{
+	uint32_t i;
+
+	for (i = 0; i < kgenome_nucleo_capshape_n; i++)
+		if (kgenome_nucleo_capshape_cap[i] == cap)
+			return &kgenome_nucleo_shapes[kgenome_nucleo_capshape_shape[i]];
+	return &kgenome_nucleo_shapes[0];
+}
+
+static const struct kgenome_nucleo_shape *row_shape(uint16_t row)
+{
+	if (!row || row > kgenome_nucleo_rows_n)
+		return NULL;
+	return &kgenome_nucleo_shapes[kgenome_nucleo_row_shape[row - 1u]];
+}
+
+static int shape_hands_on(const struct kgenome_nucleo_shape *s)
+{
+	return s->res == KGENOME_NUCLEO_RES_HANDLE || s->res == KGENOME_NUCLEO_RES_POINTER || s->res == KGENOME_NUCLEO_RES_CODEPTR;
+}
+
+uint8_t kgenome_nucleo_row_role(uint16_t row, unsigned i)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s && i < 8u ? s->role[i] : 0u;
+}
+
+int kgenome_nucleo_row_field(uint16_t row, unsigned i)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s && i < 8u && (s->field >> i) & 1u;
+}
+
+unsigned kgenome_nucleo_row_res(uint16_t row)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s ? s->res : KGENOME_NUCLEO_RES_STATUS;
+}
+
+int kgenome_nucleo_row_hands_on(uint16_t row)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s && shape_hands_on(s);
+}
+
+unsigned kgenome_nucleo_row_out(uint16_t row, unsigned k)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s && k < 2u ? s->out[k] : KGENOME_NUCLEO_ARG_NONE;
+}
+
+unsigned kgenome_nucleo_row_release(uint16_t row)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	return s ? s->release : KGENOME_NUCLEO_ARG_NONE;
+}
+
+unsigned kgenome_nucleo_entry_arg(uint16_t row, unsigned *how)
+{
+	const struct kgenome_nucleo_shape *s = row_shape(row);
+
+	if (how)
+		*how = s && s->entry != KGENOME_NUCLEO_ARG_NONE ? s->entry_how : 0u;
+	return s ? s->entry : KGENOME_NUCLEO_ARG_NONE;
+}
+
+uint8_t kgenome_nucleo_cap_role(uint16_t cap, unsigned i)
+{
+	return i < 8u ? cap_shape(cap)->role[i] : 0u;
+}
+
+uint8_t kgenome_nucleo_call_role(uint16_t cap, uint16_t row, unsigned i)
+{
+	return row ? kgenome_nucleo_row_role(row, i) : kgenome_nucleo_cap_role(cap, i);
+}
+
+int kgenome_nucleo_call_hands_on(uint16_t cap, uint16_t row)
+{
+	return row ? kgenome_nucleo_row_hands_on(row) : shape_hands_on(cap_shape(cap));
 }
 
 int kgenome_nucleo_cap_named(uint16_t cap)
@@ -354,94 +468,51 @@ const char *kgenome_nucleo_cap_name(uint16_t cap)
 	}
 }
 
-/* See the note in nucleo.h. */
+/* See the note in nucleo.h: the capability's shape says which argument names the kernel symbol (name<k> / nameobj<k>). */
 unsigned kgenome_nucleo_name_arg(uint16_t cap, unsigned *arg)
 {
-	if (arg)
-		*arg = 0u;
-	switch (cap) {
-	/* A resolver is handed the word it is to find. */
-	case KGENOME_NUCLEO_KSYM_LOOKUP:
-	case KGENOME_NUCLEO_SYMBOL_GET:
-		return KGENOME_NAME_DIRECT;
-	/*
-	 * A probe is handed an OBJECT, and the name it is to be placed on is
-	 * one of the pointers in it - see the note in nucleo.h for why this
-	 * does not say which.
-	 */
-	case KGENOME_NUCLEO_KPROBE_REG:
-		return KGENOME_NAME_OBJECT;
-	default:
-		return 0u;
-	}
-}
+	const struct kgenome_nucleo_shape *s = cap_shape(cap);
 
-/* See the note in nucleo.h - this is the vocabulary's own answer, and the
- * only one.
- *
- * `nm` IS NOT A NAME THE FILE CHOSE. A caller passes either the label of the syscall
- * NUMBER it decoded (kgenome_nucleo_sys_name: the kernel's own table, so a renamed or
- * stripped binary gives the same word) or an IMPORT name the loader resolves (the one
- * OS-defined spelling: change it and the program no longer links). A symbol name taken
- * from a program's own .symtab never reaches here - see kgenome_diag_sym's sites,
- * which come from undefined symbols only. Test: names_structural. */
-int kgenome_nucleo_hands_on(uint16_t cap, const char *nm)
-{
-	switch (cap) {
-	case KGENOME_NUCLEO_ALLOC:
-	case KGENOME_NUCLEO_ALLOC_EXEC:
-	case KGENOME_NUCLEO_HEAP:
-		/*
-		 * mprotect shares the word with mmap and is not a
-		 * constructor: it is handed a mapping and returns a status.
-		 */
-		return !(nm && (!strcmp(nm, "mprotect") ||
-				!strcmp(nm, "mprotect64")));
-	case KGENOME_NUCLEO_NET_OPEN:
-	case KGENOME_NUCLEO_NET_RAW:
-	case KGENOME_NUCLEO_NET_ACCEPT:
-	case KGENOME_NUCLEO_FILE_OPEN:
-	case KGENOME_NUCLEO_MEMFD:
-	case KGENOME_NUCLEO_PIPE_OPEN:
-	/* The kernel side: a credential to edit and commit, and the address
-	 * of whatever was looked up. */
-	case KGENOME_NUCLEO_CRED_PREPARE:
-	case KGENOME_NUCLEO_KSYM_LOOKUP:
-	case KGENOME_NUCLEO_SYMBOL_GET:
-		return 1;
-	default:
-		return 0;
-	}
+	if (arg)
+		*arg = s->name_kind ? s->name : 0u;
+	return s->name_kind;
 }
 
 /*
- * The names whose success value is zero - the labels of the kernel's own syscall table
- * and the OS-defined import names, with the same provenance as kgenome_nucleo_hands_on's
- * `nm` (never a name the file spelled for itself). Short and explicit rather than
- * derived: "returns 0 on success" is a per-call fact in the manual page, and
- * a rule that tried to infer it from the capability would get `socket` and
- * `bind` wrong in opposite directions.
+ * THE ROW `nm` IS, for the two questions below that are asked with a name and no target. The ELF table first, then the PE table: the
+ * routes that pass a name read one of those two (a syscall's label - kgenome_nucleo_sys_name, the kernel's own table - an ELF or a
+ * PE import). A name both tables hold is one function of the same contract in both (socket, connect, closesocket).
  *
- * `execve` is deliberately absent: on success it does not return at all, so
- * there is no value to claim.
+ * `nm` IS NOT A NAME THE FILE CHOSE: the label of a syscall NUMBER, or an IMPORT name the loader resolves (the one OS-defined
+ * spelling: change it and the program no longer links). A symbol name from a program's own .symtab never reaches here - see
+ * kgenome_diag_sym's sites, which come from undefined symbols only. Test: names_structural.
+ */
+static uint16_t row_of_any(const char *nm)
+{
+	uint16_t r = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, nm);
+
+	return r ? r : kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, nm);
+}
+
+/* See the note in nucleo.h: the row's answer when the name has one, the capability's otherwise. */
+int kgenome_nucleo_hands_on(uint16_t cap, const char *nm)
+{
+	uint16_t r = nm ? row_of_any(nm) : 0u;
+
+	return kgenome_nucleo_call_hands_on(cap, r);
+}
+
+/*
+ * The names whose success value is zero: the rows of the ELF table whose result is res=status0 (KGENOME_SHAPE). It was a list of
+ * names here, beside the table that names the same calls; "returns 0 on success" is a per-call fact in the manual page, and a rule
+ * that inferred it from the capability would get `socket` and `bind` wrong in opposite directions. `name` has the provenance of
+ * kgenome_nucleo_hands_on's `nm`.
+ *
+ * `execve` is deliberately not status0: on success it does not return at all, so there is no value to claim.
  */
 int kgenome_nucleo_sys_zero_on_success(const char *name)
 {
-	static const char *const z[] = {
-		"connect", "bind", "listen", "shutdown", "close",
-		"mprotect", "munmap", "chmod", "fchmod", "fchmodat",
-		"chdir", "chroot", "setuid", "setgid", "setreuid",
-		"setresuid", "unlink", "unlinkat", "rename", "renameat",
-		"utime", "utimes", "utimensat", "init_module",
-		"finit_module", "delete_module", "setns", "unshare",
-		"pivot_root"
-	};
-	uint32_t i;
+	uint16_t r = name ? kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, name) : 0u;
 
-	if (!name)
-		return 0;
-	for (i = 0; i < sizeof z / sizeof z[0]; i++)
-		if (!strcmp(name, z[i]))
-			return 1;
-	return 0;
+	return r && kgenome_nucleo_row_res(r) == KGENOME_NUCLEO_RES_STATUS0;
 }

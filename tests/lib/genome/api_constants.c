@@ -94,7 +94,7 @@ static void t_format_numbers(void)
 	CK(KGENOME_PE_LAYOUT_FILE == 0 && KGENOME_PE_LAYOUT_MAPPED == 1);
 	CK(KGENOME_PE_ORIGIN_NONE == 0 && KGENOME_PE_ORIGIN_MANUAL < KGENOME_PE_ORIGIN_REPLACED);
 	CK(KGENOME_PE_IMP_DLLLEN == 64);
-	CK(KGENOME_PE_ANOM_COUNT == 27);
+	CK(KGENOME_PE_ANOM_COUNT == 28);
 	{
 		/* the anomaly words are single bits, one per member, in a 64-bit field */
 		uint64_t b[KGENOME_PE_ANOM_COUNT], v;
@@ -103,7 +103,8 @@ static void t_format_numbers(void)
 			v = 1ull << i;
 			b[i] = v;
 		}
-		CK(KGENOME_PE_ANOM_BAD_MZ == b[0] && KGENOME_PE_ANOM_RSRC_UNALIGNED == b[26]);
+		CK(KGENOME_PE_ANOM_BAD_MZ == b[0] && KGENOME_PE_ANOM_RSRC_UNALIGNED == b[26] &&
+		   KGENOME_PE_ANOM_CERT_OVERLAP == b[27]);
 		one_bit_each("PE_ANOM", b, KGENOME_PE_ANOM_COUNT, 32);
 	}
 	CK(KGENOME_ELF_ANOM_COUNT == 24 && KGENOME_ELF_ANOM_BAD_MAGIC == 1ull && KGENOME_ELF_ANOM_SECTAB_MISSING == 1ull << 23);

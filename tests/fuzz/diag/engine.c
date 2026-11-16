@@ -512,7 +512,22 @@ static int run_rec(struct fz_ctx *c, const uint8_t *in, size_t n)
 			if (p->sym)
 				FZ_CHECK(c, p->sym >= needs[0] && p->sym < needs[0] + sizeof needs[0] && strlen(p->sym) < sizeof needs[0], "a node's symbol outside the string store");
 		}
-		FZ_CHECK(c, roots == 1u, "a loaded diagnose without exactly one root");
+		/* one root, or two with a KOF_DIAG_B_JOIN node in the second block (kofdiag_load.c blocks_ok); every node's parents end at a root */
+		{
+			uint8_t joins = 0;
+
+			for (i = 0; i < d[0].n_node; i++) {
+				uint8_t p = i, steps = 0;
+
+				while (d[0].node[p].parent != KOF_DIAG_NO_PARENT && d[0].node[p].parent < d[0].n_node && steps++ <= d[0].n_node)
+					p = d[0].node[p].parent;
+				FZ_CHECK(c, d[0].node[p].parent == KOF_DIAG_NO_PARENT, "a loaded node whose parents do not end at a root");
+				if (d[0].node[i].bits & KOF_DIAG_B_JOIN)
+					joins++;
+			}
+			FZ_CHECK(c, roots == 1u || (roots == 2u && joins), "a loaded diagnose without one root, or two that meet");
+			FZ_CHECK(c, roots == 2u || !joins, "a loaded one-block diagnose with a join");
+		}
 		FZ_CHECK(c, strlen(d[0].name) < sizeof name[0], "a loaded name without its terminator");
 		FZ_CHECK(c, d[0].n_needcap <= KOF_DIAG_MAX_NEED, "more needed capabilities than the array");
 		FZ_CHECK(c, d[0].n_when <= KOF_DIAG_MAX_WHEN, "more conditions than the array holds");

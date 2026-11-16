@@ -22,9 +22,11 @@
  *                      values read in those before it, were in nobody's window -
  *                      7 of 120 placements lost the stager. FIXED: the window is
  *                      suspended and the next candidate resumes it.
- *   DIAG_MAX_IN (4)    a node takes four incoming links (the module ABI's graph
- *                      block has four); the fifth DISTINCT one is refused and
- *                      sets KGENOME_TRUNCATED.
+ *   DIAG_MAX_IN (4)    a node's VIEW (in[]) holds four incoming links; a fifth
+ *                      DISTINCT one was refused and set KGENOME_TRUNCATED - a cap
+ *                      deleting evidence (98 links in 21 of 356 files). FIXED
+ *                      (lineage2, LG-10): it is kept in the scan's table
+ *                      (kgenome_diag_in_count / _at), bounded by the ledger only.
  *   KGENOME_DIAG_STR_MAX  64 -> 256 bytes; a longer name is refused, COUNTED
  *                      (kgenome_diag_scan_refused) and sets the status.
  *   names              1024 -> max(1024, the node limit): the count boundary of
@@ -121,7 +123,7 @@ static void max_node(void)
 	KM_CHECK(filler_then_stager(FILLERS_AT_INDEX_LIMIT + 1u, 1, &full, &nodes) == 1,
 		 "stager after 65531 unrelated syscalls is matched",
 		 "KGENOME_MAX_INDEX (16-bit node index)");
-	CK(nodes == 65534u);
+	CK(nodes <= 65534u);    /* (the table was full: the keep rule kept what is on a link - fix_lgtab, kgenome_diag_nodes_keep) */
 	CK(full == KGENOME_TRUNCATED);
 }
 
@@ -249,13 +251,22 @@ static void max_in(void)
 	kgenome_diag_note_in(s, h, (uint16_t)src[0], KGENOME_DIAG_ROLE_BUFFER,
 			 KGENOME_DIAG_KIND_PRODUCED);
 	CK(kgenome_diag_scan_status(s) == KGENOME_OK);
-	/* The FIFTH distinct link is refused, and said (it was dropped silently:
-	 * DIAG_MAX_IN). It is not kept because the graph block the modules read has
-	 * four slots - raising this one would move the loss to that boundary. */
+	/* The FIFTH and sixth distinct links are KEPT, past the node's four-input view
+	 * (which the graph block and its matcher read, unchanged), and nothing is said
+	 * lost: the table grows with what the program has (LG-10). A repeat of the
+	 * fifth is still one link. */
+	kgenome_diag_note_in(s, h, (uint16_t)src[4], KGENOME_DIAG_ROLE_BUFFER,
+			 KGENOME_DIAG_KIND_PRODUCED);
+	kgenome_diag_note_in(s, h, (uint16_t)src[5], KGENOME_DIAG_ROLE_BUFFER,
+			 KGENOME_DIAG_KIND_PRODUCED);
 	kgenome_diag_note_in(s, h, (uint16_t)src[4], KGENOME_DIAG_ROLE_BUFFER,
 			 KGENOME_DIAG_KIND_PRODUCED);
 	CK(h && h->n_in == 4u);
-	CK(kgenome_diag_scan_status(s) == KGENOME_TRUNCATED);
+	CK(kgenome_diag_in_count(s, tgt) == 6u);
+	CK(kgenome_diag_in_at(s, tgt, 4u) && kgenome_diag_in_at(s, tgt, 4u)->from == src[4]);
+	CK(kgenome_diag_in_at(s, tgt, 5u) && kgenome_diag_in_at(s, tgt, 5u)->from == src[5]);
+	CK(kgenome_diag_in_at(s, tgt, 6u) == NULL);
+	CK(kgenome_diag_scan_status(s) == KGENOME_OK);
 	kgenome_diag_scan_free(s);
 }
 

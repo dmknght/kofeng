@@ -1,4 +1,10 @@
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when kof_cfgsign_function is out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * cfgsign_wk - kof_cfgsign_function reads the object's walk (req.wk) instead of decoding again, and gives the same answer either way.
  *
  * Phase A1 passes the walk of the object to the signing of a function (scan_feed.c: `rq.wk = ...obj.diag.walk`). Its claim: on a walk that holds a trace the function is READ from the
@@ -157,12 +163,15 @@ static void t_states(void)
 	memset(&ctx, 0, sizeof ctx); kof_genome_obj_store(&ctx, &o);
 	memset(&rq, 0, sizeof rq);
 	rq.ctx = &ctx; rq.data = kof_buf_make(B, n); rq.off = TEXT_OFF; rq.len = 20;
+	/* this fixture (3 reachable blocks) is below the default floor (KGENOME_CFG_ANCHOR_MIN, 5, anchor-floor-1); this test is about decode/walk
+	 * identity, not about the floor policy, so an explicit floor of 1 keeps the rest of it exercising a SIGNED function as it always did. */
+	rq.floor = 1;
 
 	CK(kof_cfgsign_function(&rq, &cs) == KOF_CFGSIGN_SIGNED && cs.sign.n_blk > 0 && cs.n_insn >= 8);
 	/* a higher floor than the function has blocks: BELOW_FLOOR, the signature still made */
 	rq.floor = 1000;
 	CK(kof_cfgsign_function(&rq, &cs) == KOF_CFGSIGN_BELOW_FLOOR && cs.sign.n_blk > 0);
-	rq.floor = 0;
+	rq.floor = 1;
 	/* not in the object: undecodable */
 	rq.off = n; CK(kof_cfgsign_function(&rq, &cs) == KOF_CFGSIGN_UNDECODABLE);
 	rq.off = TEXT_OFF; rq.len = 0; CK(kof_cfgsign_function(&rq, &cs) == KOF_CFGSIGN_UNDECODABLE);
@@ -246,6 +255,7 @@ static void t_long_function(void)
 	memset(&ctx, 0, sizeof ctx); kof_genome_obj_store(&ctx, &o);
 	memset(&rq, 0, sizeof rq);
 	rq.ctx = &ctx; rq.data = kof_buf_make(B, n); rq.off = TEXT_OFF; rq.len = 0x700;
+	rq.floor = 1;    /* this fixture is one straight-line block (below KGENOME_CFG_ANCHOR_MIN, 5); the test is about allocation growth, not the floor */
 	CK(kof_cfgsign_function(&rq, &cs) == KOF_CFGSIGN_SIGNED && cs.n_insn == 0x700);
 	memset(&host, 0, sizeof host); host.max_bytes = 64;             /* the second doubling does not fit the allowance */
 	rq.host = &host;
@@ -274,3 +284,4 @@ int main(void)
 	printf("cfgsign_wk: %lu checks, %d failure(s)\n", checks, fails);
 	return fails != 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

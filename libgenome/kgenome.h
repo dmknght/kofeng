@@ -47,7 +47,7 @@
  * builds, every other waits on the release store and reads them read-only after
  * it. Everything else the audit found was a const table that the dynamic linker
  * relocates (so it sits in .data) or a one-element cache of a build-time
- * constant in the emulator, which is gone (see win_trace in emu_interp.c).
+ * constant in the emulator, which is gone (see kgenome_emu_win_trace in emu_win_exc.c).
  */
 
 #include "kgenome_status.h"
@@ -90,6 +90,8 @@
 #include "celllysis/trueline.h"
 #include "celllysis/mutation.h"
 #include "celllysis/mutation_window.h"
+#include "celllysis/script_funcs.h"
+#include "celllysis/script_islands.h"
 #include "celllysis/cfg.h"
 #include "celllysis/gview.h"
 

@@ -25,6 +25,7 @@
 #include "scan_int.h"
 #include "objctx_int.h"
 #include <stdlib.h>
+#include <string.h>
 
 /*
  * The two buffers - one answers a search, one feeds a copy, see struct kof_scan_cache -
@@ -92,6 +93,13 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mas
 	uint32_t n;
 
 	if (scan_mask & KOF_SCAN_ALL) {
+		/*
+		 * ALL IS THE WHOLE OBJECT, for a script too (SP-14, owner 2026-11-14: "scan all chắc chắn cả file rồi"). It answered a page's
+		 * island code only (tags and markup out) to every caller - module searches, the pattern sweep, region shape, gather - and lexed
+		 * the object again for each call, when only the similarity cut was meant to read the islands (Merge 161). The islands are now
+		 * the object's one product (objctx_diag.c, kof_scan_script_islands) and the cut reads them there (scan_feed.c); nothing else
+		 * asks, and a marker over "<?php" or in a page's markup is found like any other byte.
+		 */
 		eb->v[0].off = 0;
 		eb->v[0].len = ctx->obj_size;
 		return ctx->obj_size ? 1u : 0u;

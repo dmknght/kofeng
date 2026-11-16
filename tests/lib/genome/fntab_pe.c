@@ -30,6 +30,38 @@
 
 #include "fntab_pe_kit.h"
 
+
+/* The declared start at `off` (round 4: a start-only source declares a start, held in fs.st), or a zero one (source 0). */
+static const struct kgenome_func_start g_nost;
+static __attribute__((unused)) const struct kgenome_func_start *stz(const struct tab *t, uint64_t off)
+{
+	uint32_t i;
+
+	for (i = 0; i < t->fs.n_st; i++)
+		if (t->fs.st[i].off == off)
+			return &t->fs.st[i];
+	return &g_nost;
+}
+/* The entries a metadata source declared (2026-11-16 round 2: the code no metadata declares is an entry too, trust NONE, source UNDECLARED). */
+static __attribute__((unused)) uint32_t n_decl(const struct kgenome_func_set *s)
+{
+	uint32_t i, k = 0;
+
+	for (i = 0; i < s->n; i++)
+		k += s->v[i].trust != KGENOME_FN_TRUST_NONE;
+	return k;
+}
+/* Phase 2 (2026-11-16): the entries of trust HIGH and of trust DERIVED. */
+static __attribute__((unused)) uint32_t n_trust(const struct kgenome_func_set *s, uint8_t trust)
+{
+	uint32_t i, k = 0;
+
+	for (i = 0; i < s->n; i++)
+		k += s->v[i].trust == trust;
+	return k;
+}
+#include "pe32_switch_fixture.h"
+
 /* ---- fixtures: x86 code ------------------------------------------------------------------------------------------ */
 
 /* The functions of an x86 image: three, called by direct calls, `cc` between them and zero fill to the end of the raw section (as a linker leaves it). */
@@ -57,6 +89,8 @@ static uint32_t x86_image(struct pb *p, uint32_t text_raw)
 	return t;
 }
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* The case: PE32 with nothing: the walk's starts (call targets and the entry), the end is the next start less the padding. RED on base: x86 had no function set at all. */
 static void t_x86_walk(void)
 {
@@ -83,6 +117,7 @@ static void t_x86_walk(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
 /* One walk per object, and the walk is the only decode: the table asked twice gives the same table (idempotence), and an image whose code section is shorter than its
  * VirtualSize ends the last function at the file's bytes (section with VirtualSize > raw). */
@@ -96,7 +131,8 @@ static void t_x86_idempotent_and_virtual(void)
 	w(p.b + p.sec_tab + 8, 0x5000, 4);                  /* VirtualSize far past the raw bytes */
 	build(p.b, p.n, &a);
 	build(p.b, p.n, &b);
-	CK(a.fs.n == 3 && a.fs.n == b.fs.n);
+	/* no metadata (2026-11-16); phase 2: the entry f1 and the two functions it calls are derived, the int3 and zero runs are NONE */
+	CK(a.fs.n == b.fs.n && n_trust(&a.fs, KGENOME_FN_TRUST_HIGH) == 0 && n_trust(&a.fs, KGENOME_FN_TRUST_DERIVED) == 3 && atz(&a, a.fs.v[0].off)->trust == KGENOME_FN_TRUST_DERIVED);
 	for (i = 0; i < a.fs.n && i < b.fs.n; i++)
 		CK(a.fs.v[i].off == b.fs.v[i].off && a.fs.v[i].len == b.fs.v[i].len && a.fs.v[i].flags == b.fs.v[i].flags);
 	CK(table_ok(&a, p.n));
@@ -119,13 +155,14 @@ static void t_virtual_size_cut(void)
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
 	CK(kgenome_diag_extent(&t.obj, 0, p.n, &at_) == 0x80 && at_ == base);
-	CK(at(&t, base) && !at(&t, base + 0x100));
-	CK(at(&t, base + 0x40));                            /* a start inside the extent is untouched */
+	/* no metadata: the extent is cut at VirtualSize; phase 2: f1 (its first call goes past the extent: assumed to return) and f3 are derived, the rest is NONE, nothing past 0x80 */
+	CK(atz(&t, base)->trust == KGENOME_FN_TRUST_DERIVED && atz(&t, base)->len == 15 && atz(&t, base + 0x40)->trust == KGENOME_FN_TRUST_DERIVED && !at(&t, base + 0x100) &&
+	   t.fs.v[t.fs.n - 1u].off + t.fs.v[t.fs.n - 1u].len == base + 0x80u && n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0);
 	tab_free(&t);
 	free(p.b);
 }
 
-/* An entry point outside every executable section is not a start (the entry of nothing: counted), and the image still gets its walk starts. */
+/* An entry point outside every executable section is not a start (the entry of nothing); with no other metadata the code is one unit of trust NONE. */
 static void t_entry_outside_code(void)
 {
 	struct pb p;
@@ -137,12 +174,13 @@ static void t_entry_outside_code(void)
 	pb_done(&p);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(t.fs.n == 2);                                    /* 0x1000 is no longer the entry and nobody calls it: its two callees remain */
-	CK(!at(&t, base) && at(&t, base + 0x20) && at(&t, base + 0x40));
+	CK(t.fs.n == 1 && at(&t, base) && atz(&t, base)->trust == KGENOME_FN_TRUST_NONE);   /* no metadata (the entry is in no code, and an entry alone splits nothing): one unit */
 	tab_free(&t);
 	free(p.b);
 }
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* Import stubs: `jmp [iat slot]`, six bytes each, back to back, then a real function. A stub is kind THUNK with its own six bytes and does not swallow the function after
  * the last one; without the strategy the last stub would run to the next start (RED on base: no table at all). */
 static void t_thunks(void)
@@ -194,6 +232,7 @@ static void t_thunks(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
 /* THE STUBS THE WALK MET carry the slot they jump through, sorted by offset (the lineage reads the slot of a function that is one `jmp [slot]`: it decoded the head of every function for it).
  * Three stubs of the IAT at a function start; a jump through a slot OUTSIDE the declared IAT (listed, `iat` 0: the table does not kind it a THUNK, the lineage still asks its slot); a jump
@@ -254,7 +293,8 @@ static void t_stub_slots(void)
 		a = at(&tt, t0 + 0x30);
 		o = at(&tt, t0 + 0x48);
 		m = at(&tt, t0 + 0x62);
-		CK(a && a->kind == KGENOME_FN_THUNK);
+		/* the table makes no stub a start (the import-stub strategy is DISABLED by the owner 2026-11-16: decode-derived); the walk's own list above still holds them */
+		CK(!a || a->kind != KGENOME_FN_THUNK);
 		CK(!o || o->kind != KGENOME_FN_THUNK);          /* a jump through data outside the IAT */
 		CK(!m || m->kind != KGENOME_FN_THUNK);          /* a jump in the middle of a function */
 		tab_free(&tt);
@@ -325,6 +365,15 @@ static void t_lineage_sections_out_of_order(void)
 				memcpy(d + 0xa2, "socket", 7);
 				memcpy(d + 0xb2, "connect", 8);
 			}
+			/* the .pdata an x64 compiler writes for both functions (2026-11-16: the function table is made from metadata only; with none the image is one
+			 * unpartitioned unit and the lineage solves nothing): main [0, 32), stop [0, 1 or 2), one UNWIND_INFO of version 1 */
+			{
+				const uint32_t rf[6] = { main_rva, main_rva + 32u, idata + 0x180u, stop_rva, stop_rva + (ret ? 1u : 2u), idata + 0x180u };
+
+				memcpy(d + 0x100, rf, sizeof rf);
+				d[0x180] = 1;
+				pb_dir(&p, KGENOME_PE_DIR_EXCEPTION, idata + 0x100u, sizeof rf);
+			}
 			pb_done(&p);
 			memset(&pi, 0, sizeof pi);
 			CK(kgenome_pe_image_parse(kof_buf_make(p.b, p.n), &pi, &o));
@@ -371,7 +420,7 @@ static void t_sigreturn_not_in_pe(void)
 	wk = kgenome_diag_walk_new();
 	kgenome_diag_funcs_with_walk(&t.obj, p.b, p.n, wk, &t.fs);
 	for (i = 0; i < t.fs.n; i++)
-		n += t.fs.v[i].off == t0 + 1u;
+		n += t.fs.v[i].off == t0 + 1u && t.fs.v[i].trust != KGENOME_FN_TRUST_NONE;       /* phase 2: the run after the entry's `ret` is undeclared code (NONE), no function */
 	CK(n == 0);
 	tab_free(&t);
 	kgenome_diag_walk_free(wk);
@@ -472,6 +521,8 @@ static void t_thunk_slot_outside_iat(void)
 	free(p.b);
 }
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* The one int3 right after a call is the function's (the compiler's mark that the call does not return: the unwind table's End includes it in the images measured);
  * the padding after it is not. Zero bytes inside the code (the high half of a jump-table entry) are data, not padding: a function that ends in a table keeps it. */
 static void t_tail_rules(void)
@@ -514,6 +565,7 @@ static void t_tail_rules(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
 /* A `jmp X` right after a `ret` or a `jmp` is NOT a thunk in a PE: it is the first instruction of a basic block as often as of a function (the ELF walk takes it as a start; measured
  * on the PE oracle that split 9000 functions of 180000 and gave back 0.9 point of starts). Here a jump into the middle of g, after f's own jmp, must make no start. */
@@ -588,6 +640,8 @@ static void x64_image(struct x64 *x, uint32_t pd_vsize)
 	pb_done(p);
 }
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* The case: PE32+ with .pdata. The non-leaf functions are exact (start, END = EndAddress); the leaf function has no entry and is named by the call that targets it (so a
  * call target in a gap is a start); nothing is made of the padding. RED on base for the leaf. */
 static void t_pdata_leaf(void)
@@ -618,7 +672,10 @@ static void t_pdata_leaf(void)
 	tab_free(&t);
 	free(x.p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* A leaf that NOBODY calls is made by the GAPS step: the first non-padding byte of a gap between exact bodies. The step adds nothing where the table already has a start,
  * nothing in padding, and the entry says it is a gap start with an open end. */
 static void t_pdata_gap_leaf(void)
@@ -645,6 +702,98 @@ static void t_pdata_gap_leaf(void)
 	tab_free(&t);
 	free(x.p.b);
 }
+#endif
+
+#if 0 /* DISABLED by the owner 2026-11-16: read only by the padding rows of the disabled REACH tests */
+/* Does one padding run the walk recorded hold [from, to)? (PG-1's rows: the run is the walk's own product, read back.) */
+static int pad_holds(const uint8_t *b, uint32_t n, uint64_t from, uint64_t to)
+{
+	struct tab t;
+	struct kgenome_diag_walk *wk;
+	const uint64_t *pad;
+	uint32_t np = 0, i;
+	int hit = 0;
+
+	build(b, n, &t);
+	wk = kgenome_diag_walk_new();
+	if (t.ok && wk && kgenome_diag_walk_ensure(wk, &t.obj, b, n, 1)) {
+		pad = kgenome_diag_walk_pads(wk, &np);
+		for (i = 0; pad && i < np; i++)
+			if (pad[2u * i] <= from && to <= pad[2u * i + 1u])
+				hit = 1;
+	}
+	kgenome_diag_walk_free(wk);
+	tab_free(&t);
+	return hit;
+}
+#endif
+
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/* PG-1: a leaf that BEGINS with a one-byte nop behind an int3 fill (MinGW's Go and C objects): the fill ends at the nop, the start is the nop. One and two
+ * leading nops, found by the gap step and by a call. RED on base: the walk recorded the fill and the nops as one padding run, so the start came 1 or 2 bytes
+ * late (or the called one was cut by the run). Missed because (b): every fixture's fill was followed by a non-nop first instruction. A fill of nops and a
+ * multi-byte nop after int3 stay padding (the second half of the row). */
+static void t_pdata_leaf_leading_nop(void)
+{
+	unsigned k;
+
+	for (k = 0; k < 4; k++) {
+		struct x64 x;
+		struct tab t;
+		const struct kgenome_func *leaf;
+		uint32_t zero = 0;
+		uint8_t *c;
+
+		x64_image(&x, 36);
+		c = x.p.b + x.text;
+		if (k < 2) {                                    /* nobody calls the leaf: the gap step */
+			memcpy(c + 5, &zero, 4);
+			memcpy(c + 0x45, &zero, 4);
+			memcpy(c + 0x85, &zero, 4);
+		}
+		if (k & 1u)
+			memcpy(c + 0x60, "\x90\x90\x31\xc0\xc3", 5);
+		else
+			memcpy(c + 0x60, "\x90\x31\xc0\xc3", 4);
+		build(x.p.b, x.p.n, &t);
+		CK(t.ok && table_ok(&t, x.p.n));
+		leaf = at(&t, x.text + 0x60);
+		CK(leaf && leaf->len == ((k & 1u) ? 5u : 4u));
+		CK(!at(&t, x.text + 0x61) && !at(&t, x.text + 0x62));
+		tab_free(&t);
+		free(x.p.b);
+	}
+	/* padding stays padding: a nop fill (90 90 90 ..) and a multi-byte nop after int3 make no start of their own in the gap */
+	{
+		struct x64 x;
+		struct tab t;
+		uint32_t zero = 0;
+		uint8_t *c;
+
+		x64_image(&x, 36);
+		c = x.p.b + x.text;
+		memcpy(c + 5, &zero, 4);
+		memcpy(c + 0x45, &zero, 4);
+		memcpy(c + 0x85, &zero, 4);
+		memset(c + 0x4e, 0x90, 0x12);                   /* nops from the end of 0x1040 to the leaf */
+		memcpy(c + 0x0e, "\xcc\xcc\x0f\x1f\x40\x00\x31\xc0\xc3", 9);  /* int3, a 4-byte nop, then a leaf at 0x1014 that nobody calls */
+		build(x.p.b, x.p.n, &t);
+		CK(t.ok && table_ok(&t, x.p.n));
+		CK(at(&t, x.text + 0x60));
+		CK(at(&t, x.text + 0x14) && !at(&t, x.text + 0x10) && !at(&t, x.text + 0x0e));
+		CK(!at(&t, x.text + 0x4e));
+		tab_free(&t);
+		/* the walk's own runs: int3 and the 4-byte nop are one run (a multi-byte nop after int3 is padding), and so are a nop fill and its last 0x90 */
+		CK(pad_holds(x.p.b, x.p.n, x.text + 0x0e, x.text + 0x14));
+		memcpy(c + 0x0e, "\x0f\x1f\x40\x00\x90\x31\xc0\xc3", 8);
+		CK(pad_holds(x.p.b, x.p.n, x.text + 0x0e, x.text + 0x13));
+		memcpy(c + 0x0e, "\xcc\xcc\x90\x31\xc0\xc3", 6);   /* control: the int3 run ends at the nop */
+		CK(pad_holds(x.p.b, x.p.n, x.text + 0x0e, x.text + 0x10) && !pad_holds(x.p.b, x.p.n, x.text + 0x0e, x.text + 0x11));
+		free(x.p.b);
+	}
+}
+#endif
 
 /* A chained entry (UNW_FLAG_CHAININFO) is the cold part of ANOTHER function: not a function of its own, no start is made inside it, and the parent keeps its extent.
  * The unwind info of the chained entry carries the parent's RUNTIME_FUNCTION after the codes. */
@@ -671,6 +820,66 @@ static void t_pdata_chained(void)
 #endif
 	for (i = 0; i < t.fs.n; i++)
 		CK(t.fs.v[i].kind != KGENOME_FN_FRAGMENT);
+	tab_free(&t);
+	free(x.p.b);
+}
+
+/* PF-1 (2026-11-15): a chained part that begins where its function ends is MORE OF THAT FUNCTION: the function's extent runs over it, and over a part
+ * chained to that part (a chain of chains: the part names the part before it, whose own chain names the function). RED on main and round 6: the
+ * function ended at its first part and the parts were in no function (APT sacsvr.dll ServiceMain, RVA 0x2400: 0x53 of 0x14f bytes; pe120 with .pdata
+ * visible: 2791 functions short by 1290274 bytes). Why the old tests missed it: (b) t_pdata_chained has only a FAR part (the cold body elsewhere); no row
+ * had a contiguous part, and the oracle (h/oracle.c -p) hid the table it would have compared with. */
+static void t_pdata_chained_contig(void)
+{
+	struct x64 x;
+	struct tab t;
+	uint8_t *u;
+
+	x64_image(&x, 60);
+	u = at_rva(&x.p, 0x2010);                                                    /* part 1 [0x100e,0x1020): chained to the function at 0x1000 */
+	u[0] = 0x01 | (4u << 3); u[1] = 0; u[2] = 0; u[3] = 0;
+	w(u + 4, 0x1000, 4); w(u + 8, 0x100e, 4); w(u + 12, 0x2000, 4);
+	u = at_rva(&x.p, 0x2030);                                                    /* part 2 [0x1020,0x1030): chained to part 1 */
+	u[0] = 0x01 | (4u << 3); u[1] = 0; u[2] = 0; u[3] = 0;
+	w(u + 4, 0x100e, 4); w(u + 8, 0x1020, 4); w(u + 12, 0x2010, 4);
+	rf(&x.p, 0x3000, 3, 0x100e, 0x1020, 0x2010);
+	rf(&x.p, 0x3000, 4, 0x1020, 0x1030, 0x2030);
+	pb_dir(&x.p, KGENOME_PE_DIR_EXCEPTION, 0x3000, 60);
+	build(x.p.b, x.p.n, &t);
+	CK(t.ok && table_ok(&t, x.p.n));
+	CK(at(&t, x.text) && at(&t, x.text)->len == 0x30);                          /* the function and both parts */
+	CK(!at(&t, x.text + 0x0e) && !at(&t, x.text + 0x20));                      /* no start at a part */
+	CK(t.fs.n_rng == 0 && kgenome_funcs_n_ranges(&t.fs, kgenome_funcs_start(&t.fs, x.text)) == 1u);   /* joined parts are the body, not a second range (2026-11-16) */
+	tab_free(&t);
+	free(x.p.b);
+}
+
+/* AUD-11 (independent audit 2026-11-16): a chain of TEN contiguous parts, each chained to the part before it. The read follows a chain 8 parts deep: the
+ * tenth part kept the FIRST part's start as its function and joined nothing, the function ended 2 bytes short with nothing said. RED before: len 0x20.
+ * Why the old rows missed it: (b) the longest chain in a row was 2 parts. */
+static void t_pdata_chain_deep(void)
+{
+	struct x64 x;
+	struct tab t;
+	uint32_t k;
+
+	x64_image(&x, 156);
+	for (k = 0; k < 10u; k++) {
+		uint8_t *u = at_rva(&x.p, 0x2010 + 0x10 * k);
+		const uint32_t b = 0x100e + 2u * k;
+
+		u[0] = 0x01 | (4u << 3); u[1] = 0; u[2] = 0; u[3] = 0;
+		if (k == 0) {
+			w(u + 4, 0x1000, 4); w(u + 8, 0x100e, 4); w(u + 12, 0x2000, 4);
+		} else {
+			w(u + 4, b - 2u, 4); w(u + 8, b, 4); w(u + 12, 0x2010 + 0x10 * (k - 1u), 4);
+		}
+		rf(&x.p, 0x3000, 3 + k, b, b + 2u, 0x2010 + 0x10 * k);
+	}
+	pb_dir(&x.p, KGENOME_PE_DIR_EXCEPTION, 0x3000, 156);
+	build(x.p.b, x.p.n, &t);
+	CK(t.ok && table_ok(&t, x.p.n));
+	CK(at(&t, x.text) && at(&t, x.text)->len == 0x22);
 	tab_free(&t);
 	free(x.p.b);
 }
@@ -788,7 +997,7 @@ static void t_pdata_unwind_info(void)
 		CK(t.ok && table_ok(&t, x.p.n));
 #ifndef FNTAB_PE_OLD_API_ONLY
 		CK(t.fs.partial & KGENOME_FNTAB_P_BAD_FDE);
-		CK(t.fs.ccase == KGENOME_FNTAB_C_PE_WALK);          /* every entry refused: the table was read and is empty: the next row (the walk) */
+		CK(t.fs.ccase == KGENOME_FNTAB_C_NO_META);          /* every entry refused: the table was read and is empty: the next row, which names nothing but the entry: no metadata */
 		CK(!at(&t, x.text) || at(&t, x.text)->end_source != KGENOME_FN_E_UNWIND);
 #endif
 		if (rows[k].b0 == 0xff)
@@ -963,10 +1172,11 @@ static void t_exports(void)
 	pb_done(&p);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(t.fs.n == 2);
-	CK(at(&t, t0) && at(&t, t0 + 0x20));
+	/* round 4 (rule changed): the exports are declared starts of the one NONE unit, not units */
+	CK(n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0 && stz(&t, t0)->source && stz(&t, t0 + 0x20)->source);
+	CK(atz(&t, t0)->trust == KGENOME_FN_TRUST_DERIVED && atz(&t, t0)->len == 5 && atz(&t, t0 + 0x20)->trust == KGENOME_FN_TRUST_DERIVED && atz(&t, t0 + 0x20)->len == 3);   /* phase 2 */
 #ifndef FNTAB_PE_OLD_API_ONLY
-	CK(at(&t, t0) && (atz(&t, t0)->source & KGENOME_FN_S_EXPORT));
+	CK(stz(&t, t0)->source & KGENOME_FN_S_EXPORT);
 	{
 		struct kgenome_fntab_list l;
 
@@ -981,6 +1191,269 @@ static void t_exports(void)
 }
 
 #ifndef FNTAB_PE_OLD_API_ONLY
+/* NM-1: an export at a start .pdata also names. The merge kept the PDATA entry (value 0: .pdata names nothing) and the export's own entry carried no (value, shndx) at all,
+ * so kof_func_name found no symbol and every export of an x64 DLL was fcn_<off> (measured on four DLLs: 19/19, 1/1, 76/76, 4/4). The entry must carry the pair the symbol block
+ * keys the export's name on (pe_sym.c export_put: value = RVA, shndx 0xffff). RED on base: value 0, shndx 0. Missed because (c): t_exports checks the start and its source
+ * bit, never what names it. */
+static void t_export_name_pdata(void)
+{
+	struct x64 x;
+	struct tab t;
+	const struct kgenome_func *f;
+	uint32_t e;
+
+	x64_image(&x, 36);
+	e = off_of(&x.p, 0x2100);
+	w(x.p.b + e + 20, 2, 4);                            /* NumberOfFunctions */
+	w(x.p.b + e + 28, 0x2140, 4);                       /* AddressOfFunctions */
+	w(x.p.b + e + 0x40, 0x1040, 4);                     /* a .pdata start */
+	w(x.p.b + e + 0x44, LEAF_RVA, 4);                   /* a start only the export (and the calls) name */
+	pb_dir(&x.p, KGENOME_PE_DIR_EXPORT, 0x2100, 0x60);
+	build(x.p.b, x.p.n, &t);
+	CK(t.ok && table_ok(&t, x.p.n));
+	f = at(&t, x.text + 0x40);
+	CK(f && f->len == 14 && (f->source & KGENOME_FN_S_PDATA) && (f->source & KGENOME_FN_S_EXPORT));
+	CK(f && f->value == 0x1040 && f->shndx == 0xffffu);
+	CK(stz(&t, x.text + 0x60)->value == LEAF_RVA && stz(&t, x.text + 0x60)->shndx == 0xffffu);   /* round 4: the export is a declared start, its name kept */
+	f = at(&t, x.text);
+	CK(f && f->value == 0 && f->shndx == 0);            /* not exported: no symbol */
+	tab_free(&t);
+	free(x.p.b);
+}
+
+/* NM-1, the merge: the name comes from whichever entry of a start carries one, whatever order the sort gives them. An entry of the load configuration's tables also sets
+ * KGENOME_FN_S_EXPORT and names nothing (value 0): it must not count as named and block the real export's pair; a FRAGMENT's value is its parent's start, not a symbol.
+ * Exhaustive over the 4! orders of the four entries of one start. RED on base: the kept PDATA entry stayed value 0. */
+static void t_merge_name_carrier(void)
+{
+	static const uint8_t perm[24][4] = {
+		{0,1,2,3},{0,1,3,2},{0,2,1,3},{0,2,3,1},{0,3,1,2},{0,3,2,1},{1,0,2,3},{1,0,3,2},{1,2,0,3},{1,2,3,0},{1,3,0,2},{1,3,2,0},
+		{2,0,1,3},{2,0,3,1},{2,1,0,3},{2,1,3,0},{2,3,0,1},{2,3,1,0},{3,0,1,2},{3,0,2,1},{3,1,0,2},{3,1,2,0},{3,2,0,1},{3,2,1,0} };
+	struct kgenome_func in[4];
+	unsigned k, i;
+
+	memset(in, 0, sizeof in);
+	in[0].off = 0x400; in[0].len = 0x20; in[0].source = KGENOME_FN_S_PDATA; in[0].end_source = KGENOME_FN_E_UNWIND;
+	in[1].off = 0x400; in[1].source = KGENOME_FN_S_EXPORT;                                  /* a load-configuration row: no name */
+	in[2].off = 0x400; in[2].source = KGENOME_FN_S_EXPORT; in[2].value = 0x1400; in[2].shndx = 0xffffu;
+	in[3].off = 0x400; in[3].source = KGENOME_FN_S_WALK;
+	for (k = 0; k < 24; k++) {
+		struct kgenome_fntab_list l;
+		struct kgenome_func_set fs;
+
+		memset(&l, 0, sizeof l);
+		memset(&fs, 0, sizeof fs);
+		for (i = 0; i < 4; i++)
+			CK(kgenome_fntab_list_add(&l, &in[perm[k][i]]));
+		kgenome_fntab_merge(&l, 0, &fs);
+		CK(fs.n == 1 && fs.v[0].len == 0x20 && fs.v[0].value == 0x1400 && fs.v[0].shndx == 0xffffu);
+		kgenome_fntab_list_free(&l);
+		kgenome_funcs_free(&fs);
+	}
+	/* two named sources of one start: the better rank's pair stands. A COFF symbol of a function at the start of its section has value 0 and a section index: that is
+	 * a name (the pair, not the value alone), and the export's pair must not replace it */
+	{
+		struct kgenome_fntab_list l;
+		struct kgenome_func_set fs;
+		struct kgenome_func a, b;
+
+		memset(&l, 0, sizeof l);
+		memset(&fs, 0, sizeof fs);
+		memset(&a, 0, sizeof a);
+		memset(&b, 0, sizeof b);
+		a.off = 0x400; a.len = 0x20; a.source = KGENOME_FN_S_COFF; a.end_source = KGENOME_FN_E_SYMBOL; a.shndx = 1;
+		b.off = 0x400; b.source = KGENOME_FN_S_EXPORT; b.value = 0x1400; b.shndx = 0xffffu;
+		CK(kgenome_fntab_list_add(&l, &b) && kgenome_fntab_list_add(&l, &a));
+		kgenome_fntab_merge(&l, 0, &fs);
+		CK(fs.n == 1 && fs.v[0].value == 0 && fs.v[0].shndx == 1 && (fs.v[0].source & KGENOME_FN_S_EXPORT));
+		kgenome_fntab_list_free(&l);
+		kgenome_funcs_free(&fs);
+	}
+	/* D2, the general rule: every fact of the start is taken from the first entry that says it, not only the name. An unwind body (FDE, rank 2) and a symbol of
+	 * size 0 (rank 1) at one start: the body's extent stands, and the symbol's Thumb bit and IFUNC kind are the start's. RED on base: isa DEFAULT (the body
+	 * decoded as ARM) and kind FUNC. */
+	{
+		struct kgenome_fntab_list l;
+		struct kgenome_func_set fs;
+		struct kgenome_func a, b;
+
+		memset(&l, 0, sizeof l);
+		memset(&fs, 0, sizeof fs);
+		memset(&a, 0, sizeof a);
+		memset(&b, 0, sizeof b);
+		a.off = 0x400; a.len = 0x20; a.source = KGENOME_FN_S_FDE; a.end_source = KGENOME_FN_E_UNWIND;
+		b.off = 0x400; b.source = KGENOME_FN_S_SYMTAB; b.flags = KGENOME_FN_F_SIZE0; b.value = 0x8401; b.shndx = 12;
+		b.isa_mode = KGENOME_FN_ISA_THUMB; b.kind = KGENOME_FN_IFUNC;
+		CK(kgenome_fntab_list_add(&l, &b) && kgenome_fntab_list_add(&l, &a));
+		kgenome_fntab_merge(&l, 0, &fs);
+		CK(fs.n == 1 && fs.v[0].len == 0x20 && fs.v[0].end_source == KGENOME_FN_E_UNWIND);
+		CK(fs.n == 1 && fs.v[0].isa_mode == KGENOME_FN_ISA_THUMB && fs.v[0].kind == KGENOME_FN_IFUNC && fs.v[0].value == 0x8401 && fs.v[0].shndx == 12);
+		kgenome_fntab_list_free(&l);
+		kgenome_funcs_free(&fs);
+	}
+	/* a FRAGMENT at a start a walk entry also names: the fragment leaves the table, and the walk entry it masked gives no name either */
+	{
+		struct kgenome_fntab_list l;
+		struct kgenome_func_set fs;
+		struct kgenome_func a, b;
+
+		memset(&l, 0, sizeof l);
+		memset(&fs, 0, sizeof fs);
+		memset(&a, 0, sizeof a);
+		memset(&b, 0, sizeof b);
+		a.off = 0x400; a.len = 0x20; a.source = KGENOME_FN_S_PDATA; a.end_source = KGENOME_FN_E_UNWIND;
+		b.off = 0x400; b.len = 0x10; b.source = KGENOME_FN_S_PDATA; b.end_source = KGENOME_FN_E_UNWIND; b.kind = KGENOME_FN_FRAGMENT; b.value = 0x300;
+		CK(kgenome_fntab_list_add(&l, &a) && kgenome_fntab_list_add(&l, &b));
+		kgenome_fntab_merge(&l, 0, &fs);
+		CK(fs.n == 1 && fs.v[0].value == 0 && fs.v[0].shndx == 0);
+		kgenome_fntab_list_free(&l);
+		kgenome_funcs_free(&fs);
+	}
+}
+
+/* AUDIT 2026-11-15 (partition audit, item 2): three strategy paths no row executed (gcov over the fntab tests: never run, class (a)) - the PE32+ load
+ * configuration's CF table, the PE32+ TLS callback list (8-byte pointers) and the export reader's hostile exits. One strategy each, asked directly. */
+
+/* PE32+ IMAGE_LOAD_CONFIG_DIRECTORY64: GuardCFFunctionTable (VA, u64) at 0x80, its count (u64) at 0x88, GuardFlags (u32) at 0x90; the stride is 4 + ((flags >> 28) & 15).
+ * One metadata byte an entry here (stride 5), so a reader that ignores the stride reads the second RVA from the wrong bytes. A Size that does not reach past GuardFlags
+ * (0x93) holds no table; a count past the file is bounded by the file. */
+static void t_cfg_x64(void)
+{
+	static const uint32_t sizes[2] = { 0x94u, 0x93u };
+	unsigned k;
+
+	for (k = 0; k < 3; k++) {
+		struct x64 x;
+		struct tab t;
+		struct kgenome_fntab_list l;
+		uint8_t *lc, *tb;
+
+		x64_image(&x, 36);
+		lc = at_rva(&x.p, 0x2080);
+		w(lc, k == 1 ? sizes[1] : sizes[0], 4);
+		w(lc + 0x80, 0x140000000ull + 0x2180, 8);
+		w(lc + 0x88, k == 2 ? (1ull << 40) : 3u, 8);
+		w(lc + 0x90, 1u << 28, 4);                      /* one metadata byte an entry */
+		tb = at_rva(&x.p, 0x2180);
+		w(tb, LEAF_RVA, 4); tb[4] = 0xff;
+		w(tb + 5, 0x1040, 4); tb[9] = 0xff;
+		w(tb + 10, 0x2000, 4); tb[14] = 0xff;          /* .rdata: not code */
+		pb_dir(&x.p, KGENOME_PE_DIR_LOAD_CONFIG, 0x2080, 0x94);
+		build(x.p.b, x.p.n, &t);
+		CK(t.ok && t.info.pe32_plus);
+		memset(&l, 0, sizeof l);
+		kgenome_fntab_pe_cfg(kof_buf_make(x.p.b, x.p.n), &t.info, &l);
+		if (k == 1) {
+			CK(l.n == 0 && l.n_bad == 0);
+		} else {
+			CK(l.n >= 2 && l.v[0].off == x.text + 0x60 && l.v[1].off == x.text + 0x40 && (l.v[0].source & KGENOME_FN_S_EXPORT));
+			/* k 2: the count is bounded by the file and every 5 bytes to its end are read as an RVA (the zeros are not code; a word of .pdata may be) */
+			CK(k == 2 ? l.n + l.n_bad == (x.p.n - off_of(&x.p, 0x2180)) / 5u : (l.n == 2 && l.n_bad == 1u));
+		}
+		kgenome_fntab_list_free(&l);
+		tab_free(&t);
+		free(x.p.b);
+	}
+}
+
+/* PE32+ TLS: AddressOfCallBacks is the fourth pointer of IMAGE_TLS_DIRECTORY64 (+0x18) and the list is 8-byte VAs to a null. A reader that took 4-byte pointers would
+ * read the low half of the first VA and then its high half as the second. A VA below the image base and one in data are counted, not followed. */
+static void t_tls_x64(void)
+{
+	struct x64 x;
+	struct tab t;
+	struct kgenome_fntab_list l;
+	uint8_t *d, *cb;
+
+	x64_image(&x, 36);
+	d = at_rva(&x.p, 0x2100);
+	w(d + 0x18, 0x140000000ull + 0x2140, 8);
+	cb = at_rva(&x.p, 0x2140);
+	w(cb, 0x140000000ull + LEAF_RVA, 8);
+	w(cb + 8, 0x140000000ull + 0x2000, 8);             /* data */
+	w(cb + 16, 0x1080, 8);                              /* below the image base */
+	w(cb + 24, 0x140000000ull + 0x1080, 8);
+	pb_dir(&x.p, KGENOME_PE_DIR_TLS, 0x2100, 0x28);
+	build(x.p.b, x.p.n, &t);
+	CK(t.ok && t.info.pe32_plus);
+	memset(&l, 0, sizeof l);
+	kgenome_fntab_pe_tls(kof_buf_make(x.p.b, x.p.n), &t.info, &l);
+	CK(l.n == 2 && l.n_bad == 2);
+	CK(l.n == 2 && l.v[0].off == x.text + 0x60 && l.v[1].off == x.text + 0x80 && l.v[0].source == KGENOME_FN_S_ENTRY);
+	kgenome_fntab_list_free(&l);
+	/* the callback list's pointer below the image base: nothing read */
+	w(d + 0x18, 0x2140, 8);
+	memset(&l, 0, sizeof l);
+	kgenome_fntab_pe_tls(kof_buf_make(x.p.b, x.p.n), &t.info, &l);
+	CK(l.n == 0 && l.n_bad == 0);
+	kgenome_fntab_list_free(&l);
+	tab_free(&t);
+	free(x.p.b);
+}
+
+/* The export reader's exits, each with an input made to take it: a directory too short for its fields, no functions, no table, a table outside every section, and a
+ * count past the file (bounded by the file: every entry read, the zero ones skipped, none past the end). */
+static void t_export_hostile(void)
+{
+	unsigned k;
+
+	for (k = 0; k < 5; k++) {
+		struct pb p;
+		struct tab t;
+		struct kgenome_fntab_list l;
+		uint32_t t0, x;
+		uint8_t *c;
+
+		pb_init(&p, 0x4000, 0, 0x14c);
+		t0 = pb_sec(&p, ".text", 0x1000, 0x200, 0x200, CH_CODE);
+		pb_sec(&p, ".edata", 0x2000, 0x200, 0x200, CH_RDATA);
+		pb_entry(&p, 0);
+		c = p.b + t0;
+		memset(c, 0xcc, 0x200);
+		memcpy(c, "\x55\x8b\xec\x5d\xc3", 5);
+		x = off_of(&p, 0x2000);
+		w(p.b + x + 20, k == 1 ? 0u : (k == 4 ? 0xffffffffu : 1u), 4);
+		w(p.b + x + 28, k == 2 ? 0u : (k == 3 ? 0x9000u : 0x2040u), 4);
+		w(p.b + x + 0x40, 0x1000, 4);
+		pb_dir(&p, KGENOME_PE_DIR_EXPORT, k == 0 ? 0x21e0u : 0x2000u, 0x60);   /* k 0: 32 bytes before the end of the file's last section */
+		pb_done(&p);
+		build(p.b, p.n, &t);
+		CK(t.ok);
+		memset(&l, 0, sizeof l);
+		kgenome_fntab_pe_export(kof_buf_make(p.b, p.n), &t.info, &l);
+		if (k == 4)
+			CK(l.n == 1 && l.v[0].off == t0 && l.n_bad == 0);
+		else
+			CK(l.n == 0 && l.n_bad == 0);
+		kgenome_fntab_list_free(&l);
+		tab_free(&t);
+		free(p.b);
+	}
+}
+
+/* KNOWN DEFECT PART-D3 (2026-11-15, M): this row PINS THE CURRENT RULE: an exact body is authoritative, so a .pdata entry whose EndAddress is wrong
+ * (here 0x1040's end moved to 0x1070, over the leaf at 0x1060) swallows a start another table names. The start is dropped and said only as a count
+ * (n_extra), with no entry, flag or offset that names it. Since 2026-11-16 (metadata only) the start comes from a start-only table - here the entry point
+ * (AddressOfEntryPoint 0x1060) - and no longer from a call target the walk decoded. The alternative: report each dropped start. */
+static void t_exact_body_swallows_called_start(void)
+{
+	struct x64 x;
+	struct tab t;
+	const struct kgenome_func *f;
+
+	x64_image(&x, 36);
+	rf(&x.p, 0x3000, 1, 0x1040, 0x1070, 0x2000);
+	pb_entry(&x.p, 0x1060);
+	build(x.p.b, x.p.n, &t);
+	CK(t.ok && table_ok(&t, x.p.n));
+	f = at(&t, x.text + 0x40);
+	CK(f && f->len == 0x30);
+	CK(!at(&t, x.text + 0x60));                         /* the entry point names it; it is no function */
+	CK(n_decl(&t.fs) == 3 && t.fs.n_extra >= 1);
+	tab_free(&t);
+	free(x.p.b);
+}
+
 /* A forwarder string that lies INSIDE a code section (the export directory placed in .text by a packer): its RVA is code by the section table and a start by that alone, so only the
  * directory's own range says it is not. */
 static void t_export_forwarder_in_code(void)
@@ -1054,10 +1527,11 @@ static void t_cfg_tables(void)
 	cfg_image(&p, 0x5c, 2, 3, &t0);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0) && at(&t, t0 + 0x20) && at(&t, t0 + 0x40) && at(&t, t0 + 0x60));      /* the entry, two handlers, one CF target: nobody calls any of them */
-	CK(t.fs.n == 4);
+	/* round 4 (rule changed): the entry, two handlers and one CF target are declared starts, not units */
+	CK(stz(&t, t0)->source && stz(&t, t0 + 0x20)->source && stz(&t, t0 + 0x40)->source && stz(&t, t0 + 0x60)->source);
+	CK(n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0 && t.fs.n_st == 4);
 #ifndef FNTAB_PE_OLD_API_ONLY
-	CK(at(&t, t0 + 0x60) && (atz(&t, t0 + 0x60)->source & KGENOME_FN_S_EXPORT));
+	CK(stz(&t, t0 + 0x60)->source & KGENOME_FN_S_EXPORT);
 	{
 		struct kgenome_fntab_list l;
 
@@ -1073,22 +1547,25 @@ static void t_cfg_tables(void)
 	cfg_image(&p, 0x48, 2, 3, &t0);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0 + 0x20) && at(&t, t0 + 0x40));
-	/* the function at 0x60 is code behind padding that nothing names: the REACH step finds it (a gap start), the CF table does not (it was no start before that step) */
-	CK(at(&t, t0 + 0x60) && !(atz(&t, t0 + 0x60)->source & KGENOME_FN_S_EXPORT) && (atz(&t, t0 + 0x60)->flags & KGENOME_FN_F_GAP));
+	CK(stz(&t, t0 + 0x20)->source && stz(&t, t0 + 0x40)->source);
+	/* the function at 0x60 is code behind padding that nothing names: no table names it, so it is inside the handler before it (the GAPS step that found it is
+	 * DISABLED by the owner 2026-11-16: decode-derived) */
+	/* phase 2: the handler at 0x40 is derived (6 bytes); 0x60 is in the NONE unit behind it */
+	CK((!at(&t, t0 + 0x60) || at(&t, t0 + 0x60)->trust == KGENOME_FN_TRUST_NONE) && kgenome_funcs_at(&t.fs, t0 + 0x60) != KGENOME_FUNCS_NONE &&
+	   t.fs.v[kgenome_funcs_at(&t.fs, t0 + 0x60)].trust == KGENOME_FN_TRUST_NONE && atz(&t, t0 + 0x40)->trust == KGENOME_FN_TRUST_DERIVED);
 	tab_free(&t);
 	free(p.b);
 	/* Size 0x20: no field at all */
 	cfg_image(&p, 0x20, 2, 3, &t0);
 	build(p.b, p.n, &t);
-	CK(t.ok && table_ok(&t, p.n) && at(&t, t0 + 0x20) && !(atz(&t, t0 + 0x20)->source & KGENOME_FN_S_EXPORT));
+	CK(t.ok && table_ok(&t, p.n) && n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0 && atz(&t, t0)->trust == KGENOME_FN_TRUST_DERIVED);    /* no table read: nothing but the entry, no metadata; phase 2: the entry derives */
 	tab_free(&t);
 	free(p.b);
 	/* counts of 4 billion: bounded by the file */
 	cfg_image(&p, 0x5c, 0xffffffffu, 0xffffffffu, &t0);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0 + 0x20) && at(&t, t0 + 0x60));
+	CK(stz(&t, t0 + 0x20)->source && stz(&t, t0 + 0x60)->source);     /* round 4: declared starts, not units */
 	tab_free(&t);
 	/* a table VA below the image base */
 	w(p.b + off_of(&p, 0x2000) + 0x40, 0x1000, 4);
@@ -1130,9 +1607,9 @@ static void t_tls(void)
 	tls_image(&p, 3, &t0);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0 + 0x40) && at(&t, t0 + 0x60) && at(&t, t0 + 0x80));
+	CK(stz(&t, t0 + 0x40)->source && stz(&t, t0 + 0x60)->source && stz(&t, t0 + 0x80)->source);     /* round 4: declared starts, not units */
 #ifndef FNTAB_PE_OLD_API_ONLY
-	CK(at(&t, t0 + 0x40) && (at(&t, t0 + 0x40)->source & KGENOME_FN_S_ENTRY));
+	CK(stz(&t, t0 + 0x40)->source & KGENOME_FN_S_ENTRY);
 #endif
 	tab_free(&t);
 	free(p.b);
@@ -1198,7 +1675,7 @@ static void t_tls_hostile(void)
 	memset(&l, 0, sizeof l);
 	kgenome_fntab_pe_tls(kof_buf_make(p.b, p.n), &t.info, &l);
 	CK(l.n == 2 && l.n_bad == 2);                             /* the two real callbacks found, the two hostile ones counted and left out */
-	CK(at(&t, t0) && at(&t, t0 + 0x20));                      /* and both land in the final, merged table too */
+	CK(stz(&t, t0)->source && stz(&t, t0 + 0x20)->source);           /* and both land in the final, merged table too (round 4: as declared starts) */
 	kgenome_fntab_list_free(&l);
 	tab_free(&t);
 	free(p.b);
@@ -1261,11 +1738,12 @@ static void t_coff(void)
 	pb_done(&p);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0) && at(&t, t0 + 0x20) && at(&t, t0 + 0x50));
+	CK(stz(&t, t0)->source && at(&t, t0 + 0x20) && stz(&t, t0 + 0x50)->source);   /* round 4: the size-0 COFF symbols are declared starts, the sized one a unit */
 	CK(!at(&t, t0 + 0x40));
 	CK(at(&t, t0 + 0x20) && at(&t, t0 + 0x20)->len == 9);       /* the aux size, exact */
-	CK(at(&t, t0) && atz(&t, t0)->len == 5);                     /* no size: next start less the padding */
-	CK(at(&t, t0 + 0x50) && at(&t, t0 + 0x50)->len == 2);
+	/* no size: a declared start (round 4); phase 2: the descent derives main (5 bytes) and tail (2 bytes) from them, the rest of the gaps stays NONE */
+	CK(atz(&t, t0)->trust == KGENOME_FN_TRUST_DERIVED && atz(&t, t0)->len == 5);
+	CK(atz(&t, t0 + 0x50)->trust == KGENOME_FN_TRUST_DERIVED && atz(&t, t0 + 0x50)->len == 2);
 #ifndef FNTAB_PE_OLD_API_ONLY
 	CK(t.fs.ccase == KGENOME_FNTAB_C_PE_COFF);
 	{
@@ -1278,7 +1756,14 @@ static void t_coff(void)
 		kgenome_fntab_list_free(&l);
 	}
 	CK(at(&t, t0 + 0x20) && at(&t, t0 + 0x20)->end_source == KGENOME_FN_E_SYMBOL && (at(&t, t0 + 0x20)->source & KGENOME_FN_S_COFF));
-	CK(at(&t, t0) && (atz(&t, t0)->flags & KGENOME_FN_F_SIZE0) && !(atz(&t, t0)->flags & KGENOME_FN_F_END_OPEN) && atz(&t, t0)->end_source == KGENOME_FN_E_REACH);
+	{
+		/* round 4: a COFF symbol with no size declares a start, not a body: a declared start of the NONE unit there */
+		uint32_t q, hit = 0;
+
+		for (q = 0; q < t.fs.n_st; q++)
+			hit |= t.fs.st[q].off == t0 && (t.fs.st[q].source & KGENOME_FN_S_COFF);
+		CK(hit && atz(&t, t0)->trust == KGENOME_FN_TRUST_DERIVED && (atz(&t, t0)->source & (KGENOME_FN_S_COFF | KGENOME_FN_S_DERIVED_SEED)) == (KGENOME_FN_S_COFF | KGENOME_FN_S_DERIVED_SEED));
+	}
 #endif
 	tab_free(&t);
 	free(p.b);
@@ -1298,9 +1783,9 @@ static void t_coff_hostile(void)
 	pb_done(&p);
 	build(p.b, p.n, &t);
 	CK(t.ok && table_ok(&t, p.n));
-	CK(at(&t, t0 + 0x20));
+	CK(n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0 && atz(&t, t0)->trust == KGENOME_FN_TRUST_DERIVED);   /* the table names no function, and no other source does; phase 2: the entry derives */
 #ifndef FNTAB_PE_OLD_API_ONLY
-	CK(t.fs.ccase == KGENOME_FNTAB_C_PE_WALK);
+	CK(t.fs.ccase == KGENOME_FNTAB_C_NO_META);
 #endif
 	tab_free(&t);
 	w(p.b + p.lfanew + 16, 0x7fffffffu, 4);             /* NumberOfSymbols far past the file */
@@ -1324,6 +1809,7 @@ static void t_clr(void)
 	pb_dir(&p, KGENOME_PE_DIR_COM_DESCRIPTOR, 0x1000, 72);
 	w(p.b + 0x400, 72, 4);                              /* cb */
 	w(p.b + 0x400 + 4, 2, 2);
+	w(p.b + 0x400 + 16, 1, 4);                          /* COMIMAGE_FLAGS_ILONLY: managed only (round 3, PMA-5: mixed-mode runs the native rows) */
 	build(p.b, p.n, &t);
 	CK(t.ok);
 #ifndef FNTAB_PE_OLD_API_ONLY
@@ -1421,29 +1907,27 @@ static void t_poison(void)
 static void t_selector(void)
 {
 	/* the PE rows of the decision table (fntab_select.c): metadata -> case -> run */
-	static const uint16_t S = KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_THUNK;
+	/* 2026-11-16 (metadata only): no row runs WALK, THUNK or REACH (decode-derived, DISABLED); every row with code runs the start-only tables and the ENTRY
+	 * strategy (asked by the orchestrator only beside another source); x86 / x64 with no exact table is PE_META; any other machine runs the start-only tables */
+	static const uint16_t S = KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG | KGENOME_FNTAB_X_ENTRY;
 	static const struct { struct kgenome_fntab_meta m; unsigned ccase, run; } rows[] = {
 		{ { .format = KGENOME_FMT_PE, .pe_clr = 1, .pe_x86 = 1, .pe_x64_pdata = 1 }, KGENOME_FNTAB_C_PE_CLR, 0 },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1 }, KGENOME_FNTAB_C_PE_PDATA,
-		  KGENOME_FNTAB_X_PDATA | S | KGENOME_FNTAB_X_PE_REACH },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_PDATA,
-		  KGENOME_FNTAB_X_PDATA | S | KGENOME_FNTAB_X_PE_REACH | KGENOME_FNTAB_X_PE_COFF },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1 }, KGENOME_FNTAB_C_PE_PDATA, KGENOME_FNTAB_X_PDATA | S },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_PDATA, KGENOME_FNTAB_X_PDATA | S | KGENOME_FNTAB_X_PE_COFF },
 		/* a table read and found empty is the next row: the meta says it, the selector does not guess */
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pdata_empty = 1 }, KGENOME_FNTAB_C_PE_WALK, S | KGENOME_FNTAB_X_PE_REACH },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pdata_empty = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_COFF,
-		  KGENOME_FNTAB_X_PE_COFF | S | KGENOME_FNTAB_X_PE_REACH },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_COFF, KGENOME_FNTAB_X_PE_COFF | S | KGENOME_FNTAB_X_PE_REACH },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_coff = 1, .coff_empty = 1 }, KGENOME_FNTAB_C_PE_WALK, S | KGENOME_FNTAB_X_PE_REACH },
-		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1 }, KGENOME_FNTAB_C_PE_WALK, S | KGENOME_FNTAB_X_PE_REACH },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pdata_empty = 1 }, KGENOME_FNTAB_C_PE_META, S },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pdata_empty = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_COFF, KGENOME_FNTAB_X_PE_COFF | S },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_COFF, KGENOME_FNTAB_X_PE_COFF | S },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_coff = 1, .coff_empty = 1 }, KGENOME_FNTAB_C_PE_META, S },
+		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1 }, KGENOME_FNTAB_C_PE_META, S },
 		/* no executable section holds a byte of the file: nothing to table, whatever the machine or the tables say (a managed image is still managed) */
 		{ { .format = KGENOME_FMT_PE, .pe_x86 = 1, .pe_x64_pdata = 1, .pe_nocode = 1 }, KGENOME_FNTAB_C_PE_NOCODE, 0 },
 		{ { .format = KGENOME_FMT_PE, .pe_arm = 1, .pe_nocode = 1 }, KGENOME_FNTAB_C_PE_NOCODE, 0 },
 		{ { .format = KGENOME_FMT_PE, .pe_clr = 1, .pe_nocode = 1 }, KGENOME_FNTAB_C_PE_CLR, 0 },
-		/* ARM64 / Thumb-2: the packed exception table and the starts the image declares; no walk */
-		{ { .format = KGENOME_FMT_PE, .pe_arm = 1 }, KGENOME_FNTAB_C_PE_ARM,
-		  KGENOME_FNTAB_X_PE_ARMPDATA | KGENOME_FNTAB_X_PE_EXPORT | KGENOME_FNTAB_X_PE_TLS | KGENOME_FNTAB_X_PE_CFG },
-		{ { .format = KGENOME_FMT_PE }, KGENOME_FNTAB_C_PE_NONE, 0 },
-		{ { .format = KGENOME_FMT_PE, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_NONE, 0 },
+		/* ARM64 / Thumb-2: the packed exception table and the starts the image declares */
+		{ { .format = KGENOME_FMT_PE, .pe_arm = 1 }, KGENOME_FNTAB_C_PE_ARM, KGENOME_FNTAB_X_PE_ARMPDATA | S },
+		{ { .format = KGENOME_FMT_PE }, KGENOME_FNTAB_C_PE_NONE, S },
+		{ { .format = KGENOME_FMT_PE, .pe_coff = 1 }, KGENOME_FNTAB_C_PE_NONE, S },
 	};
 	unsigned i;
 	struct kgenome_fntab_plan p;
@@ -1539,6 +2023,8 @@ static void t_merge_order(void)
 
 /* ---- the REACH step: the end of an entry is the end of what it reaches ---------------------------------------------- */
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * THE ENDS BY REACH, and the marks a compiler leaves. f0: push ebp; mov ebp,esp; call g; int3 (the int3 right after a call is the body's own mark: the call does not return).
  * f1 (called by nobody, after the padding): push ebp; mov ebp,esp; xor eax,eax; pop ebp; ret - a leaf behind padding is a START (the first byte past the padding is code that ends).
@@ -1579,7 +2065,10 @@ static void t_reach_ends(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * DATA IS NOT A FUNCTION, and what REACH does not know it says. A: `push ebp; ret` and the 8 bytes of a jump table right behind it (no padding): the table is not code that ends, so it is no start and the
  * entry ends at its `ret`. B: `push ebp; jmp eax; <the table>`: a reachable jump through a register - the code of the cases may be reached only through the table - the end stays the next
@@ -1649,7 +2138,10 @@ static void t_reach_states(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * THE BODY'S OWN BLOCKS BEHIND ITS RET. Code that ends, right behind the end of a body with no padding between and no prologue, is more of that body (the block a compiler puts behind the `ret` that
  * nothing branches to); with a prologue instruction it is a function (a start in a gap); data that does not end is neither. f: push ebp; ret; xor eax,eax; ret (a dead tail). h: push ebp; ret; push ebp;
@@ -1681,7 +2173,10 @@ static void t_reach_adjacent(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * A JUMP TO THE BYTE BEHIND AN INT3 RUN is the start of another function (an int3 is never executed inside a body: it is the padding between functions); two noreturn call blocks of one body, the second reached
  * by a branch and standing behind the first one's mark with no padding, are one function. f: push ebp; test eax,eax; je L; call g; int3; L: call g; int3 (+ padding); the tail jump `jmp h` of k lands behind padding.
@@ -1712,7 +2207,10 @@ static void t_reach_jump_targets(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * FNR-3, the x86 SEH handler case: a function reached ONLY by a `mov reg, imm32` that stores its address (the fs:[0] EXCEPTION_REGISTRATION_RECORD install an x86 SEH frame does -
  * `reg.handler = handler;` lowers to exactly this, `movl $handler,-0x8(%ebp)`), never by a `call`/`jmp`, standing between two call-reached functions with NO padding at all between
@@ -1752,6 +2250,7 @@ static void t_seh_handler_gap_fnr3(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
 /* The mark in the frame: the facts of a PE function that ends in `call; int3` say its control does not run on (RUNS_OUT is the next function's code), so the lineage reads it as a function that
  * never returns; the same bytes in a function that goes on through the int3 (the byte is the first of a following block that a branch reaches) do not. RED on base: RUNS_OUT was set. */
@@ -1774,7 +2273,7 @@ static void t_trap_exit_frame_one(uint8_t mark)
 	memcpy(code + 0x60, "\x55\xc3", 2);
 	t0 = code_image(&p, 0, code, sizeof code);
 	build(p.b, p.n, &t);
-	CK(t.ok && atz(&t, t0)->len == 7);
+	CK(t.ok);                       /* (the table's own end for it was the REACH step's, DISABLED 2026-11-16: the frame below is made over the extent the row names) */
 	memset(&s, 0, sizeof s);
 	s.obj = &t.obj; s.base = p.b; s.size = p.n; s.fs = &t.fs;
 	CK(kgenome_frame_make(&s, t0, 7, 0u, &fr) == KGENOME_FRAME_OK);
@@ -1859,7 +2358,7 @@ static void t_pdata_arm(void)
 	CK(f && f->len == 16 && f->end_source == KGENOME_FN_E_UNWIND && (f->source & KGENOME_FN_S_PDATA));
 	f = at(&t, t0 + 0x40);
 	CK(f && f->len == 32 && f->end_source == KGENOME_FN_E_UNWIND);
-	CK(t.fs.n == 2);                                                     /* the entries held two (the entry point is the first one: it names the same start); the walk is not run (x86 only) */
+	CK(n_decl(&t.fs) == 2);                                                     /* the entries held two (the entry point is the first one: it names the same start); the walk is not run (x86 only) */
 	CK(t.fs.state == KGENOME_FNTAB_PARTIAL && (t.fs.partial & KGENOME_FNTAB_P_STARTS) && (t.fs.partial & KGENOME_FNTAB_P_BAD_FDE));
 	tab_free(&t);
 	free(p.b);
@@ -1892,19 +2391,35 @@ static void t_pdata_arm(void)
 		arm_image(&p, 0x1c2, &t0, thm, 1);                               /* the older Thumb machine id is the same case */
 		build(p.b, p.n, &t);
 		CK(t.ok && t.fs.ccase == KGENOME_FNTAB_C_PE_ARM && atz(&t, t0)->len == 8);
+		CK(n_trust(&t.fs, KGENOME_FN_TRUST_DERIVED) == 0);           /* phase 2: a Thumb machine's starts are not read as A32 (counted in n_derive_skipped) */
 		tab_free(&t);
 		free(p.b);
 	}
-	/* a machine whose exception directory this tree cannot read: empty, and it says so */
+	/* a machine whose exception directory this tree cannot read: it says so, and with no other table the code is one unit of trust NONE */
 	arm_image(&p, 0x1c0, &t0, thm, 1);
 	build(p.b, p.n, &t);
-	CK(t.ok && t.fs.n == 0 && t.fs.ccase == KGENOME_FNTAB_C_PE_NONE && (t.fs.partial & KGENOME_FNTAB_P_NO_TABLE));
+	CK(t.ok && n_trust(&t.fs, KGENOME_FN_TRUST_HIGH) == 0 && t.fs.ccase == KGENOME_FNTAB_C_NO_META &&
+	   (t.fs.partial & KGENOME_FNTAB_P_NO_TABLE) && (t.fs.partial & KGENOME_FNTAB_P_NO_META));       /* (machine 0x1c0 is A32: phase 2 may derive from its entry) */
+	tab_free(&t);
+	free(p.b);
+	/* phase 2: a Thumb-2 image (0x1c4) with no exception table: its entry is Thumb code, which the A32 space does not read: skipped and counted, no function
+	 * derived; the same image as ARM64 (control) derives from its entry */
+	arm_image(&p, 0x1c4, &t0, thm, 0);
+	build(p.b, p.n, &t);
+	CK(t.ok && n_trust(&t.fs, KGENOME_FN_TRUST_DERIVED) == 0 && t.fs.n_derive_skipped == 1);
+	tab_free(&t);
+	free(p.b);
+	arm_image(&p, 0xaa64, &t0, a64, 0);
+	build(p.b, p.n, &t);
+	CK(t.ok && n_trust(&t.fs, KGENOME_FN_TRUST_DERIVED) >= 1 && t.fs.n_derive_skipped == 0);
 	tab_free(&t);
 	free(p.b);
 }
 #endif
 
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* A body that runs on into padding that is NOT behind its int3 mark ends where the padding begins: f: push ebp; call g; nop; nop; nop and g right behind (g is called by h): the nop after the call
  * is the mark, the two nops after it are padding, g's start is where the walk's run of padding ends. A call and its mark behind a `ret` (the block of a call that does not return, with no padding
  * before it) is more of that body: f2: push ebp; call g; ret; call g; nop and then the padding. */
@@ -1934,7 +2449,10 @@ static void t_reach_padding_and_marks(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* The window: a body longer than the first window (4096 bytes) is read to its end; one longer than the bound of cost (1 MiB) is said, not cut: REACH_NONE, the end the next start. */
 static void t_reach_windows(void)
 {
@@ -1973,6 +2491,7 @@ static void t_reach_windows(void)
 		free(p.b);
 	}
 }
+#endif
 
 /* Two chained fragments behind a function: no start is made inside either (the cover is sorted and read), and the padding between them is padding. */
 static void t_pdata_two_fragments(void)
@@ -1993,8 +2512,8 @@ static void t_pdata_two_fragments(void)
 	pb_dir(&x.p, KGENOME_PE_DIR_EXCEPTION, 0x3000, 60);
 	build(x.p.b, x.p.n, &t);
 	CK(t.ok && table_ok(&t, x.p.n));
-	CK(!at(&t, x.text + 0x60) && !at(&t, x.text + 0x68) && !at(&t, x.text + 0x63));
-	CK(t.fs.n == 3);                                                     /* the three non-leaf functions */
+	CK(!at(&t, x.text + 0x60) && !at(&t, x.text + 0x68) && (!at(&t, x.text + 0x63) || atz(&t, x.text + 0x63)->trust == KGENOME_FN_TRUST_NONE));   /* the padding between the parts is undeclared code (round 2) */
+	CK(n_decl(&t.fs) == 3);                                                     /* the three non-leaf functions */
 	tab_free(&t);
 	free(x.p.b);
 }
@@ -2040,6 +2559,8 @@ static void t_pdata_arm_hostile(void)
 #endif
 
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* An int3 that the code falls into (the padding of the next function) is not the body's: `push ebp; mov ebp,esp` then int3 padding ends at the int3, whatever stands behind. And a branch whose target lies in
  * the last bytes of the first window (4096): the instruction it names is cut by the window, the window grows and the branch is followed. */
 static void t_reach_fall_and_edge(void)
@@ -2077,7 +2598,10 @@ static void t_reach_fall_and_edge(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* What a function begins with, x64: with no padding behind the ret of a function, code that starts `push r`, `sub rsp,n`, `mov rax,rsp` or stores into the home space [rsp+n] is the next function (a start);
  * the same bytes without such a first instruction are more of the body behind it. */
 static void t_reach_prologues(void)
@@ -2113,8 +2637,11 @@ static void t_reach_prologues(void)
 		free(p.b);
 	}
 }
+#endif
 
 
+/* DISABLED by the owner 2026-11-16: the rows pin the entry walk's starts, the import stubs it decoded, or the REACH / GAPS / padding steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* Evidence of a start, and of no start. (1) A jump to the byte behind ONE int3 that follows a `jmp` (not a call: no mark) is a start. (2) Zero bytes behind padding are the fill and no start, even when a `ret` stands
  * behind them. (3) After a `ret`, `call; nop` with no padding is the block of a call that does not return (more of the body) and the prologue right behind it is a new function: the general rule alone would
  * take both as one body. (4) After a `ret`, a bare `jmp eax` with no padding does not end by a `ret`: it is neither more of the body nor a start. (5) The zero fill that reaches the end of the section joins the
@@ -2169,7 +2696,10 @@ static void t_reach_kills(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the REACH / GAPS steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /*
  * FNR-2 (2026-11-04): a `ret` with no padding behind it, followed by bytes that happen to decode and end
  * (independently re-run from that offset), was absorbed into the previous body on the decode guess alone. The
@@ -2230,7 +2760,10 @@ static void fnr2_no_evidence_absorb(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the REACH / GAPS steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* FNR-2v2 (2026-11-04): RED on the merged FNR-2 (`!rc.has_call` alone) - a chunk with no call of its own, but
  * carrying an int3 that is NOT right after a call, must not pass as the dead-tail SHAPE evidence FNR-2 meant:
  * that int3 fell through classify() as ordinary code (FNR-1; defect FNR-4), not because this is really a
@@ -2261,7 +2794,10 @@ static void fnr2v2_trap_not_absorbed(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
 
+/* DISABLED by the owner 2026-11-16: the rows pin the REACH / GAPS steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
 /* FNR-4 (2026-11-04): classify()'s FNR-1 fix lets a bare int3/hlt not right after a CALL fall through as ordinary
  * flow, so graph_of()'s OWN reachable-block walk (fntab_reach.c) could run straight through a genuine, multi-byte
  * alignment run and into the next function's own bytes, inside the SAME block. This needs the probe function's
@@ -2319,35 +2855,142 @@ static void fnr4_reach_stops_at_padding(void)
 	tab_free(&t);
 	free(p.b);
 }
+#endif
+
+/* DISABLED by the owner 2026-11-16: the rows pin the REACH / GAPS steps (decode-derived), which the function table no longer runs (metadata only). To re-enable: take this #if 0 out (and the one around its call in main) with the strategy it tests. */
+#if 0
+/* Task A (2026-11-05): fntab_reach.c's own graph_of() now supplies kgenome_cfg_build a REAL switch_src.read_at
+ * (reach_switch_read_at) backed by the object's own image, instead of leaving `src.switch_src` zeroed. Fixture:
+ * pe32_switch_fixture.h's real i686-w64-mingw32-gcc -O2 `dispatch` bytes - a single `jmp DWORD PTR
+ * [eax*4+0x404044]` against a real 16-entry table of ABSOLUTE pointers that lives in .rdata, a DIFFERENT
+ * section from .text - exercising the real cross-section VA->file-offset translation (kgenome_image_addr_to_off)
+ * reach_switch_read_at uses, which cfg_switch.c's own flat-buffer fake table_read() never has to do.
+ * `dispatch` is named only by a direct call (WALK): its end has no exact source and must come from REACH.
+ *
+ * A second, undeclared function (`hidden`: push ebp; mov ebp,esp; pop ebp; ret - entry_like) sits immediately
+ * behind dispatch's real last byte, with a third, independently-called function (`nextfn`) immediately behind
+ * THAT - so the only boundary evidence between dispatch and nextfn is REACH itself, never padding or a
+ * next-start that happens to land in the right place by construction.
+ *
+ * RED on base (switch_src unwired): the indirect jmp is R_INDIRECT (KGENOME_FN_F_REACH_INDIRECT, no end
+ * established by REACH) - kgenome_fntab_reach()'s own gap scan for this entry never runs (`cov` is forced to
+ * `bound` on R_INDIRECT), so `hidden` is never discovered as its own function; fntab_ends.c's NEXT_START rule
+ * then closes dispatch at nextfn's start, silently swallowing hidden's 5 bytes into dispatch's own reported
+ * length (288, not the real 283).
+ * GREEN on tree: the switch resolves (16 real targets, all inside the function - switch_reach_extend folds them
+ * into this graph's own reach), dispatch's end is exact (283, the real `mov eax,-1; ret` default case) with
+ * end_source REACH and REACH_INDIRECT NOT set; the gap scan then runs normally behind it and finds `hidden` as
+ * its own entry (source WALK, flag GAP), exactly as fnr4_reach_stops_at_padding's own `g` above. */
+static void reach_indirect_switch_resolves(void)
+{
+	struct pb p;
+	struct tab t;
+	uint32_t text_raw, rdata_raw, stub0, dispatch0, hidden0, nextfn0;
+	const struct kgenome_func *f, *h, *n;
+
+	pb_init(&p, 0x8000, 0, 0x14c);
+	text_raw = pb_sec(&p, ".text", 0x1000, 0x1000, 0x1000, CH_CODE);
+	rdata_raw = pb_sec(&p, ".rdata", 0x4000, 0x100, 0x100, CH_RDATA);
+	memset(p.b + text_raw, 0xcc, 0x1000);
+
+	stub0 = text_raw;                                       /* VA 0x401000: the entry point */
+	dispatch0 = text_raw + 0x500;                           /* VA 0x401500 = PE32_DISPATCH_VA, fixed: the table's own absolute entries depend on it */
+	hidden0 = dispatch0 + (uint32_t)sizeof PE32_DISPATCH_TEXT;        /* immediately behind dispatch's real last byte, no padding */
+	nextfn0 = hidden0 + 5u;                                 /* immediately behind hidden, no padding */
+
+	memcpy(p.b + stub0, "\xe8\x00\x00\x00\x00\xe8\x00\x00\x00\x00\xc3", 11);     /* call dispatch; call nextfn; ret */
+	rel32(p.b, stub0, 5u, dispatch0);
+	rel32(p.b, stub0 + 5u, 5u, nextfn0);
+	memcpy(p.b + dispatch0, PE32_DISPATCH_TEXT, sizeof PE32_DISPATCH_TEXT);
+	memcpy(p.b + hidden0, "\x55\x8b\xec\x5d\xc3", 5);       /* a real prologue, found nowhere but by the gap scan */
+	memcpy(p.b + nextfn0, "\x55\x8b\xec\x5d\xc3", 5);
+	memcpy(p.b + rdata_raw + 0x44, PE32_TABLE_RAW, sizeof PE32_TABLE_RAW);
+	pb_entry(&p, 0x1000);
+	pb_done(&p);
+
+	build(p.b, p.n, &t);
+	CK(t.ok && table_ok(&t, p.n));
+	f = atz(&t, dispatch0);
+	/* RED on base: f->len is 288 (dispatch0..nextfn0, hidden swallowed in), not the real 283. */
+	CK(f->len == sizeof PE32_DISPATCH_TEXT);
+#ifndef FNTAB_PE_OLD_API_ONLY
+	CK(f->end_source == KGENOME_FN_E_REACH);
+	CK(!(f->flags & KGENOME_FN_F_REACH_INDIRECT));
+	h = at(&t, hidden0);
+	CK(h != NULL);                   /* RED on base: NULL (swallowed into dispatch, the unwired-switch_src gap-scan defect) */
+	if (h)
+		CK(h->len == 5 && h->source == KGENOME_FN_S_WALK && (h->flags & KGENOME_FN_F_GAP));
+#endif
+	n = at(&t, nextfn0);
+	CK(n != NULL && n->len == 5);
+	tab_free(&t);
+	free(p.b);
+}
+#endif
 
 int main(void)
 {
+#if 0 /* DISABLED by the owner 2026-11-16: t_x86_walk */
 	t_x86_walk();
+#endif
 	t_x86_idempotent_and_virtual();
 	t_entry_outside_code();
 	t_virtual_size_cut();
+#if 0 /* DISABLED by the owner 2026-11-16: t_thunks */
 	t_thunks();
+#endif
 	t_stub_slots();
 	t_stub_order();
 	t_sigreturn_not_in_pe();
 	t_code_bytes_union();
 	t_lineage_sections_out_of_order();
 	t_thunk_slot_outside_iat();
+#if 0 /* DISABLED by the owner 2026-11-16: t_tail_rules */
 	t_tail_rules();
+#endif
 	t_no_jmp_thunk();
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_ends */
 	t_reach_ends();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_states */
 	t_reach_states();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_adjacent */
 	t_reach_adjacent();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_jump_targets */
 	t_reach_jump_targets();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_seh_handler_gap_fnr3 */
 	t_seh_handler_gap_fnr3();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_padding_and_marks */
 	t_reach_padding_and_marks();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_windows */
 	t_reach_windows();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_fall_and_edge */
 	t_reach_fall_and_edge();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_prologues */
 	t_reach_prologues();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_reach_kills */
 	t_reach_kills();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: fnr2_no_evidence_absorb */
 	fnr2_no_evidence_absorb();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: fnr2v2_trap_not_absorbed */
 	fnr2v2_trap_not_absorbed();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: fnr4_reach_stops_at_padding */
 	fnr4_reach_stops_at_padding();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: reach_indirect_switch_resolves */
+	reach_indirect_switch_resolves();
+#endif
 	t_pdata_two_fragments();
 	t_nocode();
 #ifndef FNTAB_PE_OLD_API_ONLY
@@ -2355,9 +2998,18 @@ int main(void)
 	t_pdata_arm();
 	t_pdata_arm_hostile();
 #endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_pdata_leaf */
 	t_pdata_leaf();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_pdata_gap_leaf */
 	t_pdata_gap_leaf();
+#endif
+#if 0 /* DISABLED by the owner 2026-11-16: t_pdata_leaf_leading_nop */
+	t_pdata_leaf_leading_nop();
+#endif
 	t_pdata_chained();
+	t_pdata_chained_contig();
+	t_pdata_chain_deep();
 	t_pdata_hostile();
 	t_pdata_unwind_info();
 	t_pdata_indirect();
@@ -2367,6 +3019,12 @@ int main(void)
 	t_pdata_clip();
 	t_pdata_cap();
 	t_exports();
+	t_cfg_x64();
+	t_tls_x64();
+	t_export_hostile();
+	t_exact_body_swallows_called_start();
+	t_export_name_pdata();
+	t_merge_name_carrier();
 #ifndef FNTAB_PE_OLD_API_ONLY
 	t_export_forwarder_in_code();
 #endif

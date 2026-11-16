@@ -64,7 +64,7 @@
  *
  * WHAT THE COUNT SEES: every stop the emulator makes at a syscall instruction, the first visit
  * and every later one. (Until the instruction cache was made to fill the same per-step record as
- * a fresh decode - run_step in emu_interp.c - the watch compared the fetch buffer a cache HIT
+ * a fresh decode - struct kgenome_emu_run_step in emu_run_private.h - the watch compared the fetch buffer a cache HIT
  * did not fill, so a polled call paused once however many times it ran and a cached non-call was
  * paused on as one; a fixture of one getpid polled 1000 times made ONE stop. That is fixed, and
  * tests/unit/emu_syscall_watch.c holds it.) Counting every stop is why the identity above is

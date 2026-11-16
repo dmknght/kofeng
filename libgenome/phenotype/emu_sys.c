@@ -4,7 +4,7 @@
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_win_private.h"
 
 
 /*
@@ -70,28 +70,29 @@ static uint64_t tsc_ns(struct kgenome_emu *e)
 }
 
 static uint64_t syscall_do(struct kgenome_emu *e, int *stop_out);
-static uint64_t sysarg(const struct kgenome_emu *e, unsigned i);
+
+/* The number AS THE GUEST GAVE IT, in the register the convention in force names (see
+ * struct kgenome_emu_sysabi): not yet translated to the numbering this file is written in. */
+static uint64_t sysnr_raw(const struct kgenome_emu *e)
+{
+	const struct kgenome_emu_sysabi *a = kgenome_emu_sysabi_of(e);
+
+	return e->gpr[a->nr] & a->mask;
+}
 
 uint64_t kgenome_emu_do_syscall(struct kgenome_emu *e, int *stop_out)
 {
 	struct kgenome_emu_syscall *s;
 	uint64_t ret;
+	unsigned k;
 
 	s = &e->syslog[e->n_syslog % KGENOME_EMU_SYSLOG];
 	/* The number AS THE GUEST GAVE IT, not the translated one: a reader of
 	 * the log is looking at a 32-bit program and expects to see i386
 	 * numbers. What it was translated to is the dispatcher's business. */
-	s->nr     = e->bits == 32 ? (e->gpr[KGENOME_EMU_RAX] & 0xffffffffu)
-				  : e->gpr[KGENOME_EMU_RAX];
-	s->arg[0] = e->bits == 32 ? (e->gpr[KGENOME_EMU_RBX] & 0xffffffffu)
-				  : e->gpr[KGENOME_EMU_RDI];
-	s->arg[1] = e->bits == 32 ? (e->gpr[KGENOME_EMU_RCX] & 0xffffffffu)
-				  : e->gpr[KGENOME_EMU_RSI];
-	s->arg[2] = e->bits == 32 ? (e->gpr[KGENOME_EMU_RDX] & 0xffffffffu)
-				  : e->gpr[KGENOME_EMU_RDX];
-	s->arg[3] = sysarg(e, 0);
-	s->arg[4] = sysarg(e, 1);
-	s->arg[5] = sysarg(e, 2);
+	s->nr = sysnr_raw(e);
+	for (k = 0; k < 6u; k++)
+		s->arg[k] = kgenome_emu_sys_arg(e, k);
 	ret = syscall_do(e, stop_out);
 	s->ret = ret;
 	e->n_syslog++;
@@ -352,7 +353,7 @@ static uint64_t mmap_alloc(struct kgenome_emu *e, uint64_t len)
  * purpose or has simply not been met yet; the gap to close was never "the whole
  * table", it was "everything this file already knows how to answer".
  */
-static uint64_t i386_nr(uint64_t nr)
+uint64_t kgenome_emu_sys_i386_nr(uint64_t nr)
 {
 	switch (nr) {
 	case 1:   return EMU_SYS_EXIT;
@@ -450,18 +451,6 @@ static uint64_t i386_nr(uint64_t nr)
 
 
 
-static uint64_t sysarg(const struct kgenome_emu *e, unsigned i)
-{
-	static const unsigned amd64[3] = { KGENOME_EMU_R10, KGENOME_EMU_R8, KGENOME_EMU_R9 };
-	static const unsigned i386[3]  = { KGENOME_EMU_RSI, KGENOME_EMU_RDI, KGENOME_EMU_RBP };
-	uint64_t v;
-
-	if (i >= 3)
-		return 0;
-	v = e->gpr[e->bits == 32 ? i386[i] : amd64[i]];
-	return e->bits == 32 ? (v & 0xffffffffu) : v;
-}
-
 /*
  * exit, execve and the memory calls.
  *
@@ -483,7 +472,7 @@ static uint64_t sys_proc_mem(struct kgenome_emu *e, uint64_t nr, uint64_t a0, ui
 		return 0;
 	case EMU_SYS_MMAP: {
 		uint64_t len = (a1 + KGENOME_EMU_PAGE - 1u) & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
-		uint64_t prot = e->gpr[KGENOME_EMU_RDX];
+		uint64_t prot = kgenome_emu_sys_arg(e, 2);
 		/*
 		 * The descriptor is an int, and a caller that sets it with a
 		 * 32-bit MOV leaves 0x00000000ffffffff in the register - which
@@ -493,10 +482,10 @@ static uint64_t sys_proc_mem(struct kgenome_emu *e, uint64_t nr, uint64_t a0, ui
 		 * MAP_ANONYMOUS settles it regardless of what the fd looks
 		 * like.
 		 */
-		int32_t  fd    = (int32_t)sysarg(e, 1);
-		uint64_t flags = sysarg(e, 0);
+		int32_t  fd    = (int32_t)kgenome_emu_sys_arg(e, 4);
+		uint64_t flags = kgenome_emu_sys_arg(e, 3);
 		/* mmap2 (i386 192) counts its offset in 4096 byte pages; the amd64 call and old_mmap count bytes */
-		uint64_t off = sysarg(e, 2) << ((e->bits == 32 && (e->gpr[KGENOME_EMU_RAX] & 0xffffffffu) == 192u) ? 12 : 0);
+		uint64_t off = kgenome_emu_sys_arg(e, 5) << ((e->bits == 32 && sysnr_raw(e) == 192u) ? 12 : 0);
 		uint64_t at;
 
 		if (!len)
@@ -534,7 +523,7 @@ static uint64_t sys_proc_mem(struct kgenome_emu *e, uint64_t nr, uint64_t a0, ui
 		return at;
 	}
 	case EMU_SYS_MPROTECT:
-		if (e->gpr[KGENOME_EMU_RDX] & KGENOME_EMU_X)
+		if (kgenome_emu_sys_arg(e, 2) & KGENOME_EMU_X)
 			kgenome_emu_snap_take(e, a0, a1);
 		return 0;
 	case EMU_SYS_MUNMAP:
@@ -606,9 +595,9 @@ static uint64_t sys_runtime(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uin
 	 */
 	case EMU_SYS_NANOSLEEP:
 	case EMU_SYS_CLOCK_NANOSLEEP: {
-		uint64_t req = (nr == EMU_SYS_NANOSLEEP) ? a0 : e->gpr[KGENOME_EMU_RDX];
+		uint64_t req = (nr == EMU_SYS_NANOSLEEP) ? a0 : kgenome_emu_sys_arg(e, 2);
 		uint64_t ts[2], rem[2] = { 0, 0 };
-		uint64_t back = (nr == EMU_SYS_NANOSLEEP) ? a1 : sysarg(e, 0);
+		uint64_t back = (nr == EMU_SYS_NANOSLEEP) ? a1 : kgenome_emu_sys_arg(e, 3);
 
 		if (req && kgenome_emu_mem_rd(e, req, ts, sizeof ts))
 			e->tsc_skew += ts[0] * 1000000000u + ts[1];
@@ -674,7 +663,7 @@ static uint64_t sys_runtime(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uin
 	case EMU_SYS_RT_SIGACTION:
 	case EMU_SYS_RT_SIGPROCMASK: {
 		/* The old value, if asked for, is "nothing was set". */
-		uint64_t old = (nr == EMU_SYS_RT_SIGACTION) ? e->gpr[KGENOME_EMU_RDX] : a1;
+		uint64_t old = (nr == EMU_SYS_RT_SIGACTION) ? kgenome_emu_sys_arg(e, 2) : a1;
 		uint8_t z[152];
 
 		if (old) {
@@ -686,7 +675,7 @@ static uint64_t sys_runtime(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uin
 	case EMU_SYS_SCHED_GETAFFINITY: {
 		uint64_t mask = 1;                          /* one CPU, cpu 0 */
 
-		if (a1 < 8 || !kgenome_emu_mem_wr(e, e->gpr[KGENOME_EMU_RDX], &mask, 8))
+		if (a1 < 8 || !kgenome_emu_mem_wr(e, kgenome_emu_sys_arg(e, 2), &mask, 8))
 			return (uint64_t)-22;               /* EINVAL */
 		return 8;
 	}
@@ -729,8 +718,8 @@ static uint64_t sys_runtime(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uin
 		/* 8 MB of stack, and as many descriptors as anyone asks for. */
 		uint64_t lim[2] = { 8u * 1024u * 1024u, ~(uint64_t)0 };
 
-		if (sysarg(e, 0) &&
-		    !kgenome_emu_mem_wr(e, sysarg(e, 0), lim, sizeof lim))
+		if (kgenome_emu_sys_arg(e, 3) &&
+		    !kgenome_emu_mem_wr(e, kgenome_emu_sys_arg(e, 3), lim, sizeof lim))
 			return (uint64_t)-14;
 		return 0;
 	}
@@ -841,11 +830,11 @@ static uint64_t sys_files(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint6
 	case EMU_SYS_READLINKAT: {
 		/* readlink's answer, one argument along. */
 		static const char path[] = "/proc/self/exe";
-		uint64_t n = sizeof path - 1u, room = sysarg(e, 0);
+		uint64_t n = sizeof path - 1u, room = kgenome_emu_sys_arg(e, 3);
 
 		if (n > room)
 			n = room;
-		if (!kgenome_emu_mem_wr(e, e->gpr[KGENOME_EMU_RDX], path, (unsigned)n))
+		if (!kgenome_emu_mem_wr(e, kgenome_emu_sys_arg(e, 2), path, (unsigned)n))
 			return (uint64_t)-14;
 		return n;
 	}
@@ -1059,7 +1048,7 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 	*mine = 1;
 	switch (nr) {
 	case EMU_SYS_PWRITE64:
-		return e->gpr[KGENOME_EMU_RDX];             /* wrote it all */
+		return kgenome_emu_sys_arg(e, 2);             /* wrote it all */
 	case EMU_SYS_WRITEV:
 	case EMU_SYS_READV: {
 		/*
@@ -1069,7 +1058,7 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 		 * made the common case of "it told us what it was doing" into
 		 * a stop.
 		 */
-		uint64_t vec = a1, n = e->gpr[KGENOME_EMU_RDX], i, done = 0;
+		uint64_t vec = a1, n = kgenome_emu_sys_arg(e, 2), i, done = 0;
 		unsigned w = gw(e);
 
 		if (n > 1024u)
@@ -1133,9 +1122,9 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 		 */
 		uint64_t old_len = (a1 + KGENOME_EMU_PAGE - 1u) &
 				   ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
-		uint64_t new_len = (e->gpr[KGENOME_EMU_RDX] + KGENOME_EMU_PAGE - 1u) &
+		uint64_t new_len = (kgenome_emu_sys_arg(e, 2) + KGENOME_EMU_PAGE - 1u) &
 				   ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
-		uint64_t flags = sysarg(e, 0), at, done;
+		uint64_t flags = kgenome_emu_sys_arg(e, 3), at, done;
 
 		if (!new_len)
 			return (uint64_t)-22;                   /* EINVAL */
@@ -1169,14 +1158,14 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 		static const char path[] = "/proc/self/exe";
 		uint64_t n = sizeof path - 1u;
 
-		if (n > e->gpr[KGENOME_EMU_RDX])
-			n = e->gpr[KGENOME_EMU_RDX];
+		if (n > kgenome_emu_sys_arg(e, 2))
+			n = kgenome_emu_sys_arg(e, 2);
 		if (!kgenome_emu_mem_wr(e, a1, path, (unsigned)n))
 			return (uint64_t)-14;
 		return n;
 	}
 	case EMU_SYS_LSEEK: {
-		uint64_t whence = e->gpr[KGENOME_EMU_RDX];
+		uint64_t whence = kgenome_emu_sys_arg(e, 2);
 
 		if (whence == 0)      e->self_pos = a1;
 		else if (whence == 1) e->self_pos += a1;
@@ -1184,15 +1173,15 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 		return e->self_pos;
 	}
 	case EMU_SYS_PREAD64:
-		return self_read(e, a1, sysarg(e, 0), e->gpr[KGENOME_EMU_RDX]);
+		return self_read(e, a1, kgenome_emu_sys_arg(e, 3), kgenome_emu_sys_arg(e, 2));
 	case EMU_SYS_FSTAT:
 	case EMU_SYS_NEWFSTATAT: {
-		uint64_t at = (nr == EMU_SYS_FSTAT) ? a1 : e->gpr[KGENOME_EMU_RDX];
+		uint64_t at = (nr == EMU_SYS_FSTAT) ? a1 : kgenome_emu_sys_arg(e, 2);
 
 		return stat_out(e, at);
 	}
 	case EMU_SYS_WRITE: {
-		uint64_t n = e->gpr[KGENOME_EMU_RDX];
+		uint64_t n = kgenome_emu_sys_arg(e, 2);
 
 		if (a0 <= 2 && e->n_say < KGENOME_EMU_SAY) {
 			uint64_t room = KGENOME_EMU_SAY - e->n_say;
@@ -1248,7 +1237,7 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 			return 0;
 		}
 		e->stdin_eof = 0;
-		got = self_read(e, a1, e->self_pos, e->gpr[KGENOME_EMU_RDX]);
+		got = self_read(e, a1, e->self_pos, kgenome_emu_sys_arg(e, 2));
 		if ((int64_t)got > 0)
 			e->self_pos += got;
 		return got;
@@ -1266,54 +1255,52 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
  */
 static uint64_t old_mmap(struct kgenome_emu *e, int *stop_out)
 {
-	static const unsigned reg[6] = { KGENOME_EMU_RBX, KGENOME_EMU_RCX, KGENOME_EMU_RDX,
-					 KGENOME_EMU_RSI, KGENOME_EMU_RDI, KGENOME_EMU_RBP };
+	const struct kgenome_emu_sysabi *a = kgenome_emu_sysabi_of(e);
 	uint32_t w[6];
-	uint64_t save[6], rax = e->gpr[KGENOME_EMU_RAX], r;
+	uint64_t save[6], nr = e->gpr[a->nr], r;
 	unsigned k;
 
-	if (!kgenome_emu_mem_rd(e, e->gpr[KGENOME_EMU_RBX] & 0xffffffffu, w, sizeof w))
+	if (!kgenome_emu_mem_rd(e, kgenome_emu_sys_arg(e, 0), w, sizeof w))
 		return (uint64_t)-14;                           /* EFAULT */
 	for (k = 0; k < 6u; k++) {
-		save[k] = e->gpr[reg[k]];
-		e->gpr[reg[k]] = w[k];
+		save[k] = e->gpr[a->arg[k]];
+		e->gpr[a->arg[k]] = w[k];
 	}
-	e->gpr[KGENOME_EMU_RBP] = w[5] >> 12;                   /* mmap2's unit is a page */
-	e->gpr[KGENOME_EMU_RAX] = 192u;
+	e->gpr[a->arg[5]] = w[5] >> 12;                         /* mmap2's unit is a page */
+	e->gpr[a->nr] = 192u;
 	r = syscall_do(e, stop_out);
 	for (k = 0; k < 6u; k++)
-		e->gpr[reg[k]] = save[k];
-	e->gpr[KGENOME_EMU_RAX] = rax;
+		e->gpr[a->arg[k]] = save[k];
+	e->gpr[a->nr] = nr;
 	return r;
 }
 
 static uint64_t syscall_do(struct kgenome_emu *e, int *stop_out)
 {
-	if (e->bits == 32 && (e->gpr[KGENOME_EMU_RAX] & 0xffffffffu) == 90u)
+	const struct kgenome_emu_sysabi *abi = kgenome_emu_sysabi_of(e);
+
+	if (e->bits == 32 && sysnr_raw(e) == 90u)
 		return old_mmap(e, stop_out);
 
 	/*
-	 * i386 passes the number in eax and the arguments in ebx, ecx, edx,
-	 * esi, edi, ebp - a different register for every one of them than amd64
-	 * uses. Read here rather than by moving the guest's registers about,
-	 * because the guest is entitled to find them unchanged when the call
+	 * The number and the arguments as the convention in force passes them (struct
+	 * kgenome_emu_sysabi: i386 uses a different register for every one of them than amd64
+	 * does, and numbers its calls differently). Read here rather than by moving the guest's
+	 * registers about, because the guest is entitled to find them unchanged when the call
 	 * returns.
 	 */
-	uint64_t nr = e->bits == 32 ? i386_nr(e->gpr[KGENOME_EMU_RAX] & 0xffffffffu)
-				    : e->gpr[KGENOME_EMU_RAX];
-	uint64_t a0 = e->bits == 32 ? (e->gpr[KGENOME_EMU_RBX] & 0xffffffffu)
-				    : e->gpr[KGENOME_EMU_RDI];
-	uint64_t a1 = e->bits == 32 ? (e->gpr[KGENOME_EMU_RCX] & 0xffffffffu)
-				    : e->gpr[KGENOME_EMU_RSI];
+	uint64_t nr = abi->canon ? abi->canon(sysnr_raw(e)) : sysnr_raw(e);
+	uint64_t a0 = kgenome_emu_sys_arg(e, 0);
+	uint64_t a1 = kgenome_emu_sys_arg(e, 1);
 
 	/*
 	 * The Windows ids first, and against the RAW register rather than `nr`:
-	 * a 32-bit guest's number goes through i386_nr, which maps i386 numbers
+	 * a 32-bit guest's number goes through kgenome_emu_sys_i386_nr, which maps i386 numbers
 	 * onto amd64 ones and would turn one of these into something else
 	 * entirely. See the Windows environment above for why the range is safe.
 	 */
 	{
-		uint32_t raw = (uint32_t)(e->gpr[KGENOME_EMU_RAX] & 0xffffffffu);
+		uint32_t raw = (uint32_t)e->gpr[abi->nr];
 
 		if (raw >= KGENOME_EMU_WIN_API_BASE &&
 		    raw < KGENOME_EMU_WIN_API_BASE + KGENOME_EMU_WIN_API_COUNT + kgenome_emu_win_export_total())

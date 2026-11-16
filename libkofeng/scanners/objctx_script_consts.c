@@ -22,6 +22,7 @@
 #include "objctx_int.h"
 #include "../kofcore/tabgrow.h"
 #include "../analyzers/parsers/scripts/script_apply.h"
+#include "../kofcore/kofdebug.h"
 #include <phenotype/diag_scan.h>
 #include <textual/textual.h>
 
@@ -49,6 +50,8 @@ static void on_range(struct oc_consts *a, uint64_t off, uint64_t len, const uint
 	if (!bare && !kgenome_textual_subst_can(a->lang, val, n))
 		return;
 	if (off > 0xffffffffu || len > 0xffffffffu - off || a->an + n > a->room) {
+		KOF_TRACE("[script] consts: allowance spent at off=%llu, %u byte(s) wanted\n",
+			  (unsigned long long)off, n);
 		a->fail = 1;            /* the allowance for what a script computes is spent */
 		return;
 	}
@@ -140,14 +143,18 @@ uint32_t oc_script_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b, uint
 	a = oc_text_consts(sc, lang, b);
 	/* the evaluator's bound that fired (an expression nested past it) is said: what was collected is true, and partial. NOT the scan's status: that is
 	 * the names' too (a table of them that filled) and the diagnose stage reports it from its own scan of the same text. */
-	if (!a || oc_text_eval_cut(sc))
+	if (!a || oc_text_eval_cut(sc)) {
+		KOF_TRACE("[script] consts: evaluator cut, a=%p\n", (void *)a);
 		oc_scan_limit(sc);
+	}
 	if (!a)
 		return 0;
 	if (a->fail)
 		oc_scan_limit(sc);
-	if (!a->n)
+	if (!a->n) {
+		KOF_TRACE("[script] consts: nothing collected, lang=%u\n", (unsigned)lang);
 		goto done;
+	}
 	sub = malloc((size_t)a->n * sizeof *sub);
 	if (!sub)
 		goto done;
@@ -158,6 +165,8 @@ uint32_t oc_script_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b, uint
 	cap = kgenome_textual_subst_cap(lang, b.p, (uint32_t)b.n, sub, nr);
 	/* The text is the scanner's memory like any other: it has to fit under the ceiling, and under what 32 bits can address. */
 	if (cap > 0xffffffffu || cap > oc_scan_room(sc) / 2u) {
+		KOF_TRACE("[script] consts: text buffer of %llu byte(s) over the ceiling, not written\n",
+			  (unsigned long long)cap);
 		oc_scan_limit(sc);
 		goto done;
 	}
@@ -175,6 +184,8 @@ uint32_t oc_script_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b, uint
 	*text_n = w;
 	n_sub = nr;
 done:
+	KOF_TRACE("[script] consts done: %u substitution(s), %u byte(s) written\n", (unsigned)n_sub,
+		  (unsigned)*text_n);
 	free(sub);
 	return n_sub;
 }

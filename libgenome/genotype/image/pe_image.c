@@ -112,14 +112,61 @@ uint32_t kgenome_pe_sec_perm(uint32_t ch)
  * The other direction is real - 219 sections in 115 files are executable
  * without CNT_CODE (UPX1) - and stays code.
  */
-/* KNOWN DEFECT PE-RSRC-EXEC-CODE (2026-11-04, M) [sev M]: reads only the EXECUTE bit, never
- * whether the range is .rsrc/Security (a directory, not code). Trigger: EXECUTE set on a
- * resource or certificate section. Effect: icon/version/signature bytes enter CODE and are
- * hashed as a mutation gene. Reproducer: none yet, not measured on a real sample.
- * Fix: exclude the resource/security directory ranges, as the .NET heap already is. */
-int kgenome_pe_sec_is_code(const struct kgenome_pe_sec *s)
+/*
+ * Whether [a_off, a_off+a_len) and [b_off, b_off+b_len) share a byte. An empty range
+ * (len 0) overlaps nothing. The sums saturate (kof_sat_add) so a directory whose RVA
+ * and size are both near UINT64_MAX cannot wrap an end back below its own start and
+ * read as "no overlap" when it should cover everything past it.
+ */
+static int file_ranges_overlap(uint64_t a_off, uint64_t a_len, uint64_t b_off, uint64_t b_len)
 {
-	return (s->perm & KGENOME_PE_PERM_X) != 0;
+	if (!a_len || !b_len)
+		return 0;
+	return a_off < kof_sat_add(b_off, b_len) && b_off < kof_sat_add(a_off, a_len);
+}
+
+/*
+ * PE-RSRC-EXEC-CODE, fixed: EXECUTE is necessary but not sufficient. A section whose
+ * declared raw bytes (file_off, file_size - what the directories below are resolved
+ * against too) overlap the resource directory or the certificate table is excluded,
+ * whole, from CODE - both are metadata a packer or a cert-stuffing tool can mark
+ * EXECUTE, and a section mixing real code with either is not a shape any linker
+ * produces, so the conservative whole-section exclusion costs nothing seen in the
+ * wild and closes the admission.
+ *
+ * Resource: `p->res_off`/`res_len` (resolve_resource, above) is already the resolved,
+ * bounds-checked FILE-OFFSET extent of the resource directory's bytes - reused here
+ * rather than re-deriving the RVA walk a second time (rule: table lookup, not
+ * re-analysis).
+ *
+ * Certificate: `p->cert_off`/`cert_len` is NOT reused - it is populated only when the
+ * directory does NOT overlap a section's claim (settle_claims runs first; a security
+ * directory pointing INTO a section is deliberately left unresolved there, flagged
+ * CERT_OVERLAP, E-CERT fixed). That is exactly the hostile shape this
+ * defect is about, so cert_off would stay 0 for it and the check would be a no-op. The raw
+ * directory fields (`p->dir[KGENOME_PE_DIR_SECURITY]`; a FILE OFFSET for this one
+ * directory, not an RVA - see struct kgenome_pe_dir) are read instead, saturating-
+ * clamped the same way the certificate resolver clamps them. This also has to be the
+ * raw fields for a second reason: resolve_entry (which calls this through the section
+ * loop) runs BEFORE the certificate block below in kgenome_pe_image_parse, so
+ * cert_off/cert_len are not even computed yet at that call site.
+ */
+int kgenome_pe_sec_is_code(const struct kgenome_pe_info *p, const struct kgenome_pe_sec *s)
+{
+	if (!(s->perm & KGENOME_PE_PERM_X))
+		return 0;
+	if (!p)
+		return 1;
+	if (file_ranges_overlap(s->file_off, s->file_size, p->res_off, p->res_len))
+		return 0;
+	if (p->n_dirs > KGENOME_PE_DIR_SECURITY) {
+		const uint64_t co = p->dir[KGENOME_PE_DIR_SECURITY].rva;    /* a file offset here */
+		const uint64_t cn = p->dir[KGENOME_PE_DIR_SECURITY].size;
+
+		if (file_ranges_overlap(s->file_off, s->file_size, co, cn))
+			return 0;
+	}
+	return 1;
 }
 
 const struct kgenome_pe_sec *kgenome_pe_sec_at_off(const struct kgenome_pe_info *p,
@@ -567,7 +614,7 @@ static void resolve_entry(struct kgenome_pe_info *p, struct kgenome_obj *obj)
 			continue;
 		p->entry_sec  = i;
 		p->entry_perm = s->perm;
-		if (!kgenome_pe_sec_is_code(s))
+		if (!kgenome_pe_sec_is_code(p, s))
 			p->anomalies |= KGENOME_PE_ANOM_ENTRY_NOT_EXEC;
 		if (p->entry_rva - s->mem_rva >= s->file_size)
 			p->anomalies |= KGENOME_PE_ANOM_ENTRY_ZEROFILL;
@@ -862,14 +909,15 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 			/* Only past everything else. A certificate directory
 			 * pointing into a section is a claim on bytes that
 			 * already have an owner, and honouring it would put the
-			 * same offset in two regions. */
-			/* KNOWN DEFECT E-CERT (2026-10-24, R) [sev L]: a certificate directory that overlaps an earlier claim (co < last_end) is
-			 * reported KGENOME_PE_ANOM_CERT_PAST_EOF, a name that says "past the end of the file". Trigger: a PE whose security
-			 * directory points into a section. Effect: the anomaly fires for an overlap, so
-			 * the label over-claims what was measured. Reproducer: none. Fix: its own anomaly bit (CERT_OVERLAP), or reword. */
+			 * same offset in two regions.
+			 *
+			 * E-CERT (fixed): that is a DIFFERENT fact from the file-end check
+			 * above, and used to be reported with the same bit - CERT_PAST_EOF,
+			 * a name that says "past the end of the file" when the directory in
+			 * fact overlaps an owned claim well inside it. Its own bit now. */
 			if (co < last_end) {
 				if (co < lim)
-					info->anomalies |= KGENOME_PE_ANOM_CERT_PAST_EOF;
+					info->anomalies |= KGENOME_PE_ANOM_CERT_OVERLAP;
 			} else if (co < lim) {
 				info->cert_off = co;
 				info->cert_len = lim - co;
@@ -1134,11 +1182,22 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
  */
 #define EXP_NAMES_MAX 4096u
 
-/* KNOWN DEFECT PE-EXPFWD-INEXEC (2026-11-05, M) [sev L]: unlike its sibling kgenome_fntab_pe_export, this walk never checks a forwarder's RVA against the directory's own [rva, rva+size) range.
- * Trigger: a named export read for the KSYM symbol block (kof_pe_syms); a forwarder or a pure-data export. Effect: export_put (pe_sym.c) gets the forwarder STRING's RVA (not a function address)
- * or a non-code address, and flags KOF_SYM_F_IN_EXEC from `frva != 0` alone - no boundary-analysis effect (kgenome_fntab_pe_export already excludes the same range there), display/value only.
- * Reproducer: tests/unit/pe_export_sym_flags.c:t_export_forwarder_and_data_sym. Fix: skip (or flag) an RVA inside [rva,rva+size) here as kgenome_fntab_pe_export does; have export_put resolve
- * frva through the section table for IN_EXEC, as elf_sym.c does, instead of testing it against zero. */
+/*
+ * True when `rva` lies inside the export directory's own [rva, rva+size) range: the
+ * address of a forwarder string ("DLL.Name"), not code. See the header comment
+ * (kgenome_pe_export_is_forwarder, pe_image.h) for why this is one function and not
+ * re-derived by each reader of `p->dir[KGENOME_PE_DIR_EXPORT]`.
+ */
+int kgenome_pe_export_is_forwarder(const struct kgenome_pe_info *p, uint32_t rva)
+{
+	const struct kgenome_pe_dir *d;
+
+	if (!p || !p->valid)
+		return 0;
+	d = &p->dir[KGENOME_PE_DIR_EXPORT];
+	return rva >= d->rva && (uint64_t)rva < d->rva + d->size;
+}
+
 uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 			kgenome_pe_export_fn fn, void *user,
 			enum kgenome_status *status)

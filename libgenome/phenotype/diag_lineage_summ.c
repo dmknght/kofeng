@@ -44,6 +44,15 @@
 
 #define KGENOME_LINEAGE_ROUNDS 8u
 
+/* Does a return record name a producer of a handle or a parameter: what a caller can use, and what the SUMM stage is asked for. A node's
+ * STATUS (a result that is no handle) is carried, so a system call's number can name it, and asks for nothing: it makes no function worth
+ * reading and no run of SUMM, as before it was a token. */
+static int ret_is_token(const struct kgenome_diag_wrapper_summary *m)
+{
+	return m->ret.t == KGENOME_DIAG_WRAPPER_V_PARAM ||
+	       (m->ret.t == KGENOME_DIAG_WRAPPER_V_NODE && !(m->ret.node & KGENOME_LINEAGE_STATUS));
+}
+
 int kgenome_lineage_sum_find(struct kgenome_lineage *L, uint64_t entry, uint32_t *lo, uint32_t *hi)
 {
 	uint32_t p = kgenome_diag_wrapper_summary_pos(&L->sums, entry), q = p;
@@ -84,8 +93,7 @@ void kgenome_lineage_apply(struct kgenome_lineage *L, struct kgenome_lineage_sta
 	for (p = lo; p < hi && !want_ret; p++) {
 		const struct kgenome_diag_wrapper_summary *m = kgenome_diag_wrapper_summary_at(&L->sums, p);
 
-		if (m->flow == KGENOME_DIAG_WRAPPER_FLOW_RET &&
-		    (m->ret.t == KGENOME_DIAG_WRAPPER_V_NODE || m->ret.t == KGENOME_DIAG_WRAPPER_V_PARAM))
+		if (m->flow == KGENOME_DIAG_WRAPPER_FLOW_RET && ret_is_token(m))
 			break;
 		if (p + 1u == hi)
 			want_ret = 1;
@@ -157,30 +165,57 @@ static uint64_t fnv(uint64_t h, uint64_t v)
 }
 
 /* Publish function `fi`'s summary; 1 when it is not the one published before. */
+/* KNOWN DEFECT LE-D5 (2026-11-17, Inference) [sev M]: publish keeps a function's return as the union of the nodes that reach it, so malloc returns its INTERNAL mmap nodes
+ * (sysmalloc, sysmalloc_mmap, alloc_new_heap) and the heap part (brk, no node) is not said. Trigger: static ELF, read/execve on a malloc'd buffer.
+ * Effect (M): 360 links per mode buffer/path MAY <- an mmap inside malloc that never ran (gdb: the memory came from brk through the user's malloc).
+ * Reproducer: lin_truth res, the static rows tagged NOEXEC_P. Fix: a return with a part no token names is widened (other), not published as its node part alone. */
 static int publish(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineage_out *o)
 {
-	uint32_t t[KGENOME_LINEAGE_SET + 1u], nt = 0, i, lo, hi, k;
+	uint32_t t0[KGENOME_LINEAGE_VAL_INLINE + 1u], *t = t0, nt = 0, i, lo, hi, k, nr;
 	uint32_t why;
 	uint64_t h = 0xcbf29ce484222325ull;
 	struct kgenome_diag_wrapper_summary m;
+	int ch = 1;
 
 	if (o->n_sink)
 		qsort(o->sink, o->n_sink, sizeof *o->sink, cmp_sink);
-	/* the tokens of what it returns, in a canonical order; `other` is the one record that is not a token */
+	/* the tokens of what it returns (as many as it has: kgenome_lineage_val_toks), in a canonical order; `other` is the one record that is
+	 * not a token */
+	nr = o->ret_seen ? kgenome_lineage_val_toks(L, &o->ret, NULL, 0) : 0u;
+	if (nr + 1u > KGENOME_LINEAGE_VAL_INLINE + 1u && !(t = malloc((size_t)(nr + 1u) * sizeof *t))) {
+		kgenome_diag_note(L->s, KGENOME_NOMEM);
+		L->halt = 1;
+		return 0;
+	}
 	if (!o->ret_seen || o->ret.other)
 		t[nt++] = UINT32_MAX;
 	why = o->ret_seen && o->ret.other ? o->ret.why : (uint32_t)KGENOME_LINEAGE_W_RET;
-	if (o->ret_seen)
-		for (i = 0; i < o->ret.n; i++)
-			t[nt++] = o->ret.t[i];
+	if (nr) {
+		uint16_t q0[KGENOME_LINEAGE_VAL_INLINE], *q = q0;
+
+		if (nr > KGENOME_LINEAGE_VAL_INLINE && !(q = malloc((size_t)nr * sizeof *q))) {
+			kgenome_diag_note(L->s, KGENOME_NOMEM);
+			L->halt = 1;
+			if (t != t0)
+				free(t);
+			return 0;
+		}
+		(void)kgenome_lineage_val_toks(L, &o->ret, q, nr);
+		for (i = 0; i < nr; i++)
+			t[nt++] = q[i];
+		if (q != q0)
+			free(q);
+	}
 	qsort(t, nt, sizeof *t, cmp_tok);
 	for (i = 0; i < nt; i++)
 		h = fnv(h, t[i]);
 	h = fnv(h, why);
 	for (i = 0; i < o->n_sink; i++)
 		h = fnv(fnv(h, o->sink[i].node), (uint64_t)o->sink[i].role << 16 | (uint64_t)o->sink[i].param << 8);
-	if (h == L->sumhash[fi])
-		return 0;
+	if (h == L->sumhash[fi]) {
+		ch = 0;
+		goto out;
+	}
 	L->sumhash[fi] = h;
 	if (kgenome_lineage_sum_find(L, L->fs->v[fi].off, &lo, &hi))
 		for (k = lo; k < hi; k++)
@@ -210,7 +245,10 @@ static int publish(struct kgenome_lineage *L, uint32_t fi, struct kgenome_lineag
 		m.param = o->sink[i].param;
 		(void)kgenome_diag_wrapper_summary_insert(&L->sums, &m);
 	}
-	return 1;
+out:
+	if (t != t0)
+		free(t);
+	return ch;
 }
 
 /* Solve a function, and publish what it does. 1 when its summary changed. */
@@ -324,11 +362,6 @@ static int graph_build(struct kgenome_lineage *L, const struct kgenome_codemap *
 		g->fe[fp[from[k]]++] = to[k];
 		g->re[rp[to[k]]++] = from[k];
 		if (from[k] != to[k])
-			/* KNOWN DEFECT D8 (2026-10-24, R) [sev M]: `callers` counts direct calls only, so an exported or address-taken function with
-			 * one direct caller has all its callers "accounted for" and its summary links come out MUST. Trigger: a function also
-			 * called through a pointer or from outside the object. Effect: the link is MUST on one caller's value (link 451/f in
-			 * the lineage audit), the others are never seen. Reproducer: none committed (agent-reported, STATUS D8). Fix: mark a
-			 * function whose address is taken or exported as having an unknown caller and demote its links to MAY. */
 			L->callers[to[k]]++;
 	}
 	/* the functions that can reach a node: a value can only travel between two nodes through them */
@@ -443,9 +476,7 @@ static int summary_nontrivial(struct kgenome_lineage *L, uint32_t fi)
 	for (p = lo; p < hi; p++) {
 		const struct kgenome_diag_wrapper_summary *m = kgenome_diag_wrapper_summary_at(&L->sums, p);
 
-		if (m->flow == KGENOME_DIAG_WRAPPER_FLOW_SINK ||
-		    (m->flow == KGENOME_DIAG_WRAPPER_FLOW_RET &&
-		     (m->ret.t == KGENOME_DIAG_WRAPPER_V_NODE || m->ret.t == KGENOME_DIAG_WRAPPER_V_PARAM)))
+		if (m->flow == KGENOME_DIAG_WRAPPER_FLOW_SINK || (m->flow == KGENOME_DIAG_WRAPPER_FLOW_RET && ret_is_token(m)))
 			return 1;
 	}
 	return 0;
@@ -640,6 +671,24 @@ out:
 	free(on);
 }
 
+/*
+ * IS THE FUNCTION ENTERED FROM OUTSIDE ITS OBJECT'S CODE: the image's entry point or a loader callback, a symbol of the dynamic table, an entry
+ * of an address table the image declares (the function table's own evidence, KGENOME_FN_S_ENTRY / _DYNSYM / _EXPORT). Such a function's direct
+ * callers are not all its callers, so a parameter that reaches a node in it is MAY whatever they pass (LG-8, formerly the comment D8: an exported
+ * function with one direct caller had its summary link MUST on that caller's value). The NAMED LIMIT: a function whose address is only TAKEN
+ * (stored, passed as a callback, put in a table the image does not declare) is not seen here - the next algorithm is the references to an
+ * entry's address in the code (an immediate or a RIP-relative `lea` that equals it) and in the data (a pointer-sized word that does).
+ */
+static int outside_caller(const struct kgenome_lineage *L, uint32_t f)
+{
+	/* the entry point is the object's own fact, asked of the object: the table records the evidences of a start only as far as its
+	 * selector ran them, and an object whose .symtab is exact has no ENTRY or DYNSYM bit on any entry (measured: lineage_sites.c,
+	 * t_outside_caller - the entry function's only bit was SYMTAB). The same is the LIMIT for an exported function of such an object:
+	 * the next fix is the function table's (record every evidence that names a start, or the symbol's binding), not one here. */
+	return L->fs->v[f].off == L->obj->entry_off ||
+	       (L->fs->v[f].source & (KGENOME_FN_S_ENTRY | KGENOME_FN_S_DYNSYM | KGENOME_FN_S_EXPORT)) != 0;
+}
+
 void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 {
 	const struct kgenome_codemap *cm = kgenome_lineage_codemap(L);
@@ -677,7 +726,8 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 	L->rel = NULL;
 	L->ag = &L->glob;
 	/* A function nobody calls is entered with parameters nothing proves: where one reaches a node,
-	 * something no token names may be what arrives. */
+	 * something no token names may be what arrives. So is one the table says is entered from OUTSIDE the code it was read from
+	 * (outside_caller): its direct callers are some of its callers, not all. */
 	for (p = 0; p < L->sums.n_ws && !L->halt; p++) {
 		const struct kgenome_diag_wrapper_summary *m = kgenome_diag_wrapper_summary_at(&L->sums, p);
 		uint32_t f, node;
@@ -685,7 +735,7 @@ void kgenome_lineage_run_summ(struct kgenome_lineage *L)
 		if (m->flow != KGENOME_DIAG_WRAPPER_FLOW_SINK)
 			continue;
 		f = kgenome_funcs_at(L->fs, m->entry);
-		if (f == UINT32_MAX || L->callers[f] || !kgenome_lineage_site_of(L, m->site, &node))
+		if (f == UINT32_MAX || (L->callers[f] && !outside_caller(L, f)) || !kgenome_lineage_site_of(L, m->site, &node))
 			continue;
 		{
 			struct kgenome_lineage_val o;

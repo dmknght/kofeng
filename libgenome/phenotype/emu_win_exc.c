@@ -1,10 +1,11 @@
 /*
  * emu_win_exc.c - the Windows environment: structured exception dispatch, the call event log and the socket model.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the interpreter's Windows environment; see emu_interp.c and emu_win_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
+#include "emu_win_private.h"
 #include "../kgenome_budget.h"   /* kgenome_grow_cap */
 
 /* ---- exception dispatch --------------------------------------------------

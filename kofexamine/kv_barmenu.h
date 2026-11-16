@@ -57,9 +57,11 @@ enum bar_menu {
  * to do one thing.
  */
 enum bar_item {
-	/* File menu, in the order the menu shows them: moving between files, a rule, Quit. The table bar_item in kv_bar.c is
-	 * positional, so its entries follow this order. */
-	BI_NEXT = 0, BI_PREV,
+	/* File menu, in the order the menu shows them: Open, moving between files, a rule, Close, Quit. The table bar_item in
+	 * kv_bar.c is positional, so its entries follow this order. */
+	BI_OPEN = 0,
+	BI_NEXT, BI_PREV,
+	BI_CLOSE,
 	BI_QUIT,
 	BI_FIND, BI_GOTO,
 	/*

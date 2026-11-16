@@ -175,7 +175,6 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	uint8_t rec[KOF_PROC_REC_MAX];
 	uint32_t n = 0, pids[1];
 	int err = 0;
-	struct kv_session ses;
 
 	/*
 	 * ASKED ONCE HERE, BEFORE ANYTHING IS TORN DOWN. A pid that cannot be
@@ -202,11 +201,8 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 		return 0;
 	}
 
-	session_take(v, &ses);
-	file_close(v);
-	memset(v, 0, sizeof *v);
+	view_close(v);
 	v->eng = eng;
-	session_put(v, &ses);
 
 	v->proc_pid = pid;
 	snprintf(v->pathbuf, sizeof v->pathbuf, "pid:%lu", (unsigned long)pid);
@@ -234,6 +230,7 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 
 		/* See the reset loop for what an object owns. */
 		free(o->carve);
+		free(o->pretty_p);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
 		o->buf = kof_buf_make(v->map, v->map_len);
@@ -340,6 +337,8 @@ static void file_close(struct view *v)
 		struct object *o = &v->obj[i];
 
 		free(o->diag);
+		free(o->lineage);
+		free(o->lineage_in);
 		kgenome_funcs_free(&o->funcs);
 		kof_codenotes_free(&o->notes);
 		kgenome_callnames_free(&o->calls, NULL);
@@ -349,6 +348,7 @@ static void file_close(struct view *v)
 		free(o->fixed);
 		free(o->own);
 		free(o->carve);
+		free(o->pretty_p);
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);
 		memset(o, 0, sizeof *o);
@@ -366,6 +366,45 @@ static void file_close(struct view *v)
 		v->map = NULL;
 		v->map_len = 0;
 	}
+}
+
+/*
+ * LET GO OF WHATEVER FILE OR PROCESS THIS VIEW IS SHOWING, keeping the
+ * session (the catalogs, the bases/db/syndromes directories, how a reader
+ * likes a document shown - struct kv_session above) and putting the rest of
+ * the view back in the state a fresh session starts in: three empty panes
+ * and a status line about nothing (see main's own empty start, above
+ * dir_pick's early return).
+ *
+ * file_open and proc_open both call this before loading what they were
+ * asked to show; the File > Close menu item (BI_CLOSE, kv_bar.c) calls it
+ * with nothing loaded afterwards - one function for the reset, not three
+ * copies of it (kofeng/CLAUDE.md, "never leave two paths doing one job").
+ *
+ * The caller's v->eng does not survive the memset below - a local does not
+ * save it, because the caller may want a DIFFERENT engine (file_open and
+ * proc_open take one as an argument) - so every caller restores it itself
+ * right after this returns, the same single line each time.
+ */
+void view_close(struct view *v)
+{
+	struct kv_session ses;
+
+	session_take(v, &ses);
+	file_close(v);
+	memset(v, 0, sizeof *v);
+	session_put(v, &ses);
+	/*
+	 * BUG FIX (2026-11-06): draft_hash starts from a non-zero FNV seed, so
+	 * an empty draft does not hash to 0 - the memset above left saved_hash
+	 * at 0 while draft_edited's own draft_hash(v->ed) read back nonzero,
+	 * so the freshly-closed, nothing-loaded view read as EDITED and every
+	 * rule that guards on !draft_edited (Open, Close, Next/Previous File)
+	 * disabled itself right after Close. file_open already does this one
+	 * line after loading a file (kv_main.c, end of file_open); view_close
+	 * needs the same line for the empty state it produces.
+	 */
+	v->ed.dr.saved_hash = draft_hash(&v->ed);
 }
 
 /*
@@ -418,7 +457,6 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	void       *map;
 	uint64_t    len;
 	int         fd;
-	struct kv_session ses;
 	char keep[KOF_DUMP_PATH_ROOM];
 	/*
 	 * Kept only when this is the same file being rebuilt - which is what
@@ -450,11 +488,8 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 		return 0;
 	}
 
-	session_take(v, &ses);
-	file_close(v);
-	memset(v, 0, sizeof *v);
+	view_close(v);
 	v->eng = eng;
-	session_put(v, &ses);
 	v->emu_mode = emu_mode;
 
 	snprintf(v->pathbuf, sizeof v->pathbuf, "%s", keep);
@@ -564,6 +599,7 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 
 		/* See the reset loop for what an object owns. */
 		free(o->carve);
+		free(o->pretty_p);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
 		o->buf = kof_buf_make(v->map, v->map_len);
@@ -643,8 +679,23 @@ int main(int argc, char **argv)
 	editor_attach(v);
 
 	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--pid") && i + 1 < argc)
-			want_pid = (uint32_t)strtoul(argv[++i], NULL, 10);
+		if (!strcmp(argv[i], "--pid") && i + 1 < argc) {
+			const char *pv = argv[++i];
+
+			want_pid = (uint32_t)strtoul(pv, NULL, 10);
+			/* 0 is never a real process id, so it is what a bad
+			 * value (a word, a negative number) parses to as well
+			 * as what one literal "0" would - refused here, not
+			 * silently read as "no --pid was given" (which used to
+			 * be true of it by the same coincidence, before a path
+			 * or --pid became optional on its own). */
+			if (!want_pid) {
+				fprintf(stderr, "kofviewer: --pid takes a "
+					"process id, not '%s'\n", pv);
+				free(v);
+				return 2;
+			}
+		}
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db = argv[++i];
 		/*
@@ -689,10 +740,14 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (!path && !want_pid) {
-		usage();
-		return 2;
-	}
+	/*
+	 * NEITHER A PATH NOR A PID IS A VALID START, not an error: the reader
+	 * opens something from the empty view - the Open dialog (Ctrl+O, File >
+	 * Open) - rather than being sent back to a shell for one more argument.
+	 * This used to call usage() and exit(2); what changed is only that this
+	 * check is gone; the empty-view rendering it now reaches is the state
+	 * already described above dir_pick's early return.
+	 */
 
 	/*
 	 * The tree a drafted signature is written into.
@@ -771,14 +826,34 @@ int main(int argc, char **argv)
 			/* The names of the catalog ids: the engine reads the directories the dialogs write, the verdict then shows them. */
 			(void)keng_catalog_load(v->eng, v->pathdir[0] ? v->pathdir : NULL, v->syndir);
 	}
-	/* A pid and a path are two ways of naming what to look at; the pid
-	 * wins when both are given, because it is the more specific ask. */
-	if (want_pid ? !proc_open(v, want_pid, v->eng)
-		     : !file_open(v, path, v->eng)) {
-		fprintf(stderr, "kofviewer: %s\n", v->act_msg);
-		keng_close(v->eng);
-		view_free(v);
-		return 1;
+	/*
+	 * A pid and a path are two ways of naming what to look at; the pid
+	 * wins when both are given, because it is the more specific ask.
+	 * NEITHER is also valid: the loop below starts on the empty view, and
+	 * the reader opens a file from there (Ctrl+O, File > Open).
+	 */
+	if (want_pid || path) {
+		if (want_pid ? !proc_open(v, want_pid, v->eng)
+			     : !file_open(v, path, v->eng)) {
+			fprintf(stderr, "kofviewer: %s\n", v->act_msg);
+			keng_close(v->eng);
+			view_free(v);
+			return 1;
+		}
+	} else {
+		/*
+		 * THE EMPTY VIEW NEEDS THE SAME SENTINELS file_open AND
+		 * proc_open GET FROM session_put - bar_open, bar_sel, bar_sub,
+		 * sel_a/sel_b, find_at - and nothing else on this path sets
+		 * them, so without this call they stay at calloc's 0: bar_open
+		 * is then BM_FILE, not "closed", and the File menu drew itself
+		 * open over the three panes that were supposed to be empty.
+		 * view_close is the same reset those two already use.
+		 */
+		kof_engine *eng = v->eng;
+
+		view_close(v);
+		v->eng = eng;
 	}
 
 	/*

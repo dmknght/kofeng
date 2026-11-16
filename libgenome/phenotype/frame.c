@@ -287,7 +287,7 @@ enum kgenome_frame_state kgenome_frame_make(const struct kgenome_frame_src *s, u
 		cq.flags |= KGENOME_CFG_F_TRAP_EXITS;
 	cq.budget = &bud;
 	cq.mem = s->mem;
-	cq.switch_src = s->switch_src;          /* REACH_INDIRECT: plumbing only, see frame.h; NULL read_at (every caller today) changes nothing */
+	cq.switch_src = s->switch_src;          /* REACH_INDIRECT: plumbing only, see frame.h; NULL read_at (every caller but fntab_reach.c's own REACH walk) changes nothing */
 	st = kgenome_cfg_build(&cq, &out->cfg);
 	out->status = kgenome_status_merge(st, out->cfg.status);
 	if (!out->cfg.n_all) {

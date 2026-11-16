@@ -366,13 +366,13 @@ program, which is `OEP_CONTEXT` in `dep/XEmulUnpacker/`:
   - `nSpDelta`, the stack pointer measured against where it was at the entry
     point, and the rule that a real hand-over happens with it BALANCED. That
     is the single most useful thing in the file and it is what
-    `libgenome/phenotype/emu_interp.c` now tests;
+    `libgenome/phenotype/emu_run_private.h` (the run loop) now tests;
   - the per-packer tails: PECompact hands over with `ret` (1.00-1.10),
     `ret 4` (1.50-1.76) or `jmp eax` (2.40), and 0.90 does it with a `ret`
     from a heap buffer into the image;
   - that the undefined region of 16-bit `SHRD`/`SHLD` is NOT derivable and
     has to be taken from the host CPU. A formula was guessed here first and
-    was wrong; the note in `emu_interp.c` says so beside the inline assembly that
+    was wrong; the note in `emu_state.c` says so beside the inline assembly that
     replaced it.
 
 No code is reproduced from XEmulUnpacker: it is C++ against Qt and Unicorn.
@@ -639,7 +639,7 @@ here for a different reason: this engine starts 35 interpreter runs across
 (Symantec).** An artificial memory region spanning operating-system components,
 and a monitor that detects the guest reaching into it. This engine already
 builds a synthetic PEB, LDR and module images and counts reads into them - see
-`count_mod_reads` in emu_interp.c and the thread-block builder in emu_unpack_pe_teb.c.
+`count_mod_reads` in emu_win.c and emu_mem.c and the thread-block builder in emu_unpack_pe_teb.c.
 
 **US 6,907,396 - "Detecting computer viruses by patching" (Networks Associates,
 2005).** Emulator extensions - program instructions loaded INTO the emulator to

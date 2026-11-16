@@ -749,6 +749,24 @@ static void case_text_of(void)
 			ok(kof_evt_content(&e, &t, &l) == 0, "any other verb with no content_len: not content");
 		}
 	}
+	/* EVTCONTENT-NUL-1's reproducer: raw/binary content that runs to the very end of the text
+	 * arena with no NUL anywhere in it - legitimate (kof_evt_content_looks_binary above already
+	 * covers control bytes and an MZ header as real content). Before the fix, kof_evt_object's
+	 * at() fell back to the empty literal here too (not just on an out-of-range offset), so
+	 * *text pointed at 1-2 static bytes while *len stayed the real (large) content_len. */
+	{
+		struct kof_evt e;
+		const char *t = NULL;
+		size_t l = 0, room;
+
+		mk(&e, KOF_EVT_AMSI_SCAN, 1);
+		e.off_object = kof_evt_text_put(&e, "x");
+		room = sizeof e.text - e.off_object;
+		memset(e.text + e.off_object, 'A', room);      /* no trailing NUL anywhere in the arena */
+		e.content_len = (uint16_t)(room > 0xffffu ? 0xffffu : room);
+		ok(kof_evt_content(&e, &t, &l) == 1 && l == e.content_len && t == e.text + e.off_object,
+		   "kof_evt_content: content with no NUL before the arena end is still the real span");
+	}
 }
 
 /* ------------------------------------------------------------------------------------------------- hostile records */

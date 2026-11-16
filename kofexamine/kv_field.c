@@ -151,6 +151,9 @@ void prow_build(struct view *v)
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
 		if (v->ed.dr.opt_on[i])
 			prow_add(v);
+	/* The gate's conditions, a row each below the options (draw_decl_opts). */
+	for (i = 0; i < v->ed.dr.n_gate && i < KOF_DIAG_MAX_WHEN; i++)
+		prow_add(v);
 	/* The title bar of tabs: everything above it is shared by every
 	 * diagnose the draft generates, everything below is the open tab's. */
 	prow_add(v);

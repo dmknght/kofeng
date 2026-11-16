@@ -460,7 +460,12 @@ static void t_entry_and_tail(void)
 	p.dir_rva[KGENOME_PE_DIR_SECURITY] = 0x400;
 	fresh(&p);
 	CK(parse());
+	/* E-CERT (fixed): 0x400 is well inside the file (not past its end) but inside a section's
+	 * already-claimed raw range - that is an OVERLAP, a different fact from CERT_PAST_EOF, and
+	 * now has its own bit; the old code mislabelled this exact case CERT_PAST_EOF. */
 	CK(info.cert_len == 0);
+	CK((info.anomalies & KGENOME_PE_ANOM_CERT_OVERLAP) != 0 &&
+	   (info.anomalies & KGENOME_PE_ANOM_CERT_PAST_EOF) == 0);
 	p.dir_rva[KGENOME_PE_DIR_SECURITY] = N - 0x10;
 	p.dir_size[KGENOME_PE_DIR_SECURITY] = 0x100;
 	fresh(&p);

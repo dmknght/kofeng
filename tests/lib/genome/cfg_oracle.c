@@ -7,8 +7,7 @@
  *               listed by objdump -D -b binary, and compared with the graph of the lib's own decode of the same bytes
  *   REAL        up to 400 functions of each of four libraries of this machine (code other people's compilers wrote),
  *               split where objdump's listing starts a symbol; a function whose instruction lengths objdump and the
- *               decoder disagree on is counted and left out (that is the decoder's own test, cov_x86_objdump), and so
- *               is one with jrcxz/jecxz/jcxz in it: the decoder reports those as OTHER, defect CL-1
+ *               decoder disagree on is counted and left out (that is the decoder's own test, cov_x86_objdump)
  *
  * THE LEADER DEFINITION is the lib's (cfg_isa.c): block starts are the entry, a local branch target and the
  * instruction after ret / iret / ud2 / jmp / a local conditional branch; a conditional branch out of the function
@@ -310,7 +309,7 @@ static void generated(void)
 static void real(void)
 {
 	static const char *const files[] = { "/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib/x86_64-linux-gnu/libm.so.6", "/usr/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/x86_64-linux-gnu/libcrypto.so.3" };
-	unsigned f, funcs = 0, same_n = 0, bad = 0, skipped_len = 0, skipped_cl1 = 0, blocks = 0;
+	unsigned f, funcs = 0, same_n = 0, bad = 0, skipped_len = 0, blocks = 0;
 
 	for (f = 0; f < sizeof files / sizeof files[0]; f++) {
 		char cmd[300], ln[1024];
@@ -332,22 +331,18 @@ static void real(void)
 
 			if ((!got || header) && in_fn && n >= 3 && nf < 400) {
 				char why[200];
-				unsigned q;
-				int cl1 = 0, rc;
+				int rc;
 
-				for (q = 0; q < n; q++)
-					cl1 |= !strcmp(v[q].m, "jrcxz") || !strcmp(v[q].m, "jecxz") || !strcmp(v[q].m, "jcxz");
-				if (cl1) {
-					skipped_cl1++;
+				/* CL-1 (fixed): jrcxz/jecxz/jcxz is now KGENOME_CELL_LOOP -> X_BR_COND, the
+				 * same conditional-branch shape the oracle's class_of_mnemonic() already gave
+				 * it above - no more reason to leave these functions out of the comparison. */
+				rc = compare_function(v, n, KGENOME_ARCH_X86_64, why, sizeof why);
+				if (rc < 0) {
+					skipped_len++;
 				} else {
-					rc = compare_function(v, n, KGENOME_ARCH_X86_64, why, sizeof why);
-					if (rc < 0) {
-						skipped_len++;
-					} else {
-						funcs++;
-						nf++;
-						if (rc) same_n++; else { bad++; printf("    %s function at %llx: %s\n", files[f], (unsigned long long)v[0].addr, why); }
-					}
+					funcs++;
+					nf++;
+					if (rc) same_n++; else { bad++; printf("    %s function at %llx: %s\n", files[f], (unsigned long long)v[0].addr, why); }
 				}
 			}
 			if (!got)
@@ -375,8 +370,8 @@ static void real(void)
 		free(v);
 	}
 	blocks = same_n;
-	printf("  real code: %u functions compared (%u equal, %u differ); left out: %u decoder/objdump length disagreements, %u with jrcxz (CL-1)\n",
-	       funcs, same_n, bad, skipped_len, skipped_cl1);
+	printf("  real code: %u functions compared (%u equal, %u differ); left out: %u decoder/objdump length disagreements\n",
+	       funcs, same_n, bad, skipped_len);
 	(void)blocks;
 	CKM(bad == 0, "%u functions of real code differ from objdump's reading", bad);
 	CKM(funcs > 300, "only %u functions compared", funcs);

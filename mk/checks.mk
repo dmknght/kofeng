@@ -15,7 +15,15 @@ check-rules:
 	@$(PYTHON) tools/check_rules.py
 	@$(PYTHON) tools/check_layers.py
 	@$(MAKE) --no-print-directory check-catalog
+# The merge gate's self-tests run sh, diff, cc, ar and nm (tools/merge_gate.sh, tests/gate/*.py),
+# which a cmd.exe build does not have: there it is said and not run, and the gate is a Linux
+# step (mk/misc.mk). It joined this list on the way to 2026-11-10 and `make` on Windows then
+# failed in check-rules before it compiled anything.
+ifeq ($(KOF_CMD_SHELL),yes)
+	$(info check-rules: gate-test not run: the merge gate needs sh, diff, cc, ar and nm (run it on Linux))
+else
 	@$(MAKE) --no-print-directory gate-test
+endif
 
 # EVERY REFERENCE OF EVERY DIAGNOSE SOURCE against the two catalogs: a family, variant, type or tag
 # that does not exist, a variant of another family, a type the variant does not declare, Packer,

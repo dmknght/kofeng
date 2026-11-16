@@ -50,6 +50,14 @@ enum kgenome_diag_role {
 	 * record and a renumbering breaks every diagnose.
 	 */
 	KGENOME_DIAG_ROLE_VALUE,
+	/*
+	 * THE NUMBER OF A SYSTEM CALL: the register that chose which call it is. A producer linked here is a node whose RESULT the number is
+	 * (msfvenom's cleartext stager leaves connect's zero in rax and its next `syscall` is `read` because of it). The lineage stage follows
+	 * it as it follows a descriptor (diag_lineage_solve.c, site_take); the node's class of it is kgenome_diag_hit.nr. It is never in a
+	 * node's four-input view (kgenome_diag_hit.in[]): no pack names it, so the graph block does not carry it (kofdiag.c). Appended, as
+	 * VALUE was: a renumbering breaks every diagnose.
+	 */
+	KGENOME_DIAG_ROLE_NUMBER,
 	KGENOME_DIAG_ROLE_COUNT
 };
 
@@ -73,6 +81,24 @@ enum kgenome_diag_link {
 	 * of this byte is read by no matcher and written to no pack, so a new one moves nothing.
 	 */
 	KGENOME_DIAG_LINK_MAY
+};
+
+/*
+ * WHERE A SYSTEM CALL'S NUMBER CAME FROM (kgenome_diag_hit.nr), decided by the lineage stage from what reaches the number at the site,
+ * over every path. NONE: not a system call, or no stage read it. CONST: a constant on every path - the ordinary case. PARAM: what the
+ * function's caller passed (a syscall wrapper). RESULT: the answer of an earlier node on some path - abnormal: the program chose the call
+ * by what another call returned (msfvenom's cleartext stager leaves connect's zero in rax and its next `syscall` is `read` because of it),
+ * and kgenome_diag_hit.nr_from names which node. UNKNOWN: none of these (arithmetic, memory the stage cannot name).
+ *
+ * THE NUMBER'S PRODUCERS ARE INPUTS OF THE NODE like any other (role KGENOME_DIAG_ROLE_NUMBER, kgenome_diag_in_at); the class is the fact
+ * about them, and nr_from / nr_how / nr_n repeat the lead of them for a reader of the node alone.
+ */
+enum kgenome_diag_nr {
+	KGENOME_DIAG_NR_NONE = 0,
+	KGENOME_DIAG_NR_CONST,
+	KGENOME_DIAG_NR_PARAM,
+	KGENOME_DIAG_NR_RESULT,
+	KGENOME_DIAG_NR_UNKNOWN
 };
 
 #endif /* KGENOME_DIAG_VOCAB_H */

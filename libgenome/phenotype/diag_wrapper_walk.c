@@ -442,6 +442,17 @@ static int pad_cmp(const void *a, const void *b)
 	return x < y ? -1 : x > y ? 1 : 0;
 }
 
+/* [from, to) is all int3 (0xcc): a fill, not a run of nops (PG-1). The one caller has checked to < c->size. */
+static int int3_fill(const struct kgenome_diag_wrapper_ctx *c, uint64_t from, uint64_t to)
+{
+	uint64_t i;
+
+	for (i = from; i < to; i++)
+		if (c->base[i] != 0xccu)
+			return 0;
+	return 1;
+}
+
 /* Ends the padding run in progress at `at`: [from, at) is recorded when it holds a byte. */
 static int pad_close(struct kgenome_diag_wrapper_ctx *c, uint64_t *from, uint64_t at)
 {
@@ -677,8 +688,16 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 			continue;
 		}
 		trace_put(c, seg, &in);
+		/* PG-1: a one-byte nop right behind a fill of int3 is CODE, the first instruction of the function the fill aligns (MinGW's Go and C objects start
+		 * functions with `nop`): the fill does not run on into it. Measured on 12 x64 MinGW images with COFF symbols as truth (h/d/leaf.c of codemap5):
+		 * 150 leaf functions missed, a start 1 or 2 bytes late at every `cc..cc 90`. A fill of nops, or a multi-byte nop after int3, is still padding; a
+		 * second leading nop opens a run of its own that ends inside the function and covers no start. */
+		if (x86 && in.op == KGENOME_CELL_NOP && in.at < c->size && c->base[in.at] == 0x90u &&
+		    in.at > pad_from && int3_fill(c, pad_from, in.at)) {
+			if (!pad_close(c, &pad_from, in.at))
+				return 0;
 		/* the padding runs: nop of any width, int3 (the byte 0xcc decodes as INT) */
-		if (in.op == KGENOME_CELL_NOP || (x86 && in.op == KGENOME_CELL_INT && in.at < c->size && c->base[in.at] == 0xccu) || (x86 && x86_self_lea(&in)) ||
+		} else if (in.op == KGENOME_CELL_NOP || (x86 && in.op == KGENOME_CELL_INT && in.at < c->size && c->base[in.at] == 0xccu) || (x86 && x86_self_lea(&in)) ||
 		    (zeronop && in.len == 4u && in.at + 4u <= c->size && !(c->base[in.at] | c->base[in.at + 1u] | c->base[in.at + 2u] | c->base[in.at + 3u]))) {
 			if (pad_from == UINT64_MAX) {
 				pad_from = in.at + (slots && prev_cti ? in.len : 0u);

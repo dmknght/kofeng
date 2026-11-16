@@ -122,6 +122,12 @@ uint32_t draft_hash(struct kof_editor *e)
 		MIX32(val);
 		MIX32(val >> 32);
 	}
+	/* The gate of the signature: a condition added is an edit. No step for an empty gate, so a draft without one hashes as it did. */
+	for (i = 0; i < e->dr.n_gate && i < KOF_DIAG_MAX_WHEN; i++) {
+		MIX32(e->dr.gate[i].fact);
+		MIX32(e->dr.gate[i].val);
+		MIX32(e->dr.gate[i].val >> 32);
+	}
 	for (i = 0; i < e->dr.n_decl; i++) {
 		const struct decl *d = &e->dr.decl[i];
 
@@ -408,6 +414,8 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.opt_on, 0, sizeof e->dr.opt_on);
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
 	memset(e->dr.opt_auto, 0, sizeof e->dr.opt_auto);
+	memset(e->dr.gate, 0, sizeof e->dr.gate);
+	e->dr.n_gate = 0;
 	e->dr.n_decl = e->dr.n_grp = e->dr.n_cnd = 0;
 	/*
 	 * THE TICKS GO WITH THE MATCHERS THAT USED THEM.

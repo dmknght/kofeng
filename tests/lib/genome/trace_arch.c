@@ -460,6 +460,9 @@ static void t_pad_lea(void)
 	}
 }
 
+/* DISABLED by the owner 2026-11-16: the signal-return stub was made a start by the entry walk (a decoded pattern after a ret); the function table is made from
+ * metadata only and no strategy decodes. To re-enable: take this #if 0 out (and the call in main) with the walk strategy (phenotype/fntab_walk.c). */
+#if 0
 /* D3: the C library's signal-return trampolines are called by no one (the kernel returns into them) and follow the function before them with no padding: the entry walk saw no start and the
  * stub was merged into the function before it. Their bytes are fixed by the ABI; where they stand after a ret or padding they are a start. The same bytes after an instruction that does not
  * end a function are not. RED on main: no entry for the stub. */
@@ -516,6 +519,7 @@ static void t_sigreturn_stub(void)
 		kgenome_diag_walk_free(wk);
 	}
 }
+#endif
 
 int main(void)
 {
@@ -528,7 +532,9 @@ int main(void)
 	t_walk();
 	t_walk_edges();
 	t_pad_lea();
+#if 0 /* DISABLED by the owner 2026-11-16: see t_sigreturn_stub */
 	t_sigreturn_stub();
+#endif
 	/* the corners exist in the images above, or the rows prove nothing about them */
 	CK(t_hi > 0);
 	CK(t_both > 0);

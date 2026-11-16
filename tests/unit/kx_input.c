@@ -26,9 +26,10 @@ int txt_bot(const struct view *v) { (void)v; return 0; }
 void txt_hscroll(struct view *v, int by) { (void)v; (void)by; }
 const uint8_t *view_bytes(const struct view *v, uint64_t *n) { (void)v; if (n) *n = 0; return NULL; }
 uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run) { (void)v; (void)at; (void)run; return 0; }
-uint64_t txt_line_start(struct view *v, const uint8_t *base, uint64_t base_n, uint64_t at) { (void)v; (void)base; (void)base_n; return at; }
-uint64_t txt_line_end(struct view *v, const uint8_t *base, uint64_t base_n, uint64_t at) { (void)v; (void)base; (void)base_n; return at; }
-uint64_t txt_max_top(struct view *v, const uint8_t *base, uint64_t base_n, int rows) { (void)v; (void)base; (void)base_n; (void)rows; return 0; }
+uint64_t txt_line_start(struct view *v, const uint8_t *base, uint64_t base_n, uint64_t at, int rendered) { (void)v; (void)base; (void)base_n; (void)rendered; return at; }
+uint64_t txt_line_end(struct view *v, const uint8_t *base, uint64_t base_n, uint64_t at, int rendered) { (void)v; (void)base; (void)base_n; (void)rendered; return at; }
+uint64_t txt_max_top(struct view *v, const uint8_t *base, uint64_t base_n, int rows, int rendered) { (void)v; (void)base; (void)base_n; (void)rows; (void)rendered; return 0; }
+int txt_pretty_view(struct object *ob, const uint8_t **p, uint64_t *n) { (void)ob; (void)p; (void)n; return 0; }
 char   g_clip[8192];
 size_t g_clip_n;
 int    g_cols, g_decl_rows, g_disasm_rows, g_mod_ctrl, g_mod_shift, g_mx, g_my, g_wheel;

@@ -120,4 +120,8 @@ fuzz-clean:
 
 .PHONY: fuzz fuzz-build fuzz-smoke fuzz-selftest fuzz-mutants fuzz-clean $(FZ_SMOKE_RUN) $(FZ_RUN)
 
+else
+# Said on Windows rather than answered "No rule to make target".
+fuzz fuzz-build fuzz-smoke fuzz-selftest fuzz-mutants fuzz-clean:
+	$(error $@ is a Linux target: the fuzz kit's registry is a linker section and its fault seams are POSIX (tests/fuzz/README.txt))
 endif

@@ -1,6 +1,7 @@
 /*
  * elf_semantics.c - what the ELF headers mean, as words and facts for a tool (declared in elf_image.h):
- * linking and symbol/debug shape, the section that holds the entry. Pure functions of the parsed view.
+ * linking and symbol/debug shape, the section that holds the entry, whether an address is covered by
+ * an executable segment. Pure functions of the parsed view.
  */
 #include "elf_image.h"
 
@@ -38,6 +39,31 @@ void kgenome_elf_shape(const struct kgenome_elf_info *e, struct kgenome_elf_shap
 		if (strncmp(s->name, ".debug_", 7) == 0)
 			out->has_debug = 1;
 	}
+}
+
+/*
+ * ELF-SEC-EXEC-CODE's cross-check, as a lookup any caller can share: whether `va` lies
+ * inside SOME executable PT_LOAD (kgenome_elf_seg_is_code) - the AUTHORITATIVE,
+ * segment-level "is this code" diag_code.c already uses, now also what
+ * kgenome_fntab_symtab (funcs.c) asks before admitting a symbol whose SECTION says
+ * SHF_EXECINSTR alone. Same loop and bound as diag_wrapper_walk.c's mips_got_target
+ * (merge 135, CN-5), which established the pattern: a section flag is the linker's
+ * claim, a PT_LOAD's PF_X is the loader's, and only the second is load-bearing.
+ * O(seg_count), a handful of segments on every object measured.
+ */
+int kgenome_elf_va_is_code(const struct kgenome_elf_info *e, uint64_t va)
+{
+	uint32_t i;
+
+	if (!e)
+		return 0;
+	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+		const struct kgenome_elf_seg *g = &e->seg[i];
+
+		if (kgenome_elf_seg_is_code(g) && va >= g->mem_addr && va - g->mem_addr < g->mem_size)
+			return 1;
+	}
+	return 0;
 }
 
 int kgenome_elf_entry_sec(const struct kgenome_elf_info *e, uint32_t *index, uint64_t *delta)

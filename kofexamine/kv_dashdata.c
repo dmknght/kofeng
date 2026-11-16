@@ -9,6 +9,9 @@
  */
 
 #include "kv.h"
+#include <phenotype/diag_scan.h>
+#include <celllysis/nucleo.h>
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 /* ---- row builders ----------------------------------------------------------------------------------------- */
 
@@ -372,6 +375,135 @@ void dash_regions(const struct view *v, const struct object *ob, struct dash_blo
 	}
 }
 
+/* ---- a script's islands ---------------------------------------------------------------------------------- */
+
+int dash_is_script(const struct object *ob)
+{
+	return ob && ob->ctx.format == KOF_FMT_SCRIPT;
+}
+
+static const struct kgenome_diag_text_obf_set *obf_get(struct object *ob)
+{
+	if (!ob->obf_done) {
+		ob->obf_done = 1;
+		ob->obf_data = calloc(1, sizeof *ob->obf_data);
+		if (ob->obf_data)
+			kof_script_obf(&ob->ctx, ob->buf.p, ob->buf.n, ob->obf_data);
+	}
+	return ob->obf_data;
+}
+
+/* An ObfScore as the reader sees it: bits per effect, two decimals (the engine's unit is thousandths of a bit). */
+static void obf_text(char *out, size_t cap, uint32_t milli)
+{
+	snprintf(out, cap, "%u.%02u", milli / 1000u, (milli % 1000u) / 10u);
+}
+
+/* The capabilities of one record, as the vocabulary spells them, comma separated; what does not fit is said as "+N", never dropped silently. */
+static void caps_text(char *out, size_t cap, const struct kgenome_diag_text_obf_rec *r)
+{
+	size_t w = 0;
+	uint32_t i;
+
+	out[0] = 0;
+	if (!r->n_cap) {
+		snprintf(out, cap, "-");
+		return;
+	}
+	for (i = 0; i < r->n_cap; i++) {
+		const char *nm = kgenome_nucleo_cap_name(r->cap[i]);
+		char one[48];
+		int k;
+
+		snprintf(one, sizeof one, "%s%s", i ? ", " : "", nm ? nm : "?");
+		if (w + strlen(one) + 8u >= cap) {
+			snprintf(out + w, cap - w, " +%u", r->n_cap - i);
+			return;
+		}
+		k = snprintf(out + w, cap - w, "%s", one);
+		w += k > 0 ? (size_t)k : 0u;
+	}
+}
+
+static const char *place_word(const struct kgenome_diag_text_obf_rec *r, char *b, size_t n)
+{
+	if (r->kind == KGENOME_DIAG_TEXT_OBF_ISLAND)
+		return "island";
+	if (r->kind == KGENOME_DIAG_TEXT_OBF_LAYER) {
+		snprintf(b, n, "layer %u", r->layer);
+		return b;
+	}
+	return "text";
+}
+
+void dash_islands(struct object *ob, struct dash_block *b)
+{
+	const struct kgenome_diag_text_obf_set *s = obf_get(ob);
+	struct dash_row *r;
+	char sc[16];
+
+	block_begin(b, "Islands");
+	if (!s) {
+		r = row_new(b, "", DT_NONE);
+		span(r, DT_BAD, "not enough memory to measure the script");
+		return;
+	}
+	if (!s->n) {
+		r = row_new(b, "", DT_NONE);
+		span(r, DT_DIM, "the text route read no code in this object");
+		if (s->status != KGENOME_OK)
+			span(r, DT_WARN, " (%s)", kgenome_status_name(s->status));
+		return;
+	}
+	obf_text(sc, sizeof sc, kgenome_diag_text_obf_value(s));
+	r = row_new(b, "ObfScore", DT_ID);
+	span(r, DT_HEUR, "%s", sc);
+	span(r, DT_DIM, " bits/effect, the highest of %u", s->n);
+	if (s->status != KGENOME_OK)
+		span(r, DT_WARN, "  limit: %s", kgenome_status_name(s->status));
+}
+
+void dash_islands_table(struct object *ob, struct dash_table *t)
+{
+	static const char *const head[DASH_ISL_COLS] = { "offset", "place", "bytes", "ObfScore", "nucleo" };
+	static const enum dash_tone tone[DASH_ISL_COLS] = { DT_LOC, DT_NAME, DT_SIZE, DT_HEUR, DT_TYPE };
+	const struct kgenome_diag_text_obf_set *s = obf_get(ob);
+	uint32_t k;
+
+	memset(t, 0, sizeof *t);
+	if (!s || !s->n)
+		return;                 /* dash_islands has said why */
+	t->n_col = DASH_ISL_COLS;
+	for (k = 0; k < DASH_ISL_COLS; k++) {
+		t->head[k] = head[k];
+		t->tone[k] = tone[k];
+	}
+	t->lead = 1;
+	t->n_row = t->declared = s->n;
+}
+
+void dash_islands_cell(struct object *ob, uint32_t row, char c[][DASH_CELL], char *caps, size_t cap)
+{
+	const struct kgenome_diag_text_obf_set *s = obf_get(ob);
+	const struct kgenome_diag_text_obf_rec *e;
+	const char *pw;
+	uint32_t k;
+
+	for (k = 0; k < DASH_ISL_COLS - 1u; k++)
+		c[k][0] = 0;
+	caps[0] = 0;
+	if (!s || row >= s->n)
+		return;
+	e = &s->v[row];
+	snprintf(c[0], DASH_CELL, "0x%llx", (unsigned long long)e->at);
+	pw = place_word(e, c[1], DASH_CELL);
+	if (pw != c[1])
+		snprintf(c[1], DASH_CELL, "%s", pw);
+	snprintf(c[2], DASH_CELL, "%llu", (unsigned long long)e->len);
+	obf_text(c[3], DASH_CELL, kgenome_diag_text_obf_milli(e));
+	caps_text(caps, cap, e);
+}
+
 /*
  * What the parser thought was wrong with it. Said even when there is nothing, because "no anomalies" is a finding
  * and an absent section reads as a section that was not checked. A reconstructed payload says what it is in place
@@ -386,6 +518,10 @@ void dash_regions(const struct view *v, const struct object *ob, struct dash_blo
  * Sample: HEUR-Backdoor.Linux.Mirai.r-be0826d7 shows `packer ELF:UPX 3.94` and `anomalies SEG_PAST_EOF SECTAB_MISSING` in kofexaminer's list for the file itself.
  * Open: what "enclosing" is on screen (the stacked blocks: file, unpacked child, view); the owner's rule for a view is the only one given.
  */
+/* KNOWN DEFECT SG-D1 (2026-11-17, R) [sev M]: dash_anomalies lists the viewer's own parse of the object's bytes (ob->fmt->anomalies(ob->info)), not the engine's word.
+ * Trigger: a normalised view (run1's //0:norm). Effect: it shows SHOFF_PAST_EOF SEG_PAST_EOF SECTAB_MISSING, which the engine's view (the parent's description) does not hold.
+ * Reproducer: tests/tui/golden/run1_norm_dash_overview.txt beside kof_result.anomalies of the view (tests/unit/diag_form_generate.c gate_draft).
+ * Fix: list the bits of the kept result's word (ob->heur.anomalies, anomaly_fmt), as the gate's offer does (draft_gate_offer). */
 void dash_anomalies(const struct object *ob, struct dash_block *b)
 {
 	struct dash_row *r;
@@ -450,6 +586,9 @@ static int is_elf(const struct object *ob)
 	return ob->fmt && ob->info && ob->entry_kind != KOF_ENT_NORMALIZED && ob->ctx.format == KOF_FMT_ELF;
 }
 
+/* KNOWN DEFECT NV-1B (2026-11-15, R) [sev L]: is_pe / is_elf answer no for every normalised view, so the Layout and Infect tables of a PE view say "this object is not a parsed ELF or PE".
+ * Trigger: open whs32res.dll (sha256 19c6fd14d012ca92...) and its //0:norm view in the dashboard. Effect: the engine knows the view is PE (kofexaminer: format PE x64 DLL) but the viewer shows no sections.
+ * Fix: the engine publishes the view's image description (the parent's, moved by kgenome_pe_info_remap / kgenome_elf_info_remap over the view's offmap) and the viewer reads it - no parse of the view's header in the tool. */
 static int is_pe(const struct object *ob)
 {
 	return ob->fmt && ob->info && ob->entry_kind != KOF_ENT_NORMALIZED && ob->ctx.format == KOF_FMT_PE;
@@ -1225,12 +1364,19 @@ void dash_drop(struct object *ob)
 		free(ob->shell_data->row);
 	free(ob->shell_data);
 	ob->shell_data = NULL;
+	kgenome_diag_text_obf_free(ob->obf_data);
+	free(ob->obf_data);
+	ob->obf_data = NULL;
+	ob->obf_done = 0;
 }
 
 /* ---- the strip --------------------------------------------------------------------------------------------- */
 
 /* The strip names the pages and carries no count. An empty page keeps its tab, so "this object imports nothing" stays
- * distinguishable from "no imports tab". */
+ * distinguishable from "no imports tab". An object read as text (KV_CAP_TEXT: a script, a text) has the Overview alone: the
+ * four tables are a binary's layout and symbol tables and mean nothing for a script (owner, 2026-11-14). The strip draws one
+ * label, so a click reaches no other page, and the dialog opens on the Overview (prop_show) and is modal, so the object cannot
+ * change under a table page. */
 uint32_t dash_tabs(const struct view *v, const struct object *ob, char lab[][32])
 {
 	static const char *const name[DASH_TABS] = { "Overview", "Segments", "Sections", "Imports", "Exports" };
@@ -1238,7 +1384,8 @@ uint32_t dash_tabs(const struct view *v, const struct object *ob, char lab[][32]
 	const char *const *w = v->prop_inf ? inf : name;
 	uint32_t i, n = v->prop_inf ? 2u : DASH_TABS;
 
-	(void)ob;
+	if (!v->prop_inf && ob && kv_cap(ob->ctx.format, KV_CAP_TEXT))
+		n = 1u;
 	for (i = 0; i < n; i++)
 		snprintf(lab[i], 32, "%s", w[i]);
 	return n;

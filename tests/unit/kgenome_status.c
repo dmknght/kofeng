@@ -86,7 +86,14 @@ static void nodes(void)
 	/* one under it: the 20th is dropped, and the scan says so */
 	b.max_nodes = 19;
 	s = scan_with(n, &b);
-	CK(kgenome_diag_scan_count(s) == 19u && kgenome_diag_scan_status(s) == KGENOME_TRUNCATED);
+	/* (then the keep rule - fix_lgtab, kgenome_diag_nodes_keep - kept what is on a link: the fillers are on none) */
+	{
+		struct kgenome_diag_drops dr;
+
+		kgenome_diag_scan_drops(s, &dr);
+		CK(dr.refused == 1u && kgenome_diag_scan_count(s) + dr.unlinked + dr.nocap == 19u);
+	}
+	CK(kgenome_diag_scan_status(s) == KGENOME_TRUNCATED);
 	kgenome_diag_scan_free(s);
 }
 
@@ -141,8 +148,10 @@ static void links(void)
 		kgenome_diag_note_in(s, h, src[j], KGENOME_DIAG_ROLE_BUFFER,
 				 KGENOME_DIAG_KIND_PRODUCED);
 	CK(kgenome_diag_scan_status(s) == KGENOME_OK);
+	/* a fifth input is kept past the node's view, and nothing is said lost (lineage2, LG-10) */
 	kgenome_diag_note_in(s, h, src[4], KGENOME_DIAG_ROLE_BUFFER, KGENOME_DIAG_KIND_PRODUCED);
-	CK(kgenome_diag_scan_status(s) == KGENOME_TRUNCATED);
+	CK(kgenome_diag_scan_status(s) == KGENOME_OK);
+	CK(kgenome_diag_in_count(s, kgenome_diag_scan_count(s) - 1u) == 5u);
 	kgenome_diag_scan_free(s);
 }
 

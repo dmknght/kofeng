@@ -84,6 +84,8 @@ static const struct ch_kind ch_kinds[] = {
 	[CH_DECLKIND] = { ch_open_declkind, ch_take_declkind },
 	[CH_ATTR] = { ch_open_attr, ch_take_attr },
 	[CH_THRESH] = { ch_open_thresh, ch_take_thresh },
+	[CH_GATE_ANOM] = { ch_open_gate, ch_take_gate },
+	[CH_GATE_NUC] = { ch_open_gate, ch_take_gate },
 };
 
 /* The rows of a chooser as a pop-up: an item is a row of its own (the id is its index), a separator a rule, a row that opens a list carries the ">". */

@@ -8,6 +8,8 @@
  * indirect jump through a fixed slot, the slot an entry of the IAT when the image declares one, at a function start: after a ret, a jmp, padding); this reads that list and decodes
  * nothing. Starts of kind FUNC from the same address (a call target) are one entry in the merge (the sources add up).
  */
+/* DISABLED by the owner 2026-11-16: the import stubs are recognised by decoding (`jmp [iat slot]` found by the walk's decode), not declared by any table: decode-derived. To re-enable: take the #if 0 out, set KGENOME_FNTAB_X_PE_THUNK and KGENOME_FNTAB_X_WALK in the PE selector rows and call it after the walk in fntab_build_pe.c. */
+#if 0
 #include "diag_scan_private.h"
 #include <genotype/image/fntab.h>
 
@@ -31,3 +33,4 @@ void kgenome_fntab_pe_thunk(const struct kgenome_diag_walk *walk, struct kgenome
 			return;
 	}
 }
+#endif

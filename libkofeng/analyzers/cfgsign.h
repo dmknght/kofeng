@@ -3,8 +3,9 @@
  * that the scanner's feed, the viewer's table and the CFG dialog all call; none of them decodes a function for a graph by itself.
  *
  * WHAT IT DECIDES AND WHAT IT DOES NOT. It makes the signature the lib defines (cfg.h) for a function of the object and says whether
- * it counts: SIGNED (the function is of a code region and has a reachable block: the floor of 12 blocks is gone, owner 2026-11-01), BELOW_FLOOR (a graph
- * was made and no block is reachable, or the caller asked for a higher `floor`: the unit stays listed and unsigned), UNDECODABLE, UNSUPPORTED (no rule table for the architecture),
+ * it counts: SIGNED (the function is of a code region and has at least KGENOME_CFG_ANCHOR_MIN reachable blocks, 5, measured -
+ * anchor-floor-1, cfg.h), BELOW_FLOOR (a graph was made and has fewer reachable blocks than the floor, or the caller asked for a higher
+ * `floor`: the unit stays listed and unsigned), UNDECODABLE, UNSUPPORTED (no rule table for the architecture),
  * OVER_BUDGET (the lib's allowance for one call: the function holds more instructions or blocks than it may) and NOMEM. Each is a
  * per-function REASON a viewer prints; none is silent. Which functions are offered at all is the CUT's decision (kgenome_mutation_units:
  * the library's functions are not units), not this function's: every unit it is asked about is signed. Big-endian objects are read in their own byte order (kgenome_diag_code_run).
@@ -24,9 +25,15 @@
 #include <celllysis/cfg.h>
 #include <phenotype/frame.h>
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out with the one in cfgsign.c.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 enum kof_cfgsign_state {
 	KOF_CFGSIGN_SIGNED = 0,
-	KOF_CFGSIGN_BELOW_FLOOR,        /* fewer reachable blocks than the floor (default one: no reachable block) */
+	KOF_CFGSIGN_BELOW_FLOOR,        /* fewer reachable blocks than the floor (default KGENOME_CFG_ANCHOR_MIN, 5) */
 	KOF_CFGSIGN_UNDECODABLE,        /* the extent is not in the object, or no instruction decodes there */
 	KOF_CFGSIGN_UNSUPPORTED,        /* no control-flow rules for the architecture */
 	KOF_CFGSIGN_OVER_BUDGET,        /* the lib's allowance for one call (kgenome_budget.max_bytes) is not enough for this function */
@@ -50,7 +57,7 @@ struct kof_cfgsign_req {
 	const struct kof_obj_ctx *ctx;  /* the object: architecture, parsed header (byte order, address map) */
 	kof_buf data;                   /* the object's bytes */
 	uint64_t off, len;              /* the function: file offset and size */
-	uint32_t floor;                 /* reachable blocks needed to be SIGNED; 0 = KGENOME_CFG_ANCHOR_MIN (one) */
+	uint32_t floor;                 /* reachable blocks needed to be SIGNED; 0 = KGENOME_CFG_ANCHOR_MIN (5) */
 	int      keep;                  /* 1: hand back the instructions, the graph and the labels (kof_cfgsign_release) */
 	const struct kof_cfgsign_host *host;    /* may be NULL */
 	/* The object's walk, when it has one: its trace is the decode of the code (x86), so the function is READ from it and not decoded again. NULL decodes. */
@@ -81,4 +88,5 @@ struct kof_cfgsign {
 enum kof_cfgsign_state kof_cfgsign_function(const struct kof_cfgsign_req *rq, struct kof_cfgsign *out);
 void kof_cfgsign_release(struct kof_cfgsign *r, const struct kgenome_cfg_mem *mem);
 
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 #endif /* KOFENG_CFGSIGN_H */

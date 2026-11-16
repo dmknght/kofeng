@@ -191,7 +191,7 @@ def help_keys_listed_are_real():
     with ko() as v:
         v.key('ctrl+f'); check(v.has('Find'), 'Ctrl+F did not open Find'); v.esc()
         v.key('f10');    check(v.popup(), 'F10 did not open the menu'); v.esc()
-        v.key('ctrl+o'); check(v.has('No file picker') or True)
+        v.key('ctrl+o'); check(v.has('[ Open ]'), 'Ctrl+O did not open the Open dialog'); v.esc()
     with ko() as v:
         v.key('ctrl+q'); v.pump(0.8)
         check(not v.alive(), 'Ctrl+Q listed as quit but did not quit')
@@ -392,6 +392,180 @@ def goto_esc_closes_and_typing_repaints():
         check('[abc' in v.text(), 'typing not painted in goto field')
         v.key('esc')
         check(not v.has('[ Go ]'))
+
+
+# ---------------------------------------------------------------------- open
+#
+# A RAW FIXTURE, NOT ko() - not a documented-elsewhere BUG-20 workaround but one
+# found while writing these cases: opening a real compiled object (ko(),
+# SAMPLES['ko']) crashes this build in the engine's own CFG-signing feed
+# (mtn_sync -> mtn_rescore -> kof_scan_mutation_feed -> mutation_feed_func), on
+# an UNMODIFIED tree - see the defect reported to the coordinator. Nothing
+# about the Open/Close dialog touches that path, and tiny.bin (16 raw bytes,
+# no function to sign) does not reach it, so the dialog cases below start from
+# it instead of ko() - see FIX() and mkfixtures.py.
+def starter():
+    return Viewer(FIX('tiny.bin'))
+
+
+def opener():
+    v = starter()
+    v.key('ctrl+o')
+    check(v.has('[ Open ]'), 'Open dialog did not open with Ctrl+O')
+    return v
+
+
+@case(A)
+def open_menu_item_reaches_the_same_dialog_as_ctrl_o():
+    with starter() as v:
+        check(v.menu_item('File', 'Open...'), 'no File > Open item')
+        check(v.has('[ Open ]') and v.has('[ Cancel ]'),
+              'File > Open did not open the dialog')
+
+
+@case(A)
+def open_typing_a_path_and_enter_loads_it():
+    target = FIX('tiny.bin')
+    with opener() as v:
+        v.type(target)
+        v.key('enter', settle=0.4)
+        check(not v.has('[ Open ]'), 'dialog stayed open after a good path')
+        check(v.alive(), 'died loading %r' % target)
+        check('Opened' in v.text(), 'no confirmation that the path was opened: %r' % v.row(v.rows))
+
+
+@case(A)
+def open_cancel_button_closes_with_no_change():
+    # obj_label draws the format ("Raw"), not the file name, so "the same
+    # file is still open" is read off the unchanged hex row rather than off
+    # text that is never on screen outside the fading status line.
+    with starter() as v:
+        before = v.row(2)
+        v.key('ctrl+o')
+        check(v.has('[ Open ]'), 'Open dialog did not open with Ctrl+O')
+        v.type('/should/not/be/opened')
+        v.click(*v.find('[ Cancel ]'))
+        check(not v.has('[ Open ]'), 'Cancel did not close the Open dialog')
+        check(v.alive())
+        check(v.row(2) == before, 'Cancel changed what file is open: %r -> %r' % (before, v.row(2)))
+
+
+@case(A)
+def open_esc_closes_without_loading_anything():
+    with starter() as v:
+        before = v.row(2)
+        v.key('ctrl+o')
+        v.type('/should/not/be/opened')
+        v.key('esc')
+        check(not v.has('[ Open ]'), 'Esc did not close the Open dialog')
+        check(v.row(2) == before, 'Esc changed what file is open: %r -> %r' % (before, v.row(2)))
+
+
+@case(A)
+def open_bad_path_reports_an_error_and_stays_open():
+    with opener() as v:
+        before = v.row(2)
+        v.type('/nonexistent/does/not/exist_zzz.bin')
+        v.key('enter', settle=0.4)
+        check(v.has('[ Open ]'), 'dialog closed on a path that does not exist')
+        check(v.alive(), 'died on a bad path')
+        check(v.row(2) == before, 'the old file changed although the open failed: %r -> %r' % (before, v.row(2)))
+
+
+@case(A)
+def open_empty_field_reports_an_error_and_stays_open():
+    with opener() as v:
+        v.key('enter')
+        check(v.has('[ Open ]'), 'dialog closed with nothing typed')
+        check(v.alive())
+
+
+@case(A)
+def open_folder_resolves_to_its_first_file():
+    # Its own folder of two harmless raw files (not SAMPLES/FIX fixtures -
+    # alphabetically-first among those includes real compiled objects, which
+    # would hit the ko()-class crash above; the point here is dir_pick's
+    # ordering, not the content of whatever it names).
+    d = os.path.join(VT, 'open_dlg_folder_p%d' % os.getpid())
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    os.makedirs(d)
+    try:
+        open(os.path.join(d, 'aaa_first.bin'), 'wb').write(bytes(range(16)))
+        open(os.path.join(d, 'zzz_second.bin'), 'wb').write(bytes(range(16)))
+        with opener() as v:
+            v.type(d)
+            v.key('enter', settle=0.4)
+            check(not v.has('[ Open ]'), 'dialog stayed open on a folder')
+            check(v.alive(), 'died opening a folder')
+            check('aaa_first.bin' in v.text(),
+                  'did not resolve to the alphabetically first file: %r' % v.row(v.rows))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@case(A)
+def open_empty_folder_reports_an_error_and_stays_open():
+    d = os.path.join(VT, 'empty_dir_p%d' % os.getpid())
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    os.makedirs(d)
+    try:
+        with opener() as v:
+            v.type(d)
+            v.key('enter', settle=0.4)
+            check(v.has('[ Open ]'), 'dialog closed on an empty folder')
+            check(v.alive(), 'died on an empty folder')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@case(A)
+def open_from_the_empty_view_loads_a_file():
+    """The empty-start case (no path, no --pid): Ctrl+O still works."""
+    with Viewer(None, db=False) as v:
+        check(v.alive(), 'empty start did not come up')
+        v.key('ctrl+o')
+        check(v.has('[ Open ]'), 'Ctrl+O did not open the dialog from the empty view')
+        v.type(FIX('tiny.bin'))
+        v.key('enter', settle=0.4)
+        check(not v.has('[ Open ]'), 'dialog stayed open after a good path')
+        check('Opened' in v.text(), 'the file opened from the empty view is not confirmed')
+
+
+# --------------------------------------------------------------------- close
+def tree_col(v, y):
+    """The tree pane's own text of row y, left of its '|' divider."""
+    return v.row(y).split('|', 1)[0].strip()
+
+
+@case(A)
+def close_menu_item_returns_to_the_empty_view():
+    with starter() as v:
+        check(tree_col(v, 2), 'tiny.bin did not show its Raw row before Close: %r' % v.row(2))
+        check(v.menu_item('File', 'Close'), 'no File > Close item')
+        check(v.alive(), 'died on Close')
+        check(not tree_col(v, 2), 'the closed object is still shown: %r' % v.row(2))
+        # the empty view still works: Ctrl+O still opens the Open dialog
+        v.key('ctrl+o')
+        check(v.has('[ Open ]'), 'Ctrl+O did not work after Close')
+        v.type(FIX('tiny.bin'))
+        v.key('enter', settle=0.4)
+        check('Opened' in v.text(), 'could not open a file after Close')
+        check(tree_col(v, 2), 'no object shown after reopening past Close: %r' % v.row(2))
+
+
+@case(A)
+def close_is_grey_with_nothing_open():
+    with Viewer(None, db=False) as v:
+        check(v.alive())
+        v.menu_open('File')
+        p = v.find('Close', rows=(2, 10))
+        check(p, 'no Close row in the File menu with nothing open')
+        v.click(*p)
+        check(v.alive(), 'died clicking Close with nothing open')
+        check(v.popup(), 'a disabled Close row closed the menu (bar_run should refuse and stay open)')
+        v.esc()
 
 
 # ------------------------------------------------------------------- decoder

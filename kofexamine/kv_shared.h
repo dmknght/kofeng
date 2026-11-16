@@ -86,13 +86,14 @@ int decl_kind(struct view *v, uint64_t off);
 void sym_flag_str(uint8_t f, char *out);
 void sym_shn_str(const uint8_t *r, char *out, size_t n);
 uint64_t txt_line_start(struct view *v, const uint8_t *base,
-			       uint64_t base_n, uint64_t at);
+			       uint64_t base_n, uint64_t at, int rendered);
 uint64_t txt_line_end(struct view *v, const uint8_t *base,
-			     uint64_t base_n, uint64_t at);
+			     uint64_t base_n, uint64_t at, int rendered);
 uint64_t txt_line_of(struct view *v, const uint8_t *base,
-			    uint64_t base_n, uint64_t at);
+			    uint64_t base_n, uint64_t at, int rendered);
 uint64_t txt_max_top(struct view *v, const uint8_t *base,
-			    uint64_t base_n, int rows);
+			    uint64_t base_n, int rows, int rendered);
+int txt_pretty_view(struct object *ob, const uint8_t **p, uint64_t *n);
 int txt_bot(const struct view *v);
 void draw_text(struct out *o, struct view *v);
 int text_under(struct view *v, int row, int col, uint64_t *out,
@@ -247,6 +248,12 @@ int enc_click(struct view *v, int rclick);
 void goto_take(struct view *v);
 void draw_goto(struct out *o, struct view *v);
 int goto_click(struct view *v);
+/* kv_dialogs.c: the Open dialog (File > Open, Ctrl+O). opendlg_show is the one
+ * function both entry points call. */
+void opendlg_show(struct view *v);
+void opendlg_take(struct view *v);
+void draw_opendlg(struct out *o, struct view *v);
+int opendlg_click(struct view *v);
 void draw_find(struct out *o, struct view *v);
 int dframe_grab(struct view *v, struct dframe *f);
 void dlg_hold(struct view *v, struct dlg_off *off);
@@ -279,9 +286,9 @@ void draw_tags(struct out *o, struct view *v);
 int tags_uncovered(struct view *v);
 int tags_click(struct view *v, int rclick);
 int handle_tags_key(struct view *v, int k);
-/* kv_cfgdlg.c: the CFG dialog of one function (the engine's graph, drawn by kv_graph.c, in the dialog frame): made by cfgd_open from the request hit_plg_cfg fills. */
-struct kof_cfgview_req;
-void cfgd_open(struct view *v, const struct kof_cfgview_req *rq);
+/* kv_cfgdlg.c: the dialog of one function (Overview, Disasm, Lineage; its CFG graph DISABLED by the owner 2026-11-15), in the dialog frame: opened by hit_plg_cfg for
+ * the function [func_off, func_off + func_len) of object `o`. */
+void cfgd_open(struct view *v, uint64_t func_off, uint64_t func_len, const struct object *o);
 void cfgd_free(struct view *v);
 int cfgd_up(const struct view *v);
 void draw_cfgd(struct out *o, struct view *v);
@@ -311,6 +318,14 @@ void on_drag(struct view *v);
 void on_release(struct view *v);
 int handle(struct view *v, int k);
 int file_open(struct view *v, const char *path, kof_engine *eng);
+/*
+ * kv_main.c: let go of whatever file or process is open, keeping the
+ * session - the reset file_open and proc_open both do before loading what
+ * they were asked to show. The caller's v->eng does not survive it (see the
+ * function's own comment); every caller restores it right after. File >
+ * Close (BI_CLOSE, kv_bar.c) calls it with nothing loaded afterwards.
+ */
+void view_close(struct view *v);
 size_t paste_extern(char *out, size_t cap);
 
 /* ===== what the units share: state ===== */
@@ -319,6 +334,7 @@ extern int g_decl_rows;
 extern int g_disasm_rows;
 extern int g_evt_rows;
 extern const char *const opt_word[OPT_COUNT];
+const char *gate_word(uint16_t fact);
 extern int g_mx, g_my;
 extern int g_wheel;
 struct kv_g_fld {
@@ -335,7 +351,7 @@ extern struct prop_line g_prop[PROP_MAX];
 extern uint32_t         g_n_prop;
 extern int g_mod_shift;
 extern int g_mod_ctrl;
-extern struct dframe g_goto_f, g_find_f, g_enc_f;
+extern struct dframe g_goto_f, g_find_f, g_enc_f, g_opendlg_f;
 
 
 #endif /* KV_SHARED_H */

@@ -609,14 +609,14 @@ static void fw_push1(struct kgenome_thumb_insn in, const struct t_info *e,
 		     struct kgenome_cell_insn *o)
 {
 	(void)e;
-	kgenome_arm_pushpop(o, 0, KGENOME_ARM_R(kgenome_thumb_w_rt(in)));    /* str rt, [sp, #-4]! */
+	kgenome_arm_pushpop(o, 0, (uint32_t)KGENOME_ARM_R(kgenome_thumb_w_rt(in)));    /* str rt, [sp, #-4]!; rt is 4 bits, so the bit fits the 16-bit list */
 }
 
 static void fw_pop1(struct kgenome_thumb_insn in, const struct t_info *e,
 		    struct kgenome_cell_insn *o)
 {
 	(void)e;
-	kgenome_arm_pushpop(o, 1, KGENOME_ARM_R(kgenome_thumb_w_rt(in)));    /* ldr rt, [sp], #4 */
+	kgenome_arm_pushpop(o, 1, (uint32_t)KGENOME_ARM_R(kgenome_thumb_w_rt(in)));    /* ldr rt, [sp], #4; rt is 4 bits, so the bit fits the 16-bit list */
 }
 
 static void fw_push(struct kgenome_thumb_insn in, const struct t_info *e,

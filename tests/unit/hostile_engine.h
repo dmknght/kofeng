@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fcntl.h>
 
 #include "../../libkofeng/kofeng.h"
 #include "notes.h"
@@ -229,14 +230,70 @@ static inline const char *he_how(struct he_status s)
 
 /* ---- scratch trees ---------------------------------------------------------------- */
 
-/* Remove `path` and everything under it. lstat, so a symlink is unlinked and never
- * followed out of the tree; the caller passes the one directory the test made. */
+/*
+ * Remove `path` and everything under it. lstat, so a symlink is unlinked and never
+ * followed out of the tree; the caller passes the one directory the test made.
+ *
+ * BY chdir, NOT BY PATH: the deepest tree a test makes (c_deeper_tree, 2100 levels) has
+ * no path that fits PATH_MAX, and the old walk built "<parent>/<name>" in 1024 bytes and
+ * skipped what did not fit - so every run left a 2100-level tree under build/test (26 of
+ * them in one build directory; a tar of it walked for 1h20m). Each level is entered by
+ * its name and left by "..", which holds no descriptor per level, and a directory is made
+ * readable first (c_unreadable leaves one at mode 0). The caller's working directory is
+ * restored from a descriptor.
+ */
+static inline void he_rm_here(void)
+{
+	DIR *d = opendir(".");
+	struct dirent *de;
+	char **names = NULL;
+	size_t n = 0, cap = 0, i;
+
+	if (!d)
+		return;
+	while ((de = readdir(d)) != NULL) {
+		char *c;
+
+		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+			continue;
+		if (n == cap) {
+			char **g = (char **)realloc(names, (cap ? cap * 2 : 16) * sizeof *names);
+
+			if (!g)
+				break;
+			names = g;
+			cap = cap ? cap * 2 : 16;
+		}
+		c = strdup(de->d_name);
+		if (!c)
+			break;
+		names[n++] = c;
+	}
+	closedir(d);
+	for (i = 0; i < n; i++) {
+		struct stat sb;
+
+		if (lstat(names[i], &sb) == 0 && S_ISDIR(sb.st_mode)) {
+			(void)chmod(names[i], 0700);
+			if (chdir(names[i]) == 0) {
+				he_rm_here();
+				if (chdir("..") != 0)
+					break;      /* lost: the caller's fchdir puts it back */
+			}
+			(void)rmdir(names[i]);
+		} else {
+			(void)unlink(names[i]);
+		}
+	}
+	for (i = 0; i < n; i++)
+		free(names[i]);
+	free(names);
+}
+
 static inline void he_rmtree(const char *path)
 {
 	struct stat sb;
-	DIR *d;
-	struct dirent *de;
-	char p[1024];
+	int here;
 
 	if (lstat(path, &sb) != 0)
 		return;
@@ -244,17 +301,18 @@ static inline void he_rmtree(const char *path)
 		unlink(path);
 		return;
 	}
-	d = opendir(path);
-	if (d) {
-		while ((de = readdir(d)) != NULL) {
-			if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
-				continue;
-			if ((size_t)snprintf(p, sizeof p, "%s/%s", path, de->d_name) >= sizeof p)
-				continue;
-			he_rmtree(p);
+	here = open(".", O_RDONLY | O_DIRECTORY);
+	if (here < 0)
+		return;
+	(void)chmod(path, 0700);
+	if (chdir(path) == 0) {
+		he_rm_here();
+		if (fchdir(here) != 0) {
+			close(here);
+			return;
 		}
-		closedir(d);
 	}
+	close(here);
 	rmdir(path);
 }
 

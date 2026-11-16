@@ -143,8 +143,10 @@ def bases_dir():
 class Viewer:
     def __init__(self, path, rows=50, cols=170, extra=(), db=True, bases=True,
                  settle=0.7, copy=True, cwd=None):
+        # path=None: no file and no --pid - the empty view (see the Open
+        # dialog, File > Open / Ctrl+O, for how a reader fills it in).
         self.rows, self.cols = rows, cols
-        if copy and not path.startswith(VT):
+        if path and copy and not path.startswith(VT):
             path = prep_sample(path)
         self.path = path
         self.log = []
@@ -156,7 +158,9 @@ class Viewer:
                 argv += ['--db', (REPO + '/build/release/databases') if cwd else 'build/release/databases']
         if bases:
             argv += ['--bases', bases if isinstance(bases, str) else bases_dir()]
-        argv += list(extra) + [path]
+        argv += list(extra)
+        if path:
+            argv += [path]
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(cwd or REPO)

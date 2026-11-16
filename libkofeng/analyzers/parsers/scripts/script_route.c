@@ -4,8 +4,15 @@
 
 #include <kofmod/script.h>
 #include <textual/textual.h>
+#include <celllysis/script_funcs.h>
+#include <celllysis/script_islands.h>
+#include <genotype/image/funcs.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "script_route.h"
+#include "script_apply.h"
+#include <phenotype/diag_scan.h>
 
 uint32_t kof_script_textual_lang(uint8_t kind)
 {
@@ -60,4 +67,79 @@ int kof_script_is_code_at(uint8_t kind, const uint8_t *p, uint32_t n, uint32_t a
 		return 1;       /* nothing to say it is not */
 	(void)kgenome_textual_lex(&rq, &res);
 	return c.code;
+}
+
+int kof_script_from_code(const struct kof_obj_ctx *ctx)
+{
+	return ctx && ctx->format == KOF_FMT_SCRIPT && ctx->entry_off == 0u;
+}
+
+int kof_script_entry_is_code(uint32_t entry_kind)
+{
+	return entry_kind == KOF_ENT_SCRIPT;
+}
+
+void kof_script_mark_code(struct kof_obj_ctx *ctx)
+{
+	if (ctx && ctx->format == KOF_FMT_SCRIPT)
+		ctx->entry_off = 0;
+}
+
+void kof_script_parts_build(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n, uint32_t want, struct kgenome_script_parts *out)
+{
+	const struct kgenome_script_parts_req rq = {
+		.lang = kof_script_textual_lang(ctx->subtype),
+		.flags = kof_script_from_code(ctx) ? KGENOME_TEXTUAL_FRAGMENT : 0u,
+		.want = want,
+		.in = p,
+		.n = n,
+	};
+
+	kgenome_script_parts(&rq, out);
+}
+
+void kof_script_funcs_build(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n, struct kgenome_func_set *out)
+{
+	struct kgenome_script_parts parts;
+
+	kof_script_parts_build(ctx, p, n, 0u, &parts);
+	*out = parts.funcs;
+	memset(&parts.funcs, 0, sizeof parts.funcs);
+	kgenome_script_parts_free(&parts);
+}
+
+uint32_t kof_script_places(const struct kgenome_script_islands *isl, struct kgenome_diag_text_place **out)
+{
+	const struct kgenome_script_isl_list *L = &isl->lv[KGENOME_SCRIPT_ISL_SERVER][0];
+	uint32_t i;
+
+	*out = NULL;
+	if (!L->n)
+		return 0;
+	*out = malloc((size_t)L->n * sizeof **out);
+	if (!*out)
+		return 0;
+	for (i = 0; i < L->n; i++) {
+		(*out)[i].off = L->v[i].off;
+		(*out)[i].len = L->v[i].len;
+	}
+	return L->n;
+}
+
+void kof_script_obf(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n, struct kgenome_diag_text_obf_set *out)
+{
+	struct kgenome_diag_text_place *isl = NULL;
+	struct kgenome_script_parts parts;
+	struct kgenome_diag_text_req rq = { .base = p, .size = n, .lang = kof_script_textual_lang(ctx->subtype), .apply = kof_script_apply,
+					    .obf = out };
+
+	memset(out, 0, sizeof *out);
+	if (!rq.lang || !p || !n)
+		return;
+	kof_script_parts_build(ctx, p, n, KGENOME_SCRIPT_PART_ISLANDS, &parts);
+	rq.n_obf_isl = kof_script_places(&parts.isl, &isl);
+	rq.obf_isl = isl;
+	kgenome_diag_text_obf(&rq);
+	free(isl);
+	kgenome_script_parts_free(&parts);
 }

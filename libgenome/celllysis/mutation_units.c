@@ -8,13 +8,15 @@
  * both call it.
  *
  * A unit is one of:
- *   - a function, or a run of small ones that sit next to each other, in a
- *     region that is offered a function at a time;
+ *   - a function of the function table (one unit per function: no grouping of
+ *     neighbours, no minimum length - by_function), in a region that is offered
+ *     a function at a time, and the clusters of strings among its bytes;
  *   - a piece of any other region, cut where the window hash has its low bits
  *     clear - see kgenome_mutation_cut - so the same bytes are cut in the same places
  *     whatever was inserted before them.
- * A function unit is cut and listed and carries a CFG signature when the lib can make one (kgenome_mutation_signature);
- * every other unit has windows.
+ * A machine-code function unit is cut and listed and carries NO signature (kgenome_mutation_signature:
+ * CFG signing disabled by the owner 2026-11-15); a script's function, kind KGENOME_FN_SCRIPT, keeps a
+ * window sketch like any other unit; every other unit has windows.
  * Each carries its side - see enum kgenome_mutation_side - and a unit never spans a
  * join between the author's code and the static library.
  */
@@ -29,16 +31,49 @@
 #include <genotype/image/pe_types.h>
 
 _Static_assert((unsigned)KGENOME_SCAN_ELF_CODE == (unsigned)KGENOME_SCAN_PE_CODE, "kgenome_mutation_block_min tests one bit for both formats");
+/*
+ * A script's region axis (KOF_SCAN_SCRIPT_HEADER/_BODY/_MARKUP, kofmod/script.h) is NEVER what a
+ * script object actually carries here: kof_obj_regionless (kofformat.c) answers true for every
+ * language the lib's own lexer reads - PHP included, the only one kgenome_script_funcs_build
+ * knows - precisely BECAUSE the lexer already reads the whole text as one pass of code/string/
+ * comment/markup bytes, and a cut along tags first would be a second reading of the same thing
+ * (script_parse.c's own comment on script_resolve_scan says so). A regionless object has ONE
+ * region, ALL (KOF_SCAN_ALL = 1u<<0 in kofmod/kofregion.h, a libkofeng header this lib must not
+ * include - named here under its own value for the same reason NORM_CODE_MASK in the engine's
+ * scan_int.h names ELF/PE's shared CODE bit under its own value rather than one format's name).
+ * So the row below reads ALL, not BODY: BODY is unreachable for PHP and would be dead code. This
+ * was found the hard way (2026-11-05): an earlier version of this row matched BODY, which never
+ * fired, and a live run of kofexaminer --blocks on a real PHP file was the only thing that showed
+ * it (the unit tests call kgenome_mutation_units directly and cannot see what mask the engine
+ * actually resolves) - recorded as a reason the brief's own instruction to verify end to end, not
+ * only in isolation, is not optional.
+ */
+#define KGENOME_MUTATION_ALL_BIT (1u << 0)
 
 int kgenome_mutation_by_function(uint32_t format, uint32_t mask)
 {
 	return (format == KGENOME_FMT_ELF && mask == KGENOME_SCAN_ELF_CODE) ||
-	       (format == KGENOME_FMT_PE && mask == KGENOME_SCAN_PE_CODE);
+	       (format == KGENOME_FMT_PE && mask == KGENOME_SCAN_PE_CODE) ||
+	       (format == KGENOME_FMT_SCRIPT && mask == KGENOME_MUTATION_ALL_BIT);
 }
 
+int kgenome_mutation_has_blocks(uint32_t format)
+{
+	return format == KGENOME_FMT_ELF || format == KGENOME_FMT_PE || format == KGENOME_FMT_SCRIPT;
+}
+
+/*
+ * THE DECISION (owner 2026-11-15): a machine-code function unit is not signed. The CFG sketch it had (2026-10-30 .. 2026-11-15) is
+ * disabled with every other CFG feature; the default for what the unit carries instead is NOTHING (listed, unsigned, scores nothing, the
+ * reason KGENOME_MUTATION_SIG_NONE_WHY), and data units keep their window sketches.
+ * TODO(owner): function units: window sketch (measured weak: exp_cfg/report.md, x86-64 5/60 pairs, 0 on other architectures) or another
+ * signing method. DISABLED by the owner 2026-11-15 (the CFG sketch): to re-enable, this line answers KGENOME_MUTATION_SIG_CFG again and the
+ * #if 0 blocks of the CFG signing are taken out (cfg_sign.c, cfg_anchor.c, analyzers/cfgsign.c, scan_feed.c mutation_feed_func, kofmutation.c
+ * kof_mutation_cfg_unit, scan_explain.c func_hold, kofexaminer_blocks.c blk_func, kv_mutation.c mtn_mark).
+ */
 uint32_t kgenome_mutation_signature(const struct kgenome_func *first)
 {
-	return first ? KGENOME_MUTATION_SIG_CFG : KGENOME_MUTATION_SIG_WINDOWS;
+	return (first && first->kind != KGENOME_FN_SCRIPT) ? KGENOME_MUTATION_SIG_NONE : KGENOME_MUTATION_SIG_WINDOWS;
 }
 
 uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const uint8_t *p,
@@ -49,6 +84,15 @@ uint32_t kgenome_mutation_unit_minhash(const struct kgenome_func *first, const u
 	return kgenome_mutation_minhash(p, n, out);
 }
 
+/*
+ * NOT A COLLISION, CHECKED: KOF_SCAN_ALL is bit 0, KGENOME_SCAN_ELF_CODE/PE_CODE is bit 2, so a
+ * script's unit (always mask ALL - see kgenome_mutation_by_function above) never takes the CFG
+ * floor below, function or not: it falls to KGENOME_MUTATION_MIN_HASH like every other windows
+ * unit. A defect comment once lived here, written against an earlier version of this file where
+ * scripts matched the CODE bit through a since-removed BODY row; that row is gone, the floor this
+ * bit gives a windows unit is no longer reachable from a script, and the comment was deleted
+ * rather than left to describe a path that no longer exists.
+ */
 uint32_t kgenome_mutation_block_min(uint32_t scan_mask)
 {
 	/* a block whose region is EXACTLY a function region (kgenome_mutation_by_function: CODE of an ELF or of a PE, one bit in both) may be a CFG block */
@@ -337,12 +381,61 @@ static int by_bytes(const struct kgenome_mutation_req *rq, int pieces)
 	return 0;
 }
 
+/*
+ * SCRIPTS: WHAT IS NOT A FUNCTION IS STILL REAL CODE, so by_function's by_bytes(rq, 0) fallback -
+ * right for ELF/PE, where a CODE region's leftover bytes are "instructions the functions already
+ * cover" and only its string clusters are worth a unit - is wrong here: a webshell's whole body is
+ * routinely ONE top-level statement with no function at all (`<?php system($_GET['c']); ?>`), and
+ * even a file that does declare functions usually has top-level code around them. That code keeps
+ * the ordinary content-defined cut, so this walks the region exactly as by_bytes does but treats
+ * each function's span as a GAP TO SKIP, not a fixed-and-re-EMIT extent (by_bytes's own `fixed`
+ * does the latter - right for a view's decoded blob, which by_function never also offered; wrong
+ * here, where by_function has ALREADY emitted the function with its real kgenome_func, and a second
+ * emission over the identical bytes with first NULL would be the same bytes scored as two units).
+ */
+static int script_remainder(const struct kgenome_mutation_req *rq)
+{
+	uint32_t k;
+
+	for (k = 0; k < rq->n_ext; k++) {
+		uint64_t pos = rq->ext[k].off, end;
+		uint32_t f = 0;
+
+		if (pos >= rq->n_obj)
+			continue;
+		end = rq->ext[k].len > rq->n_obj - pos ? rq->n_obj : pos + rq->ext[k].len;
+		while (pos < end) {
+			uint64_t lim = end;
+
+			while (rq->funcs && f < rq->funcs->n &&
+			       (rq->funcs->v[f].off + rq->funcs->v[f].len <= pos ||
+				!fn_in(rq->ext, rq->n_ext, &rq->funcs->v[f]) ||
+				fn_lib(rq->lib, &rq->funcs->v[f])))
+				f++;
+			if (rq->funcs && f < rq->funcs->n && rq->funcs->v[f].off < end)
+				lim = rq->funcs->v[f].off > pos ? rq->funcs->v[f].off : pos;
+			if (lim > pos) {
+				if (cut_bytes(rq, pos, lim, 1))
+					return 1;
+				pos = lim;
+				continue;
+			}
+			pos = rq->funcs->v[f].off + rq->funcs->v[f].len;       /* a function's own span: by_function already offered it, skip with no emission */
+		}
+	}
+	return 0;
+}
+
 void kgenome_mutation_units(const struct kgenome_mutation_req *rq)
 {
 	if (!rq->p || !rq->fn)
 		return;
 	if (kgenome_mutation_by_function(rq->format, rq->mask)) {
-		if (!by_function(rq))
+		if (by_function(rq))
+			return;
+		if (rq->format == KGENOME_FMT_SCRIPT)
+			script_remainder(rq);
+		else
 			by_bytes(rq, 0);
 		return;
 	}

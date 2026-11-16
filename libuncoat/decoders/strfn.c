@@ -241,7 +241,10 @@ static kuncoat_st_t trim_run(const struct kuncoat_step *s, const uint8_t *in, ui
 		e--;
 	if (e - b > cap - *w)
 		return KUNCOAT_OVER_BUDGET;
-	memcpy(out + *w, in + b, (size_t)(e - b));
+	/* out and in alias on an in-place chain (out==in) with a leading trim (*w < b) -
+	 * memmove, not memcpy (STRFN-TRIM-OVERLAP-1, fixed; tests/lib/uncoat/strfn.c's
+	 * inplace_trim_and_cut). */
+	memmove(out + *w, in + b, (size_t)(e - b));
 	*w += e - b;
 	return KUNCOAT_OK;
 }
@@ -383,7 +386,9 @@ static kuncoat_st_t cut_run(const struct kuncoat_step *s, const uint8_t *in, uin
 	}
 	if (e - b > cap - *w)
 		return KUNCOAT_OVER_BUDGET;
-	memcpy(out + *w, in + b, (size_t)(e - b));
+	/* same shape as trim_run above (STRFN-CUT-OVERLAP-1, fixed): a leading cut (b = s->key_len)
+	 * can alias an in-place chain - memmove, not memcpy. */
+	memmove(out + *w, in + b, (size_t)(e - b));
 	*w += e - b;
 	return KUNCOAT_OK;
 }

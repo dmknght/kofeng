@@ -32,7 +32,7 @@
  *                    #define KOF_DIAG_MATCH_NO       0
  *                    #define KOF_DIAG_MATCH_YES      1
  *                    #define KOF_DIAG_MATCH_UNKNOWN (-1)   // scan limited: cannot say
- *                    int kof_diag_match_known(const struct kgenome_diag_scan *,
+ *                    int kof_diag_match_known(struct kgenome_diag_scan *,
  *                                             const struct kof_diag *,
  *                                             uint16_t *bind_out, uint8_t *n_bind);
  *

@@ -1,10 +1,10 @@
 /*
  * emu_win.c - the Windows environment: the API table, modules, the allocator, import resolution.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the interpreter's Windows environment; see emu_interp.c and emu_win_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_win_private.h"
 
 /* ---- the Windows environment ----------------------------------------------
  *

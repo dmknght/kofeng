@@ -237,6 +237,11 @@ struct kof_diag_match {
 
 enum { KDET_P_MARKER = 1, KDET_P_BLOCK = 2 };
 
+/* The conditions of one diagnose a report holds: KOF_DIAG_MAX_WHEN (kofmod/kofdiagtree.h), the most a record may state - a
+ * compile-time assertion in the engine holds the two equal, so no condition is left out of a report. */
+#define KOF_DIAG_REPORT_GATE 16u
+enum kof_gate_state { KOF_GATE_NOT_ASKED = 0, KOF_GATE_YES = 1, KOF_GATE_NO = 2, KOF_GATE_UNKNOWN = 3 };
+
 struct kof_diag_part {
 	uint8_t  matcher;
 	uint8_t  kind;        /* KDET_P_MARKER / KDET_P_BLOCK */
@@ -275,6 +280,56 @@ struct kof_diag_report {
 	uint8_t     n_part;                 /* parts listed in part[] (a form that matched, and a report was asked for) */
 	uint8_t     n_part_total;           /* parts the form has in the matchers that were asked (part[] holds the first KOF_DIAG_REPORT_PARTS) */
 	struct kof_diag_part part[KOF_DIAG_REPORT_PARTS];
+	/* WHAT EACH CONDITION OF THE DIAGNOSE CAME TO (its KOF_TARGET_* and KOF_DIAG_HAS_* lines, in the record's order): enum
+	 * kof_gate_state. A gate condition (KOF_FACT_ANOMALY, KOF_FACT_NUCLEO) can be UNKNOWN - the engine could not look - which
+	 * is never a NO; the others are YES or NO. NOT_ASKED: the scan did not reach it (a nucleo condition is asked only after the
+	 * form's expression answered yes). Last: the members above keep their offsets. */
+	uint8_t     n_gate;                 /* conditions the diagnose states (at most KOF_DIAG_REPORT_GATE) */
+	uint8_t     gate[KOF_DIAG_REPORT_GATE];
+};
+
+/*
+ * ONE INPUT OF A VALUE-FLOW NODE, for a reader of the whole graph rather than a module's
+ * matcher - kofmod/kofdiagtree.h's wire record is the module's own, lossier copy of the
+ * same analysis (the first two inputs, no certainty), because a matcher's "is there an
+ * edge" question does not need either. A reader showing one function's own graph does:
+ * `how` is what tells a MUST link (KGENOME_DIAG_LINK_PROVEN, enum kgenome_diag_link,
+ * phenotype/diag_vocab.h) from a MAY one, and the third and fourth input of a node are
+ * never cut here the way the wire record cuts them.
+ */
+struct kof_diag_lineage_in {
+	uint16_t from;    /* a record index of kof_result.lineage, or KOF_GR_FROM_NONE/_STACK */
+	uint8_t  role;    /* enum kgenome_diag_role */
+	uint8_t  how;     /* enum kgenome_diag_link */
+	uint8_t  kind;    /* enum kgenome_diag_kind - PRODUCED or SHARED; a merge of the two under one
+			   * word is the mistake this field exists to prevent (CLAUDE.md, link-has-
+			   * two-kinds) */
+};
+
+/* ONE NODE of the object's value-flow graph - see kof_result.lineage. Carries the same fields
+ * kgenome_diag_hit does, borrowed for the callback's length like diag/n_diag: a viewer that drops
+ * attr/val/symref here has nowhere else to recover what a node actually wrote or named. */
+struct kof_diag_lineage_rec {
+	uint64_t at;      /* offset into the object */
+	uint64_t attr;    /* which part of an object this is about, 0 when none - see kgenome_diag_hit.attr */
+	uint64_t val;     /* the constant this node wrote, valid only when bits & KGENOME_DIAG_H_VAL */
+	uint64_t symref;  /* file offset of a NUL-terminated name this node's operand pointed at,
+			   * valid only when bits & KGENOME_DIAG_H_SYMREF (a relocatable object only) */
+	int32_t  symadd;  /* how far into the symbol named by symref */
+	uint16_t cap;     /* enum kgenome_nucleo_cap - kgenome_nucleo_cap_name reads it as text */
+	uint16_t flags;   /* KOF_FLOWF_* observed at this site */
+	uint8_t  bits;    /* KGENOME_DIAG_H_* - which of attr/val/symref/symadd above are valid */
+	uint8_t  n_in;
+	struct kof_diag_lineage_in in[4];
+	/* a system call's number (kgenome_diag_hit.nr): its class, enum kgenome_diag_nr - RESULT is a number another node returned - and then
+	 * the record that returned it (nr_from), how sure (nr_how, enum kgenome_diag_link) and how many producers reached it (nr_n). Last: the
+	 * members above keep their offsets. */
+	uint8_t  nr, nr_n;
+	uint16_t nr_from;
+	uint8_t  nr_how;
+	/* EVERY INPUT of the node: `in[]` above is its view (the first four of the roles a pack can name); all of them, the view's first, are
+	 * kof_result.lineage_in[in_first .. in_first + n_all) - a node has as many as the program gave it (a system call's NUMBER among them) */
+	uint32_t in_first, n_all;
 };
 
 
@@ -515,6 +570,25 @@ struct kof_result {
 	uint32_t n_diag;
 
 	/*
+	 * THE OBJECT'S WHOLE VALUE-FLOW GRAPH, when the caller asked - see kscan_explain,
+	 * same opt-in as `diag` above and built by the same analysis (this is every node
+	 * that analysis made, not the ones a diagnose's tree bound). NULL and 0 otherwise.
+	 *
+	 * BORROWED FOR THE CALL, like `diag`: valid until the callback returns.
+	 */
+	const struct kof_diag_lineage_rec *lineage;
+	uint32_t n_lineage;
+	/* every input of every record (kof_diag_lineage_rec.in_first, n_all), borrowed the same way */
+	const struct kof_diag_lineage_in *lineage_in;
+	uint32_t n_lineage_in;
+	/*
+	 * WHAT THE NODE TABLE'S MANAGEMENT DID, by class (kgenome_diag_scan_drops): nodes refused a slot because the table or the ledger was full,
+	 * and nodes the keep rule dropped afterwards - on no link with a capability, or with no capability - none of them named by a loaded
+	 * diagnose. Zero when the table never filled. Set for every object the diagnose scan read, whether or not the report was asked for.
+	 */
+	uint32_t nodes_refused, nodes_dropped_unlinked, nodes_dropped_nocap;
+
+	/*
 	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.
 	 *
 	 * Empty for almost every object: a file is identified and its parser
@@ -593,6 +667,26 @@ struct kof_result {
 	/* APPENDED LAST (ABI: a host rebuilds; nothing precedes it that moved): the catalog facts of the verdict, see
 	 * struct kof_verdict_cat. All zero for a verdict made of diseases only and for an object with none. */
 	struct kof_verdict_cat cat;
+	/*
+	 * APPENDED (owner, 2026-11-10): this object is EVIDENCE for another object's
+	 * verdict, not a scan target of its own - see kof_src_declare_evidence_only
+	 * (objsrc.h) and scan_pipeline.c's DETECT/SIMILAR/ANALYSE/VERDICT guards, which
+	 * is why `has_verdict` is always 0 here. FACTS and SCRIPT still ran, so the
+	 * object is tokenized/normalised like any other - a host tells a reader so with
+	 * a different mark than a real child's, without reading anything the engine did
+	 * not already decide (kofeng/CLAUDE.md #11: a tool shows, it does not compute).
+	 */
+	uint8_t evidence_only;
+	/*
+	 * APPENDED (owner, 2026-11-17, the gate of a signature): WHAT THE PARSE SAID WAS WRONG WITH THIS OBJECT, as the engine
+	 * holds it - the anomaly word of the object's own view (kof_parser.anomalies over ctx->file_header; for a normalised view
+	 * that is the parent's description it inherits, never a parse of the view's bytes) and the format whose parser names its
+	 * bits (kof_parser_of(anomaly_fmt)->anomaly_name). KOF_FMT_UNKNOWN and 0 for an object the engine keeps no view of. The
+	 * word a signature's anomaly condition is answered from (scanners/objctx_diag_gate.c), so a tool that offers the
+	 * conditions offers exactly what the engine will check.
+	 */
+	uint8_t  anomaly_fmt;
+	uint64_t anomalies;
 };
 
 /*
@@ -846,7 +940,8 @@ struct kof_stats {
 	 */
 	uint64_t work_feeds, work_form_asks, work_form_matchers, work_verdicts, work_catalogs;
 	/*
-	 * APPENDED (prototype 2026-10-30, function units carry no similarity signature yet - kgenome_mutation_signature): the objects on which the feed
+	 * APPENDED (prototype 2026-10-30; again since 2026-11-15, CFG signing disabled by the owner, function units carry no similarity signature -
+	 * kgenome_mutation_signature): the objects on which the feed
 	 * met at least one function unit and did not sketch it (KOF_MTN_S_FUNC_UNSIGNED). A block cut from a function scores 0 there; the objects are
 	 * counted, not lost. Zero means the objects had no function unit or no pack had a block. Not an error.
 	 */

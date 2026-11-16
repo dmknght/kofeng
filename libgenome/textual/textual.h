@@ -121,6 +121,28 @@ struct kgenome_textual_islands_req {
 /* OK, or the status of the lex (NO_LANG, REFUSED when the sink stopped it; OPEN is a text with a construct that did not close, and the islands were delivered). */
 enum kgenome_textual_status kgenome_textual_islands(const struct kgenome_textual_islands_req *rq);
 
+/* Does this build have a lexer for `lang` (enum kgenome_textual_lang_id). */
+int kgenome_textual_lang_known(uint32_t lang);
+
+/*
+ * The bytes of a TAG span that are the tag's own (kgenome_textual_island's open_len / close_len): php's "<?php" span holds the one white space php
+ * takes after it, and its "?>" span the line break. `close` is a tag that leaves the language. The whole span for a language that says nothing.
+ */
+uint32_t kgenome_textual_tag_own(uint32_t lang, const uint8_t *tag, uint32_t len, int close);
+
+/*
+ * THE BLOCK SYNTAX OF A PAGE'S ISLAND: which language the code of the island whose opening tag is at `at` is written in, as far as how a block opens
+ * and closes - the page lexer's own choice (the language a directive names, else that of a <script runat="server"> element's own attribute, else the
+ * page's first). BRACES for c#, jscript and java, VB for vbscript and vb.net; NONE for a language that is not a page (php's blocks are its own).
+ * `at` equal to `n` asks for the page's own language (no element tag of its own).
+ */
+enum kgenome_textual_block_syntax {
+	KGENOME_TEXTUAL_SYN_NONE = 0,
+	KGENOME_TEXTUAL_SYN_BRACES,
+	KGENOME_TEXTUAL_SYN_VB
+};
+enum kgenome_textual_block_syntax kgenome_textual_page_syntax(uint32_t lang, const uint8_t *in, uint32_t n, uint32_t at);
+
 /*
  * FORM. How a text was TYPED, taken out of it: the indentation, the blank lines, the comments,
  * the spacing between tokens, the line endings. Nothing the program says changes - a string is
@@ -552,6 +574,10 @@ struct kgenome_textual_form_res {
 	uint32_t n_bound;       /* the lexer's work bounds that fired (kgenome_textual_lex_res.n_bound) */
 	uint32_t n_calls;       /* calls written as the literal they evaluate to */
 	uint32_t n_fn[KGENOME_TEXTUAL_DEC_COUNT];       /* of them, by the op of the function (a nested call counts once for each) */
+	/* Statement-end line breaks the text did not have (a language whose row sets `stmt_semi`): a difference the
+	 * file did not say, the same as a decode or a fold - a caller that asks "did this view say anything new"
+	 * (objctx_script.c's floor) adds it in alongside n_decoded/n_folded/n_calls, not only those three. */
+	uint32_t n_stmt;
 };
 
 /* OK and OPEN both mean `out` holds the form; the others mean it holds nothing. */
@@ -589,5 +615,48 @@ enum kgenome_textual_status kgenome_textual_value(const struct kgenome_textual_v
 
 /* "code", "string", ...: for a tool that prints spans. Never NULL. */
 const char *kgenome_textual_kind_name(uint32_t kind);
+
+/*
+ * PRETTY. A text laid out for a PERSON to read, indented by block nesting - NOT the form above, and not a
+ * second spelling of it: the form's output is a CHILD OBJECT (kof_scan_script_forms, libkofeng's own) that
+ * RE-ENTERS the scan - pattern matching runs on it, another module may ask for its own form or fold of it -
+ * so the form's one invariant is "the form of a form is the form", and every byte it may add answers to
+ * `KGENOME_TEXTUAL_FORM_CAP(n)`. This call's output is never fed back into itself, `kgenome_textual_lex` or
+ * `kgenome_textual_form` - a display tool reads it once and the bytes end there (owner, 2026-11-11: inserting
+ * a REAL line break into text that may be RE-LEXED can change what the lexer reads next - a block's own "{"
+ * breaking onto its own line put JavaScript's Annex B "-->" at the start of a line where the original never
+ * had one, turning it into a comment the second time the SAME mechanism's own output was read - the kind of
+ * defect only a text that is never re-entered can rule out by construction, not by one more special case).
+ * Because of that, this call needs none of the form's capacity bookkeeping: `cap` is however much a caller
+ * can spare for a cosmetic job, exceeding it only truncates (never evidence - the canonical, un-indented text
+ * this is laid out FROM is untouched, in the form child byte for byte), and comments are kept, not stripped
+ * (a form's own comment-is-a-gap rule is for matching, not for a person reading the file).
+ *
+ * Indentation is driven by `lang->stmt_delim` (textual_lang.h) treating "{"/"}" as block delimiters - its OWN
+ * per-language row, not the form's `stmt_semi`: the two looked like the same question (owner, 2026-11-11) until
+ * turning `stmt_semi` on for js and perl, so this call could indent them too, changed `kgenome_textual_form`'s
+ * own tested, re-entered output for both languages as a side effect - `stmt_delim` is read by this call alone,
+ * so a language added here never moves the form's. A language with no `stmt_delim` row (today: the
+ * keyword-delimited ones, shell, vbscript) is laid out with no indentation at all, every line kept as its own -
+ * a block-detection rule for those is its own later design, not approximated here.
+ */
+struct kgenome_textual_pretty_req {
+	const uint8_t *in;
+	uint32_t       n;
+	uint32_t       lang;    /* enum kgenome_textual_lang_id */
+	uint32_t       flags;   /* KGENOME_TEXTUAL_FRAGMENT */
+	uint8_t       *out;
+	uint32_t       cap;
+};
+
+struct kgenome_textual_pretty_res {
+	uint32_t n_out;         /* bytes written - at most `cap`, see `truncated` */
+	uint8_t  truncated;     /* `cap` ran out; `n_out` is a valid prefix, cosmetically incomplete */
+};
+
+/* OK, OPEN (a literal or a comment did not close - the spans still partition the input, this still laid out
+ * all of it), or NO_LANG. Never SMALL: running out of `cap` sets `truncated` instead. */
+enum kgenome_textual_status kgenome_textual_pretty(const struct kgenome_textual_pretty_req *rq,
+						   struct kgenome_textual_pretty_res *res);
 
 #endif /* KGENOME_TEXTUAL_H */

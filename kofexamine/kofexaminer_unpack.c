@@ -7,6 +7,7 @@
  */
 
 #include "kofexaminer_private.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 /* ---- what the unpackers recover -------------------------------------------- */
 
@@ -282,7 +283,9 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	kex_g_decl_fixed = res->fixed;
 	kex_g_decl_fixed_n = res->n_fixed;
 	kex_g_decl_view = res->entry_kind == KOF_ENT_NORMALIZED;
+	kex_g_decl_evidence = res->evidence_only;
 	kex_g_decl_lang = res->lang_known;
+	kex_g_decl_code = (uint8_t)kof_script_entry_is_code(res->entry_kind);
 	kex_g_decl_subtype = res->subtype;
 	kex_g_decl_subfam = res->subfamily;
 	kex_g_decl_rgn_n = res->n_region < KOF_MAX_REGIONS ? res->n_region
@@ -302,6 +305,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		kex_g_decl_rgn_n = 0;
 		kex_g_decl_lang = 0;
 		kex_g_decl_view = 0;
+		kex_g_decl_evidence = 0;
 		return 0;
 	}
 	/*
@@ -347,6 +351,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	kex_g_decl_rgn_n = 0;
 	kex_g_decl_lang = 0;
 	kex_g_decl_view = 0;
+	kex_g_decl_evidence = 0;
 	return 0;
 }
 

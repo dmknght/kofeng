@@ -305,10 +305,10 @@ static void forms(void)
 	form("<?php echo $a ;", "<?php echo($a);");
 	form("<?php return  $a;", "<?php return$a;");
 	form("<?php new  Foo ( ) ;", "<?php new Foo();");
-	form("<?php $a = 1 + +2 ; $b = 1 - -2 ; $c = $a . .5 ;", "<?php $a=1+ +2;$b=1- -2;$c=$a. .5;");
+	form("<?php $a = 1 + +2 ; $b = 1 - -2 ; $c = $a . .5 ;", "<?php $a=1+ +2;\n$b=1- -2;\n$c=$a. .5;");
 	form("<?php $a = $b ? $c : $d ;", "<?php $a=$b?$c:$d;");
 	/* a pair of brackets, braces, commas or semicolons is not one token */
-	form("<?php f( $a ) ) ; g( [ [ 1 ] ] ) ; ; ", "<?php f($a));g([[1]]);;");
+	form("<?php f( $a ) ) ; g( [ [ 1 ] ] ) ; ; ", "<?php f($a));\ng([[1]]);\n;");
 	/* a comment is a gap: it separates two names and closes up around an operator */
 	form("<?php a/* c */b", "<?php a b");
 	form("<?php a/* c */+b", "<?php a+b");
@@ -316,7 +316,7 @@ static void forms(void)
 	form("<?php $a=1; // c\n$b=2;", "<?php $a=1;\n$b=2;");
 	form("<?php $a=1; # c\n$b=2;", "<?php $a=1;\n$b=2;");
 	/* a comment that is not closed is kept: what it holds is not known to be a comment */
-	form("<?php $a; /* x", "<?php $a;/* x");
+	form("<?php $a; /* x", "<?php $a;\n/* x");
 	/* a string is every byte of itself */
 	form("<?php $a  =  'x   y\n  z' ;", "<?php $a='x   y\n  z';");
 	form("<?php $a = \"x // y /* z */\" ;", "<?php $a='x // y /* z */';");
@@ -350,7 +350,7 @@ static void forms(void)
 	/* markup is markup: its spacing, its comment-like text and its line endings stay */
 	form("<p>  a // b  </p>\r\n<?php a(); ?>  \r\n  z", "<p>  a // b  </p>\r\n<?php a();\n?>  \r\n  z");
 	/* __halt_compiler: what follows is data and is left exactly as it is */
-	form("<?php a ( ) ; __halt_compiler ( ) ;  x  y\n", "<?php a();__halt_compiler();  x  y\n");
+	form("<?php a ( ) ; __halt_compiler ( ) ;  x  y\n", "<?php a();\n__halt_compiler();  x  y\n");
 }
 
 /*
@@ -449,7 +449,7 @@ static void decode_hook(void)
 	dform("<?php base64_decode( \"ab\" /* c */ );", "<?php decoded_base64_decode(\"<AB>\");", 0, 64);
 	CK(hook_calls == 1);
 	/* not a decoder, or no call at all, or the literal after a comma */
-	dform("<?php md5(\"ab\"); \"cd\"; x(\"ef\");", "<?php md5('ab');'cd';x('ef');", 0, 64);
+	dform("<?php md5(\"ab\"); \"cd\"; x(\"ef\");", "<?php md5('ab');\n'cd';\nx('ef');", 0, 64);
 	CK(hook_calls == 0);
 	dform("<?php a(base64_decode(\"x\"), \"y\");", "<?php a(decoded_base64_decode(\"<X>\"),'y');", 0, 64);
 	CK(hook_calls == 1);
@@ -515,7 +515,7 @@ static void display_forms(void)
 	/* "return" and the name are two words: only the name is renamed */
 	dform("<?php return base64_decode('ab');", "<?php return decoded_base64_decode('<AB>');", 0, 64);
 	/* a join no decoder reads */
-	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php $f = 'ev' . 'al'; g('a' . \"b\" . 'c');", "<?php $f='eval';g('abc');");
+	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php $f = 'ev' . 'al'; g('a' . \"b\" . 'c');", "<?php $f='eval';\ng('abc');");
 	{
 		struct kgenome_textual_form_req rq = { .in = (const uint8_t *)"<?php $f = 'ev' . 'al'; g('a' . 'b' . 'c');", .n = 43,
 						       .lang = KGENOME_TEXTUAL_LANG_PHP, .out = fbuf, .cap = 256 };
@@ -526,15 +526,15 @@ static void display_forms(void)
 	}
 	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php $f = 'a' . /* c */ 'b';", "<?php $f='ab';");
 	/* ...but not one that goes on in an expression (the next operand binds as it likes), not one that interpolates */
-	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php $f = 'a' . 'b' . $x; $g = 'a' . \"b$x\";", "<?php $f='a'.'b'.$x;$g='a'.\"b$x\";");
+	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php $f = 'a' . 'b' . $x; $g = 'a' . \"b$x\";", "<?php $f='a'.'b'.$x;\n$g='a'.\"b$x\";");
 	/* echo and print are written as calls, with the bracket round the whole argument; and quotes: single where nothing needs
 	 * double (a "$", a backslash or a "'" does), and the same after a second pass */
-	form("<?php echo \"x\"; echo(\"x\"); echo ( 'x' ) ; print \"y\" . $z; echo $a ?>t", "<?php echo('x');echo('x');echo('x');print('y'.$z);echo($a)\n?>t");
-	form("<?php echo \"a $b\", \"c\\n\"; $echo = 1; $o->echo; echoes(1); echo f(1) . g(2);", "<?php echo(\"a $b\",\"c\\n\");$echo=1;$o->echo;echoes(1);echo(f(1).g(2));");
-	form("<?php $a = \"it's\"; $b = \"x\\41\"; $c = \"y\" . 'z' . \"w\";", "<?php $a=\"it's\";$b='x!';$c='yzw';");
+	form("<?php echo \"x\"; echo(\"x\"); echo ( 'x' ) ; print \"y\" . $z; echo $a ?>t", "<?php echo('x');\necho('x');\necho('x');\nprint('y'.$z);\necho($a)\n?>t");
+	form("<?php echo \"a $b\", \"c\\n\"; $echo = 1; $o->echo; echoes(1); echo f(1) . g(2);", "<?php echo(\"a $b\",\"c\\n\");\n$echo=1;\n$o->echo;\nechoes(1);\necho(f(1).g(2));");
+	form("<?php $a = \"it's\"; $b = \"x\\41\"; $c = \"y\" . 'z' . \"w\";", "<?php $a=\"it's\";\n$b='x!';\n$c='yzw';");
 	/* a variable at the end of the first text takes what the second begins with, so those two are not one literal */
 	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php f(\"$a\" . \"b$c\"); g(\"$a\" . \"[0]$c\"); h(\"x$\" . \"y$c\"); k(\"$a\" . \"$c\");",
-		  "<?php f(\"$a\".\"b$c\");g(\"$a\".\"[0]$c\");h(\"x$\".\"y$c\");k(\"$a$c\");");
+		  "<?php f(\"$a\".\"b$c\");\ng(\"$a\".\"[0]$c\");\nh(\"x$\".\"y$c\");\nk(\"$a$c\");");
 	/* only a literal a quote opens is a string being joined */
 	form_lang(KGENOME_TEXTUAL_LANG_PHP, "<?php f(<<<E\nx\nE\n . 'a');", "<?php f(<<<E\nx\nE\n.'a');");
 	/* KEEP_JOINS: as typed */

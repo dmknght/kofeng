@@ -456,6 +456,16 @@ static void ch_take_opt(struct view *v)
 	struct object *ob = cur_obj(v);
 	int seen = 0, k;
 
+	/* A gate row opens its list beside it, the way every other two-level menu here does (ch_take_fmt_cat). */
+	if (c->sel >= 0 && c->sel < c->n && (c->verb[c->sel] == CH_OPT_V_ANOM || c->verb[c->sel] == CH_OPT_V_NUC)) {
+		struct chooser up = *c;
+
+		up.open = 1;
+		ch_open_beside(v, c->verb[c->sel] == CH_OPT_V_ANOM ? CH_GATE_ANOM : CH_GATE_NUC, 0, &up);
+		v->ch_up = up;
+		return;
+	}
+
 	for (k = 0; k < OPT_COUNT; k++) {
 		/*
 		 * THE SAME QUESTION THE LIST ASKED - see ch_opt_offerable.
@@ -483,6 +493,19 @@ static void ch_take_opt(struct view *v)
 		break;
 	}
 	return;
+}
+
+/* The row-th offer, the list walked again rather than remembered so the two cannot disagree; the draft refuses what it
+ * already states or cannot hold (draft_gate_add). */
+static void ch_take_gate(struct view *v)
+{
+	struct chooser *c = &v->ch;
+	struct kof_diag_when w[CH_ITEMS];
+	uint32_t n = ch_gate_offers(v, c->what == CH_GATE_ANOM ? (uint16_t)KOF_FACT_ANOMALY : (uint16_t)KOF_FACT_NUCLEO, w,
+				    CH_ITEMS);
+
+	if (c->sel >= 0 && (uint32_t)c->sel < n && (uint32_t)c->sel < CH_ITEMS)
+		(void)draft_gate_add(&v->ed, w[c->sel].fact, w[c->sel].val);
 }
 
 static void ch_take_declkind(struct view *v)

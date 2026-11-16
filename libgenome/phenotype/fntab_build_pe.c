@@ -3,8 +3,9 @@
  *
  * The exact tables first (the exception table of an x64 image, the COFF symbols), each with its one retry (a table that was READ and held no function is the next row, the
  * meta says so); then the sources that name starts without ends (the COFF symbols beside the exception table, the export address table, the TLS callbacks, the load
- * configuration's call-target lists); then the entry walk and, in the same decode, the import stubs. What the case says about the table that the merge cannot know is
- * kept in `add_partial` (a leaf function has no unwind entry; no table at all; managed code).
+ * configuration's call-target and SafeSEH lists). What the case says about the table that the merge cannot know is kept in `add_partial` (a leaf function has no unwind
+ * entry; no table at all; managed code). No strategy here decodes code: the entry walk and the import stubs it decoded are DISABLED (owner 2026-11-16, see fntab_build.c);
+ * the entry point is the orchestrator's (fntab_build.c).
  */
 #include "fntab_build_private.h"
 
@@ -40,10 +41,8 @@ void kgenome_fntab_collect_pe(struct kgenome_fntab_run *r)
 		kgenome_fntab_pe_tls(r->file, pe, &r->l);
 	if (r->plan.run & KGENOME_FNTAB_X_PE_CFG)
 		kgenome_fntab_pe_cfg(r->file, pe, &r->l);
-	if ((r->plan.run & KGENOME_FNTAB_X_WALK) && kgenome_fntab_run_walk(r) && (r->plan.run & KGENOME_FNTAB_X_PE_THUNK))
-		kgenome_fntab_pe_thunk(r->walk, &r->l);
-	if (r->plan.ccase == KGENOME_FNTAB_C_PE_PDATA)
-		r->add_partial |= KGENOME_FNTAB_P_STARTS;        /* a leaf function has no unwind entry */
+	if (r->plan.ccase == KGENOME_FNTAB_C_PE_PDATA || r->plan.ccase == KGENOME_FNTAB_C_PE_COFF || r->plan.ccase == KGENOME_FNTAB_C_PE_META)
+		r->add_partial |= KGENOME_FNTAB_P_STARTS;        /* a leaf function has no unwind entry; the start-only tables name a few functions */
 	if (r->plan.ccase == KGENOME_FNTAB_C_PE_NONE)
 		r->add_partial |= KGENOME_FNTAB_P_NO_TABLE;
 	if (r->plan.ccase == KGENOME_FNTAB_C_PE_ARM)

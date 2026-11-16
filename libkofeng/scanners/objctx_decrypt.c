@@ -8,6 +8,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../kofcore/kofdebug.h"
 #include <stdlib.h>
 
 /*
@@ -78,6 +79,8 @@ uint64_t oc_decrypt(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
 		return 0;
 	room = oc_scan_room(sc);
 	if (len > room) {
+		KOF_TRACE("[decrypt] algo=%d refused: %llu byte(s) over the %llu byte room left\n", (int)c->algo,
+			  (unsigned long long)len, (unsigned long long)room);
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
@@ -89,6 +92,8 @@ uint64_t oc_decrypt(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
 	scan_charge(sc, len);
 	got = capsid_run(c, b.p + off, len, buf, len);
 	at = got ? oc_emit_all(ctx, buf, got) : 0;
+	KOF_TRACE("[decrypt] algo=%d ran on %llu byte(s), got %llu, emitted at %llu\n", (int)c->algo,
+		  (unsigned long long)len, (unsigned long long)got, (unsigned long long)at);
 	free(buf);
 	oc_scan_release(sc, len);
 	return at;

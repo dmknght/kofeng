@@ -170,8 +170,9 @@ static void diag_fill(const struct ksb_ctx *ksb, const struct kof_dsrc_view *vp,
 	memcpy(blob + at, name, strlen(name));
 	at += strlen(name);
 	for (i = 0; i < n_nd; i++) {
-		/* a tail's parent is the head: the block is a star */
-		unsigned par = i ? 0u : (unsigned)KOF_DIAG_NO_PARENT;
+		/* a tail's parent is the head of its block (a block is a star); a head has none. The view decided it
+		 * (kof_dsrc_resolve): one block writes the bytes it always wrote, two write the second head's root. */
+		unsigned par = nd[i].parent;
 
 		blob[at + 0] = (unsigned char)nd[i].cap;
 		blob[at + 1] = (unsigned char)(nd[i].cap >> 8);

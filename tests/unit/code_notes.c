@@ -141,7 +141,7 @@ static void t_one_spelling(void)
 		f.off = t;
 		f.len = 1;
 		kof_fcn_name(t, want, sizeof want);
-		CK(kof_func_name(&f, NULL, 0, text, sizeof text) == 0 && !strcmp(text, want));
+		CK(kof_func_name(&f, NULL, 0, NULL, 0, text, sizeof text) == 0 && !strcmp(text, want));
 		for (with_table = 0; with_table < 2; with_table++) {
 			memset(&ctx, 0, sizeof ctx);
 			memset(&none, 0, sizeof none);
@@ -183,7 +183,7 @@ static void t_one_spelling(void)
 				memset(&f, 0, sizeof f);
 				f.off = offs[i];
 				kof_fcn_name(offs[i], a, cap);
-				CK(kof_func_name(&f, NULL, 0, b, cap) == 0 && !strcmp(a, b) && strlen(a) < cap);
+				CK(kof_func_name(&f, NULL, 0, NULL, 0, b, cap) == 0 && !strcmp(a, b) && strlen(a) < cap);
 				CK(!strncmp(a, "fcn_", cap < 5 ? cap - 1u : 4u));
 			}
 		{

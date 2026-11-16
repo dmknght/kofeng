@@ -9,6 +9,12 @@
 #include "cfg_private.h"
 #include "gview.h"
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out, the declarations in cfg.h (kgenome_cfg_gv_make) and its caller kof_cfgview_build (analyzers/cfgview.c).
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static const char *term_name(unsigned t)
 {
 	switch (t) {
@@ -130,3 +136,4 @@ enum kgenome_status kgenome_cfg_gv_make(const struct kgenome_cfg_gv_req *r, stru
 	head_lines(out, r);
 	return out->status;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

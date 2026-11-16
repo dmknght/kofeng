@@ -270,12 +270,35 @@ static void only_unread_is_answerable(const char *db)
 	p = scan(img, len, "x", 0);
 	CK(p.runs[KOF_PROD_DIAG] == 1u && p.hit_root == 1 && p.hit_commit == 0);
 	CK(strstr(p.verdict, "Rootkit") != NULL);
-	/* neither import: no gate open, and the report has nothing to run either */
+	/* neither import: no diagnose's gate opens on this object - but it is still a servable kernel
+	 * module (SYMBOL, oc_diag_servable), and the report is authoring a diagnose, not matching one:
+	 * the route runs anyway (PROD_DIAG=1, measured - this object has no program entry, so the walk
+	 * and the forced EMULATE route both measure nothing to do, PROD_WALK=0, sc->st.emu_insn==0).
+	 * Neither diagnose MATCHES, because the import it needs really is gone. */
 	len = cf_kmod(img, sizeof img, 4, 0);
 	rename_import(img, len, "prepare_creds", "prepare_credz");
 	rename_import(img, len, "commit_creds", "commit_credz");
 	r = scan(img, len, "driver.ko", 1);
-	CK(r.runs[KOF_PROD_DIAG] == 0u && r.runs[KOF_PROD_WALK] == 0u);
+	CK(r.runs[KOF_PROD_DIAG] == 1u && r.runs[KOF_PROD_WALK] == 0u);
+	CK(r.hit_root == 0 && r.hit_commit == 0);
+	CK(sc->st.emu_insn == 0u);
+	/* THE SAME POINT ON A FULL PROGRAM: a static ELF stager, a real entry point, no kernel-module
+	 * import at all - every diagnose's gate is closed here too (rwx_exec's own pack is excluded
+	 * above), but the format serves SYMBOL and SYSCALL, so explain also forces EMULATE and the run
+	 * executes instructions (sc->st.emu_insn>0, measured) - proven on an object with something to
+	 * emulate, where the kernel-module case above measured there was none. */
+	{
+		unsigned n = cf_stager64(code, 0);
+		uint64_t slen = cf_elf64(img, sizeof img, code, n);
+		struct got s0 = scan(img, slen, "stage.bin", 0);
+		struct got s1;
+
+		CK(s0.runs[KOF_PROD_DIAG] == 0u);
+		s1 = scan(img, slen, "stage.bin", 1);
+		CK(s1.runs[KOF_PROD_DIAG] == 1u);
+		CK(sc->st.emu_insn > 0u);
+		CK(s1.hit_root == 0 && s1.hit_commit == 0);
+	}
 	drop_tmpdb();
 }
 

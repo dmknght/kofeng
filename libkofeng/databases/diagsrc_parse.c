@@ -9,6 +9,8 @@
  */
 
 #include "diagsrc_int.h"
+#include "../analyzers/parsers/kofformat.h"
+#include "../detectors/linkage/kofdiag.h"
 
 struct kof_dsrc_item *kof_dsrc_add_item(struct kof_dsrc *d, int *errs,
 					const struct kof_dsrc_report *r,
@@ -174,6 +176,27 @@ static void dsrc_tail(struct dsrc_cx *x, char *p)
 	x->d->n++;
 }
 
+/* KOF_DIAG_DECLARE_JOIN(cap): where the second block meets the first (diagsrc_resolve.c checks the rest). */
+static void dsrc_join(struct dsrc_cx *x, char *p)
+{
+	struct kof_dsrc_item *it;
+	uint16_t cap;
+
+	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0])) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
+			"KOF_DIAG_DECLARE_JOIN(cap)");
+		return;
+	}
+	if (!kof_dsrc_cap_of(x->a[0], &cap)) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, "not a capability");
+		return;
+	}
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_JOIN)))
+		return;
+	it->a = cap;
+	x->d->n++;
+}
+
 /* KOF_DIAG_ACTION(head, action, value) */
 static void dsrc_action(struct dsrc_cx *x, char *p)
 {
@@ -319,6 +342,14 @@ static void dsrc_attrb(struct dsrc_cx *x, char *p)
 			"not a fact the engine publishes");
 		return;
 	}
+	/* ONE SPELLING PER CONDITION: a gate condition is written by its own macro, by name, and checked there; a number here
+	 * would be the same condition with nothing checking what it names. */
+	if (fv == (uint64_t)KOF_FACT_ANOMALY || fv == (uint64_t)KOF_FACT_NUCLEO) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
+			"an anomaly or a nucleo condition is written KOF_DIAG_HAS_ANOMALY(format, name) or "
+			"KOF_DIAG_HAS_NUCLEO(cap)");
+		return;
+	}
 	if (!kof_dsrc_when_value(x->a[1], &vv)) {
 		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
 			"KOF_DIAG_HAS_ATTRB wants a constant "
@@ -329,6 +360,67 @@ static void dsrc_attrb(struct dsrc_cx *x, char *p)
 		return;
 	it->a = (uint16_t)fv;
 	it->v = vv;
+	x->d->n++;
+}
+
+/*
+ * KOF_DIAG_HAS_ANOMALY(format, name): the format by ONE KOF_FMT_* word, the anomaly by the name that format's parser spells
+ * (kof_parser_anomaly_bit), and the pair checked by the engine's one check (kof_diag_gate_valid) - so a source the reader
+ * accepts is a record the loader accepts. A name the format does not have is refused and named, never dropped.
+ */
+static void dsrc_anomaly(struct dsrc_cx *x, char *p)
+{
+	struct kof_dsrc_item *it;
+	const struct kof_parser *fp = NULL;
+	uint64_t fmt = 0;
+	int bit;
+
+	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0]) || !kof_dsrc_arg(p, 1, x->a[1], sizeof x->a[1]) ||
+	    kof_dsrc_arg(p, 2, x->a[2], sizeof x->a[2])) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, "KOF_DIAG_HAS_ANOMALY(format, name)");
+		return;
+	}
+	if (strncmp(x->a[0], "KOF_FMT_", 8u) || strchr(x->a[0], '|') || !kof_dsrc_when_value(x->a[0], &fmt) ||
+	    fmt >= (uint64_t)KOF_FMT_COUNT || !(fp = kof_parser_of((uint8_t)fmt))) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
+			"KOF_DIAG_HAS_ANOMALY wants one KOF_FMT_* word of a format the engine parses");
+		return;
+	}
+	bit = kof_parser_anomaly_bit(fp, x->a[1]);
+	if (bit < 0 || !kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, (fmt << 32) | (uint64_t)bit)) {
+		char msg[160];
+
+		snprintf(msg, sizeof msg, "%.40s has no anomaly named %.60s", x->a[0], x->a[1]);
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, msg);
+		return;
+	}
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_ANOMALY)))
+		return;
+	it->a = (uint16_t)fmt;
+	it->b = (uint16_t)bit;
+	x->d->n++;
+}
+
+/* KOF_DIAG_HAS_NUCLEO(cap): one capability enumerator nucleo names (kof_dsrc_cap_of), never NONE (kof_diag_gate_valid). */
+static void dsrc_nucleo(struct dsrc_cx *x, char *p)
+{
+	struct kof_dsrc_item *it;
+	uint16_t cap = 0;
+
+	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0]) || kof_dsrc_arg(p, 1, x->a[1], sizeof x->a[1])) {
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, "KOF_DIAG_HAS_NUCLEO(cap)");
+		return;
+	}
+	if (!kof_dsrc_cap_of(x->a[0], &cap) || !kof_diag_gate_valid((uint16_t)KOF_FACT_NUCLEO, cap)) {
+		char msg[160];
+
+		snprintf(msg, sizeof msg, "KOF_DIAG_HAS_NUCLEO wants a capability nucleo names (KOF_NUCLEO_*), not %.60s", x->a[0]);
+		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno, msg);
+		return;
+	}
+	if (!(it = kof_dsrc_add_item(x->d, &x->errs, x->r, x->lineno, KDS_NUCLEO)))
+		return;
+	it->a = cap;
 	x->d->n++;
 }
 
@@ -493,6 +585,8 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 		dsrc_head(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_TAIL(")) != NULL) {
 		dsrc_tail(x, p);
+	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_JOIN(")) != NULL) {
+		dsrc_join(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_ACTION(")) != NULL) {
 		dsrc_action(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SYMBOL(")) != NULL) {
@@ -504,6 +598,10 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 		dsrc_target(x, p, line);
 	} else if ((p = strstr(line, "KOF_DIAG_HAS_ATTRB(")) != NULL) {
 		dsrc_attrb(x, p);
+	} else if ((p = strstr(line, "KOF_DIAG_HAS_ANOMALY(")) != NULL) {
+		dsrc_anomaly(x, p);
+	} else if ((p = strstr(line, "KOF_DIAG_HAS_NUCLEO(")) != NULL) {
+		dsrc_nucleo(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SEQUENCE(")) != NULL) {
 		dsrc_sequence(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_FAMILY(")) != NULL) {

@@ -106,13 +106,14 @@ struct kgenome_frame_src {
 	struct kgenome_cfg_mem mem;             /* the caller's allocator for kgenome_frame_make (NULL members: malloc and free); a cache uses its own */
 	/*
 	 * REACH_INDIRECT (cfg.h, KGENOME_CFG_T_SWITCH), optional: passed straight through to `kgenome_cfg_req.switch_src` (plumbing
-	 * only - frame.c copies the field, it reads and resolves nothing of its own). NULL read_at (every caller today: the signing
-	 * through kof_cfgsign_function, the lineage, codenotes, cfgview, kofexaminer) means kgenome_cfg_build never attempts switch
-	 * resolution, so the frame's graph, its `n_all`/`n_blk`/`n_edge`/reach and every existing caller's output are byte-for-byte
-	 * what they were before this field existed. A caller with image/VA access (fntab_reach.c's REACH_INDIRECT gap, its own header
-	 * comment) may fill it to let a switch's real targets become `fr.cfg.switch_tgt[]`; wiring that up is NOT done here - the two
-	 * structural fields (this one and cfg_req.switch_src) are the whole of this work package's plumbing, deliberately, to stay
-	 * disjoint from concurrent work on fntab_reach.c's own padding-walk logic.
+	 * only - frame.c copies the field, it reads and resolves nothing of its own). NULL read_at (every caller except fntab_reach.c's
+	 * own REACH walk: the signing through kof_cfgsign_function, the lineage, codenotes, cfgview, kofexaminer) means kgenome_cfg_build
+	 * never attempts switch resolution, so the frame's graph, its `n_all`/`n_blk`/`n_edge`/reach and every one of THOSE callers'
+	 * output stay byte-for-byte what they were before this field existed. fntab_reach.c (its own REACH_INDIRECT header comment,
+	 * `reach_switch_read_at`) is the one caller with the image/VA access this needs: it fills `read_at` to let a resolved switch's
+	 * real targets become `fr.cfg.switch_tgt[]`, then folds them into ITS OWN local copy of `fr.cfg`'s `reach` flags
+	 * (`switch_reach_extend`, fntab_reach.c) to size a function's extent - frame.c and cfg_build.c themselves still do no folding
+	 * of their own (cfg.h's own doc: switch edges stay out of `succ[]`/`reach`/`n_blk`/`n_edge`/the WL signature for every caller).
 	 */
 	struct kgenome_cfg_switch_src switch_src;
 	uint64_t max_bytes;                     /* what ONE function may hold while it is made (0: 64 MiB) */

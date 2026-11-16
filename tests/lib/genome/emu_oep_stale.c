@@ -1,14 +1,14 @@
 /*
- * emu_oep_stale - the emulator's handover test (emu_interp.c run_landed) reads the SHAPE of the
+ * emu_oep_stale - the emulator's handover test (emu_run_private.h kgenome_emu_run_landed) reads the SHAPE of the
  * transfer from the instruction that just ran, and that must be the instruction's own bytes
  * whether it came out of the instruction cache or was decoded fresh.
  *
  * THE DEFECT THIS GUARDS (it was a KNOWN-MISS here until fixed): in kgenome_emu_run the bytes
  * were a pointer at the 16-byte fetch buffer, which a cache MISS filled and a HIT left holding
- * whatever was last decoded. The watch for `syscall` (iwatch_hit) compared it, and so did the
+ * whatever was last decoded. The watch for `syscall` (kgenome_emu_iwatch_hit) compared it, and so did the
  * handover test, which asks whether the instruction that just transferred control was one of the
  * four tails a packer ends with (jmp/call rel32, ret, ret imm16, jmp/call reg). The bytes, the
- * length and the address now come from ONE per-step record (run_step) filled the same way on a
+ * length and the address now come from ONE per-step record (struct kgenome_emu_run_step) filled the same way on a
  * hit and a miss.
  *
  * THE FIXTURES

@@ -296,6 +296,15 @@ case BI_UNPACKER:
 	case BI_NEXT:
 	case BI_PREV:      return v->path && v->path[0] && !draft_edited(&v->ed);
 	/*
+	 * Opening a new file is the same loss as stepping to one - file_open
+	 * discards the draft - but it needs no file ALREADY open: this is the one
+	 * way in from the empty view (no path, no --pid).
+	 */
+	case BI_OPEN:      return !draft_edited(&v->ed);
+	/* Closing is the same loss again, and it DOES need a file already open -
+	 * the empty view has nothing left to close. */
+	case BI_CLOSE:     return v->path && v->path[0] && !draft_edited(&v->ed);
+	/*
 	 * Rebuilding replaces the database this file was examined against, so
 	 * the file is examined again - which throws the draft away for the same
 	 * reason stepping to another file does.
@@ -375,6 +384,8 @@ const char *bar_why_off(struct view *v, int i)
 	}
 	case BI_NEXT:
 	case BI_PREV:
+	case BI_OPEN:
+	case BI_CLOSE:
 	case BI_UNPACKER:
 	case BI_DUMP_STATIC:
 	case BI_DUMP_EMU:

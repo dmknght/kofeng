@@ -48,6 +48,11 @@ int kgenome_diag_wrapper_site_wrapped(const struct kgenome_diag_scan *s, uint64_
 
 /* One path through a wrapper that ended in a syscall or a call to a wrapper,
  * turned into a summary. 1 when it says something about the parameters. */
+/* KNOWN DEFECT LE-D3 (2026-11-17, Inference) [sev M]: a function whose straight line meets a wrapper call first is summarised by summarise_end as a wrapper of that call,
+ * though it does more after it (M: 830 false net-open nodes in main at calls of user functions beginning with socket(), 978 nodes at non-capability lines, 144 static builds).
+ * Trigger: gcc/clang -static, f() { socket(2,1,0); connect(..); write(..); } called from main. Effect: a producer node at every call of f; f's own call has none (superseded).
+ * Reproducer: /mnt/games/normtest/lin_truth kit/node_audit.py static (e.g. s2 gcc_O2_64_static 0x4015a1). Which rule accepts it (constants vs parameters) is not located: Inference.
+ * Fix: a function is a wrapper only when the path to the call is its whole body (nothing after the call but the return). */
 static int summarise_end(struct kgenome_diag_wrapper_ctx *c, struct kgenome_diag_wrapper_frame *f, uint64_t entry,
 			 const struct kgenome_diag_wrapper_insn *in, struct kgenome_diag_wrapper_summary *callee,
 			 struct kgenome_diag_wrapper_summary *out)

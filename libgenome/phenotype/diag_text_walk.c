@@ -176,6 +176,43 @@ int kgenome_dtx_arg_range(const struct kgenome_dtx *x, uint32_t open, uint32_t v
 	return 1;
 }
 
+/*
+ * ISLANDS (diag_scan.h, 2026-11-10): keep a copy of a resolved value `x->islands` was asked to collect (kgenome_diag_text_islands), beside
+ * walking it as a further layer for the capability graph as this file already did. `at` is the call's own file offset - honest provenance, see
+ * the struct's own comment for why the value itself carries none. A failure (the ledger, or memory) sets the set's status and drops this one
+ * island rather than merging it into another (rule 4: a cap must never be mistaken for a wrong answer); the islands already collected stay.
+ */
+static void island_add(struct kgenome_dtx *x, uint64_t at, const uint8_t *p, uint32_t n,
+			uint64_t name_off, uint32_t name_len)
+{
+	struct kgenome_diag_text_island_set *s = x->islands;
+	uint8_t *copy;
+
+	if (!n)
+		return;
+	if (!kgenome_dtx_grow(x, (void **)&s->v, &s->cap, s->n + 1u, sizeof *s->v)) {
+		s->status = KGENOME_OVER_BUDGET;
+		return;
+	}
+	if (!kgenome_dtx_charge(x, n)) {
+		s->status = KGENOME_OVER_BUDGET;
+		return;
+	}
+	copy = malloc(n);
+	if (!copy) {
+		kgenome_diag_note(x->s, KGENOME_NOMEM);
+		s->status = KGENOME_NOMEM;
+		return;
+	}
+	memcpy(copy, p, n);
+	s->v[s->n].at = at;
+	s->v[s->n].data = copy;
+	s->v[s->n].len = n;
+	s->v[s->n].name_off = name_off;
+	s->v[s->n].name_len = name_len;
+	s->n++;
+}
+
 /* The call whose "(" is token `open` runs its argument `val`: if that is a constant the evaluator can follow, it is code to walk. */
 static void layer_of_call(struct kgenome_dtx *x, uint32_t open, uint32_t val)
 {
@@ -193,6 +230,19 @@ static void layer_of_call(struct kgenome_dtx *x, uint32_t open, uint32_t val)
 	}
 	if (v.n && v.n <= x->lay->room) {
 		x->lay->room -= v.n;
+		/*
+		 * Only where Merge 167's own literal-argument matcher (celllysis/script_funcs.c's find_eval_islands) could NOT already have
+		 * answered it from the file's own bytes: a bare, closed string literal argument is exactly ONE 'S' token here too, has a real
+		 * file offset, and is that file's domain by construction (its own header: "a variable, a concatenation... is left exactly as
+		 * before this feature"). Anything this evaluator had to resolve THROUGH - a variable, a wrapper, a join - is never one token and
+		 * is this file's domain instead, by the same construction: the two conditions never overlap, so no call site is ever processed
+		 * twice. Conservative on purpose: an escaped or interpolating single literal is also skipped here (not just a bare one), which
+		 * costs nothing this mechanism needs to cover today and keeps the exclusion simple and provably disjoint rather than mirroring
+		 * find_eval_islands' own finer escape/interpolation checks a second time.
+		 */
+		if (x->islands && !(re == rs + 1u && x->t[rs].k == 'S'))
+			island_add(x, x->layer ? x->layer_at : x->t[open].off, v.p, v.n,
+				   x->t[rs].off, (uint32_t)(x->t[re - 1u].off + x->t[re - 1u].len - x->t[rs].off));
 		kgenome_dtx_run_one(x->s, v.p, v.n, KGENOME_TEXTUAL_FRAGMENT, x, x->lay, x->layer + 1u, x->layer ? x->layer_at : x->t[open].off);
 	} else if (v.n) {
 		kgenome_diag_note(x->s, KGENOME_OVER_BUDGET);

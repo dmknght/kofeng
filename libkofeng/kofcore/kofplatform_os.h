@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>            /* kof_localtime */
 
 #ifdef _WIN32
 
@@ -168,6 +169,9 @@ give_up:
 
 /* See the header comment: not a verified equivalent, only the closest
  * available primitive until reparse-point behaviour is checked for real. */
+/* KNOWN DEFECT W-D7 (2026-11-17, R) [sev M]: kof_lstat on Windows is stat(): it follows a symlink or a junction. Callers that rely on it not following: scan_walk.c (directory
+ * walk: a junction cycle), scan_mt.c, catstore.c (S_ISREG / same-file test), kofrepart.c. Trigger: a symlink or junction in a scanned tree on Windows. Effect: a walk loops through a junction or scans outside the tree.
+ * Reproducer: none on wine (W-D11); /mnt/games/normtest/fix_wd/report.txt. Fix: build kof_lstat on the handle test kof_path_kind uses (a reparse point as a link). */
 static inline int kof_lstat(const char *path, struct stat *st)
 {
 	return stat(path, st);
@@ -724,5 +728,20 @@ static inline uint64_t kof_heap_in_use(void)
 	return 0;
 }
 #endif
+
+/*
+ * THE LOCAL TIME, INTO THE CALLER'S STRUCT. localtime() answers in a static buffer another thread
+ * may be writing; the reentrant form is localtime_r on POSIX and localtime_s (arguments the other
+ * way round, an errno_t back) in the Windows C runtime, which has no localtime_r. Returns `out`, or
+ * NULL when the time cannot be represented.
+ */
+static inline struct tm *kof_localtime(const time_t *t, struct tm *out)
+{
+#ifdef _WIN32
+	return localtime_s(out, t) == 0 ? out : NULL;
+#else
+	return localtime_r(t, out);
+#endif
+}
 
 #endif /* KOFENG_KOFPLATFORM_OS_H */

@@ -150,7 +150,13 @@ void emu_here(struct view *v)
 	 * particular mechanism; which mechanism worked is the engine's answer
 	 * and is reported afterwards.
 	 */
-	opt.emu_use = KOF_EMU_AUTO;
+	/*
+	 * ONLY AGAIN (owner, 2026-11-15: "force unpack without the gate" from the viewer). AUTO left the run to the
+	 * entropy gate, and the gate refuses a small encoded stager by design (emu_unpack_gate.c, DENSE_MIN), so the
+	 * button could never show the interpreter's answer on exactly the objects a reader presses it on. ONLY skips
+	 * the static packer modules and runs the interpreter ungated; the reasoning above for AUTO is superseded.
+	 */
+	opt.emu_use = KOF_EMU_ONLY;
 	v->skip_root = 1;
 	/* Everything already in the list belongs to the first pass - see the
 	 * dedup in on_object. Zero afterwards, because an ordinary collect

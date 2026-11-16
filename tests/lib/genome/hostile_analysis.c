@@ -22,6 +22,12 @@
  *                         guard page; the cut's pieces tile the span; the unit
  *                         walk over random extents, functions and library spans
  *                         reports only units inside the object.
+ *   script funcs           kgenome_script_funcs_build over random bytes, PHP-vocabulary-only bytes, a
+ *                         well-formed tiny program and the adversarial shape (N functions nested one
+ *                         inside the next, up to 300 deep): every entry inside the buffer, starts
+ *                         ascending and ends never dipping below an earlier one's (what
+ *                         kgenome_funcs_at's binary search needs), and the family's own timeout is
+ *                         what would catch the quadratic-scan design this was written to avoid.
  *   library spans         the marker, symbol and object tiers over an ELF with
  *                         library text in it, cut at every length and with its
  *                         fields set to every extreme.
@@ -513,6 +519,127 @@ static int km_units_stop(void *arg)
 	return km_stop_calls == 1 ? 0 : 1;
 }
 
+/*
+ * ---- a script's function table (kgenome_script_funcs_build): random bytes, PHP-shaped bytes, and the
+ * one adversarial shape the single-pass design (script_funcs.c's own header) exists to keep linear - a
+ * function nested deep inside a function inside a function, which a per-keyword independent forward scan
+ * for its own matching "}" would have cost O(depth) for EACH level, O(n^2) total. The family's own
+ * timeout (hk_isolated) is the check: a quadratic blow-up times out (HK_HUNG) long before it could matter
+ * what the entries say. ----
+ */
+
+/* ascending starts, ends that never dip below an earlier one's (kgenome_funcs_at's binary search needs
+ * exactly this - see fntab_merge.c's containment rule, which gives it for a script's own entries too),
+ * and nothing outside the buffer. */
+static void check_func_set(const struct kgenome_func_set *fs, uint64_t n_obj)
+{
+	uint32_t i;
+
+	if (fs->n && !fs->v) {
+		bad("script funcs: n>0 but v is NULL", fs->n);
+		return;
+	}
+	for (i = 0; i < fs->n; i++) {
+		if (fs->v[i].off > n_obj || fs->v[i].len > n_obj - fs->v[i].off)
+			bad("script funcs: an entry outside the buffer", i);
+		if (fs->v[i].kind != KGENOME_FN_SCRIPT)
+			bad("script funcs: an entry of the wrong kind", fs->v[i].kind);
+		/* The NAME span (kof_func_name's own read, sym_any.c) must never reach past the buffer
+		 * it was found in - checked over every random/adversarial shape this family generates,
+		 * not only the well-formed fixtures tests/lib/genome/script_funcs.c hand-builds. */
+		if (fs->v[i].name_off > n_obj || (uint64_t)fs->v[i].name_len > n_obj - fs->v[i].name_off)
+			bad("script funcs: a name span outside the buffer", i);
+		if (i) {
+			if (fs->v[i].off < fs->v[i - 1u].off)
+				bad("script funcs: starts not ascending", i);
+			if (fs->v[i].off + fs->v[i].len < fs->v[i - 1u].off + fs->v[i - 1u].len)
+				bad("script funcs: an end dips below an earlier one's (kgenome_funcs_at would misbind)", i);
+		}
+	}
+}
+
+static int fam_script_funcs(void *arg)
+{
+	struct hk_rng r = { 0x5ec4f17e5ull + (uintptr_t)arg };
+	struct hk_gb g;
+	unsigned round;
+
+	gb_init(&g, 8192);
+	for (round = 0; round < 400u * hk_scale(); round++) {
+		static uint8_t src[4096];
+		unsigned n = hk_below(&r, sizeof src + 1u), k, mode = hk_below(&r, 4);
+		struct kgenome_func_set fs;
+		const uint8_t *p;
+
+		if (shared_seed)
+			*shared_seed = ((uint64_t)mode << 32) | n;
+		switch (mode) {
+		case 0:         /* pure noise: almost never spells "function" */
+			for (k = 0; k < n; k++)
+				src[k] = (uint8_t)hk_next(&r);
+			break;
+		case 1:         /* PHP vocabulary bytes only, so "function"/"("/")"/"{"/"}"/quotes collide a lot */
+			for (k = 0; k < n; k++) {
+				static const char v[] = "function use(){}$abc;:&\"'\n\t /*-*/";
+				src[k] = (uint8_t)v[hk_below(&r, sizeof v - 1u)];
+			}
+			break;
+		case 2: {       /* a real, well-formed tiny PHP program with a closure default value */
+			static const char prog[] =
+				"<?php\nfunction outer(callable $cb = function(){ return 1; }) {\n"
+				"  function inner() { return 2; }\n  return $cb() + inner();\n}\n";
+			unsigned pl = (unsigned)(sizeof prog - 1u);
+
+			n = pl < sizeof src ? pl : (unsigned)sizeof src;
+			memcpy(src, prog, n);
+			break;
+		}
+		default: {      /* the adversarial shape: N functions nested one inside the next */
+			static const char open_kw[] = "function f(){";
+			unsigned ol = (unsigned)(sizeof open_kw - 1u);
+			unsigned depth = hk_below(&r, 300), at = 0, opened = 0;
+
+			for (k = 0; k < depth && at + ol < sizeof src; k++) {
+				memcpy(src + at, open_kw, ol);
+				at += ol;
+				opened++;
+			}
+			for (k = 0; k < opened && at < sizeof src; k++)
+				src[at++] = '}';
+			n = at;
+			break;
+		}
+		}
+		p = gb_put(&g, src, n);
+		memset(&fs, 0, sizeof fs);
+		kgenome_script_funcs_build(KGENOME_TEXTUAL_LANG_PHP, p, n, &fs);
+		check_func_set(&fs, n);
+		kgenome_funcs_free(&fs);
+		/* A LANGUAGE WITH NO STRATEGY, or no bytes, always answers empty and COMPLETE. This used
+		 * KGENOME_TEXTUAL_LANG_SH as the "no strategy" language until 2026-11-06: shell gained a
+		 * real strategy that day, and mode 2's own fixture ("function inner() { return 2; }", a
+		 * nested PHP closure with EMPTY parens) is coincidentally also valid shell syntax, so
+		 * feeding it as shell now deterministically answers non-empty - caught by this very
+		 * fuzzer the first time it ran after the change, exactly the point of fuzzing a boundary
+		 * rather than asserting it by hand. Python then served as the oracle until 2026-11-14, when
+		 * every lexed language gained a strategy (the island package: script_funcs_<lang>.c); a
+		 * language id this build has no lexer for is the one "no strategy" left, and it answers no
+		 * table at all (C_NONE, COMPLETE, empty), as kgenome_funcs_build does a format it does not know. */
+		memset(&fs, 0, sizeof fs);
+		kgenome_script_funcs_build(KGENOME_TEXTUAL_LANG_COUNT, p, n, &fs);
+		if (fs.n || fs.state != KGENOME_FNTAB_COMPLETE || fs.ccase != KGENOME_FNTAB_C_NONE)
+			bad("script funcs: a language with no strategy answered something", mode);
+		kgenome_funcs_free(&fs);
+		memset(&fs, 0, sizeof fs);
+		kgenome_script_funcs_build(KGENOME_TEXTUAL_LANG_PHP, p, 0, &fs);
+		if (fs.n)
+			bad("script funcs: an empty buffer produced a function", 0);
+		kgenome_funcs_free(&fs);
+	}
+	gb_free(&g);
+	return hk_fails != 0;
+}
+
 /* ---- library spans in objects with library text in them --------------------------------------------------- */
 
 static struct hk_elf LE;
@@ -658,6 +785,7 @@ int main(int argc, char **argv)
 		{ "cursor over hostile spaces", fam_cursor, (void *)0, 120 },
 		{ "mutation: windows, pool, member, cut", fam_mutation, (void *)0, 120 },
 		{ "mutation: unit walk", fam_units, (void *)0, 120 },
+		{ "script funcs: random, PHP-shaped, nested closures", fam_script_funcs, (void *)0, 120 },
 		{ "library spans: cut, fields, flips", fam_spans, (void *)0, 120 },
 	};
 	unsigned i;

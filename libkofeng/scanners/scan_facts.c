@@ -567,7 +567,7 @@ void sx_dense_code_unread(struct kof_scanner *sc,
 	for (i = 0; i < pe->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++) {
 		const struct kgenome_pe_sec *s = &pe->sec[i];
 
-		if (i == pe->entry_sec || !kgenome_pe_sec_is_code(s))
+		if (i == pe->entry_sec || !kgenome_pe_sec_is_code(pe, s))
 			continue;
 		if (s->file_size < DENSE_MIN_SEC || !s->file_off)
 			continue;

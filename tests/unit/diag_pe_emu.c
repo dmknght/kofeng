@@ -412,6 +412,12 @@ int main(int argc, char **argv)
 		CK(alloc->flags & KGENOME_NUCLEO_F_WX);
 		/* and the run ends by jumping into it */
 		CK(linked(jump, i_alloc, KGENOME_DIAG_ROLE_TARGET));
+		/* each node of a resolved API carries the row of its spelling (kgenome_diag_hit.row: which argument is which input is
+		 * the row's, fix_linrow); the jump is no call of an API and has none */
+		CK(conn->row && conn->row == kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, "connect"));
+		CK(alloc->row && alloc->row == kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, "VirtualAlloc"));
+		CK(open->row && kgenome_nucleo_row_cap(open->row) == KGENOME_NUCLEO_NET_OPEN);
+		CK(jump->row == 0u);
 	}
 	kgenome_diag_scan_free(s);
 

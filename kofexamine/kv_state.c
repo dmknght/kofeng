@@ -78,6 +78,13 @@ const char *const opt_word[OPT_COUNT] = {
 	"Architecture", "File subtype"
 };
 
+/* THE GATE'S TWO WORDS (owner, 2026-11-17: "anomalies", "nucleo"), one spelling for the [+ Options] rows that open their lists
+ * and for the rows that show what the draft states (kof_draft.gate): KOF_FACT_ANOMALY, and KOF_FACT_NUCLEO for the other. */
+const char *gate_word(uint16_t fact)
+{
+	return fact == KOF_FACT_ANOMALY ? "Anomaly" : "Nucleo";
+}
+
 /* Where the last click was. Declared here because the row callbacks are
  * written beside the rows that register them, which is above its definition. */
 int g_mx, g_my;
@@ -198,4 +205,4 @@ int g_mod_ctrl;          /* and control, which slides text sideways */
  * same reason: the geometry exists in one place, the drawing, and a second copy
  * of the arithmetic in the click handler is a second thing to keep in step.
  */
-struct dframe g_goto_f, g_find_f, g_enc_f;
+struct dframe g_goto_f, g_find_f, g_enc_f, g_opendlg_f;

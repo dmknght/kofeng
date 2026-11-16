@@ -1,5 +1,11 @@
 #define _GNU_SOURCE
 /*
+ * FLIPPED by the owner's decision 2026-11-15 (CFG signing DISABLED): the rows that sign a function (kof_cfgsign_function, kgenome_cfg_pct, kof_mutation_cfg_unit)
+ * are inside #if 0 with the code they drive. What runs is verdict_path_disabled: the same pack (a CODE block of the 24 keys the INDEPENDENT oracle computes for the
+ * reference function) loads, and the scan of the reference - loose and as a zip member - fires NO diagnose and has no verdict, and the object is counted as
+ * having an unsigned function unit (kof_stats.mutation_unsigned_objects). RED on the old code: every diagnose fired (pct 100). Why the old tests missed nothing
+ * here: the behaviour is new (the owner's decision), not a defect.
+ *
  * cfg_sig_match - the CFG signature of a function, from the object to the verdict, through the ONE matcher.
  *
  * WHAT IT PINS (CFG step 2c: the shape of a function replaces the window hash for function units):
@@ -36,7 +42,7 @@
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/verdictor/famcat.h"
 #include "../../libkofeng/verdictor/tagcat.h"
-#include "../../libkofeng/analyzers/cfgsign.h"
+#include "../../libkofeng/analyzers/cfgsign.h"   /* its contents are inside #if 0 (CFG disabled 2026-11-15) */
 #include "../../libkofeng/scanners/scan.h"
 #include "../../libgenome/celllysis/mutation.h"
 #include "../../libkofeng/detectors/mutations/kofmutation.h"
@@ -156,6 +162,12 @@ static void ora_sign(const struct cs_spec *g, struct ora *o)
 }
 
 /* The estimate of the Jaccard of two sketches, in percent, floored: the matches among the 32 smallest elements of the union. */
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgsign.c, celllysis/cfg_sign.c and the scan's feed of a function unit (scan_feed.c mutation_feed_func) are out of #if 0, and drop verdict_path_disabled.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static uint32_t ora_pct(const struct ora *a, const struct ora *b)
 {
 	uint32_t i = 0, j = 0, taken = 0, hit = 0;
@@ -178,6 +190,8 @@ static uint32_t ora_pct(const struct ora *a, const struct ora *b)
 /* ---- specs ------------------------------------------------------------------------------------------------------------------------- */
 
 /* A chain: block i jumps to i+2 on a condition (to the last at the end) and falls into i+1; the last block returns. */
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+
 static void chain(struct cs_spec *g, uint32_t nb)
 {
 	uint32_t i;
@@ -192,6 +206,12 @@ static void chain(struct cs_spec *g, uint32_t nb)
 }
 
 /* A function of another shape: pairs of blocks, a diamond each, joined by jumps. */
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgsign.c, celllysis/cfg_sign.c and the scan's feed of a function unit (scan_feed.c mutation_feed_func) are out of #if 0, and drop verdict_path_disabled.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void other(struct cs_spec *g, uint32_t nb)
 {
 	uint32_t i;
@@ -204,6 +224,7 @@ static void other(struct cs_spec *g, uint32_t nb)
 	}
 	g->kind[nb - 1u] = CS_EXIT;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 static void pads(struct cs_spec *g, uint32_t seed)
 {
@@ -335,6 +356,12 @@ static size_t make_zip(uint8_t *out, const char *name, const uint8_t *data, size
 
 /* ---- the engine's signature against the oracle ----------------------------------------------------------------------------------- */
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgsign.c, celllysis/cfg_sign.c and the scan's feed of a function unit (scan_feed.c mutation_feed_func) are out of #if 0, and drop verdict_path_disabled.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static struct kof_obj_ctx ctx_of(struct kgenome_elf_info *ei, const struct cs_obj *o)
 {
 	struct kof_obj_ctx c;
@@ -349,7 +376,6 @@ static struct kof_obj_ctx ctx_of(struct kgenome_elf_info *ei, const struct cs_ob
 	return c;
 }
 
-static struct cs_obj O1, O2;
 
 /* The unit's id and sketch as the engine's one signing function makes them. */
 static enum kof_cfgsign_state sign_fn(const struct cs_obj *o, uint32_t k, struct kof_cfgsign *cs)
@@ -429,7 +455,8 @@ static void units_per_function(void)
 {
 	struct cs_spec g[3];
 	struct units_seen u;
-	const uint32_t nb[3] = { 1, 3, 12 };
+	/* one below KGENOME_CFG_ANCHOR_MIN (5), one exactly at it, one well above: a unit's own extent does not depend on whether it is signed */
+	const uint32_t nb[3] = { 3, 5, 12 };
 	uint32_t k;
 
 	for (k = 0; k < 3u; k++)
@@ -437,10 +464,12 @@ static void units_per_function(void)
 	OKF(cs_build_gap(&O1, g, 3, 0, 0), "build the three back to back");
 	OKF(O1.f_off[1] - (O1.f_off[0] + O1.f_len[0]) < 32u && O1.f_off[2] - (O1.f_off[1] + O1.f_len[1]) < 32u, "the fixture: under 32 bytes between the functions");
 	units_of(&O1, &u);
-	OKF(u.n == 3u, "functions of 1, 3 and 12 blocks less than 32 bytes apart are three units (%u)", u.n);
+	OKF(u.n == 3u, "functions of 3, 5 and 12 blocks less than 32 bytes apart are three units (%u)", u.n);
 	for (k = 0; k < u.n && k < 3u; k++) {
+		const enum kof_cfgsign_state want = nb[k] >= KGENOME_CFG_ANCHOR_MIN ? KOF_CFGSIGN_SIGNED : KOF_CFGSIGN_BELOW_FLOOR;
+
 		OKF(u.off[k] == O1.f_off[k] && u.len[k] == O1.f_len[k], "unit %u is the function's own extent", k);
-		OKF(u.st[k] == KOF_CFGSIGN_SIGNED && u.n_blk[k] == nb[k], "unit %u (%u blocks) is signed, with %u blocks (state %d)", k, nb[k], u.n_blk[k], (int)u.st[k]);
+		OKF(u.st[k] == want && u.n_blk[k] == nb[k], "unit %u (%u blocks) is %s, with %u blocks (state %d)", k, nb[k], kof_cfgsign_state_name(want), u.n_blk[k], (int)u.st[k]);
 	}
 
 	/* the entry does not decode (0x06 is no instruction in 64-bit mode) and the bytes after it do: the precondition says UNDECODABLE after the decode and
@@ -450,7 +479,7 @@ static void units_per_function(void)
 
 		OKF(cs_build(&O2, &g[1], 1, 0), "build the one function");
 		OKF(O2.b[O2.f_off[0]] == 0x90, "the fixture's entry is a nop");
-		OKF(sign_fn(&O2, 0, &cs) == KOF_CFGSIGN_SIGNED && cs.sign.n_blk == 3u, "intact, the function is signed with 3 blocks");
+		OKF(sign_fn(&O2, 0, &cs) == KOF_CFGSIGN_SIGNED && cs.sign.n_blk == nb[1], "intact, the function is signed with %u blocks", nb[1]);
 		O2.b[O2.f_off[0]] = 0x06;
 		OKF(sign_fn(&O2, 0, &cs) == KOF_CFGSIGN_UNDECODABLE, "a function whose entry does not decode is listed unsigned, UNDECODABLE (state %d)", (int)sign_fn(&O2, 0, &cs));
 		OKF(cs.n_insn > 0 && cs.sign.n_blk == 0, "its later instructions were decoded (%u) and no graph was signed (%u blocks)", cs.n_insn, cs.sign.n_blk);
@@ -470,11 +499,14 @@ static void signature_vs_oracle(void)
 		OKF(cs_build(&O1, &g, 1, nb % 7u), "build %u", nb);
 		ora_sign(&g, &o);
 		(void)sign_fn(&O1, 0, &cs);
+		/* the sketch is computed, and matches the oracle, whether or not the block count clears the floor (anchor-floor-1): the floor
+		 * gates SIGNED vs BELOW_FLOOR, not what is computed. */
 		OKF(cs.sign.n_blk == nb && cs.sign.n_key == o.n_key && !memcmp(cs.sign.key, o.key, o.n_key * sizeof o.key[0]),
 		    "a chain of %u blocks: the engine's sketch is not the oracle's (blocks %u/%u keys %u/%u)", nb, cs.sign.n_blk, nb, cs.sign.n_key, o.n_key);
-		/* every function with a reachable block is signed: there is no floor of 12 any more */
-		OKF(cs.state == KOF_CFGSIGN_SIGNED, "a chain of %u blocks is %s", nb, kof_cfgsign_state_name(cs.state));
-		OKF(o.n_key >= KGENOME_CFG_MIN_KEYS && o.n_key == (nb < KGENOME_CFG_KEYS ? nb : KGENOME_CFG_KEYS), "a signed function holds at least KGENOME_CFG_MIN_KEYS keys, one a block (%u)", o.n_key);
+		OKF(cs.state == (nb >= KGENOME_CFG_ANCHOR_MIN ? KOF_CFGSIGN_SIGNED : KOF_CFGSIGN_BELOW_FLOOR), "a chain of %u blocks is %s", nb, kof_cfgsign_state_name(cs.state));
+		OKF(o.n_key == (nb < KGENOME_CFG_KEYS ? nb : KGENOME_CFG_KEYS), "a function's sketch holds one key a block, up to KGENOME_CFG_KEYS (%u)", o.n_key);
+		if (cs.state == KOF_CFGSIGN_SIGNED)
+			OKF(o.n_key >= KGENOME_CFG_MIN_KEYS, "a SIGNED function holds at least KGENOME_CFG_MIN_KEYS keys (%u)", o.n_key);
 	}
 	/* another shape */
 	other(&g, 30);
@@ -577,9 +609,16 @@ static void memory(void)
 		OKF(cs.sign.n_key == 0, "no sketch is claimed over the allowance");
 	}
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+
+static struct cs_obj O1;
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG): used only by the rows in #if 0 */
+static struct cs_obj O2;
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /* ---- the verdict path ------------------------------------------------------------------------------------------------------------- */
 
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG): used only by the rows in #if 0 */
 static void check_set(const char *what, const struct seen *s, uint32_t pct)
 {
 	uint32_t t, wrong = 0, first = 0;
@@ -591,7 +630,14 @@ static void check_set(const char *what, const struct seen *s, uint32_t pct)
 		}
 	OKF(!wrong, "%s: pct %u, the diagnoses that fired differ from {T <= pct} at %u threshold(s), the first T=%u (%u fired)", what, pct, wrong, first, s->n_fired);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out when analyzers/cfgsign.c, celllysis/cfg_sign.c and the scan's feed of a function unit (scan_feed.c mutation_feed_func) are out of #if 0, and drop verdict_path_disabled.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void verdict_path(void)
 {
 	struct cs_spec ref, g;
@@ -848,6 +894,47 @@ static void shared_keys(void)
 	kscan_free(scn);
 	keng_close(eng);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+
+/* THE SCAN WITH CFG SIGNING DISABLED (owner 2026-11-15): a CFG block a pack carries loads and holds nothing; the function unit is said unsigned. */
+static void verdict_path_disabled(void)
+{
+	struct cs_spec ref;
+	struct ora oref;
+	struct scene sc;
+	kof_engine *eng;
+	kof_scanner *scn;
+	struct seen s;
+	static uint8_t zipb[CS_MAX_OBJ + 1024];
+	size_t zn;
+	uint64_t before;
+
+	chain(&ref, 24);
+	pads(&ref, 3);
+	OKF(cs_build(&O1, &ref, 1, 0), "build the reference");
+	ora_sign(&ref, &oref);
+	OKF(oref.n_key == 24u, "24 reachable blocks make 24 keys (%u)", oref.n_key);
+	OKF(make_pack(&sc, "ladder", oref.key, oref.n_key, N_THRESH, 1u) == 0, "the pack builds from %u CODE keys (see %s)", oref.n_key, sc.err);
+	eng = keng_open(sc.db);
+	G_eng = eng;
+	scn = eng ? kscan_new(eng) : NULL;
+	if (!scn) {
+		OKF(0, "the pack does not open");
+		return;
+	}
+	OKF(kdb_diagnoses(eng) >= N_THRESH && kdb_diag_refused(eng) == 0u, "%u diagnoses loaded, none refused (%u, refused %u)", N_THRESH, (unsigned)kdb_diagnoses(eng),
+	    (unsigned)kdb_diag_refused(eng));
+	before = kscan_stats(scn)->mutation_unsigned_objects;
+	scan(scn, O1.b, O1.n, "", &s);
+	OKF(s.n_fired == 0 && !s.verdict[0] && !s.has_part, "CFG signing disabled: the reference fires nothing (%u fired, verdict \"%s\")", s.n_fired, s.verdict);
+	OKF(kscan_stats(scn)->mutation_unsigned_objects == before + 1u, "and the object is counted as having an unsigned function unit (%llu -> %llu)",
+	    (unsigned long long)before, (unsigned long long)kscan_stats(scn)->mutation_unsigned_objects);
+	zn = make_zip(zipb, "inner.elf", O1.b, O1.n);
+	scan(scn, zipb, zn, "inner.elf", &s);
+	OKF(s.n_fired == 0 && !s.verdict[0], "the zip member fires nothing either (%u fired)", s.n_fired);
+	kscan_free(scn);
+	keng_close(eng);
+}
 
 int main(void)
 {
@@ -860,12 +947,15 @@ int main(void)
 		printf("cfg_sig_match: cannot make a scratch directory\n");
 		return 2;
 	}
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG): re-enable with the functions' #if 0 */
 	signature_vs_oracle();
 	units_per_function();
 	memory();
 	memory_set();
 	verdict_path();
 	shared_keys();
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+	verdict_path_disabled();
 	if (!failures) {
 		char cmd[400];
 

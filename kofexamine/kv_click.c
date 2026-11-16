@@ -807,13 +807,16 @@ static int click_boxes(struct view *v, int rclick)
 	 */
 	if ((v->enc_open && dframe_grab(v, &g_enc_f)) ||
 	    (v->goto_open && dframe_grab(v, &g_goto_f)) ||
-	    (v->find_open && dframe_grab(v, &g_find_f)))
+	    (v->find_open && dframe_grab(v, &g_find_f)) ||
+	    (v->opendlg_open && dframe_grab(v, &g_opendlg_f)))
 		return 1;
 	if (v->enc_open && enc_click(v, rclick))
 		return 1;
 	if (v->goto_open && goto_click(v))
 		return 1;
 	if (v->find_open && find_click(v))
+		return 1;
+	if (v->opendlg_open && opendlg_click(v))
 		return 1;
 	return 0;
 }

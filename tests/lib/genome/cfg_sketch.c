@@ -1,4 +1,10 @@
 /*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out and drop the name from LIBTEST_CFG_DISABLED (mk/tests.mk) when cfg_sign.c is out of #if 0.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+/*
  * genome / cfg_sketch - the bottom-32 sketch of celllysis/cfg_sign.c: how it is FORMED (the 32 smallest distinct elements of a multiset,
  * ascending) and how two are COMPARED (kgenome_cfg_overlap / kgenome_cfg_pct / kgenome_cfg_pct_callee: the matches among the 32
  * smallest of the union).
@@ -701,3 +707,4 @@ int main(int argc, char **argv)
 		printf("cfg_sketch: ok\n");
 	return fails != 0;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

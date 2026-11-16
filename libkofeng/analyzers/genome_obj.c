@@ -8,6 +8,7 @@
 /* The descriptor's format values are the engine's. */
 _Static_assert((int)KGENOME_FMT_ELF == (int)KOF_FMT_ELF, "format values differ");
 _Static_assert((int)KGENOME_FMT_PE == (int)KOF_FMT_PE, "format values differ");
+_Static_assert((int)KGENOME_FMT_SCRIPT == (int)KOF_FMT_SCRIPT, "format values differ");
 
 void kof_genome_obj(const struct kof_obj_ctx *ctx, struct kgenome_obj *out)
 {

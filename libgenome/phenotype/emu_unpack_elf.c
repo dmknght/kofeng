@@ -7,6 +7,7 @@
  */
 
 #include "emu_unpack_private.h"
+#include "emu_private.h"      /* kgenome_emu_arch_seed: the loader's register assumption is the architecture's */
 
 #define DYN_BIAS      0x555555554000ull
 
@@ -58,10 +59,30 @@ static int build_stack(struct kgenome_emu *e, uint64_t entry, uint64_t phdr_va,
 	v[k++] = 11; v[k++] = 0;           /* AT_UID    */
 	v[k++] = 0;  v[k++] = 0;           /* AT_NULL   */
 
-	sp = (strv - (uint64_t)k * 8u) & ~15ull;
-	if (!kgenome_emu_map(e, sp, (const uint8_t *)v, (uint64_t)k * 8u,
-			 (uint64_t)k * 8u, KGENOME_EMU_R | KGENOME_EMU_W))
-		return 0;
+	/*
+	 * IN GUEST WORDS: four bytes each for a 32-bit process, eight for a 64-bit one. The block was
+	 * written as 8-byte words whatever the guest, so an i386 program found argc followed by a zero
+	 * where argv[0] belongs and every auxv pair at twice its offset (ED2, 2026-11-14,
+	 * tests/lib/genome/emu_dispatch.c).
+	 */
+	{
+		unsigned w = bits == 32 ? 4u : 8u, i;
+		uint8_t blk[sizeof v];
+
+		for (i = 0; i < (unsigned)k; i++) {
+			if (w == 4u) {
+				uint32_t x = (uint32_t)v[i];
+
+				memcpy(blk + i * 4u, &x, 4);
+			} else {
+				memcpy(blk + i * 8u, &v[i], 8);
+			}
+		}
+		sp = (strv - (uint64_t)k * w) & ~15ull;
+		if (!kgenome_emu_map(e, sp, blk, (uint64_t)k * w,
+				 (uint64_t)k * w, KGENOME_EMU_R | KGENOME_EMU_W))
+			return 0;
+	}
 	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, sp);
 	return 1;
 }
@@ -238,18 +259,10 @@ struct kgenome_emu *kgenome_emu_unp_build(const uint8_t *file, uint64_t n,
 	 * like and the one value that makes this family work.
 	 *
 	 * RSP and RBP are left alone: the stack is real and was just built, and
-	 * overwriting the pointer to it would break every stub that pushes.
+	 * overwriting the pointer to it would break every stub that pushes. Which
+	 * registers these are is the architecture's (struct kgenome_emu_arch.seed).
 	 */
-	{
-		static const unsigned seed[] = {
-			KGENOME_EMU_RAX, KGENOME_EMU_RCX, KGENOME_EMU_RDX, KGENOME_EMU_RBX,
-			KGENOME_EMU_RSI, KGENOME_EMU_RDI
-		};
-		unsigned k;
-
-		for (k = 0; k < sizeof seed / sizeof seed[0]; k++)
-			kgenome_emu_set_reg(e, seed[k], entry);
-	}
+	kgenome_emu_arch_seed(e, entry);
 
 	/* WHAT THE BUILD KNOWS, published before it returns - the run half is
 	 * a separate call now and cannot see these locals. */

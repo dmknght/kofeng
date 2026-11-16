@@ -696,9 +696,8 @@ int handle(struct view *v, int k)
 		if (v->find[0])
 			find_run(v, 0);
 		break;
-	case 0x0f:                      /* Ctrl+O */
-		say_act(v, "No file picker - pass the file on the "
-			   "command line");
+	case 0x0f:                      /* Ctrl+O - the same dialog File > Open opens */
+		opendlg_show(v);
 		break;
 	/*
 	 * READ IT THE OTHER WAY - the same thing the context menu offers.

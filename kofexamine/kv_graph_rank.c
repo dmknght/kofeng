@@ -40,10 +40,27 @@ int kv_graph_walk_make(const struct kv_graph_in *in, void *mem, struct kv_graph_
 		wk->first[i + 1u] += wk->first[i];
 	for (i = 0; i < n; i++)
 		wk->cur[i] = wk->first[i + 1u];         /* edges are taken from the last to the first: the first edge's subtree finishes last, so it is first in the order */
-	for (r = 0; r <= n; r++) {
+	/*
+	 * A GRAPH WITH NO ONE ENTRY (in->sources_first: a lineage, whose links run from producer to consumer and whose every source is a start): the walk
+	 * starts from each node nothing points to, then from what is left (a cycle), and the order is the reverse post-order of the WHOLE
+	 * forest - a topological order of a graph with no cycle, so a link into a part an earlier source reached still points down and is not drawn as a
+	 * link that goes back. A CFG keeps its entry first and each root's own order (its unreachable blocks below the entry's part).
+	 */
+	if (in->sources_first)
+		for (e = 0; e < m; e++)
+			wk->lvl[in->edge[e].to]++;      /* the in-degree, for the order of the roots; cleared below, before the levels */
+	for (r = 0; r <= (in->sources_first ? 2u * n : n); r++) {
 		const uint32_t from = cnt;
 
-		root = r == 0 ? in->entry : r - 1u;
+		if (in->sources_first) {
+			root = r < n ? n - 1u - r : 2u * n - 1u - r;   /* descending: the forest's order is reversed below, so the sources stand in index order */
+			if (r < n && wk->lvl[root])
+				continue;
+			if (r >= 2u * n)
+				break;
+		} else {
+			root = r == 0 ? in->entry : r - 1u;
+		}
 		if (root >= n || wk->st[root])
 			continue;
 		wk->st[root] = 1;
@@ -69,7 +86,7 @@ int kv_graph_walk_make(const struct kv_graph_in *in, void *mem, struct kv_graph_
 			wk->st[u] = 2;
 			wk->rpo[cnt++] = u;                     /* post-order of this root: reversed below */
 		}
-		{
+		if (!in->sources_first) {
 			uint32_t a = from, b = cnt - 1u;
 
 			while (a < b) {
@@ -79,6 +96,17 @@ int kv_graph_walk_make(const struct kv_graph_in *in, void *mem, struct kv_graph_
 				wk->rpo[b--] = x;
 			}
 		}
+	}
+	if (in->sources_first) {                        /* the whole forest's post-order, reversed; the in-degree count is given back to the levels */
+		uint32_t a = 0, b = cnt ? cnt - 1u : 0u;
+
+		while (a < b) {
+			const uint32_t x = wk->rpo[a];
+
+			wk->rpo[a++] = wk->rpo[b];
+			wk->rpo[b--] = x;
+		}
+		memset(wk->lvl, 0, (size_t)n * sizeof *wk->lvl);
 	}
 	for (i = 0; i < n; i++)
 		wk->pos[wk->rpo[i]] = i;
@@ -413,6 +441,7 @@ void kv_graph_step_wires(struct kv_graph_ctx *c)
 			w->to = wk->pos[v];
 			w->cond = in->edge[e].cond;
 			w->loop = in->edge[e].loop;
+			w->sure = in->edge[e].sure;
 			w->back = wk->bk[e];
 			w->self = w->from == w->to;
 			if (!w->back) {

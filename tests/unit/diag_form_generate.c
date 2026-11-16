@@ -46,6 +46,9 @@
 #include <celllysis/mutation.h>
 #include <kofmod/elf.h>
 #include "../../libkofeng/scanners/scan.h"
+#include "../../libkofeng/analyzers/parsers/kofformat.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <celllysis/nucleo.h>
 
 static int failures;
 static struct kof_editor E;
@@ -1217,6 +1220,362 @@ static void refusals(void)
 	refusal("a block whose region the reader does not know", "no name the source reader knows", mk_bad_rgn);
 }
 
+/* ---- the gate of the signature on the draft (kofeditor_gate.c): the engine's lists, the draft, Generate, the engine -----------
+ *
+ * Why the old tests missed it: (a) there was no gate - nothing here compiles against the old tree (draft_gate_offer,
+ * kof_draft.gate, KOF_FACT_ANOMALY do not exist), the RED of a feature that was not there.
+ *
+ *   offers     the draft's anomaly offers ARE the bits of the engine's word for the object (kof_result.anomalies) and its
+ *              nucleo offers ARE the engine's list for the object (kdet_nucleo_seen over the explain run), element for
+ *              element; an offer the draft already states is not offered again
+ *   add        a condition twice, NONE, an unknown anomaly value and the seventeenth are refused; the draft is edited by one
+ *   Generate   writes KOF_DIAG_HAS_ANOMALY / KOF_DIAG_HAS_NUCLEO lines that the shared reader reads back, the builder builds and
+ *              the engine answers: the draft's own sample fires, a capability it does not show blocks; sixteen gate conditions
+ *              and a format line are seventeen, which Save refuses with the reader's reason and writes nothing
+ *   run1       the golden fixture (tests/tui/golden/SAMPLES.txt): the viewer's lists (draft_gate_offer) equal the engine's, and
+ *              every condition picked from them passes the engine's gate on run1 (YES, never UNKNOWN). A missing fixture FAILS.
+ */
+struct gstate {
+	char    name[64][48];
+	uint8_t state[64], gate[64];
+	unsigned n;
+	int     first;
+	uint16_t caps[512];
+	uint32_t n_caps;
+	struct kof_result res;      /* the file's result, its borrowed pointers cleared (only n_* and the scalars are kept) */
+};
+
+static int on_gstate(const char *name, const void *bytes, uint64_t len, const struct kof_result *res, void *user)
+{
+	struct gstate *g = user;
+	uint32_t i;
+
+	(void)bytes; (void)len;
+	if (!res || g->first || strstr(name, KOF_OBJ_SEP))
+		return 0;
+	g->first = 1;
+	g->n_caps = kdet_nucleo_seen(res, g->caps, 512u);
+	for (i = 0; i < res->n_diag && g->n < 64u; i++) {
+		snprintf(g->name[g->n], sizeof g->name[0], "%s", res->diag[i].name);
+		g->state[g->n] = res->diag[i].state;
+		/* the LAST condition: a generated unit states its format first and its gate after it */
+		g->gate[g->n] = res->diag[i].n_gate ? res->diag[i].gate[res->diag[i].n_gate - 1u] : 0u;
+		g->n++;
+	}
+	return 0;
+}
+
+static void gstate_scan(kof_scanner *sc, const void *p, size_t n, struct gstate *g)
+{
+	struct kof_scan_option opt;
+
+	memset(&opt, 0, sizeof opt);
+	memset(g, 0, sizeof *g);
+	(void)kof_scan_set_explain(sc, 1);
+	kscan_bytes(sc, p, n, "sample", &opt, on_gstate, g);
+}
+
+static int gstate_of(const struct gstate *g, const char *name, uint8_t *gate)
+{
+	unsigned i;
+
+	for (i = 0; i < g->n; i++)
+		if (!strcmp(g->name[i], name)) {
+			*gate = g->gate[i];
+			return g->state[i];
+		}
+	return -1;
+}
+
+/* The engine's explain run of `p` (the viewer's view_explain asks the same: kscan_explain); the caller frees the run. */
+static kdet_run *explain_of(const char *db, const uint8_t *p, size_t n, const struct kof_result **res)
+{
+	kof_engine *eng = keng_open(db);
+	kof_scanner *sc = eng ? kscan_new(eng) : NULL;
+	kdet_run *run = NULL;
+	struct kof_scan_option opt;
+	const struct kdet_object *k;
+
+	if (sc) {
+		memset(&opt, 0, sizeof opt);
+		run = kscan_explain(sc, p, n, "sample", &opt);
+	}
+	kscan_free(sc);
+	keng_close(eng);
+	k = run ? kdet_run_find(run, "sample") : NULL;
+	*res = k ? &k->res : NULL;
+	return run;
+}
+
+static const char MMAP_STUB[] = "\x31\xff\x6a\x09\x58\x99\xb6\x10\x48\x89\xd6\x4d\x31\xc9\x6a\x22\x41\x5a\x6a\x07\x5a\x0f\x05";
+
+/* The offers equal the engine's lists (the result's anomaly word, bit by bit; kdet_nucleo_seen), element for element; the counts
+ * come back through the pointers. */
+static void offers_are_engine(const char *what, const struct kof_result *res, uint32_t *na, uint32_t *nn)
+{
+	struct kof_diag_when w[256];
+	uint16_t caps[256];
+	uint32_t a, n, nc, k, same = 1;
+
+	a = draft_gate_offer(&E, (uint16_t)KOF_FACT_ANOMALY, res, w, 256u);
+	for (k = 0, n = 0; k < 64u; k++) {
+		uint64_t val = ((uint64_t)res->anomaly_fmt << 32) | k;
+
+		if (((res->anomalies >> k) & 1u) && kof_diag_gate_valid((uint16_t)KOF_FACT_ANOMALY, val)) {
+			same &= (uint32_t)(n < a && w[n].fact == KOF_FACT_ANOMALY && w[n].val == val);
+			n++;
+		}
+	}
+	OKF(same && a == n, "%s: the anomaly offers are the engine's word (%u offers, %u named bits)", what, a, n);
+	*na = a;
+	n = draft_gate_offer(&E, (uint16_t)KOF_FACT_NUCLEO, res, w, 256u);
+	nc = kdet_nucleo_seen(res, caps, 256u);
+	for (k = 0, same = 1; k < nc && k < 256u; k++)
+		same &= (uint32_t)(k < n && w[k].fact == KOF_FACT_NUCLEO && w[k].val == caps[k]);
+	OKF(same && n == nc, "%s: the nucleo offers are the engine's list (kdet_nucleo_seen): %u offers, %u listed", what, n, nc);
+	*nn = n;
+}
+
+static void gate_draft(void)
+{
+	static uint8_t elf[0x600];
+	static const struct put code[] = { { 0x100, sizeof MMAP_STUB - 1u, MMAP_STUB }, { 0x200, 12u, "alpha-marker" } };
+	struct scene sc;
+	const struct kof_result *res;
+	struct kof_diag_when w[64];
+	kdet_run *run;
+	uint32_t na = 0, nn = 0, h0;
+	char msg[400], txt[96];
+	uint16_t absent = 0;
+
+	make_elf(elf, code, 2u);
+	/* THE LIST IS MADE WITH THE DATABASE THE GATE IS ANSWERED WITH: what the analysis runs (the emulator among it) follows the
+	 * database's modules, so the list and the answer are compared over one database - here Generate of the same draft without
+	 * a gate, the database of every scene below (sigs-any and one form). */
+	scene_new(&sc, "gate_base");
+	header();
+	decl_text((const uint8_t *)"alpha-marker", 12u);
+	use(0, matcher(1, 0, CODE));
+	condition("1", KOF_MALTYPE_BOTNET, "flood");
+	OKF(draft_generate(&E, sc.gen, msg, sizeof msg) == 1 && build(&sc) == 0, "the draft without a gate is written and built: %s", msg);
+	free_draft();
+	run = explain_of(sc.db, elf, sizeof elf, &res);
+	scene_new(&sc, "gate_list");
+	OKF(run && res, "the engine explains the ELF");
+	if (!run || !res) {
+		kdet_run_free(run);
+		return;
+	}
+	header();
+	offers_are_engine("the ELF", res, &na, &nn);
+	OKF(na >= 1u && nn >= 1u, "the ELF offers an anomaly (%u) and a nucleo (%u)", na, nn);
+	/* add: the draft is edited by one; the same twice, NONE and an unknown value are refused; what is stated is not offered */
+	h0 = draft_hash(&E);
+	(void)draft_gate_offer(&E, (uint16_t)KOF_FACT_ANOMALY, res, w, 64u);
+	OKF(draft_gate_add(&E, w[0].fact, w[0].val) == 1 && draft_hash(&E) != h0, "an anomaly is added and the draft is edited");
+	OKF(draft_gate_add(&E, w[0].fact, w[0].val) == 0 && E.dr.n_gate == 1u, "the same anomaly twice is refused");
+	OKF(draft_gate_offer(&E, (uint16_t)KOF_FACT_ANOMALY, res, NULL, 0) == na - 1u, "a stated anomaly is not offered again");
+	OKF(draft_gate_text(&E.dr.gate[0], txt, sizeof txt) && !strncmp(txt, "ELF ", 4u), "an anomaly reads \"ELF <name>\": %s", txt);
+	(void)draft_gate_offer(&E, (uint16_t)KOF_FACT_NUCLEO, res, w, 64u);
+	OKF(draft_gate_add(&E, w[0].fact, w[0].val) == 1, "a nucleo the file shows is added");
+	OKF(draft_gate_text(&E.dr.gate[1], txt, sizeof txt) && !strcmp(txt, kgenome_nucleo_cap_name((uint16_t)w[0].val)),
+	    "a nucleo reads as its nucleo name: %s", txt);
+	OKF(draft_gate_add(&E, (uint16_t)KOF_FACT_NUCLEO, 0) == 0 && draft_gate_add(&E, (uint16_t)KOF_FACT_ANOMALY, 0xffffffffffull) == 0 &&
+	    draft_gate_add(&E, (uint16_t)KOF_FACT_SIZE_MIN, 1) == 0 && E.dr.n_gate == 2u, "NONE, an unknown anomaly and another fact are refused");
+	/* Generate: the lines, read back by the shared reader, built, and answered by the engine */
+	decl_text((const uint8_t *)"alpha-marker", 12u);
+	use(0, matcher(1, 0, CODE));
+	condition("1", KOF_MALTYPE_BOTNET, "flood");
+	OKF(draft_generate(&E, sc.gen, msg, sizeof msg) == 1, "the gated draft is written: %s", msg);
+	{
+		char *t = gen_file(&sc, "botnet_mirai_flood_01.c");
+		struct kof_dsrc *d = calloc(1, sizeof *d);
+		struct kof_dsrc_view v;
+		int e = 1;
+
+		OKF(t && strstr(t, "KOF_DIAG_HAS_ANOMALY(KOF_FMT_ELF, ") && strstr(t, "KOF_DIAG_HAS_NUCLEO(KOF_NUCLEO_"),
+		    "the file states the anomaly and the nucleo");
+		memset(&v, 0, sizeof v);
+		if (t && d && kof_dsrc_parse(t, strlen(t), d, NULL) == 0)
+			e = kof_dsrc_resolve(d, &v, NULL);
+		OKF(e == 0 && v.n_when == 3 && v.when[1].fact == KOF_FACT_ANOMALY && v.when[1].val == E.dr.gate[0].val &&
+		    v.when[2].fact == KOF_FACT_NUCLEO && v.when[2].val == E.dr.gate[1].val,
+		    "the shared reader reads back the format and the two gate conditions, in order");
+		kof_dsrc_view_free(&v);
+		free(d);
+		free(t);
+	}
+	OKF(build(&sc) == 0, "the gated diagnose builds");
+	{
+		kof_engine *eng = keng_open(sc.db);
+		kof_scanner *scn = eng ? kscan_new(eng) : NULL;
+		struct gstate *g = calloc(1, sizeof *g);
+		uint8_t gs = 0;
+
+		if (scn && g) {
+			gstate_scan(scn, elf, sizeof elf, g);
+			OKF(gstate_of(g, "botnet_mirai_flood_01", &gs) == KOF_DIAG_ST_MATCH, "the draft's own sample passes the gate it was picked from");
+		} else {
+			OKF(0, "the gated database does not open");
+		}
+		free(g);
+		kscan_free(scn);
+		keng_close(eng);
+	}
+	free_draft();
+	/* a capability the file does not show blocks */
+	{
+		size_t i;
+		uint16_t c;
+		uint16_t caps[256];
+		uint32_t nc = kdet_nucleo_seen(res, caps, 256u);
+
+		for (i = 0; kof_dsrc_cap_at(i, &c) && !absent; i++) {
+			uint32_t j;
+			int in = 0;
+
+			for (j = 0; j < nc && j < 256u; j++)
+				in |= caps[j] == c;
+			if (!in)
+				absent = c;
+		}
+	}
+	scene_new(&sc, "gate_absent");
+	header();
+	decl_text((const uint8_t *)"alpha-marker", 12u);
+	use(0, matcher(1, 0, CODE));
+	condition("1", KOF_MALTYPE_BOTNET, "flood");
+	OKF(absent && draft_gate_add(&E, (uint16_t)KOF_FACT_NUCLEO, absent) == 1, "a capability the file does not show can be stated");
+	OKF(draft_generate(&E, sc.gen, msg, sizeof msg) == 1 && build(&sc) == 0, "and it is written and built: %s", msg);
+	{
+		kof_engine *eng = keng_open(sc.db);
+		kof_scanner *scn = eng ? kscan_new(eng) : NULL;
+		struct gstate *g = calloc(1, sizeof *g);
+		uint8_t gs = 0;
+
+		if (scn && g) {
+			gstate_scan(scn, elf, sizeof elf, g);
+			OKF(gstate_of(g, "botnet_mirai_flood_01", &gs) != KOF_DIAG_ST_MATCH && gs == KOF_GATE_NO,
+			    "a capability the file does not show (%s) is NO and blocks (gate %u)", kof_dsrc_cap_word(absent), gs);
+		}
+		free(g);
+		kscan_free(scn);
+		keng_close(eng);
+	}
+	free_draft();
+	/* sixteen gate conditions and the format line: seventeen, refused by Save with the reader's reason */
+	scene_new(&sc, "gate_cap");
+	header();
+	decl_text((const uint8_t *)"alpha-marker", 12u);
+	use(0, matcher(1, 0, CODE));
+	condition("1", KOF_MALTYPE_BOTNET, "flood");
+	{
+		size_t i;
+		uint16_t c;
+		uint32_t added = 0;
+
+		for (i = 0; kof_dsrc_cap_at(i, &c) && added < 17u; i++)
+			added += (uint32_t)draft_gate_add(&E, (uint16_t)KOF_FACT_NUCLEO, c);
+		OKF(added == 16u && E.dr.n_gate == 16u, "the draft holds sixteen conditions and refuses the seventeenth (%u)", added);
+	}
+	OKF(draft_generate(&E, sc.gen, msg, sizeof msg) < 0 && strstr(msg, "too many conditions") && count_files(sc.gen) == 0u,
+	    "sixteen gates and a format are refused by Save with the reader's reason, nothing written: %s", msg);
+	free_draft();
+	kdet_run_free(run);
+
+	/* run1: the golden fixture */
+	{
+		static const char *const r1 = "/mnt/games/normtest/golden_samples/run1";
+		size_t n1 = 0;
+		uint8_t *b1 = read_file(r1, &n1);
+		struct scene s1;
+		const struct kof_result *res1;
+		kdet_run *run1;
+		uint32_t a1 = 0, n1n = 0, yes = 0, total = 0;
+		struct kof_diag_when ow[128];
+
+		OKF(b1 && n1 == 64608u, "the run1 fixture is there (%s, 64608 bytes): the list equality is not checked without it", r1);
+		if (!b1) {
+			free(b1);
+			return;
+		}
+		header();
+		run1 = explain_of("build/release/databases", b1, n1, &res1);
+		OKF(run1 && res1, "the engine explains run1");
+		/* SG-D1, measured: the engine's normalised view of run1 holds the parent's description and its word, which has no
+		 * anomaly, where the dashboard (its own parse of the view's bytes) lists three (golden run1_norm_dash_overview). */
+		{
+			const struct kdet_object *view = run1 ? kdet_run_find(run1, "sample" KOF_OBJ_SEP "0:norm") : NULL;
+
+			OKF(view && view->res.anomaly_fmt == KOF_FMT_ELF && view->res.anomalies == 0u,
+			    "run1's view: the engine's word is the parent's (none): fmt %d word %llx", view ? view->res.anomaly_fmt : -1,
+			    view ? (unsigned long long)view->res.anomalies : 0ull);
+		}
+		if (run1 && res1) {
+			offers_are_engine("run1", res1, &a1, &n1n);
+			OKF(n1n >= 1u, "run1 offers nucleo (%u)", n1n);
+			/* every condition picked from the lists passes the engine's gate on run1 */
+			scene_new(&s1, "gate_run1");
+			{
+				uint32_t m = draft_gate_offer(&E, (uint16_t)KOF_FACT_ANOMALY, res1, ow, 64u), q;
+
+				m += draft_gate_offer(&E, (uint16_t)KOF_FACT_NUCLEO, res1, ow + (m < 64u ? m : 64u), 64u);
+				for (q = 0; q < m && q < 128u; q++) {
+					char src[1200], nm[48];
+
+					snprintf(nm, sizeof nm, "r1_%u", (unsigned)q);
+					if (ow[q].fact == KOF_FACT_ANOMALY)
+						snprintf(src, sizeof src, "KOF_DIAG_NAME(%s);\nKOF_TARGET_RANGE(whole, KOF_SCAN_ALL);\n"
+							 "KOF_DEFINE_STR(e, \"ELF\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);\nKOF_DIAG_FIND(m0, KOF_FIND_ANY, whole, e);\n"
+							 "KOF_DIAG_HAS_ANOMALY(%s, %s);\n", nm, kof_format_ident((uint8_t)(ow[q].val >> 32)),
+							 kof_parser_of((uint8_t)(ow[q].val >> 32))->anomaly_name((unsigned)(ow[q].val & 63u)));
+					else
+						snprintf(src, sizeof src, "KOF_DIAG_NAME(%s);\nKOF_TARGET_RANGE(whole, KOF_SCAN_ALL);\n"
+							 "KOF_DEFINE_STR(e, \"ELF\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);\nKOF_DIAG_FIND(m0, KOF_FIND_ANY, whole, e);\n"
+							 "KOF_DIAG_HAS_NUCLEO(%s);\n", nm, kof_dsrc_cap_word((uint16_t)ow[q].val));
+					{
+						char p[700];
+
+						snprintf(p, sizeof p, "%s/%s.c", s1.gen, nm);
+						(void)write_file(p, src, strlen(src));
+					}
+					total++;
+				}
+			}
+			OKF(build(&s1) == 0, "the run1 gates build");
+			{
+				kof_engine *eng = keng_open(s1.db);
+				kof_scanner *scn = eng ? kscan_new(eng) : NULL;
+				struct gstate *g = calloc(1, sizeof *g);
+
+				if (scn && g) {
+					uint32_t q;
+
+					gstate_scan(scn, b1, n1, g);
+					for (q = 0; q < total; q++) {
+						char nm[48];
+						uint8_t gs = 0;
+
+						snprintf(nm, sizeof nm, "r1_%u", (unsigned)q);
+						if (gstate_of(g, nm, &gs) == KOF_DIAG_ST_MATCH && gs == KOF_GATE_YES)
+							yes++;
+						else
+							printf("    %s: state %d gate %u\n", nm, gstate_of(g, nm, &gs), gs);
+					}
+				}
+				free(g);
+				kscan_free(scn);
+				keng_close(eng);
+			}
+			OKF(total >= 1u && yes == total, "every condition picked from run1's lists passes the engine's gate on run1: %u of %u", yes,
+			    total);
+		}
+		free_draft();
+		kdet_run_free(run1);
+		free(b1);
+	}
+}
+
 int main(void)
 {
 	if (access(builder, X_OK) != 0) {
@@ -1236,6 +1595,7 @@ int main(void)
 	block_units();
 	options();
 	refusals();
+	gate_draft();
 	if (!failures)
 		rm_all(root);       /* a failing run leaves its scratch tree for whoever reads the failure */
 	if (failures) {

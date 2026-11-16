@@ -17,6 +17,7 @@
 #include "scan_norm_endian.h"
 #include "../analyzers/genome_obj.h"
 #include "../analyzers/normalize/executables.h"
+#include "../kofcore/kofdebug.h"
 #include <genotype/image/elf_types.h>
 #include <phenotype/diag_scan.h>
 #include <string.h>
@@ -63,13 +64,18 @@ int sx_endian_begin(struct kof_scanner *sc, struct kof_obj_ctx *ctx, kof_buf buf
 	kof_genome_obj(ctx, &g);
 	if (!kgenome_obj_big_endian(&g))
 		return 0;       /* little-endian: nothing here may change a byte */
-	if (!rule_can_use_view(sc, ctx))
+	if (!rule_can_use_view(sc, ctx)) {
+		KOF_TRACE("[norm] endian: big-endian, but no loaded rule could use the twin - skipped\n");
 		return 0;
+	}
 	en->eligible = 1;
 	/* An architecture with no twin keeps its order; only UTF-16BE is handled. */
-	if (!kgenome_endian_has_twin(g.arch))
+	if (!kgenome_endian_has_twin(g.arch)) {
+		KOF_TRACE("[norm] endian: big-endian, architecture has no twin order - only wide text is handled\n");
 		return 1;
+	}
 	st = kgenome_endian_plan_build(buf, &g, &en->plan);
+	KOF_TRACE("[norm] endian: twin plan built, %u byte(s) dropped as overlapping\n", en->plan.dropped);
 	/* A cut header is the parse's finding already; any other incomplete answer
 	 * is ours to say, because the view will be the object half in each order.
 	 * So is a span the plan refused because the object's tables overlap: the plan counted them
@@ -149,5 +155,6 @@ void sx_endian_finish(struct kof_scanner *sc, struct kof_obj_ctx *ctx, kof_buf b
 	/* The swap ran and changed nothing: a view that was not needed. */
 	if (en->ran && !en->applied && !en->wide_runs)
 		return;
+	KOF_TRACE("[norm] endian: a big-endian view was needed and was not produced - limit said\n");
 	oc_scan_limit(sc);
 }

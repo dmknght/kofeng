@@ -326,11 +326,13 @@ uint16_t kgenome_nucleo_cap_generic(uint16_t cap);
  * the syscall sweep asked by NAME with a third list again. Which link could
  * form then depended on which route had run rather than on the program.
  *
- * `nm` IS THE ONE PLACE A NAME STILL DECIDES, and it is needed: mmap and
- * mprotect are one capability - an executable mapping - and only the first
- * is a constructor. mprotect is HANDED a mapping and returns a status, so
- * recording its return value as the object would link everything after it
- * to a zero. NULL means the caller has no name, and the common case for a
+ * `nm` CHOOSES THE ROW, and the row answers (kgenome_nucleo_row_hands_on): mmap
+ * and mprotect are one capability - an executable mapping - and only the first
+ * is a constructor; VirtualProtect returns a BOOL and ZwAllocateVirtualMemory an
+ * NTSTATUS, and closesocket a status, though their capabilities construct. A
+ * name is looked for in the ELF table, then the PE table (the two the routes
+ * that pass one read). NULL, or a name no table has, means the capability's
+ * answer (kgenome_nucleo_cap_role's shape), and the common case for a
  * capability that constructs is that it constructs.
  */
 int kgenome_nucleo_hands_on(uint16_t cap, const char *nm);
@@ -376,5 +378,80 @@ uint16_t kgenome_nucleo_cap_of_call(unsigned target, const char *name, const uin
 
 /* And back: the word for an id, or NULL. */
 const char *kgenome_nucleo_name_of(uint16_t id);
+
+/*
+ * ===== THE ROW OF A CALL AND ITS SHAPE (2026-11-15, step 1a of the partition redesign) =====
+ *
+ * WHICH ARGUMENT IS WHICH INPUT, WHAT THE RESULT IS, WHICH ARGUMENT IS CODE THE SYSTEM WILL CALL - per API SPELLING, because the
+ * spelling decides it and the capability does not: one capability covers WinExec (command line in argument 0), CreateProcessA (1)
+ * and ShellExecuteA (2); VirtualAlloc (returns the region), VirtualProtect (a BOOL) and ZwAllocateVirtualMemory (an NTSTATUS, the
+ * region through argument 1). These were five answers in five places (the argument roles by capability, "hands on" by capability
+ * with one name exempted, the kernel symbol name's argument by capability, a list of names whose success is zero, and a list of
+ * names that do not return); they are one row now, written at the row's line in nucleo_names_<target>.c (KGENOME_SHAPE,
+ * nucleo_private.h) and generated into nucleo_index.c, and the per-capability questions (kgenome_nucleo_cap_role,
+ * kgenome_nucleo_hands_on, kgenome_nucleo_name_arg) answer from the same generated table.
+ *
+ * A ROW ID is a position over the tables laid end to end, 1-based (the id kgenome_nucleo_name_id gives); 0 is "no row". A row may have NO capability: it makes no node, and is there for what it says about the call (an indirect entry,
+ * a released object, an argument a later analysis reads).
+ */
+enum kgenome_nucleo_res {
+	KGENOME_NUCLEO_RES_STATUS = 0,   /* a status the caller tests: not an object                        */
+	KGENOME_NUCLEO_RES_STATUS0,      /* a status whose success value is exactly 0 (errno style, NTSTATUS) */
+	KGENOME_NUCLEO_RES_VALUE,        /* a number that is data (a count, a port): not an object            */
+	KGENOME_NUCLEO_RES_HANDLE,       /* an object the system keeps: later calls are handed it            */
+	KGENOME_NUCLEO_RES_POINTER,      /* memory the call made or found                                      */
+	KGENOME_NUCLEO_RES_CODEPTR,      /* the address of code                                                */
+	KGENOME_NUCLEO_RES_VOID,         /* nothing                                                             */
+	KGENOME_NUCLEO_RES_NORET         /* the call does not return                                           */
+};
+#define KGENOME_NUCLEO_ARG_NONE 0xffu
+/* How an entry argument holds the code: the argument is the address; a field of the struct it points at is; it is code in the process
+ * another argument names (CreateRemoteThread), so an entry of THIS image only when that process is this one. */
+#define KGENOME_NUCLEO_ENTRY_DIRECT 1u
+#define KGENOME_NUCLEO_ENTRY_FIELD  2u
+#define KGENOME_NUCLEO_ENTRY_REMOTE 3u
+
+/* The row `sym` is in `target`'s table, with or without a capability; 0 when none. An `@` ends the name, as for the lookups above. */
+uint16_t kgenome_nucleo_row_of(unsigned target, const char *sym);
+/* The row's capability (KGENOME_NUCLEO_NONE for a fact-only row, or for row 0). */
+uint16_t kgenome_nucleo_row_cap(uint16_t row);
+/* The role argument `i` plays (enum kgenome_diag_role, phenotype/diag_vocab.h), 0 when none or out of range. */
+uint8_t kgenome_nucleo_row_role(uint16_t row, unsigned i);
+/* Whether argument `i`'s input is a field of what it points at (KGENOME_SHAPE's `field`). */
+int kgenome_nucleo_row_field(uint16_t row, unsigned i);
+/* enum kgenome_nucleo_res. */
+unsigned kgenome_nucleo_row_res(uint16_t row);
+/*
+ * 1 when the result is an object a later call is handed (HANDLE, POINTER, CODEPTR). A VALUE is data and a status is no object.
+ *
+ * TODO(owner) Q3 - which nodes a reached link walks THROUGH. The matcher (detectors/linkage/kofdiag.c, FLOW_DATA) walks on from a node it
+ * entered through VALUE, SOURCE, FD or TARGET and stops at PATH, because "the node hands back a NEW object, not the path's value". With
+ * this table a thread's parameter and an exec's command line are VALUE, so a walk would continue through CreateThread to the users of
+ * the thread handle, which does not carry the parameter's data. Default: unchanged until decided (no shipped diagnose names a role).
+ * Alternative: the walk asks the row - it does not go on through a node whose result is a new object (res handle, pointer, codeptr)
+ * whatever role it entered by. Either is an engine change in kofdiag.c, not in this table.
+ */
+int kgenome_nucleo_row_hands_on(uint16_t row);
+/* The `k`-th argument (k 0 or 1) the object the call makes is written through, or KGENOME_NUCLEO_ARG_NONE. */
+unsigned kgenome_nucleo_row_out(uint16_t row, unsigned k);
+/* The argument whose object the call ends, or KGENOME_NUCLEO_ARG_NONE. */
+unsigned kgenome_nucleo_row_release(uint16_t row);
+/*
+ * THE INDIRECT ENTRY OF A CALL, for the function partition: the argument that is code the system will call (a thread start, an APC,
+ * a service handler, a hook procedure, a timer or enumeration callback), or KGENOME_NUCLEO_ARG_NONE. `*how` (may be NULL) is
+ * KGENOME_NUCLEO_ENTRY_*. What the partition does with it is its own strategy (fntab); this says only which argument.
+ */
+unsigned kgenome_nucleo_entry_arg(uint16_t row, unsigned *how);
+/* The role argument `i` plays at a call of capability `cap` that has no row (a syscall, a route that knows only the capability). */
+uint8_t kgenome_nucleo_cap_role(uint16_t cap, unsigned i);
+/* The one answer for a call: its row's when it has one (row != 0), its capability's otherwise. */
+uint8_t kgenome_nucleo_call_role(uint16_t cap, uint16_t row, unsigned i);
+int kgenome_nucleo_call_hands_on(uint16_t cap, uint16_t row);
+
+/*
+ * THE NAME OF AN IMPORT BY ORDINAL, for the two libraries whose ordinals the Windows Sockets ABI fixes (ws2_32, wsock32), or NULL.
+ * `dll` is the import's library as the import table spells it (case and a ".dll" do not matter). See nucleo_ordinal.c.
+ */
+const char *kgenome_nucleo_ordinal_name(const char *dll, uint32_t ordinal);
 
 #endif

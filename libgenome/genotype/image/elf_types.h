@@ -388,6 +388,13 @@ int kgenome_elf_seg_is_code(const struct kgenome_elf_seg *g);
 uint64_t kgenome_elf_seg_extent(const struct kgenome_elf_seg *g, uint64_t obj_size,
 			    uint64_t *off);
 int kgenome_elf_sec_is_code(const struct kgenome_elf_sec *s);
+/*
+ * ELF-SEC-EXEC-CODE's cross-check: whether `va` lands inside some executable
+ * PT_LOAD segment of `e` (kgenome_elf_seg_is_code), the segment view above, not
+ * just a section's SHF_EXECINSTR flag. See elf_image.c for why this is shared
+ * rather than re-derived at each caller (kgenome_fntab_symtab today).
+ */
+int kgenome_elf_va_is_code(const struct kgenome_elf_info *e, uint64_t va);
 
 /* Is section `i` executable code that is NOT the program's own: a section other
  * than the one the entry point is in (.init, .fini, the PLT, whatever a linker

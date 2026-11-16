@@ -350,6 +350,30 @@ static const struct kgenome_textual_script_lang *page_lang(const struct kgenome_
 }
 
 /*
+ * THE BLOCK SYNTAX OF THE ISLAND AT `at` (textual.h): the language page_lang chose for the page, or the one a <script runat="server"> tag
+ * at `at` names - the choice kgenome_textual_page_lex makes for the same island, read from the same two functions, so the island builder
+ * (celllysis/script_islands.c) counts its blocks in the language the lexer read it in.
+ */
+enum kgenome_textual_block_syntax kgenome_textual_page_syntax_of(const struct kgenome_textual_page *pg, const uint8_t *p, uint32_t n,
+								  uint32_t at)
+{
+	const struct kgenome_textual_script_lang *l = page_lang(pg, p, n);
+	struct page_scan ps;
+	struct page_script sc;
+
+	scan_init(&ps, n);
+	if (pg->server_script && at + 7u < n && p[at] == '<' && script_tag(&ps, p, n, at, &sc) && sc.server && sc.has_lang && pg->langs) {
+		const struct kgenome_textual_script_lang *sl = lang_pick(pg, p, sc.lvs, sc.lve);
+
+		if (sl)
+			l = sl;
+	}
+	if (!l)
+		return KGENOME_TEXTUAL_SYN_BRACES;         /* a page whose body is its one language: java (jsp) */
+	return l->lexer == KGENOME_TEXTUAL_PAGE_VB ? KGENOME_TEXTUAL_SYN_VB : KGENOME_TEXTUAL_SYN_BRACES;
+}
+
+/*
  * THE PAIRS OF BYTES THAT CLOSING UP WOULD MAKE SOMETHING ELSE OF, for a page whose island may be in any of
  * vbscript, jscript and c# (the row has one glue and the page is read before it is known which). Each
  * group is a pair some one of the three reads as a longer token or as something that is not code:

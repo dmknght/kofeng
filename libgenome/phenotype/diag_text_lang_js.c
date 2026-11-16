@@ -3,8 +3,11 @@
  *
  * A name is a bare identifier ("$" is a letter), so a variable is a name that is no call, member or keyword. Calls are qualified ("child_process.exec"),
  * `require('m')` names a module, and a call by a value is `window[n](...)`. A line break ends a statement (automatic semicolon) unless the line
- * goes on. `new ActiveXObject("ProgID")` makes a COM object, whose members are the VBS table's rows (`classfns`). Functions: `function`, and `name(...) {` / `=> {` by shape. No string functions: the evaluator follows literals, "+", variables and
- * the module a require names - see the report for the list js would need (String.fromCharCode, atob, unescape, split/reverse/join, replace).
+ * goes on. `new ActiveXObject("ProgID")` makes a COM object, whose members are the VBS table's rows (`classfns`). Functions: `function`, and `name(...) {` / `=> {` by shape. The evaluator follows literals, "+", variables, the module a require
+ * names, and the PURE-FUNCTION rows js_fn.c declares (String.fromCharCode/fromCodePoint; see that file's own header for the full list and why atob/unescape
+ * are NOT rows there - they are DECODE-capability names for the graph (nucleo_names_js.c) and decoder rows for the FORM/display path (js_lang.c) instead, so
+ * a call to them is correctly named and linked but its decoded bytes are not re-lexed as a further eval() layer - a named scope limit, not a crash, measured
+ * in tests/lib/genome/diag_text_layer_reach.c).
  */
 
 #include "diag_text_private.h"

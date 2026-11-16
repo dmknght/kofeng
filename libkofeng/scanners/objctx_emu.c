@@ -227,6 +227,9 @@ void oc_emu_diag_end(struct kof_scanner *sc, const struct oc_emu_diag *acct,
 		kgenome_diag_note(ds, KGENOME_OVER_BUDGET);
 }
 
+static uint64_t emu_pages(const struct kof_scanner *sc);
+static int emu_account(void *user, int64_t bytes);
+
 /*
  * THE PE'S API-RESOLUTION PRODUCT, made under the tree's allowance: the resolver's run
  * may execute what the tree has left (oc_emu_afford), and NULL - said - when it has
@@ -240,14 +243,34 @@ struct kgenome_diag_apihash_set *oc_emu_apihash(struct kof_scanner *sc,
 	uint64_t spent = 0;
 
 	kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(gobj, b.n));
-	kb.max_bytes = oc_scan_room(sc);
 	kb.max_insn_resolve = oc_emu_afford(sc, kb.max_insn_resolve);
 	if (!kb.max_insn_resolve)
 		return NULL;
+	/*
+	 * ONE RUN OF THE PROGRAM FROM ITS ENTRY (EA8). The resolver's machine is kept for the unpack run,
+	 * which carries it on (kof_scan_emu_unpack): it is therefore built as that run builds its own -
+	 * the same address space (emu_pages) and its pages charged to this scanner as they are taken
+	 * (emu_account). It was built with the lib's default space and charged to nothing, which a machine
+	 * that outlives the analysis cannot be.
+	 */
+	kb.max_bytes = emu_pages(sc) * KGENOME_EMU_PAGE;
+	kb.account = emu_account;
+	kb.account_user = (void *)sc;
 	kb.insn_spent = &spent;
-	a = kgenome_diag_apihash_run(gobj, b.p, b.n, imports, &kb);
+	oc_emu_kept_drop(sc);
+	a = kgenome_diag_apihash_make(&(const struct kgenome_diag_apihash_req){
+			.obj = gobj, .base = b.p, .size = b.n, .imports = imports, .budget = &kb,
+			.keep = &sc->obj.emu.kept });
 	oc_emu_charge(sc, spent);
 	return a;
+}
+
+void oc_emu_kept_drop(struct kof_scanner *sc)
+{
+	if (!sc || !sc->obj.emu.kept.em)
+		return;
+	kgenome_emu_free(sc->obj.emu.kept.em);
+	memset(&sc->obj.emu.kept, 0, sizeof sc->obj.emu.kept);
 }
 
 /*
@@ -359,6 +382,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	struct kgenome_emu *e;
 	kof_buf b;
 	int is_pe;
+	uint64_t kept_insn = 0;
 
 	if (!sc || !sc->cur.src || !ctx->file_header)
 		return 0;
@@ -474,6 +498,9 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				if (force)
 					idle = EMU_IDLE_DECLARED;
 				kb = emu_budget(sc, b.n, bi);
+				/* The machine the API-resolution run left (EA8): carried on when the request
+				 * allows it, its instructions already charged to the tree. */
+				kept_insn = sc->obj.emu.kept.em ? kgenome_emu_insn_count(sc->obj.emu.kept.em) : 0u;
 				e = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
 						.file = b.p,
 						.n = b.n,
@@ -487,7 +514,10 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 						.n_oep = sc->cur.n_xw,
 						.decl = &sc->pend.decl,
 						.rep = &rep,
+						.resume = sc->obj.emu.kept.em ? &sc->obj.emu.kept : NULL,
 					});
+				if (rep.resumed)
+					sc->obj.emu.spent = kept_insn;
 			}
 		}
 	} else {
@@ -669,7 +699,10 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	 * module. Either way `force` means the same thing to the run: skip the
 	 * entropy gate, which is an estimate about objects nobody spoke for.
 	 */
-	return kof_scan_emu_unpack(ctx, vouched || kof_emu_stance_asked(sc->obj.emu.stance));
+	/* KOF_EMU_ONLY is a person asking to see the run "gate or no gate" (kofoption.h): it is a forced run like an ask
+	 * (EMU-ONLY-1, fixed 2026-11-15: it used to fall through to the entropy gate and run nothing on a small stager). */
+	return kof_scan_emu_unpack(ctx, vouched || kof_emu_stance_asked(sc->obj.emu.stance) ||
+					kof_emu_stance_only(sc->obj.emu.stance));
 }
 
 int oc_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,

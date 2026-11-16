@@ -103,9 +103,17 @@ static void bar_at_suite(void)
 
 						n++;
 						CK(v && hz);
-						/* one bright shape for a covered cell, the same dim one for a free cell, in either direction */
+						/*
+						 * One bright shape for a covered cell, the same dim one for a free cell, in either
+						 * direction. A FULLY covered cell is bright in both directions but not the SAME glyph
+						 * since the scrollbar fix of 2026-11-06 (kv_scrollbar.c bar_cell): the vertical bar's
+						 * thumb (G_THUMB, a heavy vertical stroke) read as a vertical bar crossing the
+						 * horizontal rail too, before G_THUMB_H (a heavy horizontal stroke) gave the lying-down
+						 * bar its own thumb glyph, the same split the half-cell glyphs (G_HALF_L/_R vs
+						 * G_HALF_T/_B) already had.
+						 */
 						if (lo && hi)
-							CK(!strcmp(v, hz) && strstr(v, "\033[1m"));
+							CK(strcmp(v, hz) != 0 && strstr(v, "\033[1m") && strstr(hz, "\033[1m"));
 						else if (lo || hi)
 							CK(strcmp(v, hz) != 0 && strstr(v, "\033[1m") && strstr(hz, "\033[1m"));
 						else

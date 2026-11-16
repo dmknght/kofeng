@@ -728,6 +728,23 @@ const struct kof_parser *kof_parser_of(uint8_t format)
 	return NULL;
 }
 
+/* A name is a format's when its parser spells it at some bit: NULL past the table, "?" for a row that keeps no word (an
+ * event record). 64 bits is the width of the anomaly word (kof_parser.anomalies). */
+int kof_parser_anomaly_bit(const struct kof_parser *p, const char *name)
+{
+	unsigned i;
+
+	if (!p || !p->anomaly_name || !name || !name[0] || !strcmp(name, "?"))
+		return -1;
+	for (i = 0; i < 64u; i++) {
+		const char *an = p->anomaly_name(i);
+
+		if (an && !strcmp(an, name))
+			return (int)i;
+	}
+	return -1;
+}
+
 int kof_obj_regionless(const struct kof_obj_ctx *ctx)
 {
 	return ctx->format == KOF_FMT_SCRIPT && kof_script_textual_lang(ctx->subtype) != 0;

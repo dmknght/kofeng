@@ -961,6 +961,7 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 	return t->off != 0;
 }
 
+/* KNOWN DEFECT SYM-IDX-1 (2026-11-12, R) [sev M]: `i` is checked only against address-space wrap, never against t->n_decl; an out-of-table r_sym still inside the file reads fabricated bytes as a symbol, which diag_sym.c's note_symref can attach as a fake name to real evidence. Trigger: relocation r_sym >= real symtab count. Fix: add `if (i >= t->n_decl) return 0;` after the check below. */
 int kgenome_elf_symbol_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_t i,
 		      struct kgenome_elf_symbol *s)
 {
@@ -1285,6 +1286,7 @@ const struct kgenome_elf_reloc *kgenome_elf_reloc_in(const struct kgenome_elf_re
 	return NULL;
 }
 
+/* KNOWN DEFECT SYM-ADDEND-1 (2026-11-12, R) [sev M]: assumes the compiler's standard addend (-4 x86/i386, -8 ARM), never reads the relocation's own addend; a non-standard addend computes a site matching no real instruction, so diag_sym.c's `by_at` lookup never finds it and the call's evidence drops with no status. Trigger: a .ko whose relocation addend differs from the toolchain default. Fix: read and apply the real addend instead of assuming -4/-8. */
 static uint64_t kgenome_elf_reloc_call_at(const struct kgenome_elf_info *p,
 			       const struct kgenome_elf_reloc *r)
 {

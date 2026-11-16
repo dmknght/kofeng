@@ -237,6 +237,18 @@ const uint32_t ch_fmt_cat_n = sizeof g_fmt_cat / sizeof g_fmt_cat[0];
  * answers it. Asked of the object in hand rather than from a fixed list, so the
  * menu answers for the file being looked at.
  */
+uint32_t ch_gate_offers(struct view *v, uint16_t fact, struct kof_diag_when *out, uint32_t cap)
+{
+	const struct object *ob = cur_obj(v);
+	const struct kdet_object *k;
+
+	if (!ob || v->ed.dr.n_gate >= KOF_DIAG_MAX_WHEN)
+		return 0;
+	/* The engine's answer for the object in hand: its explain run, the one the Diagnoses table reads (view_explain). */
+	k = view_explain(v, ob);
+	return k ? draft_gate_offer(&v->ed, fact, &k->res, out, cap) : 0;
+}
+
 int ch_opt_offerable(struct view *v, int k)
 {
 	uint8_t fm = cur_obj(v)->ctx.format;

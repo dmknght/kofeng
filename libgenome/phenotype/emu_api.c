@@ -60,8 +60,6 @@ struct kgenome_emu *kgenome_emu_new(const struct kgenome_emu_cfg *cfg)
 	/* Not a page base - page bases are aligned - so the first fetch always
 	 * takes the slow path and checks execute permission. See the fetch. */
 	e->fetch_page = ~(uint64_t)0;
-	e->mxcsr = 0x1f80u;             /* the reset value: all exceptions masked */
-	e->fcw = 0x037fu;               /* the x87 reset value: all exceptions masked, 64 bit precision, round to nearest */
 	e->max_insn = cfg && cfg->max_insn ? cfg->max_insn : KGENOME_EMU_DEF_MAX_INSN;
 	e->insn_spent = cfg ? cfg->insn_spent : NULL;
 	e->idle = KGENOME_EMU_IDLE;
@@ -69,35 +67,10 @@ struct kgenome_emu *kgenome_emu_new(const struct kgenome_emu_cfg *cfg)
 	/* 0 means 64: a caller written before the field existed asks for what
 	 * it always got. */
 	e->bits = (cfg && cfg->bits == 32) ? 32u : 64u;
-	/*
-	 * THE VSYSCALL PAGE, WHICH A REAL KERNEL ALWAYS PROVIDES.
-	 *
-	 * A runtime with no vDSO in its auxv falls back to calling the fixed
-	 * addresses here, and finding nothing at them looks like a wild jump to
-	 * 0xffffffffff600000 rather than the ordinary fallback it is. Three
-	 * entries at their architectural offsets, each doing the syscall it
-	 * stands for: mov eax, nr / syscall / ret.
-	 */
-	{
-		static const uint16_t nrs[3] = { 96, 201, 309 }; /* gettimeofday,
-								 * time, getcpu */
-		uint8_t pg[KGENOME_EMU_PAGE];
-		unsigned k;
-
-		memset(pg, 0xcc, sizeof pg);
-		for (k = 0; k < 3; k++) {
-			uint8_t *p = pg + k * 0x400u;
-
-			p[0] = 0xb8;                             /* mov eax, */
-			p[1] = (uint8_t)nrs[k];
-			p[2] = (uint8_t)(nrs[k] >> 8);
-			p[3] = 0; p[4] = 0;
-			p[5] = 0x0f; p[6] = 0x05;                /* syscall */
-			p[7] = 0xc3;                             /* ret     */
-		}
-		kgenome_emu_map(e, KGENOME_EMU_VSYSCALL_BASE, pg, sizeof pg, sizeof pg,
-			    KGENOME_EMU_R | KGENOME_EMU_X);
-	}
+	/* The architecture: its entry of the dispatch table, and the state it starts in and the pages its
+	 * loader assumes (x86: the control words and the vsyscall page - see x86_init). */
+	e->arch = kgenome_emu_arch_of(cfg);
+	e->arch->init(e);
 	return e;
 }
 
@@ -504,6 +477,28 @@ void kgenome_emu_set_max_insn(struct kgenome_emu *e, uint64_t n)
 {
 	if (e && n > e->max_insn)
 		e->max_insn = n;
+}
+
+enum kgenome_emu_stop kgenome_emu_last_stop(const struct kgenome_emu *e)
+{
+	return e ? e->stop : KGENOME_EMU_STOP_BUDGET;
+}
+
+int kgenome_emu_adopt(struct kgenome_emu *e, const struct kgenome_emu_cfg *cfg)
+{
+	if (!e || !cfg)
+		return -1;
+	/* What the machine took was charged to the account it was built with: another account would be
+	 * told of a release it never granted. */
+	if (cfg->account != e->account || cfg->account_user != e->account_user)
+		return -1;
+	e->insn_spent = cfg->insn_spent;
+	/* Exact, not raised: the first owner's ceiling (a resolver's slices) is not the new owner's. */
+	if (cfg->max_insn)
+		e->max_insn = cfg->max_insn;
+	e->deadline_ms = 0;
+	e->started_ms = 0;
+	return e->stop == KGENOME_EMU_STOP_BUDGET || e->stop == KGENOME_EMU_STOP_STALLED;
 }
 
 uint64_t kgenome_emu_insn_count(const struct kgenome_emu *e) { return e ? e->insn : 0; }

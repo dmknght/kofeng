@@ -219,6 +219,20 @@ static void merge_sites(struct kgenome_diag_scan *s)
 				s->hit[i].in[k].from = map[f];
 		}
 	/*
+	 * (the inputs past a node's view too, and their hash, whose keys hold the producers.) TODAY A NO-OP, AND KEPT: no test can tell it from
+	 * its absence (mutant M25, lineage3), because no route makes an input past a view before this fold that names a node the fold moves. The
+	 * argument: the nodes are appended route by route in the order of diag_scenarios (sweep, symbol, emulate, apihash), the only duplicates
+	 * the fold removes are the emulate route's (its nodes meet the sweep's at the same site), so every folded node comes after every node of
+	 * the sweep and the symbol route, and map[f] == f below it; an input past a view exists before the fold only where a route gave one
+	 * node five inputs - the sweep (a main producer and KGENOME_DIAG_ORG_ALT = 3 alternates per role, two roles) or the symbol route - and
+	 * those name their own route's nodes; the emulate route gives each of its nodes one input a role. A route that folds earlier nodes, or
+	 * links past a view into later ones, makes this line the one that keeps the producers right.
+	 */
+	for (j = 0; j < s->n_xin; j++)
+		if (s->xin[j].in.from < s->n_hit)
+			s->xin[j].in.from = map[s->xin[j].in.from];
+	(void)kgenome_diag_links_rehash(s);
+	/*
 	 * 3. THE UNION OF WHAT THE ROUTES SAW. Flags and bits are
 	 * observations, so either route seeing one is enough; the attribute
 	 * is a value, so the first one that resolved it stands rather than
@@ -278,6 +292,22 @@ static void merge_sites(struct kgenome_diag_scan *s)
 			else
 				(void)kgenome_diag_note_in_how(s, h, fi->from, fi->role, fi->kind, fi->how);
 		}
+		/* and those past its view (copied: noting one may grow the table under the loop) */
+		{
+			const uint32_t nx = s->n_xin;
+
+			for (j = 0; j < nx; j++) {
+				struct kgenome_diag_in fi;
+
+				if (s->xin[j].hit != i)
+					continue;
+				fi = s->xin[j].in;
+				if (fi.how == KGENOME_DIAG_LINK_PROVEN)
+					(void)kgenome_diag_note_in_seen(s, h, fi.from, fi.role, fi.kind);
+				else
+					(void)kgenome_diag_note_in_how(s, h, fi.from, fi.role, fi.kind, fi.how);
+			}
+		}
 	}
 	/*
 	 * 3b. THE NAMES FOLLOW THE NODES. Each kept name carries the index of
@@ -316,11 +346,26 @@ static void merge_sites(struct kgenome_diag_scan *s)
 			kgenome_diag_note(s, KGENOME_NOMEM);
 		}
 	}
-	/* 4. close the gaps */
+	/* 4. close the gaps; an input past a view goes with its node, and one of a node folded away was noted on its representative above */
+	{
+		uint32_t w = 0;
+
+		for (j = 0; j < s->n_xin; j++) {
+			const uint32_t o = s->xin[j].hit;
+
+			if (o >= s->n_hit || rep[map[o]] != o)
+				continue;
+			s->xin[w] = s->xin[j];
+			s->xin[w++].hit = map[o];
+		}
+		s->n_xin = w;
+	}
 	for (j = 0; j < n; j++)
 		if (rep[j] != j)
 			s->hit[j] = s->hit[rep[j]];
 	s->n_hit = n;
+	(void)kgenome_diag_links_rehash(s);
+	kgenome_diag_links_settle(s);
 	free(map);
 	free(rep);
 }
@@ -412,6 +457,8 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	s->seq = in ? in->seq : NULL;
 	s->n_seq = in ? in->n_seq : 0;
 	s->lineage_stages = in ? in->lineage_stages : 0;
+	s->keep_caps = in ? in->keep_caps : NULL;
+	s->n_keep_caps = in ? in->n_keep_caps : 0;
 	for (pass = 0; pass < 2u; pass++) {
 		for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 			const struct diag_scenario *d = &diag_scenarios[i];
@@ -435,6 +482,8 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	 * (a tool that keeps a scan alive to show it must not keep an object's worth of decode with it). */
 	if (s->own_walk)
 		kgenome_diag_walk_trim(s->own_walk);
+	kgenome_diag_links_settle(s);
+	kgenome_diag_nodes_keep(s);     /* (only when the table refused a node) */
 	return s;
 }
 
@@ -451,6 +500,7 @@ struct kgenome_diag_scan *kgenome_diag_scan_text(const struct kgenome_diag_text_
 	kgenome_diag_run_text(s, rq);
 	KOF_TIME_END(KOF_T_DIAG_TEXT);
 	s->ran |= KGENOME_DIAG_RUN_TEXT;
+	kgenome_diag_links_settle(s);
 	return s;
 }
 
@@ -766,6 +816,9 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	free(s->rcall);
 	free(s->oblig);
 	free(s->noret_at);
+	free(s->xin);
+	free(s->xin_tab);
+	free(s->xin_ord);
 	free(s->hit);
 	free(s);
 }

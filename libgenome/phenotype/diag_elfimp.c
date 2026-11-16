@@ -46,6 +46,7 @@ struct ei_imp {
 	uint64_t slot;          /* the address the call goes through (the sort key) */
 	uint64_t nameoff;       /* file offset of the symbol's name */
 	uint16_t cap;
+	uint16_t row;           /* the vocabulary's row of the import (kgenome_diag_hit.row) */
 	uint8_t  noret;         /* an import that never returns (exit, abort ...): no node, a call that ends its block */
 };
 
@@ -85,17 +86,18 @@ static int ei_grow(struct ei_ctx *c, void **v, uint32_t *cap, uint32_t n, size_t
 static void ei_gather(void *user, uint64_t slot, uint64_t nameoff, uint32_t type, const char *name)
 {
 	struct ei_ctx *c = user;
-	uint16_t cap;
+	uint16_t cap, row;
 	int nr;
 
 	kgenome_cell_plt_import(&c->plt, slot, type);
-	cap = kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, name);
-	nr = cap == KGENOME_NUCLEO_NONE && kgenome_diag_name_is_noreturn(name);
+	cap = kgenome_nucleo_name_lookup(KGENOME_NUCLEO_T_ELF, name, &row);
+	nr = cap == KGENOME_NUCLEO_NONE && kgenome_nucleo_row_res(row) == KGENOME_NUCLEO_RES_NORET;
 	if ((cap == KGENOME_NUCLEO_NONE && !nr) || !ei_grow(c, (void **)&c->imp, &c->cap_imp, c->n_imp, sizeof *c->imp))
 		return;
 	c->imp[c->n_imp].slot = slot;
 	c->imp[c->n_imp].nameoff = nameoff;
 	c->imp[c->n_imp].cap = cap;
+	c->imp[c->n_imp].row = row;
 	c->imp[c->n_imp].noret = (uint8_t)nr;
 	c->n_imp++;
 }
@@ -156,6 +158,8 @@ static void ei_add_node(struct ei_ctx *c, uint64_t at, const struct ei_imp *im)
 		return;
 	}
 	h = kgenome_diag_hit_add(c->s, at, im->cap, 0);
+	if (h)
+		h->row = im->row;
 	if (h && im->nameoff) {
 		h->symref = im->nameoff;
 		h->bits |= KGENOME_DIAG_H_SYMREF;

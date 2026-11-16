@@ -20,6 +20,16 @@
  *   NOTHING TO ASK  an object of no format, a context with no scanner: every one answers "nothing"
  *   EMULATE/SCRIPT  no source, wrong format: nothing attempted, nothing made; release is idempotent
  *   MUTATION        units of a plain buffer: sum within the buffer, a callback that stops the walk stops it
+ *   NO LIVE SCANNER  CFG-CRASH-1 (Merge 160) and its sibling (Merge 165's kof_scan_mutation_units
+ *                   unification): kofexamine/kofviewer/kofeditor build their own ctx through
+ *                   kof_inspect_identify (kofinspect.c), which never sets ctx->priv, so kof_scan_of(ctx)
+ *                   answers NULL for every object those tools ever open - a different precondition than
+ *                   every group above, which attaches through kof_mod_attach the way a real scan does.
+ *                   t_cfg_crash1_regression drives the exact three scan.h entry points kofexamine
+ *                   reaches (grepped 2026-11-10: kof_scan_resolve_range, kof_scan_mutation_units,
+ *                   kof_scan_mutation_feed) through such a ctx, over a REAL ELF object with a real
+ *                   function of enough reachable blocks to be CFG-signed - the exact shape that reached
+ *                   mutation_feed_func's unconditional kof_scan_of(f->ctx) dereference before Merge 160.
  *
  * Every group that gives a function a context it was not made for runs in a forked child with an
  * alarm (hostile_engine.h), so a fault is a result.
@@ -27,6 +37,7 @@
 
 #include "hostile_engine.h"
 #include "known_miss.h"
+#include "cfg_scene.h"
 
 #include "../../libkofeng/scanners/scan.h"
 #include "../../libkofeng/scanners/scan_state.h"
@@ -34,8 +45,14 @@
 #include "../../libkofeng/detectors/mutations/kofmutation.h"
 #include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
+#include "../../libkofeng/analyzers/cfgsign.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
+#include "../../libkofeng/analyzers/parsers/binaries/funcs.h"
 #include "../../libkofeng/databases/pack/dbtables.h"
+#include "../../kofexamine/kofinspect_private.h"
 #include <phenotype/diag_scan_state.h>
+#include <phenotype/diag_scan.h>
+#include <kofmod/elf.h>
 
 static kof_engine *eng;
 static const char *dbdir = "build/release/databases";
@@ -134,6 +151,66 @@ static void t_ranges(void)
 	   "ALL is the whole object and needs no resolver");
 	c.obj_size = 0;
 	CK(kof_scan_resolve_range(&c, KOF_SCAN_ALL, &fixed) == 0, "an empty object has no extent");
+
+	/*
+	 * ALL IS THE WHOLE OBJECT FOR A SCRIPT TOO (SP-14, owner 2026-11-14: "scan all chắc chắn cả file rồi"). These rows pinned the
+	 * opposite (Merge 161: ALL answered a page's island code with the tags and the markup cut off, to every caller - module searches,
+	 * the pattern sweep, gather) and were RED on the fix; the islands are the similarity cut's alone now, read from the object's one
+	 * product (oc_script_islands, tests/lib/genome/script_islands.c and tests/unit/script_island_parts.c). Why the old rows missed
+	 * that it was a defect: (c) they checked the extents the code gave, not what a caller of ALL - a marker over "<?php", a marker in
+	 * the markup - was owed.
+	 */
+	{
+		static const char php[] = "<?php\necho 1;\n?>";
+		static const char page[] = "html before\n<?php\necho 1;\n?>\nhtml after";
+		static const char notag[] = "no php tag anywhere in this file at all, just text";
+		static const char two[] = "<?php echo 1; ?> middle <?php echo 2; ?>";
+		static const char *const texts[] = { php, page, notag, two };
+		uint32_t t;
+
+		c.format = KOF_FMT_SCRIPT;
+		c.subtype = KOF_SCRIPT_PHP;
+		for (t = 0; t < 4u; t++) {
+			sc->match.m.data = kof_buf_make(texts[t], strlen(texts[t]));
+			c.obj_size = strlen(texts[t]);
+			CK(kof_scan_resolve_range(&c, KOF_SCAN_ALL, &fixed) == 1 && ext[0].off == 0 && ext[0].len == c.obj_size,
+			   "SP-14: ALL on a php object is the whole object (text %u: off=%llu len=%llu of %llu)", t,
+			   (unsigned long long)ext[0].off, (unsigned long long)ext[0].len, (unsigned long long)c.obj_size);
+		}
+
+		/* A LANGUAGE WITH NO TAG CONCEPT (shell) is byte for byte unaffected: still the whole buffer. */
+		c.subtype = KOF_SCRIPT_SHELL;
+		sc->match.m.data = kof_buf_make(notag, sizeof notag - 1u);
+		c.obj_size = sizeof notag - 1u;
+		CK(kof_scan_resolve_range(&c, KOF_SCAN_ALL, &fixed) == 1 && ext[0].off == 0 && ext[0].len == c.obj_size,
+		   "a language with no tag concept at all: still the whole object, unaffected");
+
+		/* ELF/PE (kind != SCRIPT) is byte for byte unaffected: the regression guard that matters most. */
+		c.format = KOF_FMT_ELF;
+		c.obj_size = 1000;
+		CK(kof_scan_resolve_range(&c, KOF_SCAN_ALL, &fixed) == 1 && ext[0].off == 0 && ext[0].len == 1000,
+		   "ELF is still the whole object, completely unaffected by the script-only island logic");
+
+		/* NO LIVE SCANNER (a kofexamine-built object: kof_inspect_identify never sets `.priv`): the same whole object, never a crash. */
+		{
+			struct kof_obj_ctx nc;
+
+			memset(&nc, 0, sizeof nc);
+			nc.format = KOF_FMT_SCRIPT;
+			nc.subtype = KOF_SCRIPT_PHP;
+			nc.obj_size = sizeof php - 1u;
+			CK(kof_scan_of(&nc) == NULL, "sanity: a context nothing attached has no live scanner");
+			CK(kof_scan_resolve_range(&nc, KOF_SCAN_ALL, &fixed) == 1 &&
+			   ext[0].off == 0 && ext[0].len == nc.obj_size,
+			   "no live scanner: the plain whole-object answer, not a crash and not an attempt to reach bytes that are not there");
+		}
+
+		/* restore for the resolver tests below, unaffected by any of the above */
+		c.format = 0;
+		c.subtype = 0;
+		sc->match.m.data = kof_buf_make(NULL, 0);
+	}
+
 	c.obj_size = 1000;
 	CK(kof_scan_resolve_range(&c, 2u, &fixed) == 0, "no resolver: nothing identified the object, only ALL is answerable");
 	c.resolve_scan = three_resolver;
@@ -504,6 +581,202 @@ static void t_prod_sync(void)
 	kof_scan_free(sc);
 }
 
+/* ---- CFG-CRASH-1 class: the exact kofexamine/kofviewer precondition --------------------------- */
+
+/*
+ * A unit with no CFG signature (and the one callback both real callers use to ask for it): the
+ * same pattern kofexaminer_blocks.c's blk_func and kv_mutation.c's mtn_count_cb/mtn_take_cb use -
+ * a function unit is signed through kof_cfgsign_function with `rq.ctx` the tool's own no-scanner
+ * ctx, never through kof_scan_of.
+ */
+/* FLIPPED 2026-11-15 (owner: CFG signing DISABLED): the function units now have no signature (KGENOME_MUTATION_SIG_NONE) and are counted in n_nosig; the
+ * signing branch below, which reached the signed and the below-floor states, is inside #if 0 with kof_cfgsign_function. RED on the old code: n_nosig stayed 0. */
+struct cfg_crash1_seen {
+	const struct kof_obj_ctx *ctx;
+	kof_buf b;
+	unsigned n_units, n_signed, n_below_floor, n_nosig;
+};
+
+static int cfg_crash1_unit_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint32_t side,
+			      const struct kgenome_func *first)
+{
+	struct cfg_crash1_seen *s = user;
+
+	(void)region; (void)off; (void)len; (void)side;
+	s->n_units++;
+	if (first && kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_NONE)
+		s->n_nosig++;
+	/* DISABLED by the owner 2026-11-15: the CFG signing of a function unit. To re-enable: take this #if 0 out with kof_cfgsign_function's. */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
+	if (first && kgenome_mutation_signature(first) == KGENOME_MUTATION_SIG_CFG) {
+		struct kof_cfgsign_req rq;
+		struct kof_cfgsign cs;
+
+		memset(&rq, 0, sizeof rq);
+		rq.ctx = s->ctx;
+		rq.data = s->b;
+		rq.off = first->off;
+		rq.len = first->len;
+		(void)kof_cfgsign_function(&rq, &cs);
+		s->n_signed += cs.state == KOF_CFGSIGN_SIGNED;
+		s->n_below_floor += cs.state == KOF_CFGSIGN_BELOW_FLOOR;
+	}
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+	return 0;
+}
+
+/*
+ * THE REGRESSION: every scan.h entry point kofexamine/kofviewer/kofeditor reach (grepped against
+ * the whole of kofexamine/ 2026-11-10: kof_scan_resolve_range, kof_scan_mutation_units,
+ * kof_scan_mutation_feed - no other const-ctx function of scan.h has a caller there), driven
+ * through a ctx built by the REAL kof_inspect_identify (never kof_mod_attach), over a REAL ELF
+ * object (cfg_scene.h: valid bytes assembled at run time, not a hand-faked struct) holding one
+ * function of 3 reachable blocks (below KGENOME_CFG_ANCHOR_MIN, the degraded answer) and one of 6
+ * (matches botnet_mirai_flood_05's own minimum, Merge 164) - the second is CFG-signed, which is
+ * what reaches mutation_feed_func's `kof_scan_of(f->ctx)` dereference, Merge 160's crash site.
+ * Run in a forked child (hostile_engine.h's own convention, already used by diag_nothing above):
+ * a fault here is the result, not the end of the binary.
+ */
+static int cfg_crash1_child(void *arg)
+{
+	static struct cs_obj o;         /* static: see cfg_sig_gen.c's own note, too big for this frame */
+	struct cs_spec g[2];
+	struct kof_obj_ctx ctx;
+	void *view = NULL;
+	const struct kof_parser *p;
+	struct kgenome_obj gobj;
+	struct kgenome_func_set fs;
+	struct kof_range extv[KOF_SCAN_MAX_EXTENTS];
+	struct kof_ext_buf eb = kof_ext_fixed(extv, KOF_SCAN_MAX_EXTENTS);
+	struct cfg_crash1_seen seen;
+	kof_buf b;
+	uint32_t i, n;
+	static const uint32_t pool5[5] = { 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u, 0x55555555u };
+	struct kof_mutation_block mblk;
+	struct kof_mutation_set *set;
+	struct kof_mutation_ctx mc;
+
+	(void)arg;
+	memset(g, 0, sizeof g);
+	g[0].nb = 3;
+	g[0].kind[0] = CS_COND; g[0].t[0] = 2;
+	g[0].kind[1] = CS_COND; g[0].t[1] = 2;
+	g[0].kind[2] = CS_EXIT;
+	g[1].nb = 6;
+	for (i = 0; i + 1u < g[1].nb; i++) {
+		g[1].kind[i] = CS_COND;
+		g[1].t[i] = i + 2u < g[1].nb ? i + 2u : g[1].nb - 1u;
+	}
+	g[1].kind[g[1].nb - 1u] = CS_EXIT;
+	if (!cs_build(&o, g, 2, 0))
+		return 20;
+
+	/* THE REAL SNIFF, exactly kofexamine's own path: kof_inspect_identify, never kof_mod_attach.
+	 * ctx.priv is memset to 0 inside it and never set again - kof_scan_of(&ctx) must answer NULL. */
+	memset(&ctx, 0, sizeof ctx);
+	p = kof_inspect_identify(kof_buf_make(o.b, o.n), &ctx, &view);
+	if (!p || ctx.format != KOF_FMT_ELF) {
+		kof_inspect_free(p, view);
+		return 21;       /* the fixture itself did not identify as a real ELF: not the scenario under test */
+	}
+	if (kof_scan_of(&ctx) != NULL) {
+		kof_inspect_free(p, view);
+		return 22;       /* the precondition is wrong, not the bug: fail loudly rather than pass by accident */
+	}
+
+	/* THE FUNCTION TABLE, no scanner - kgenome_diag_funcs_of, exactly kv_mutation.c's mtn_funcs()
+	 * and kofexaminer_blocks.c's kex_print_blocks() build it for a plain ELF/PE object. */
+	memset(&fs, 0, sizeof fs);
+	kof_genome_obj(&ctx, &gobj);
+	kgenome_diag_funcs_of(&gobj, o.b, o.n, &fs);
+	{
+		uint32_t i, decl = 0;
+
+		for (i = 0; i < fs.n; i++)
+			decl += fs.v[i].trust != KGENOME_FN_TRUST_NONE;     /* round 2: undeclared code is an entry of trust NONE besides the two */
+		if (decl != 2u)
+			fs.n = 0;
+	}
+	if (!fs.n) {
+		kgenome_funcs_free(&fs);
+		kof_inspect_free(p, view);
+		return 23;       /* the fixture did not produce the two functions this test needs */
+	}
+	b = kof_buf_make(o.b, o.n);
+
+	/* 1. kof_scan_resolve_range - the whole-object extent and a named region, both through the
+	 * no-scanner path (scan_ext.c: `sc = kof_scan_of(ctx)`, NULL-safe since Merge 161/165). */
+	n = kof_scan_resolve_range(&ctx, KOF_SCAN_ALL, &eb);
+	if (n == 0 || eb.v[0].len != o.n) {
+		kgenome_funcs_free(&fs);
+		kof_inspect_free(p, view);
+		return 24;
+	}
+	(void)kof_scan_resolve_range(&ctx, KOF_SCAN_ELF_CODE, &eb);
+
+	/* 2. kof_scan_mutation_units - kofexaminer --blocks / kofviewer's Blocks table: the callback
+	 * signs every function unit through kof_cfgsign_function exactly as blk_unit/mtn_count_cb do. */
+	{
+		struct kof_scan_cut cut;
+
+		memset(&cut, 0, sizeof cut);
+		cut.funcs = &fs;
+		memset(&seen, 0, sizeof seen);
+		seen.ctx = &ctx;
+		seen.b = b;
+		kof_scan_mutation_units(&ctx, b, 0xffffffffu, &cut, &eb, cfg_crash1_unit_cb, &seen);
+		if (seen.n_nosig < 2u || seen.n_signed || seen.n_below_floor) {      /* round 2: the undeclared entries are unsigned units too, so at least the two */      /* FLIPPED 2026-11-15: was `!seen.n_signed || !seen.n_below_floor` */
+			kgenome_funcs_free(&fs);
+			kof_inspect_free(p, view);
+			return 25;       /* both functions are listed with no signature (KGENOME_MUTATION_SIG_NONE), none signed */
+		}
+	}
+
+	/* 3. kof_scan_mutation_feed - kv_mutation.c's mtn_rescore, which is the exact call that
+	 * crashed before Merge 160: a real block set (kof_mutation_build, no pack and no live scanner
+	 * needed - the same in-memory build mtn_rescore itself uses), fed the same object, reaches
+	 * mutation_feed_func for the CFG-signed function - the `kof_scan_of(f->ctx)` dereference that
+	 * used to read NULL->obj.diag.walk unconditionally. */
+	memset(&mblk, 0, sizeof mblk);
+	mblk.first_hash = 0;
+	mblk.n_hash = 5;
+	mblk.scan_mask = KOF_SCAN_ELF_CODE;
+	set = kof_mutation_build(&mblk, 1, pool5, 5);
+	if (!set) {
+		kgenome_funcs_free(&fs);
+		kof_inspect_free(p, view);
+		return 26;
+	}
+	if (!kof_mutation_ctx_init(&mc, set)) {
+		kof_mutation_set_free(set);
+		kgenome_funcs_free(&fs);
+		kof_inspect_free(p, view);
+		return 27;
+	}
+	kof_mutation_begin(&mc);
+	{
+		struct kof_scan_cut cut;
+
+		memset(&cut, 0, sizeof cut);
+		cut.funcs = &fs;
+		kof_scan_mutation_feed(&mc, &ctx, b, 0xffffffffu, 0, &cut, &eb);
+	}
+	kof_mutation_ctx_done(&mc);
+	kof_mutation_set_free(set);
+	kgenome_funcs_free(&fs);
+	kof_inspect_free(p, view);
+	return 0;
+}
+
+static void t_cfg_crash1_regression(void)
+{
+	struct he_status st = he_child(cfg_crash1_child, NULL, 20);
+
+	CK(he_ok(st), "CFG-CRASH-1 class, no live scanner (kof_inspect_identify ctx): %s", he_how(st));
+	CK(st.exited && st.code == 0, "the fixture reached every path it means to test (exit %d, %s)",
+	   st.code, he_how(st));
+}
+
 int main(int argc, char **argv)
 {
 	struct he_status st;
@@ -524,6 +797,7 @@ int main(int argc, char **argv)
 	CK(he_ok(st), "the reserved slots and diag_share asked of an object with nothing: %s", he_how(st));
 	t_mutation_units();
 	t_prod_sync();
+	t_cfg_crash1_regression();
 	keng_close(eng);
 	printf("scan_modctx: %u checks, %u failed\n", he_checks, he_fails);
 	return he_fails != 0 || km_failed();

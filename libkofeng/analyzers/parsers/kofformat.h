@@ -138,6 +138,13 @@ int kof_parser_embedded(kof_buf b, uint8_t *format, uint64_t *extent, uint64_t *
  */
 int kof_obj_regionless(const struct kof_obj_ctx *ctx);
 
+/*
+ * THE BIT A FORMAT'S PARSER NAMES `name` AT (its own anomaly_name text), or -1 when the format has no anomaly of that name
+ * (a row whose names are "?" has none). The one lookup of a name: the diagnose reader and the loader check a signature's
+ * anomaly condition with it (KOF_DIAG_HAS_ANOMALY, kof_diag_gate_valid).
+ */
+int kof_parser_anomaly_bit(const struct kof_parser *p, const char *name);
+
 /* The anomaly bits of a format's view that mean a table of the parse was full and
  * what is past it was not read; zero for a format whose module says so itself. */
 uint64_t kof_parser_cut_bits(const struct kof_parser *p);

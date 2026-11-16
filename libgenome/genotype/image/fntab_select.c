@@ -1,51 +1,30 @@
 /*
  * fntab_select.c - the PROBE and the SELECTOR of the function table (fntab.h).
  *
- * THE DECISION TABLE. Read top to bottom, the first row that matches wins. `run` are the strategies that run, [c] marks one that only CHECKS
- * (its entries nothing else names are counted in n_extra, not kept). Each row is a case of its own: a new case is a new row and a new
- * strategy, and no existing row or strategy changes.
+ * THE DECISION TABLE (owner 2026-11-16: the partition is made from loader/ABI metadata only - no strategy decodes code). Read top to bottom, the first row that matches
+ * wins. `run` are the strategies that run, [c] marks one that only CHECKS (its entries nothing else names are counted in n_extra, not kept). STARTS is the start-only
+ * tables the object has: INITARR (init/fini/preinit arrays), EXIDX (.ARM.exidx), and ENTRY (the entry point, asked by the orchestrator only when another source named a
+ * function: the entry alone does not split an object). An object for which no row gives an entry is NO_META (fntab_build.c): one entry of trust NONE per code extent.
  *
  *   format  metadata                                      case              run
  *   ------  --------------------------------------------  ----------------  ----------------------------------
- *   ELF     .symtab present, not found empty              ELF_SYMTAB        SYMTAB, FDE[c]
- *   ELF     no .symtab (or empty), .dynsym not empty      ELF_DYNSYM        DYNSYM, FDE, WALK, REACH
- *   ELF     no symbols, .eh_frame readable                ELF_FDE           FDE, WALK, REACH
- *   ELF     nothing                                       ELF_WALK          WALK, REACH
+ *   ELF     .symtab present, not found empty              ELF_SYMTAB        SYMTAB, FDE, GOPCLN[c], STARTS
+ *   ELF     no .symtab (or empty), .dynsym not empty      ELF_DYNSYM        DYNSYM, FDE, GOPCLN, STARTS
+ *   ELF     no symbols, .eh_frame readable                ELF_FDE           FDE, GOPCLN, STARTS
+ *   ELF     no symbols, no unwind, .gopclntab             ELF_GO            GOPCLN, STARTS
+ *   ELF     none of those (a relocatable object: nothing) ELF_META          STARTS
  *   PE      (the PE rows are the PE's own table: fntab_pe_select.c)
  *   other   -                                             NONE              (empty)
  *
- * WHY THE SYMBOL TABLE IS NOT COMBINED WITH THE WALK: it is exact where it exists and the walk guesses ends; the old path took the symbol
- * table alone and that is kept (the exact path is wrapped, not touched). The unwind table runs beside it as a CHECK so that a symbol
- * table that lacks functions the unwind table names says so (state PARTIAL, P_SYMTAB), without changing what the symbols gave.
- * "Found empty": the symbol table was read and held no function (a file stripped to a few symbols) - the orchestrator then asks again with
- * symtab_empty set and the row below applies; this is the one retry and it is visible in the meta, not a hidden fallback.
- *
- * REACH (ex-defect ELF-NO-REACH, fixed 2026-11-05): every ELF row that runs WALK now runs REACH beside it, exactly as every PE row that
- * runs WALK does (fntab_pe_select.c). fntab_reach.c (THE REACH STEP's own header) reads the walk's generic decode trace and padding-run
- * table (kgenome_diag_walk_pads: any architecture, any format - it records NOP runs of any width plus, on x86 only, int3/hlt runs) and
- * builds the CFG through kgenome_frame_make/kgenome_cfg_build, which are both format-generic; the one format-specific bit in that whole
- * chain, KGENOME_CFG_F_TRAP_EXITS (frame.c: "the int3/hlt after a CALL is MSVC's mark that the call does not return"), is already gated to
- * `format == KGENOME_FMT_PE && arch is x86/x64` and stays that way - ELF code that happens to end in an untagged int3 run still falls
- * through classify() as ordinary flow, which is correct for it. So there was no PE-specific logic to generalize: the three ELF rows that
- * already run WALK (DYNSYM, FDE, WALK) simply never asked REACH to run beside it. The flag keeps its name,
- * KGENOME_FNTAB_X_PE_REACH (fntab.h): its own definition comment there was already format-generic (no "PE" in it,
- * only the symbol carries one), a rename touches every reader and every test row for a purely cosmetic gain, and
- * the PE and ELF cases now read identically here - "set WALK, set REACH" - so a reader of THIS file is in no
- * danger of reading it as PE-only. Renamed only if a future reader is shown to actually have been misled by it.
- * ELF_SYMTAB is deliberately left out: it never sets WALK
- * (an ELF symbol's st_size already closes every one of its own entries, unlike a PE pdata/COFF table which only closes SOME of its
- * functions - PE_PDATA and PE_COFF both still run WALK + REACH beside their exact source for exactly that reason), so REACH would have no
- * trace to read and no gap to look at.
- * NOT GENERALIZED: fntab_reach.c's int3/hlt-specific padding-run filter (crosses_pad(), padded_start(), call_mark_at(), the `fell` check)
- * stays byte-literal to 0xcc/0xf4, i.e. the MSVC "the call does not return" trap convention. ELF toolchains (gcc/clang) do not use it;
- * their usual inter-function fill is NOP (0x90 / multi-byte 0F1F..), which this filter deliberately does NOT treat as a hard separator
- * (FNR-4's own measurement: a NOP run is exactly as likely to be a compiler's OWN loop-realignment padding INSIDE a function as the gap
- * between two functions, on any toolchain) - extending it to NOP for ELF was not attempted here and would need the same oracle-backed
- * measurement FNR-4 did for PE before it could be trusted; until then an ELF body that runs into real inter-function NOP padding is
- * covered by the plain next-start-less-padding END rule exactly as before (fntab_ends.c), not regressed, just not strengthened by this
- * change. REACH still helps ELF in the common case this defect named: a start the walk's call-target scan missed entirely (nothing calls
- * it) is now found from the gap behind the entry before it, as long as its own bytes decode and end (a `ret`, a jump out, or run into
- * recognized padding) - this needs no int3/hlt convention at all, see kgenome_fntab_reach()'s gap-walk loop.
+ * WHY THE SYMBOL TABLE IS NOT JOINED BY THE OTHER EXACT TABLES: it is exact where it exists (measured 339429 of 339496 x86-64 functions before the IFUNC fix) and the
+ * old path took it alone; that is kept. The unwind table and the Go table run beside it as CHECKS so that a symbol table that lacks functions they name says so (state
+ * PARTIAL, P_SYMTAB) without changing what the symbols gave. The start-only tables run as sources: a start inside a symbol body is dropped by the merge (counted), a start
+ * outside every body is a function the symbols do not name.
+ * "Found empty": the symbol table was read and held no function (a file stripped to a few symbols) - the orchestrator then asks again with symtab_empty set and the row
+ * below applies; this is the one retry and it is visible in the meta, not a hidden fallback.
+ * DISABLED by the owner 2026-11-16 (error-prone, lacks coverage): the entry walk's call targets (WALK) and the REACH step (ends and gap starts from the decoded flow) that the
+ * DYNSYM, FDE and WALK rows ran; to re-enable, set KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH in those rows again and take the #if 0 out of phenotype/fntab_walk.c,
+ * fntab_reach.c and kgenome_fntab_run_walk (fntab_build.c).
  */
 #include <string.h>
 
@@ -65,19 +44,27 @@ struct kgenome_fntab_plan kgenome_fntab_select(const struct kgenome_fntab_meta *
 	if (!m)
 		return p;
 	if (m->format == KGENOME_FMT_ELF) {
+		const uint16_t starts = (uint16_t)((m->has_initarr ? KGENOME_FNTAB_X_INITARR : 0u) | (m->has_exidx ? KGENOME_FNTAB_X_EXIDX : 0u) | KGENOME_FNTAB_X_ENTRY);
+		const uint16_t go = m->has_gopcln ? KGENOME_FNTAB_X_GOPCLN : 0u;
+
 		if (m->has_symtab && !m->symtab_empty) {
 			p.ccase = KGENOME_FNTAB_C_ELF_SYMTAB;
-			p.run = KGENOME_FNTAB_X_SYMTAB | (m->has_unwind ? KGENOME_FNTAB_X_FDE : 0u);
-			p.check_only = (uint8_t)(m->has_unwind ? KGENOME_FN_S_FDE : 0u);   /* in SOURCE bits (KGENOME_FN_S_*), what kgenome_fntab_merge reads */
+			p.run = (uint16_t)(KGENOME_FNTAB_X_SYMTAB | (m->has_unwind ? KGENOME_FNTAB_X_FDE : 0u) | go | (m->elf_rel ? 0u : starts));
+			/* PMA-6 (audit, round 3): the unwind table is a SOURCE beside the symbols, not a check: an FDE whose start no sized symbol names is an exact body of
+			 * its own (HIGH); where both name one start with different ends the merge keeps the symbol's and flags DISAGREE */
+			p.check_only = (uint16_t)(m->has_gopcln ? KGENOME_FN_S_GOPCLN : 0u);   /* in SOURCE bits (KGENOME_FN_S_*), what kgenome_fntab_merge reads */
 		} else if (m->has_dynsym && !m->dynsym_empty && !m->elf_rel) {
 			p.ccase = KGENOME_FNTAB_C_ELF_DYNSYM;
-			p.run = KGENOME_FNTAB_X_DYNSYM | (m->has_unwind ? KGENOME_FNTAB_X_FDE : 0u) | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH;
+			p.run = (uint16_t)(KGENOME_FNTAB_X_DYNSYM | (m->has_unwind ? KGENOME_FNTAB_X_FDE : 0u) | go | starts);
 		} else if (m->has_unwind && !m->elf_rel) {
 			p.ccase = KGENOME_FNTAB_C_ELF_FDE;
-			p.run = KGENOME_FNTAB_X_FDE | KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH;
+			p.run = (uint16_t)(KGENOME_FNTAB_X_FDE | go | starts);
+		} else if (m->has_gopcln && !m->elf_rel) {
+			p.ccase = KGENOME_FNTAB_C_ELF_GO;
+			p.run = (uint16_t)(go | starts);
 		} else {
-			p.ccase = KGENOME_FNTAB_C_ELF_WALK;
-			p.run = m->elf_rel ? 0u : (KGENOME_FNTAB_X_WALK | KGENOME_FNTAB_X_PE_REACH);
+			p.ccase = KGENOME_FNTAB_C_ELF_META;
+			p.run = m->elf_rel ? 0u : starts;
 		}
 	} else if (m->format == KGENOME_FMT_PE) {
 		p = kgenome_pe_select(m);
@@ -93,6 +80,32 @@ int kgenome_fntab_in_stub_section(const struct kgenome_elf_info *e, uint64_t off
 	for (i = 1; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++)
 		if (off >= e->sec[i].file_off && off - e->sec[i].file_off < e->sec[i].file_size && kgenome_elf_sec_is_stub(e, i))
 			return 1;
+	return 0;
+}
+
+int kgenome_fntab_elf_code_va(const struct kgenome_elf_info *e, uint64_t va, uint64_t *off)
+{
+	const struct kgenome_elf_seg *host;
+	uint64_t o;
+
+	if (!kgenome_elf_va_to_off(e, va, 1, &o))
+		return 0;
+	host = kgenome_elf_load_at_off(e, o);
+	if (!host || !kgenome_elf_seg_is_code(host))      /* any executable segment (PMA-1): a stub section's code is code */
+		return 0;
+	*off = o;
+	return 1;
+}
+
+int kgenome_fntab_elf_section(const struct kgenome_elf_info *e, uint32_t type, const char *name, uint32_t *idx)
+{
+	uint32_t i;
+
+	for (i = 1; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++)
+		if (e->sec[i].type == type && e->sec[i].file_size && (!name || !strcmp(e->sec[i].name, name))) {
+			*idx = i;
+			return 1;
+		}
 	return 0;
 }
 
@@ -149,6 +162,21 @@ void kgenome_fntab_probe(uint32_t format, kof_buf file, const void *info, struct
 				m->has_dynsym = 1;
 		/* an object file's pcrel values are relocations, not addresses: its unwind table names no function */
 		m->has_unwind = (uint8_t)(!m->elf_rel && (kgenome_fntab_eh_section(e, &k) || kgenome_fntab_eh_segment(e, &k)));
+		/* the start-only and Go tables: present by section type or name, or (no section table) by segment / dynamic tag; the strategies read them */
+		for (i = 1; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+			if (e->sec[i].type >= 14u && e->sec[i].type <= 16u)     /* SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_PREINIT_ARRAY */
+				m->has_initarr = 1;
+			if (e->sec[i].type == 0x70000001u && e->e_machine == 40u)       /* SHT_ARM_EXIDX of an ARM object */
+				m->has_exidx = 1;
+		}
+		if (e->sec_count <= 1u)
+			for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+				if (e->seg[i].type == 2u)               /* PT_DYNAMIC: the arrays may be named there (the strategy reads the tags) */
+					m->has_initarr = 1;
+				if (e->seg[i].type == 0x70000001u && e->e_machine == 40u)       /* PT_ARM_EXIDX */
+					m->has_exidx = 1;
+			}
+		m->has_gopcln = (uint8_t)kgenome_fntab_elf_section(e, KGENOME_ELF_SHT_PROGBITS, ".gopclntab", &k);
 	} else if (format == KGENOME_FMT_PE) {
 		kgenome_pe_probe(file, info, m);
 	}

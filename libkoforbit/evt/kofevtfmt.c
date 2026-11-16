@@ -1303,7 +1303,10 @@ int kof_evt_content(const struct kof_evt *e, const char **text, size_t *len)
 
 		if (n > room)
 			n = room;
-		if (text) *text = t;
+		/* NOT kof_evt_object()'s t: at() also falls back to the empty literal when the
+		 * arena from off_object on has no NUL, which is normal for raw/binary content -
+		 * the offset is already validated above, so the real span is read directly. */
+		if (text) *text = e->text + e->off_object;
 		if (len)  *len  = n;
 		return n != 0;
 	}

@@ -15,6 +15,7 @@
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "objtree.h"
+#include <phenotype/diag_scan.h>   /* kgenome_diag_scan_count/_at - st_report_lineage */
 #include <stdlib.h>
 #include <string.h>
 
@@ -298,6 +299,12 @@ static void st_detect(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
 
+	/* EVIDENCE, NOT A SCAN TARGET OF ITS OWN (owner, 2026-11-10) - see
+	 * kof_src_declare_evidence_only in objsrc.h. FACTS and SCRIPT still ran
+	 * (it is tokenized and normalised for display like any other object);
+	 * no module searches it and it composes no verdict of its own. */
+	if (kof_src_evidence_only_of(sc->cur.src))
+		return;
 	run_modules(p, 0);
 	/* The diagnoses whose form is made of string matchers (KDIG_SEC_FORM): answered with the same matcher and the same
 	 * object the modules just searched, before the counters below are read. */
@@ -333,6 +340,9 @@ static void st_detect(struct kof_pipeline *p)
  */
 static void st_similar(struct kof_pipeline *p)
 {
+	/* See st_detect's own guard, above: evidence is not scored as its own unit either. */
+	if (kof_src_evidence_only_of(p->sc->cur.src))
+		return;
 	run_modules(p, 1);
 	/* And the diagnoses whose form is made of blocks, scored by the set the modules' blocks are in. */
 	oc_diag_forms(p->sc, &p->ctx, 1, p->out);
@@ -447,9 +457,11 @@ static void st_analyse(struct kof_pipeline *p)
 	 * The latch inside makes it once per object however many times it is
 	 * reached, and an object nobody asked about still does no work.
 	 */
-	if (sc->obj.diag.ask) {
+	if (sc->obj.diag.ask && !kof_src_evidence_only_of(sc->cur.src)) {
 		kof_scan_diag_force(&p->ctx);
 		oc_diag_trace_scan(sc);
+		/* The forms whose nucleo gate waited for this analysis (objctx_diag_gate.c), before the verdict reads them. */
+		oc_diag_gate_settle(sc, &p->ctx);
 	}
 }
 
@@ -471,6 +483,9 @@ static void st_publish(struct kof_pipeline *p)
 	struct kof_scanner *sc = p->sc;
 	struct kof_result *out = p->out;
 
+	/* What the parse said was wrong with the object, every object a view included: the word a signature's anomaly condition
+	 * is answered from (oc_obj_anomalies, objctx_diag_gate.c). */
+	out->anomalies = oc_obj_anomalies(&p->ctx, &out->anomaly_fmt);
 	if (!sc->cur.n_rgn && kof_src_kind_of(sc->cur.src) != KOF_ENT_NORMALIZED) {
 		out->opened_by_packer = sc->obj.open.packed_here ? 1u : 0u;
 		out->emu_unpacked     = sc->obj.emu.produced;
@@ -486,9 +501,23 @@ static void st_publish(struct kof_pipeline *p)
  */
 static void st_verdict(struct kof_pipeline *p)
 {
-	sx_verdict_make(p->sc, &p->ctx, p->out);
+	/* EVIDENCE COMPOSES NO VERDICT OF ITS OWN - see st_detect's own guard,
+	 * above, and kof_src_declare_evidence_only in objsrc.h. The limit/damage
+	 * flags below are a property of this object's own open stage and still
+	 * apply whichever kind of object it is. */
+	if (!kof_src_evidence_only_of(p->sc->cur.src))
+		sx_verdict_make(p->sc, &p->ctx, p->out);
 	/* A bound cut this object's evidence (oc_scan_limit): the result says so, over
 	 * no earlier reason - and a clean answer is not given for it. */
+	/* what the diagnose scan's node table refused or dropped, by class (kgenome_diag_nodes_keep): on the result, never silent */
+	if (p->sc->obj.diag.graph) {
+		struct kgenome_diag_drops dr;
+
+		kgenome_diag_scan_drops(p->sc->obj.diag.graph, &dr);
+		p->out->nodes_refused = dr.refused;
+		p->out->nodes_dropped_unlinked = dr.unlinked;
+		p->out->nodes_dropped_nocap = dr.nocap;
+	}
 	if (p->sc->obj.open.cut && !p->out->broken)
 		p->out->broken = KOF_BROKEN_LIMIT;
 	if (p->sc->obj.open.damaged && !p->out->broken)
@@ -502,6 +531,97 @@ static void st_verdict(struct kof_pipeline *p)
  * verdict reads and rebuilds the graph with them: whatever it changes is not
  * something a verdict can have read.
  */
+/*
+ * THE SAME ANALYSIS, EVERY NODE - see kof_result.lineage. `st_report`'s own loop forces
+ * it already whenever the database has at least one diagnose (kof_scan_diag_report calls
+ * kof_scan_diag_force); an empty database must not mean an empty graph, so this forces it
+ * again here - idempotent, see oc_diag_demand/oc_diag_ready - rather than depending on a
+ * loop that may not have run.
+ *
+ * REALLOC'D TO FIT, like `gr` (the module's own wire copy, objctx_diag.c) right above it
+ * in the scanner: sized by the node count, which is the object's and not a constant, and
+ * kept until the object ends because a later ask in the same callback reads the same
+ * records.
+ */
+static void st_report_lineage(struct kof_pipeline *p)
+{
+	struct kof_scanner *sc = p->sc;
+	const struct kgenome_diag_scan *ds;
+	uint32_t n, i, tot, at;
+
+	kof_scan_diag_force(&p->ctx);
+	ds = sc->obj.diag.graph;
+	if (!ds)
+		return;
+	n = kgenome_diag_scan_count(ds);
+	if (!n)
+		return;
+	if (!sc->diag.lineage || sc->diag.lineage_cap < n) {
+		struct kof_diag_lineage_rec *g = realloc(sc->diag.lineage, (size_t)n * sizeof *g);
+
+		if (!g) {
+			OC_LIMIT(sc, "lineage block not allocated");
+			return;
+		}
+		sc->diag.lineage = g;
+		sc->diag.lineage_cap = n;
+	}
+	/* every input of every node: as many as the scan holds (kgenome_diag_in_count), the view's first */
+	for (i = 0, tot = 0; i < n; i++)
+		tot += kgenome_diag_in_count(ds, i);
+	if (tot && (!sc->diag.lineage_in || sc->diag.lineage_in_cap < tot)) {
+		struct kof_diag_lineage_in *g = realloc(sc->diag.lineage_in, (size_t)tot * sizeof *g);
+
+		if (!g) {
+			OC_LIMIT(sc, "lineage inputs not allocated");
+			return;
+		}
+		sc->diag.lineage_in = g;
+		sc->diag.lineage_in_cap = tot;
+	}
+	for (i = 0, at = 0; i < n; i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(ds, i);
+		struct kof_diag_lineage_rec *r = &sc->diag.lineage[i];
+		const uint32_t nall = kgenome_diag_in_count(ds, i);
+		uint8_t k, nin = h->n_in > 4u ? 4u : h->n_in;
+		uint32_t q;
+
+		r->at = h->at;
+		r->attr = h->attr;
+		r->val = h->val;
+		r->symref = h->symref;
+		r->symadd = h->symadd;
+		r->cap = h->cap;
+		r->flags = h->flags;
+		r->bits = h->bits;
+		r->n_in = nin;
+		r->nr = h->nr;
+		r->nr_n = h->nr_n;
+		r->nr_from = h->nr_from;
+		r->nr_how = h->nr_how;
+		for (k = 0; k < nin; k++) {
+			r->in[k].from = h->in[k].from;
+			r->in[k].role = h->in[k].role;
+			r->in[k].how  = h->in[k].how;
+			r->in[k].kind = h->in[k].kind;
+		}
+		r->in_first = at;
+		r->n_all = nall;
+		for (q = 0; q < nall; q++, at++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(ds, i, q);
+
+			sc->diag.lineage_in[at].from = x->from;
+			sc->diag.lineage_in[at].role = x->role;
+			sc->diag.lineage_in[at].how = x->how;
+			sc->diag.lineage_in[at].kind = x->kind;
+		}
+	}
+	p->out->lineage = sc->diag.lineage;
+	p->out->n_lineage = n;
+	p->out->lineage_in = tot ? sc->diag.lineage_in : NULL;
+	p->out->n_lineage_in = tot;
+}
+
 static void st_report(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
@@ -510,17 +630,16 @@ static void st_report(struct kof_pipeline *p)
 	if (!sc->diag.explain)
 		return;
 	n = kof_scan_diag_count(&p->ctx);
-	if (!n)
-		return;
 	/* One buffer for the scanner's life (made, and charged, by kof_scan_set_explain), lent to the caller for its callback
 	 * - see kof_result.diag. */
-	if (!sc->diag.rep)
-		return;
-	for (i = 0; i < n; i++)
-		if (kof_scan_diag_report(&p->ctx, i, &sc->diag.rep[k]))
-			k++;
-	p->out->diag = sc->diag.rep;
-	p->out->n_diag = k;
+	if (n && sc->diag.rep) {
+		for (i = 0; i < n; i++)
+			if (kof_scan_diag_report(&p->ctx, i, &sc->diag.rep[k]))
+				k++;
+		p->out->diag = sc->diag.rep;
+		p->out->n_diag = k;
+	}
+	st_report_lineage(p);
 }
 
 static void st_recover(struct kof_pipeline *p)
@@ -620,8 +739,9 @@ static int stage_slot(enum kof_stage s)
 	}
 }
 
-/* DEBUG: the stage's name for the trace (kof_stage in scan_int.h). */
-static const char *stage_word(enum kof_stage s)
+/* DEBUG: the stage's name for the trace (kof_stage in scan_int.h). In a release build KOF_TRACE keeps its
+ * arguments inside a sizeof (kofdebug.h), so this is referenced and never called: `unused` says that is meant. */
+static const char *__attribute__((unused)) stage_word(enum kof_stage s)
 {
 	static const char *const w[KOF_STAGE_COUNT] = {
 		"FACTS", "RECOVER", "DETECT", "EXAMINE", "UNWRAP", "UNPACK", "DECRYPT", "CARVE", "EMBED", "NORMZ", "SIMILAR", "SCRIPT",
@@ -675,6 +795,10 @@ static void sx_pipeline_run(struct kof_pipeline *p)
 		if (r->stage == KOF_STAGE_NORMZ)
 			open_finish(p);
 		run_row(p, r);
+		/* The unpack run has had its chance to carry on the PE machine the API-resolution run
+		 * left (EA8); nothing after this step reads it, so its pages go back now. */
+		if (r->stage == KOF_STAGE_UNPACK)
+			oc_emu_kept_drop(sc);
 		/*
 		 * PRODUCED SOMETHING, SO STOP.
 		 *

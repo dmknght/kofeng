@@ -121,7 +121,7 @@ static uint32_t spans_of(const struct kgenome_obj *obj, kof_buf file, int code, 
 		const struct kgenome_pe_info *p = kgenome_obj_pe(obj);
 
 		for (i = 0; i < p->nsec && i < KGENOME_PE_MAX_SECTIONS; i++)
-			if (!!kgenome_pe_sec_is_code(&p->sec[i]) == !!code)
+			if (!!kgenome_pe_sec_is_code(p, &p->sec[i]) == !!code)
 				rset_put(&add, p->sec[i].file_off, p->sec[i].file_size, file.n);
 	}
 	if (!add.n)

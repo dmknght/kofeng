@@ -385,6 +385,10 @@ struct kgenome_textual_page {
 	uint8_t  fragment_code;     /* a FRAGMENT is island code from its first byte (asp, aspx) */
 	uint8_t  directive_code;    /* after <%@ WebHandler|WebService ... %> the rest of the text is code (.ashx, .asmx) */
 };
+
+/* The block syntax of the island whose tag is at `at` (textual.h, kgenome_textual_page_syntax): textual_page.c. */
+enum kgenome_textual_block_syntax kgenome_textual_page_syntax_of(const struct kgenome_textual_page *pg, const uint8_t *p, uint32_t n,
+								  uint32_t at);
 void kgenome_textual_page_lex(struct kgenome_textual_lexer *lx, const struct kgenome_textual_page *pg);
 
 /* [lx->pos, end) as code of the shared lexer `l` names (its `lexer` and `flags`; `word` is not read): what a page does for each island and a row

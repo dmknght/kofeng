@@ -65,14 +65,15 @@ static int fx_at(const struct fx *x, const struct kof_form_match *m, uint64_t *o
 	int64_t base;
 	int64_t v;
 
+	/* No entry point (KOF_NA) or an unresolved one (KOF_BROKEN) are the top two values of the word: as a signed number they
+	 * are negative, and a base below zero answers no (below). One test for the three (the ENTRY case). Stated here, not under
+	 * the case label: a declaration right after a label is a C23 extension. */
+	_Static_assert(KOF_NA > (uint64_t)INT64_MAX && KOF_BROKEN > (uint64_t)INT64_MAX, "NA and BROKEN read as negative");
 	switch (m->anchor) {
 	case KOF_FORM_ANCHOR_BOF:
 		base = 0;
 		break;
 	case KOF_FORM_ANCHOR_ENTRY:
-		/* No entry point (KOF_NA) or an unresolved one (KOF_BROKEN) are the top two values of the word: as a signed number they
-		 * are negative, and a base below zero answers no (below). One test for the three. */
-		_Static_assert(KOF_NA > (uint64_t)INT64_MAX && KOF_BROKEN > (uint64_t)INT64_MAX, "NA and BROKEN read as negative");
 		base = (int64_t)x->ctx->entry_off;
 		break;
 	default:
@@ -232,6 +233,14 @@ int oc_diag_form_ask(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint
 			x.rec[k].result = KDET_M_NOT_ASKED;
 	}
 	hit = fx_node(&x, (uint32_t)d->form->n_node - 1u);
+	/* THE GATE'S NUCLEO CONDITIONS, only once the expression said yes: they ask for the analysis, which a sample the markers
+	 * rule out does not pay for, and are SETTLED at the ANALYSE stage when it is made (objctx_diag_gate.c) - until then the
+	 * answer reads no, as a similarity form's does before SIMILAR. The anomaly ones were asked with the shape (form_applies). */
+	if (hit) {
+		sc->diag.fexpr[i >> 3] |= (uint8_t)(1u << (i & 7u));
+		if (oc_diag_gate_defer(sc, i))
+			hit = 0;
+	}
 	sc->diag.fdone[i >> 3] |= (uint8_t)(1u << (i & 7u));
 	KOF_TRACE("[form] %u %s answered %d\n", (unsigned)i, d->name, hit);
 	if (hit)

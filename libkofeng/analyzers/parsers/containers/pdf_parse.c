@@ -15,6 +15,14 @@
  * into, the references resolved once the table is complete, and the entry point.
  * The rest is in the units next to it - see pdf_int.h.
  */
+/*
+ * IMPROVE pdf-audit-1 (owner, 2026-11-05; NOTE ONLY, nothing built): the whole PDF parser family
+ * (pdf_parse.c, pdf_walk.c, pdf_xref.c, pdf_dict.c, pdf_entries.c, pdf_index.c, pdf_docinfo.c,
+ * pdf_names.c) has had no accuracy/correctness audit this session - queued for its own dedicated pass,
+ * same rigor as this session's PE/ELF fixture campaign: real hostile/malformed fixtures (broken xref,
+ * circular object references, malformed stream Length declarations, object-stream/cross-reference-stream
+ * edge cases, encrypted/linearized PDFs) before any fix work.
+ */
 
 #include "pdf_int.h"
 

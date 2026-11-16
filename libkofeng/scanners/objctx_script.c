@@ -28,6 +28,7 @@
  * kof_scan_script_forms below. */
 #include "../analyzers/parsers/scripts/script_parse.h"
 #include "../analyzers/parsers/scripts/script_route.h"
+#include <phenotype/diag_scan.h>
 #include <textual/textual.h>
 /*
  * The one format header the scan path includes, and it is not a shortcut.
@@ -41,6 +42,8 @@
 
 
 #include "objctx_int.h"
+#include "../kofcore/kofdebug.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,11 +73,15 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	 * the tree - the normalised form of a normalised form is itself, and
 	 * what a folded constant builds its parent already built.
 	 */
-	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED) {
+		KOF_TRACE("[script] gate closed: a form of a form is the form, this is already one\n");
 		return 0;
+	}
 	si = (const struct kof_script_info *)ctx->file_header;
-	if (!kof_script_textual_lang(si->kind))
+	if (!kof_script_textual_lang(si->kind)) {
+		KOF_TRACE("[script] gate closed: no lexer for kind=%d, nothing is guessed\n", (int)si->kind);
 		return 0;       /* no lexer for the kind: nothing is guessed */
+	}
 
 	*b = kof_src_buf(sc->cur.src);
 	/*
@@ -83,12 +90,16 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	 * (BE-8; scan_norm.c's norm_fits says the same for a view).
 	 */
 	if (b->p && b->n && (b->n > sc->ledger.obj_cap || b->n > 0xffffffffu)) {
+		KOF_TRACE("[script] gate closed: %llu byte(s) over the object cap, not formed or folded\n",
+			  (unsigned long long)b->n);
 		oc_scan_limit(sc);
 		return 0;
 	}
 	if (!b->p || !b->n)
 		return 0;
+	oc_text_page(sc, ctx);
 	*psc = sc;
+	KOF_TRACE("[script] gate open: %llu byte(s)\n", (unsigned long long)b->n);
 	return 1;
 }
 
@@ -110,6 +121,167 @@ static void script_declare(struct kof_scanner *sc,
 	sc->pend.subtype = ctx->subtype;
 	sc->pend.subfam  = ctx->subfamily;
 	sc->pend.lang    = 1;
+}
+
+/*
+ * A LINE NUMBER, FOR THE LABEL ONLY: 1-based, counting the newlines of the OBJECT's own
+ * bytes before `at`. A cheap, local count rather than a shared API - nothing else needs a
+ * script's line index today (sym_any.c's kof_script_line_of is a different file's private
+ * helper for a different caller) and this is best-effort display text, not a fact anything
+ * downstream reads back.
+ */
+static uint64_t island_line_of(const uint8_t *p, uint64_t n, uint64_t at)
+{
+	uint64_t i, line = 1;
+
+	if (at > n)
+		at = n;
+	for (i = 0; i < at; i++)
+		if (p[i] == '\n')
+			line++;
+	return line;
+}
+
+/*
+ * A CODE ISLAND, AS A REAL CHILD (owner, 2026-11-10: "island phải hiện ngang hàng với
+ * normalize... phải là child, phải được tokenize và normalize giống như bình thường" -
+ * it must show on a par with the normalised view, as a child, tokenized and normalised
+ * the same way a real script object already is). Supersedes the scanner-free display
+ * adapter (kof_script_island_units, script_route.c, Merge 168): the SAME resolved
+ * bytes (diag_text_walk.c's layer_of_call, unchanged - nothing here re-derives what an
+ * island IS, only what becomes of it) are declared and emitted exactly the way the
+ * view just above is - `script_declare` sets the same subtype/subfamily/lang, and the
+ * engine's own child-push (oc_kid_push) does the rest: the child re-enters the whole
+ * pipeline on its own pass, so it gets its own function table (script_funcs.c, via
+ * objctx_diag.c's funcs_of - the adapter reads the island's entry, byte 0, as code from its
+ * first byte: kof_script_from_code, script_route.c) and its own further fold/form (this same function,
+ * called again for the child) FOR FREE: nothing here special-cases it.
+ *
+ * KIND IS KOF_ENT_SCRIPT ("code meant to run when the file is opened"), NOT
+ * KOF_ENT_NORMALIZED: an island is not a transform of the parent's own bytes in
+ * place (kex_g_decl_view's whole reason to exist, kofexaminer_blocks.c) and must not
+ * be read as one - it is code the program itself assembles and runs, the kind this
+ * entry already exists to say.
+ *
+ * NOT A SCAN TARGET OF ITS OWN (owner, 2026-11-10, second correction: "nó không phải
+ * một object con để scan... vẫn được sử dụng làm bằng chứng scan giống như 1 region
+ * riêng" - oc_child_evidence_only, read by scan_pipeline.c's DETECT/SIMILAR/ANALYSE/
+ * VERDICT guards): FACTS and SCRIPT still run on it (the tokenize/normalise this
+ * comment opens with), nothing else does.
+ *
+ * THE LABEL (owner, same date, third correction: "không hiển thị island@... mà là
+ * tên biến, dòng, ngôn ngữ"; owner, 2026-11-10, fourth correction: keep the "$" and
+ * drop the language word) names the call's OWN argument text - diag_scan.h's
+ * `name_off`/`name_len`, the honest source span kgenome_dtx_arg_range already found,
+ * read from the OBJECT's own bytes, never the resolved value - and the line it was
+ * called from (island_line_of, above). The SIGIL is read the same way: a PHP variable
+ * token's own span excludes its "$" by this project's own lexer convention
+ * (diag_text_private.h's `sigil` field), so the byte right before name_off IS it when
+ * there is one - PHP only, like the rest of this feature (script_route.c's own gate).
+ * NO LANGUAGE WORD: kv_tree_label.c's obj_label already composes "Script-PHP" for
+ * every script object from ctx->format/ctx->subtype, the island included - a label
+ * carrying "PHP" too said it twice next to each other ("$U@L11 PHP Script-PHP"),
+ * obj_label's own convention bypassed rather than reused (kofeng/CLAUDE.md #2). A
+ * short emit (the ledger refused mid-island) is not silently dropped: oc_scan_limit
+ * says so and the object produced so far still becomes the child, exactly as any
+ * other producer's short write does (objctx_child_sink.c's oc_emit).
+ */
+static void script_island_declare(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
+				  kof_buf obj, const struct kgenome_diag_text_island *isl)
+{
+	char label[64];
+	uint64_t line = island_line_of(obj.p, obj.n, isl->at);
+	const char *sigil = (isl->name_len && isl->name_off && isl->name_off <= obj.n &&
+			     obj.p[isl->name_off - 1u] == '$') ? "$" : "";
+
+	oc_child_kind(ctx, KOF_ENT_SCRIPT);
+	oc_child_evidence_only(ctx);
+	script_declare(sc, ctx);
+	/*
+	 * WHAT THE CHILD IS, SAID (owner-agreed island design point 5, 2026-11-14): its language (script_declare) and that it is CODE FROM
+	 * ITS FIRST BYTE - its entry is byte 0 (kof_script_from_code reads ctx->entry_off, KOF_NA for every parsed script). Its description
+	 * is the honest one of a text with no tag (tag_off/tag_len 0, no islands of its own in the module ABI's table): the parse's
+	 * `tag_len == 0` is no longer read as a "fragment" flag anywhere, which is what made it a template. Without a description
+	 * ctx->file_header is NULL and ctx->format KOF_FMT_UNKNOWN the moment the island becomes current (ISL-1, 2026-11-10: sx_identify
+	 * has no tag to read a tagless text's format from).
+	 */
+	{
+		struct kof_script_info isl_info;
+
+		memset(&isl_info, 0, sizeof isl_info);
+		isl_info.kind = ctx->subtype;
+		oc_child_desc(ctx, KOF_FMT_SCRIPT, ctx->arch, ctx->subtype, 0u, &isl_info, (uint32_t)sizeof isl_info);
+	}
+	if (isl->name_len && (uint64_t)isl->name_off + isl->name_len <= obj.n &&
+	    isl->name_len < sizeof label - 24u)
+		snprintf(label, sizeof label, "%s%.*s@L%llu", sigil, (int)isl->name_len,
+			 (const char *)obj.p + isl->name_off, (unsigned long long)line);
+	else
+		snprintf(label, sizeof label, "eval@L%llu", (unsigned long long)line);
+	oc_note_next(ctx, label);
+	if (oc_emit_all(ctx, isl->data, isl->len) != isl->len)
+		oc_scan_limit(sc);
+	oc_child(ctx);
+}
+
+/*
+ * ONE CHILD PER DISTINCT STRING (owner-agreed island design point 5): two eval sites that run the same text are one program, read once
+ * - the child is declared at the FIRST site (its label and line), and the others are counted. Equal is equal bytes: the strings are
+ * ordered by a hash of their bytes and their length, and only strings with both equal are compared byte for byte, so n islands cost
+ * n log n and not n squared. Survey (2026-11-14): 9 php eval strings in 8 files and 5 vbs in 2, none a duplicate of another in its
+ * file - the rule is for the obfuscator that writes one decoder call per line, built from constructed text in tests/unit/script_islands.c.
+ * An index table that cannot be had declares every island (no evidence lost, the cost of reading duplicates paid).
+ */
+struct isl_key {
+	uint64_t h;
+	uint32_t len, k;
+};
+
+static int isl_key_cmp(const void *a, const void *b)
+{
+	const struct isl_key *x = a, *y = b;
+
+	if (x->h != y->h)
+		return x->h < y->h ? -1 : 1;
+	if (x->len != y->len)
+		return x->len < y->len ? -1 : 1;
+	return x->k < y->k ? -1 : x->k > y->k;
+}
+
+static void islands_declare(const struct kof_obj_ctx *ctx, struct kof_scanner *sc, kof_buf b,
+			    const struct kgenome_diag_text_island_set *isl)
+{
+	struct isl_key *key = isl->n > 1u ? malloc((size_t)isl->n * sizeof *key) : NULL;
+	uint8_t *dup = isl->n > 1u ? calloc(isl->n, 1) : NULL;
+	uint32_t k, n_dup = 0;
+
+	if (key && dup) {
+		for (k = 0; k < isl->n; k++) {
+			key[k].h = kof_hash64_bytes(isl->v[k].data, isl->v[k].len);
+			key[k].len = isl->v[k].len;
+			key[k].k = k;
+		}
+		qsort(key, isl->n, sizeof *key, isl_key_cmp);
+		for (k = 1; k < isl->n; k++) {
+			uint32_t j = k;
+
+			/* the first of a run of equal keys is kept; a later one equal to an earlier kept one is a duplicate */
+			while (j > 0 && key[j - 1u].h == key[k].h && key[j - 1u].len == key[k].len) {
+				j--;
+				if (!dup[key[j].k] && !memcmp(isl->v[key[j].k].data, isl->v[key[k].k].data, key[k].len)) {
+					dup[key[k].k] = 1;
+					n_dup++;
+					break;
+				}
+			}
+		}
+	}
+	for (k = 0; k < isl->n; k++)
+		if (!dup || !dup[k])
+			script_island_declare(ctx, sc, b, &isl->v[k]);
+	KOF_TRACE("[script] islands: %u declared, %u duplicate string(s) read once\n", (unsigned)(isl->n - n_dup), (unsigned)n_dup);
+	free(key);
+	free(dup);
 }
 
 /*
@@ -168,6 +340,10 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	uint32_t n = 0, raw = 0, cap, lang, n_dec = 0;
 	uint64_t room = 0, charged = 0;
 	int decoded = 0;
+	/* Islands found below (or NULL): declared AFTER the normalised view, so the view
+	 * keeps slot 0 and islands are 1, 2, 3... - owner, 2026-11-10: "script norm phải
+	 * là 0 và cái island... là cái 1, 2, 3... vì nó là thông tin bổ sung cho script". */
+	const struct kgenome_diag_text_island_set *isl = NULL;
 	/* The text the form reads: the object's own, or - for a language the evaluator knows, deep - the object with what it computes written where
 	 * it was computed. */
 	uint8_t *text2 = NULL;
@@ -182,10 +358,31 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	in_n = b.n;
 	if (deep && oc_script_consts_serves(lang)) {
 		n_sub = oc_script_consts(sc, lang, b, &text2, &n2, &charged2);
+		KOF_TRACE("[script] constants: lang=%u, %u substitution(s) written\n", (unsigned)lang,
+			  (unsigned)n_sub);
 		if (n_sub) {
 			in_p = text2;
 			in_n = n2;
 		}
+		/*
+		 * ISLANDS, found here but DECLARED BELOW, after the normalised view (ordering,
+		 * above) - the SAME walk oc_script_consts just ran already resolved every one it
+		 * could reach, so asking for them here costs nothing further (oc_text_islands
+		 * reuses the cached scan). Found regardless of whether the fold above found
+		 * anything to substitute or the form below finds anything worth a view of its
+		 * own: an island is evidence in its own right, not a side effect of there being a
+		 * normalised view.
+		 */
+		/*
+		 * NESTED EVAL IS BOUNDED BY THE WALK'S OWN BUDGET (design point 5): the walk that finds this object's islands follows every
+		 * layer of code it computes (diag_text_walk.c, layer_of_call: LAYER_DEPTH and the walk's room), each island is collected at its
+		 * eval site in this file, and a cap is the set's status, said below as a limit. Measured (tests/unit/script_island_parts.c,
+		 * IS-2): a create_function run inside an eval'd string arrives once, as this object's child, on the base and on this tree.
+		 */
+		isl = oc_text_islands(sc, lang, b);
+		KOF_TRACE("[script] islands: %u found\n", (unsigned)(isl ? isl->n : 0));
+		if (isl && isl->status != KGENOME_OK)
+			oc_scan_limit(sc);
 	}
 	/*
 	 * Neither pass can make anything longer than what it was given - every
@@ -215,6 +412,8 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 			need = lib;
 		if (need > 0xffffffffu)
 			{
+				KOF_TRACE("[script] refused: needed buffer %llu byte(s) over 32 bits\n",
+					  (unsigned long long)need);
 				consts_end(sc, text2, charged2);
 				return 0;
 			}
@@ -255,8 +454,14 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	/* Every kind a script object has is a language the lib lexes (script_pass_open said so): the form is the lib's, whole. */
 	{
 		struct oc_script_dec *dec = oc_script_dec_new(sc, lang, room);
+		/*
+		 * CODE FROM ITS FIRST BYTE, THE SAME TEST THE FUNCTION TABLE MAKES (kof_script_from_code, the object's entry - ISL-1,
+		 * 2026-11-10): php's lexer reads code only inside a tag's island (.islands = 1, php_lang.c) and everything before the first
+		 * tag is markup, which the form never reformats - an island's own body has no tag to open one, so without this its whole
+		 * text read as one block of markup and the form was a no-op (n == raw exactly, confirmed).
+		 */
 		struct oc_script_form_req fq = { .lang = lang, .in = in_p, .n = (uint32_t)in_n, .out = out,
-						 .cap = cap, .dec = dec };
+						 .cap = cap, .dec = dec, .fragment = (uint8_t)kof_script_from_code(ctx) };
 
 		n = oc_script_form(&fq, &n_dec);
 		oc_script_dec_end(dec);
@@ -346,11 +551,29 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	raw = (uint32_t)b.n;
 	/* A literal a decoder was put over is a difference as well, and makes the view longer than the object. */
 	n_dec += n_sub;                 /* a value written where it was computed is a difference as well */
+	/* oc_script_form's own `n_dec` already carries a statement-end line break the file never had (textual.h's
+	 * n_stmt, owner, 2026-11-10): a flat chain of obfuscated statements the source never broke onto more than
+	 * one line also makes the view longer with no decode in it, and is exactly a case this floor must not
+	 * throw away - the whole point of asking for the break. */
 	decoded |= n_dec != 0;
-	if (n < 32u || (raw < n && !n_dec) || (!decoded && raw - n < 16u))
+	if (n < 32u || (raw < n && !n_dec) || (!decoded && raw - n < 16u)) {
+		KOF_TRACE("[script] form discarded: raw=%u formed=%u decoded=%d, below the floor\n", raw,
+			  n, decoded);
 		n = 0;
+	}
 	if (n) {
 		oc_child_kind(ctx, KOF_ENT_NORMALIZED);
+		/*
+		 * AN ISLAND'S OWN FURTHER VIEW IS EVIDENCE TOO (owner, 2026-11-10): this
+		 * function runs again, recursively, on the island child's own bytes (see
+		 * script_island_declare's header comment) - and that further view is no more
+		 * an independent scan target than the island itself was. Checked on the
+		 * CURRENT object (sc->cur.src is this object's own, not the child's: the
+		 * child does not exist yet) - exactly one level of propagation, the only one
+		 * this feature produces.
+		 */
+		if (kof_src_evidence_only_of(sc->cur.src))
+			oc_child_evidence_only(ctx);
 		/*
 		 * AND IT IS STILL THE SAME LANGUAGE, said rather than left to
 		 * be re-read - see kof_src_declare_lang.
@@ -376,8 +599,18 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 			n = 0;
 		}
 	}
+	/*
+	 * ISLANDS, DECLARED LAST: after the normalised view above, so the view keeps slot
+	 * 0 and islands are 1, 2, 3... whether or not this object actually got a view
+	 * (`n` may be 0; an island is evidence in its own right either way - see where
+	 * `isl` was found, above).
+	 */
+	if (isl)
+		islands_declare(ctx, sc, b, isl);
 	free(out);
 	oc_scan_release(sc, charged);
 	consts_end(sc, text2, charged2);
+	KOF_TRACE("[script] forms done: view=%s, %u island(s) declared\n", n ? "made" : "none",
+		  (unsigned)(isl ? isl->n : 0));
 	return n;
 }

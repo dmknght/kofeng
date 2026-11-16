@@ -46,7 +46,9 @@ struct xwalk {
 	const struct kof_parser *fp;
 	const struct kof_obj_ctx *ctx;
 	uint64_t                n_bytes;
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG): the ledger of func_hold's signing; re-enable with func_hold */
 	const struct kof_cfgsign_host *cfg;
+#endif
 };
 
 static const char *mname(const struct kof_parser *fp, uint32_t mask)
@@ -73,6 +75,12 @@ static uint32_t popcount_bits(const uint8_t *b, uint32_t n_bits)
 	return c;
 }
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out, the call in unit_cb and the `cfg` member of struct xwalk (both in #if 0), with kof_cfgsign_function (analyzers/cfgsign.c) and kgenome_mutation_signature answering KGENOME_MUTATION_SIG_CFG.
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /*
  * THE HOLD OF A FUNCTION UNIT against a block: the unit's CFG sketch (kof_cfgsign_function, the one signing function) against the block's keys, as the
  * matcher scored it (kgenome_cfg_overlap: hit of taken). Returns the hits (0 when the unit is not signed) and fills the unit's id, the fold of its keys as
@@ -103,6 +111,7 @@ static uint32_t func_hold(const struct xwalk *w, const struct xpend *p, const st
 	kgenome_cfg_overlap(&cs.sign, &bs, &hit, &taken);
 	return hit;
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 static int unit_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint32_t side, const struct kgenome_func *first)
 {
@@ -112,15 +121,22 @@ static int unit_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint
 	for (k = 0; k < w->n_p; k++) {
 		struct xpend *p = &w->p[k];
 		uint8_t bits[(KOF_FORM_HASH_MAX + 7u) / 8u];
-		uint32_t c, unit_id = 0;
+		uint32_t c;
 		const uint32_t sig = kgenome_mutation_signature(first);
 		struct kof_diag_part *part;
 
 		if (side != p->side || !(p->mask & (region | KOF_SCAN_ALL)) || !len)
 			continue;
+		/* A function unit has no signature (KGENOME_MUTATION_SIG_NONE): it holds nothing of any block. */
+		if (sig == KGENOME_MUTATION_SIG_NONE)
+			continue;
+		/* DISABLED by the owner 2026-11-15: the hold of a CFG-signed function unit. To re-enable: take this #if 0 out with func_hold's. */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 		if (sig == KGENOME_MUTATION_SIG_CFG) {
 			c = func_hold(w, p, first, &unit_id);
-		} else {
+		} else
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+		{
 			memset(bits, 0, sizeof bits);
 			kgenome_mutation_member(p->hash, p->n, w->bytes + off, len, bits);
 			c = popcount_bits(bits, p->n);
@@ -134,20 +150,19 @@ static int unit_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint
 		part->plen = len;
 		part->region = region;
 		part->place_hits = c;
-		if (sig == KGENOME_MUTATION_SIG_WINDOWS) {
+		{
 			uint32_t blk[KGENOME_MUTATION_MINHASH_K], nb;
 
 			/* The unit's own id, as --blocks prints it: a near match (70%) has a different block hash than the diagnose's, which is why the id
-			 * of the diagnose's block cannot find the unit's row. */
+			 * of the diagnose's block cannot find the unit's row. (A CFG-signed unit's id was its keys' fold: DISABLED by the owner 2026-11-15 with func_hold.) */
 			nb = kgenome_mutation_unit_minhash(first, w->bytes + off, len, blk);
 			part->unit_id = nb >= kgenome_mutation_block_min(region) ? kof_mutation_fold(blk, nb) : 0u;
-		} else {
-			part->unit_id = unit_id;
 		}
 		part->region_name = mname(w->fp, region);
-		part->func[0] = 0;
-		if (first && w->syms)
-			kof_sym_name_at(w->syms, w->n_syms, &first->value, -1, part->func, sizeof part->func);
+		/* NM-2: the one naming of a function (kof_func_name), kept only when it is a real name (kof_result.h: "else empty"). It was kof_sym_name_at with
+		 * any section, so a function with no symbol (value 0) took the first record of value 0: a PE import or an ELF undefined symbol. */
+		if (!first || !kof_func_name(first, w->syms, w->n_syms, w->bytes, w->n_bytes, part->func, sizeof part->func))
+			part->func[0] = 0;
 	}
 	return 0;
 }
@@ -270,8 +285,10 @@ void oc_explain_parts(const struct kof_obj_ctx *ctx, uint32_t i, struct kof_diag
 		} else {
 			struct kof_scan_cut cut;
 
-			sx_feed_cut(sc, ctx, sc->cur.present, 0, &cut);
+			sx_feed_cut(sc, ctx, sc->cur.present, &cut);
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG): func_hold's ledger; re-enable with func_hold */
 			w.cfg = cut.cfg;
+#endif
 			kof_scan_mutation_units(ctx, b, sc->cur.present, &cut, kof_scan_ext_buf(sc, 1), unit_cb, &w);
 		}
 	}

@@ -16,39 +16,55 @@
 
 #include <phenotype/diag_lineage_private.h>
 
-static const uint8_t clob64[9] = { 0, 1, 2, 6, 7, 8, 9, 10, 11 };
-static const uint8_t clob32[3] = { 0, 1, 2 };
-
 static struct lg_img g;
 static struct lg_cg c;
 static struct lg_prog p;
 static struct lg_scan sc;
 
-static void abi64(struct kgenome_lineage *L)
+/* The convention is the table's row (diag_lineage_arch.c), not a copy of it written here: a test that builds its own ABI tests its copy. */
+static void abi_row(struct kgenome_lineage *L, unsigned arch, unsigned fmt)
 {
+	struct kgenome_obj o;
+
 	memset(L, 0, sizeof *L);
+	memset(&o, 0, sizeof o);
+	o.arch = (uint8_t)arch;
+	o.format = (uint8_t)fmt;
 	L->s = sc.s;
 	L->plan = KGENOME_LINEAGE_S_ALL;
 	L->run = L->act = KGENOME_LINEAGE_S_ALL;
-	L->abi.wide = 1;
-	L->abi.w = 8;
-	L->abi.arg = kgenome_diag_sysv_arg;
-	L->abi.n_arg = 6;
-	L->abi.clob = clob64;
-	L->abi.n_clob = (uint8_t)sizeof clob64;
-	L->abi.stack_first = 6;
+	CK(kgenome_lineage_arch_of(&o, &L->abi));
 }
 
+static void abi64(struct kgenome_lineage *L)
+{
+	abi_row(L, KGENOME_ARCH_X86_64, KGENOME_FMT_ELF);
+	CK(L->abi.w == 8 && L->abi.n_arg == 6 && L->abi.stack_first == 6 && L->abi.sp == KGENOME_CELL_REG_SP && L->abi.n_sys_arg == 6);
+}
+
+/* i386: cdecl in an ELF, stdcall (the callee pops) in a PE */
 static void abi32(struct kgenome_lineage *L, int callee_pops)
 {
-	memset(L, 0, sizeof *L);
-	L->s = sc.s;
-	L->plan = KGENOME_LINEAGE_S_ALL;
-	L->run = L->act = KGENOME_LINEAGE_S_ALL;
-	L->abi.w = 4;
-	L->abi.clob = clob32;
-	L->abi.n_clob = (uint8_t)sizeof clob32;
-	L->abi.callee_pops = (uint8_t)callee_pops;
+	abi_row(L, KGENOME_ARCH_X86, callee_pops ? KGENOME_FMT_PE : KGENOME_FMT_ELF);
+	CK(L->abi.w == 4 && L->abi.n_arg == 0 && L->abi.callee_pops == (uint8_t)callee_pops);
+}
+
+/* THE ROWS: an architecture with no row is not read; the Windows x64 convention skips the shadow space. */
+static void t_rows(void)
+{
+	struct kgenome_lineage L;
+	struct kgenome_obj o;
+	struct kgenome_lineage_abi a;
+
+	abi_row(&L, KGENOME_ARCH_X86_64, KGENOME_FMT_PE);
+	CK(L.abi.n_arg == 4 && L.abi.stack_first == 4 && L.abi.stack_off == 32 && !L.abi.callee_pops);
+	memset(&o, 0, sizeof o);
+	o.arch = KGENOME_ARCH_ARM;
+	o.format = KGENOME_FMT_ELF;
+	CK(!kgenome_lineage_arch_of(&o, &a));
+	o.arch = KGENOME_ARCH_ARM64;
+	CK(!kgenome_lineage_arch_of(&o, &a));
+	CK(!kgenome_lineage_arch_of(NULL, &a));
 }
 
 static void t_joins(void)
@@ -144,15 +160,83 @@ static void t_values(void)
 	kgenome_lineage_val_unknown(&a, KGENOME_LINEAGE_W_CONST);
 	CK(!kgenome_lineage_val_join(&L, &a, &b));
 	CK(a.why == (KGENOME_LINEAGE_W_CONST | KGENOME_LINEAGE_W_ADDR));
-	/* more producers than a value holds: it widens, says why, and the scan says it was cut */
-	memset(&d, 0, sizeof d);
-	for (i = 0; i < KGENOME_LINEAGE_SET; i++)
-		CK(kgenome_lineage_val_add(&L, &d, 100u + i));
-	CK(!d.other && d.n == KGENOME_LINEAGE_SET);
-	CK(kgenome_diag_scan_status(sc.s) == KGENOME_OK);
-	CK(kgenome_lineage_val_add(&L, &d, 999));
-	CK(d.other && (d.why & KGENOME_LINEAGE_W_LIMIT) && d.n == KGENOME_LINEAGE_SET);
-	CK(kgenome_diag_scan_status(sc.s) == KGENOME_TRUNCATED);
+	/* LG-12: A VALUE HOLDS EVERY PRODUCER THAT REACHES IT. Past the inline ones a token is a cell of the solve's pool; the seventeenth (and the
+	 * hundredth) is kept, no bound fires, nothing is said cut - the bound of sixteen fired 69 times in 2 of 356 files and lost producers. */
+	{
+		const uint64_t b0 = L.st.bounded[KGENOME_LINEAGE_B_VALUE];
+		struct kgenome_lineage_val e;
+		uint16_t all[128];
+
+		memset(&d, 0, sizeof d);
+		for (i = 0; i < 100u; i++)
+			CK(kgenome_lineage_val_add(&L, &d, 100u + i));
+		CK(!kgenome_lineage_val_add(&L, &d, 150u));                     /* a repeat past the inline ones is one token */
+		CK(!d.other && d.n == KGENOME_LINEAGE_VAL_INLINE && d.more);
+		CK(kgenome_lineage_val_toks(&L, &d, all, 128u) == 100u);
+		{
+			uint32_t seen = 0;
+
+			for (i = 0; i < 100u; i++)
+				seen += all[i] >= 100u && all[i] < 200u;
+			CK(seen == 100u);
+		}
+		CK(L.st.bounded[KGENOME_LINEAGE_B_VALUE] == b0);
+		CK(kgenome_diag_scan_status(sc.s) == KGENOME_OK);
+		/* a COPY shares the chain and does not change when the original gains a token (the chain is never written in place) */
+		e = d;
+		CK(kgenome_lineage_val_add(&L, &d, 999u));
+		CK(kgenome_lineage_val_toks(&L, &d, all, 128u) == 101u && kgenome_lineage_val_toks(&L, &e, all, 128u) == 100u);
+		/* a join brings the other's chain: e gains 999, and then is d's set */
+		CK(kgenome_lineage_val_join(&L, &e, &d));
+		CK(kgenome_lineage_val_toks(&L, &e, all, 128u) == 101u);
+		CK(!kgenome_lineage_val_join(&L, &e, &d));
+		/* statuses are tokens like any other, past the inline ones too */
+		CK(kgenome_lineage_val_add(&L, &d, 7u | KGENOME_LINEAGE_STATUS) && !d.other);
+		/* the one bound left is the ledger: with no room the next token widens the value (W_LIMIT) and the scan says it */
+		{
+			const uint64_t lim = sc.s->led.limit, used = sc.s->led.used;
+
+			L.nvx = L.capvx;                /* the pool must grow for the next token */
+			sc.s->led.limit = sc.s->led.used ? sc.s->led.used : 1u;
+			sc.s->led.used = sc.s->led.limit;
+			CK(kgenome_lineage_val_add(&L, &d, 4000u));
+			CK(d.other && (d.why & KGENOME_LINEAGE_W_LIMIT) && L.st.bounded[KGENOME_LINEAGE_B_VALUE] == b0 + 1u);
+			sc.s->led.limit = lim;
+			sc.s->led.used = used;
+		}
+		free(L.vx);
+		L.vx = NULL;
+		L.nvx = L.capvx = 0;
+	}
+}
+
+/* THE TABLE OF WHAT REACHES A CONSUMER: one probe for the insert and the lookup (diag_lineage_solve.c, agg_slot). Every key put in through
+ * growth after growth is found by the lookup with what was added; a key never put in is not found. */
+static void t_aggtab(void)
+{
+	struct kgenome_lineage L;
+	struct kgenome_lineage_val v;
+	uint32_t i, ok = 0;
+
+	abi64(&L);
+	L.ag = &L.glob;
+	for (i = 0; i < 1500u; i++) {
+		memset(&v, 0, sizeof v);
+		v.n = 1;
+		v.t[0] = (uint16_t)(i % 1000u + 1u);
+		kgenome_lineage_agg_add(&L, i, (uint8_t)(1u + i % 3u), &v, 0);
+	}
+	CK(L.glob.n == 1500u && L.glob.cap >= 3000u);
+	for (i = 0; i < 1500u; i++) {
+		const struct kgenome_lineage_agg *a = kgenome_lineage_agg_get(&L.glob, ((i + 1u) << 8) | (1u + i % 3u));
+
+		ok += a && a->n == 1u && a->t[0] == (uint16_t)(i % 1000u + 1u) && !a->other;
+	}
+	CK(ok == 1500u);
+	CK(kgenome_lineage_agg_get(&L.glob, (1501u << 8) | 1u) == NULL);
+	CK(kgenome_lineage_agg_get(&L.glob, (1u << 8) | 2u) == NULL);
+	free(L.glob.v);
+	kgenome_ledger_release(&sc.s->led, L.charged);
 }
 
 static void t_args(void)
@@ -217,9 +301,11 @@ int main(int argc, char **argv)
 	lg_h_new(&p, 1, 0);
 	lg_h_st(&p, p.fn[0].body, LG_S_EVAL, 0, lg_h_api(&p, LG_SOCKET, -1, -1), 0, 0);
 	CK(lg_h_scan(&sc, &g, &c, &p, LG_T_ELF64, KGENOME_LINEAGE_S_ALL));
+	t_rows();
 	t_joins();
 	t_calls();
 	t_values();
+	t_aggtab();
 	t_args();
 	t_sites();
 	kgenome_diag_scan_free(sc.s);

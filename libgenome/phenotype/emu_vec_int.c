@@ -1,7 +1,7 @@
 /*
  * emu_vec_int.c - the packed integer instructions of MMX, SSE2, SSSE3 and SSE4.1/4.2 (and CLMUL), on the
  * 64 bit MMX registers and the 128 bit xmm registers.
- * Part of the interpreter; see emu_interp.c, emu_vec.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c, emu_vec.c and emu_x86_private.h.
  *
  * WHY THESE ARE CARRIED. The instruction histogram of the corpora (tests/lib/genome/diff_decode_cover.c, the
  * numbers in its header) puts the packed integer set first among the vector instructions a program that is
@@ -20,7 +20,7 @@
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 /* ---- lanes ---------------------------------------------------------------------------------- */
 
@@ -466,7 +466,7 @@ static int pk_pblend(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 				memcpy(q + k * 2u, y + k * 2u, 2);
 	} else {
 		for (k = 0; k < 16u; k++)
-			if (e->xmm[0][k] & 0x80u)
+			if (e->x86.xmm[0][k] & 0x80u)
 				q[k] = y[k];
 	}
 	return kgenome_emu_vec_wr(e, ixp, &ixp->op[0], q, 16) ? KGENOME_EMU_RUN_OK : KGENOME_EMU_RUN_UNSUPPORTED;
@@ -627,7 +627,7 @@ static int pk_pcmpstr(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		} else {
 			st_lane(q, 8, res);
 		}
-		memcpy(e->xmm[0], q, 16);
+		memcpy(e->x86.xmm[0], q, 16);
 	}
 	return KGENOME_EMU_RUN_OK;
 }
@@ -890,7 +890,7 @@ int kgenome_emu_run_vec_int(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		unsigned k;
 
 		for (k = 0; k < 8u; k++)
-			e->st_tag[k] = 0;
+			e->x86.st_tag[k] = 0;
 		return KGENOME_EMU_RUN_OK;
 	}
 	default:

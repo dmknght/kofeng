@@ -56,9 +56,9 @@ static void frame_pointer(struct kgenome_lineage *L, struct kgenome_lineage_val 
 		kgenome_lineage_state_step(L, &e, in);
 	}
 	kgenome_lineage_val_other(bp);
-	if (e.r[KGENOME_CELL_REG_BP].k == KGENOME_LINEAGE_A_STACK) {
+	if (e.r[L->abi.fp].k == KGENOME_LINEAGE_A_STACK) {
 		bp->k = KGENOME_LINEAGE_A_STACK;
-		bp->v = e.r[KGENOME_CELL_REG_BP].v;
+		bp->v = e.r[L->abi.fp].v;
 	}
 	kgenome_lineage_state_free(L, &e);
 }
@@ -76,7 +76,7 @@ void kgenome_lineage_seed(struct kgenome_lineage *L, struct kgenome_lineage_cfg 
 			continue;
 		kgenome_lineage_state_entry(L, &e, 0);
 		e.seeded = 1;
-		e.r[KGENOME_CELL_REG_BP] = bp;
+		e.r[L->abi.fp] = bp;
 		if (bp.k == KGENOME_LINEAGE_A_STACK)
 			e.sp = (int32_t)(bp.v - KGENOME_LINEAGE_SEED_DEPTH);
 		kgenome_lineage_cfg_enter(g, b, &e);

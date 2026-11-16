@@ -357,9 +357,9 @@ static uint64_t packed_bytes(uint64_t entries, uint32_t w)
  * three, and the same filter on 2 MiB pages is read in a third of the time (measured). Advice only. */
 static void *big_alloc(size_t n)
 {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
 	void *p = NULL;
 
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
 	if (n >= (4u << 20) && posix_memalign(&p, 2u << 20, n) == 0) {
 		madvise(p, n, MADV_HUGEPAGE);
 		return p;

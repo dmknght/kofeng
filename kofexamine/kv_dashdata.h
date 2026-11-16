@@ -9,6 +9,7 @@
  *   dash_header      the format block of the overview, as meaning: format, abi, linking, entry, size, layout, declared counts
  *   dash_regions     the engine's division of the object, the share of each, and the partition check
  *   dash_anomalies   what the parser thought was wrong
+ *   dash_islands     a script's islands in place of the two above: its ObfScore, and the table of its records (dash_islands_table, the engine's text route)
  *   dash_layout      the segment and section tables (columns, rows, what was declared)
  *   dash_syms        the import or export rows after the filter, and why there are none when there are none
  *   dash_infect_*    the Infection dialog's first page: where a binary is commonly infected, the engine's ranges flagged
@@ -57,6 +58,11 @@ int dash_has_header(const struct object *ob);
 void dash_header(const struct object *ob, struct dash_block *b);
 void dash_regions(const struct view *v, const struct object *ob, struct dash_block *b);
 void dash_anomalies(const struct object *ob, struct dash_block *b);
+/* A SCRIPT's overview (owner 2026-11-14): no regions and no anomalies (none is defined for a script), but its islands - the script's value (the highest
+ * record) as a block row (dash_islands, or the sentence why there is none), and under it a table (dash_islands_table, below). Every number is kof_script_obf's,
+ * asked once per object and kept on it (`ob` is not const for that reason). dash_is_script says which overview an object gets. */
+int dash_is_script(const struct object *ob);
+void dash_islands(struct object *ob, struct dash_block *b);
 
 /* ---- the layout tables ---------------------------------------------------------------------------------- */
 
@@ -86,6 +92,15 @@ void dash_layout_cell(const struct object *ob, enum dash_lay which, uint32_t row
 void dash_layout_entropy(const struct object *ob, enum dash_lay which, uint32_t row, char *out, size_t cap);
 /* Natural width of each column (the entropy column by its heading: it is computed only for the rows drawn). */
 void dash_layout_widths(const struct object *ob, enum dash_lay which, uint16_t w[DASH_COLS]);
+
+/* THE ISLANDS TABLE of a script (owner 2026-11-14: offset first, then place, bytes, ObfScore, nucleo; the counts the score is made of are not columns):
+ * one row per record of the engine's set, in its order. n_col == 0 when there is no record (dash_islands says why). A cell is the record's file offset,
+ * its place (island, text, layer N), its length, its ObfScore (bits per effect, two decimals) and - in `caps`, which may be longer than a cell - the
+ * nucleo capabilities of the nodes the route made in it, comma separated ("-" for none, "+N" for what `cap` could not hold). A row past the set gives
+ * empty cells. */
+#define DASH_ISL_COLS 5u
+void dash_islands_table(struct object *ob, struct dash_table *t);
+void dash_islands_cell(struct object *ob, uint32_t row, char c[][DASH_CELL], char *caps, size_t cap);
 
 /* ---- the symbol tables ---------------------------------------------------------------------------------- */
 

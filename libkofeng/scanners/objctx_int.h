@@ -40,6 +40,9 @@ int oc_can_produce(const struct kof_scanner *sc);
 int oc_child(const struct kof_obj_ctx *ctx);
 /* What the next child IS, as an entry kind (KOF_ENT_*, kofentry.h). */
 void oc_child_kind(const struct kof_obj_ctx *ctx, uint32_t kind);
+/* The next child is evidence, not a scan target of its own - see
+ * kof_src_declare_evidence_only in objsrc.h. */
+void oc_child_evidence_only(const struct kof_obj_ctx *ctx);
 /* Emit all of `n` bytes; 1 when every byte was taken, 0 when a limit refused. */
 int oc_emit_exact(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n);
 
@@ -60,6 +63,8 @@ void oc_emu_diag_end(struct kof_scanner *sc, const struct oc_emu_diag *acct,
 		     struct kgenome_diag_scan *ds);
 struct kgenome_diag_apihash_set *oc_emu_apihash(struct kof_scanner *sc,
 		const struct kgenome_obj *gobj, kof_buf b, const struct kgenome_pe_imptab *imports);
+/* The PE machine kept between the API-resolution run and the unpack run (sc->obj.emu.kept), let go. */
+void oc_emu_kept_drop(struct kof_scanner *sc);
 /* Takes ownership of the finished run, gathers what it produced (objctx_emu_gather.c). */
 uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
 		       struct kgenome_emu *e, struct kgenome_emu_unp_report rep);
@@ -128,9 +133,18 @@ void oc_entry_begin(struct kof_scanner *sc);
 
 /* ---- the diagnose analysis and symbols (objctx_diag.c) ---- */
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+/* The capabilities the loaded diagnoses name (their nodes' and their sequences'), for the node table's keep rule; NULL / 0 when none or refused (objctx_diag_query.c). */
+uint16_t *oc_diag_keep_caps(struct kof_scanner *sc, uint32_t *n);
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 /* The functions of the object, built once - see funcs.h. Never NULL. */
 const struct kgenome_func_set *oc_funcs(const struct kof_obj_ctx *ctx);
+/* A script's islands (celllysis/script_islands.h), made with its function table on the first ask (objctx_diag.c); NULL for any other
+ * object, or one whose islands the ledger could not hold. oc_script_islands_drop gives them back at the end of the object. */
+struct kgenome_script_islands;
+const struct kgenome_script_islands *oc_script_islands(const struct kof_obj_ctx *ctx);
+/* Make a script's function table (into sc->obj.sym.funcs) and its islands (sc->obj.sym.isl) from one lex: objctx_script_parts.c. */
+void oc_script_parts(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
+void oc_script_islands_drop(struct kof_scanner *sc);
 /* The object's frames (the cache, made on the first ask), and the allocator they are charged to: the scanner's ledger, refused when the object's share has no room. */
 struct kgenome_frame_cache *oc_frames(const struct kof_obj_ctx *ctx);
 void *oc_cfg_alloc(void *user, size_t n);
@@ -227,9 +241,20 @@ uint32_t oc_script_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b, uint
  */
 struct oc_consts;
 uint32_t oc_syms_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, const struct kgenome_pe_imptab *imp, uint32_t *passes);
+/* The object whose text the next scan reads: its parse's island table is what the measure (kgenome_diag_text_req.obf_isl) is handed. Asked by every stage
+ * that makes the scan with the object in hand, before it. */
+void oc_text_page(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 struct oc_consts *oc_text_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b);
 int oc_text_eval_cut(const struct kof_scanner *sc);
 struct kgenome_diag_scan *oc_text_take(struct kof_scanner *sc, uint32_t lang, kof_buf b);
+/*
+ * EVERY ISLAND THE SAME SCAN RESOLVED (phenotype/diag_scan.h's kgenome_diag_text_island_set: a call's
+ * argument the evaluator followed through a variable, a wrapper or a join to a constant an eval()/
+ * create_function() RUNS - diag_text_walk.c's layer_of_call), when the constants were asked for
+ * (deep): the SAME walk oc_text_consts already made, asked for what it also kept - no second walk.
+ * NULL when nothing was asked, nothing was found, or the scan could not be made at all.
+ */
+const struct kgenome_diag_text_island_set *oc_text_islands(struct kof_scanner *sc, uint32_t lang, kof_buf b);
 /* the constants collector (objctx_script_consts.c): the callbacks of the scan's on_const and on_head, the collector they fill and its release */
 struct oc_consts *oc_consts_new(const struct kof_scanner *sc, uint32_t lang, uint64_t n);
 void oc_consts_free(struct oc_consts *c);
@@ -278,6 +303,10 @@ void oc_child_want(const struct kof_obj_ctx *ctx, uint32_t want,
 			 uint32_t level);
 void oc_child_format(const struct kof_obj_ctx *ctx, uint8_t fmt);
 void oc_child_entry(const struct kof_obj_ctx *ctx, uint32_t index);
+/* The next child's own image description (format, arch, subtype, entry, a copy of its
+ * header struct) - see kof_src_declare_desc, sx_inherit_image. */
+void oc_child_desc(const struct kof_obj_ctx *ctx, uint8_t fmt, uint8_t arch, uint8_t subtype,
+		   uint64_t entry_off, const void *img, uint32_t img_len);
 int oc_child_entry_rva(const struct kof_obj_ctx *ctx, uint64_t rva);
 int oc_child_dir(const struct kof_obj_ctx *ctx, uint32_t idx,
 		       uint64_t rva, uint64_t size);
@@ -367,6 +396,24 @@ struct emu_extra {
 void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 /* The routines of the diagnose scan diagnose `d` may run on this object (objctx_diag_route.c); zero: the object has nothing for it. */
 unsigned oc_diag_routes(const struct kof_diag *d, const struct kof_obj_ctx *ctx);
+/* The routines this object's FORMAT can serve, no diagnose asked (objctx_diag_route.c): the other half of oc_diag_routes. */
+unsigned oc_diag_servable(const struct kof_obj_ctx *ctx);
+/* The routines an author's list is made by: oc_diag_servable and EMULATE for a binary (objctx_diag_route.c). */
+unsigned oc_diag_author_routes(const struct kof_obj_ctx *ctx);
+
+/*
+ * THE GATE OF A SIGNATURE (objctx_diag_gate.c): KOF_FACT_ANOMALY and KOF_FACT_NUCLEO, each YES, NO or UNKNOWN
+ * (enum kof_gate_state). oc_diag_gate_shape answers an anomaly condition (asked with the object's shape, by
+ * oc_diag_when_met); oc_diag_gate_defer says form diagnose `i`, whose expression answered yes, states a nucleo condition and
+ * so waits for the analysis (and asks for it); oc_diag_gate_settle, at the ANALYSE stage, answers every form that waits;
+ * oc_diag_gate_report fills a report's per-condition states.
+ */
+uint64_t oc_obj_anomalies(const struct kof_obj_ctx *ctx, uint8_t *fmt);
+uint8_t oc_diag_gate_shape(const struct kof_obj_ctx *ctx, uint16_t fact, uint64_t val);
+int oc_diag_gate_pass(uint8_t state);
+int oc_diag_gate_defer(struct kof_scanner *sc, uint32_t i);
+void oc_diag_gate_settle(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
+void oc_diag_gate_report(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, uint32_t i, struct kof_diag_report *out);
 
 /*
  * THE TEXT ROUTE (objctx_diag_text.c). A script is read by its lexer and not as an object model, so it has its own pieces of the
@@ -380,7 +427,7 @@ void oc_diag_demand(struct kof_scanner *sc);
 /* THE DETECTION FORMS (objctx_diag_form.c): a diagnose whose record carries KDIG_SEC_FORM is answered here and nowhere in the
  * analysis of the code. oc_diag_forms asks every form diagnose of one stage (sim 0: the string matchers, at DETECT; 1: the
  * similarity matchers, at SIMILAR) that is read and whose shape this object has; oc_diag_form_hit reads an answer;
- * oc_diag_used and oc_diag_when_met are the two questions the graph's gate asks too (objctx_diag.c), one definition. */
+ * oc_diag_used and oc_diag_when_met are the two questions the graph's gate asks too (objctx_diag.c, objctx_diag_gate.c), one definition. */
 void oc_diag_forms(struct kof_scanner *sc, struct kof_obj_ctx *ctx, int sim, struct kof_result *out);
 int oc_diag_form_hit(const struct kof_scanner *sc, uint32_t i);
 /* The markers and blocks of a MATCHED form, where they are (scan_explain.c): the report's third level, filled only for a report. */

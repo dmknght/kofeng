@@ -11,9 +11,9 @@
  * nothing else. The choice of this label, of one Weisfeiler-Lehman round and of a bottom-32 sketch was made by
  * measurement over two families and 56354 clean functions (/mnt/games/normtest/briefs/cfg_decision.md); its limits
  * are there too and are not repeated as claims here: same-name ground truth only, two families, no clean
- * ARM/i386/MIPS file, a changed -O defeats it. The anchor (a floor of 12 reachable blocks, chosen there) is GONE
- * (owner, 2026-11-01): every function with a reachable block is signed; see KGENOME_CFG_ANCHOR_MIN and
- * IMPROVE cfg-small-1 in cfg_sign.c.
+ * ARM/i386/MIPS file, a changed -O defeats it. The anchor (a floor of 12 reachable blocks, chosen there) was
+ * REMOVED (owner, 2026-11-01) and then RAISED to 5, measured (owner, 2026-11-07, anchor-floor-1): see
+ * KGENOME_CFG_ANCHOR_MIN below for the numbers and cfg_anchor.c for the decision.
  *
  * ONE BUILDER. The blocks of a function used to be made by the lineage solver only (diag_lineage_solve.c) and
  * stored as addresses that every graph walk re-resolved by binary search. Both now read this: successors are
@@ -61,16 +61,38 @@
 #define KGENOME_CFG_KEYS   32u          /* elements of a sketch: the bottom 32 */
 /* the build's first work area, per input instruction: two u32 (jump target, block of an instruction) and one class byte; refused as OVER_BUDGET before anything is allocated */
 #define KGENOME_CFG_BUILD_BYTES_PER_INSN (2u * sizeof(uint32_t) + 1u)
-#define KGENOME_CFG_ANCHOR_MIN 1u       /* reachable blocks a function needs to be hashed: one (a function with none has nothing to sign) */
+#define KGENOME_CFG_ANCHOR_MIN 5u       /* reachable blocks a function needs to be hashed, see the comment below (anchor-floor-1, 2026-11-07) */
 #define KGENOME_CFG_ROUNDS_MAX 8u
 /*
- * THE FLOOR OF 12 REACHABLE BLOCKS IS GONE (owner, 2026-11-01: "dung wl1 de them hash cho cac ham nho"). It was chosen from a measured
- * false-positive cliff between 10 and 12 blocks; the owner decided that a small function gets its hash anyway and that the user's own
- * threshold handles the rest, so the number is no longer a condition of being signed. What remains is that a function with NO reachable
- * block has no element to sign. Every reachable block is one distinct element (the label paired with its k-th occurrence), so a signed
- * function holds at least this many (up to 32). It is the minimum a CFG block may carry in a pack, in place of
- * KGENOME_MUTATION_MIN_HASH (16, a number chosen for window hashes); the block record (n_hash u16, a slice of the pool) has no minimum
- * of its own, only the checks that ask kgenome_mutation_block_min.
+ * THE FLOOR, ANCHOR-FLOOR-1 (owner, 2026-11-01 removed the old floor of 12: "dung wl1 de them hash cho cac ham nho"; owner, 2026-11-07
+ * raised it to 5, measured). Floor 12 was chosen from a measured false-positive cliff between 10 and 12 blocks and then removed
+ * entirely, on the view that a small function gets its hash anyway and the user's own match threshold handles the rest. It did not:
+ * a sketch of 1-4 keys carries no content of the behaviour (the label is (in-degree, out-degree, terminator), nothing else - rule of
+ * cfg_sign.c), and MalwareLab (4673 real ELF, this machine, 2026-11-07) showed the cost of signing one anyway at FULL CONFIDENCE, the
+ * same as a 20-block function: at floor 1 the worst single 1-block shape matched 2808 of 4370 signed-unit files (64.3% of the corpus;
+ * frame_dummy/register_tm_clones/deregister_tm_clones - 4 blocks, universal glibc CRT boilerplate present in every dynamically linked
+ * ELF - were the next three groups at 56/50/41%), and 1043 of the 2500+ distinct block_ids repeated across more than 1% of files were
+ * 1-4 block shapes. Raising the floor to 5 removes every one of these: the worst remaining shape-only collision (excluding a single
+ * 105-block group that is the SAME statically-linked library routine repeated across variants - a real shared-code match, not a shape
+ * collision, and untouched by any floor) drops to 22.6% at exactly 5 blocks and keeps falling as the floor rises further (9% at floor
+ * 8). The cost, reported in the same measurement and not hidden: floor 5 leaves 49.6% of the units floor 1 used to sign unsigned
+ * (KOF_CFGSIGN_BELOW_FLOOR, kofexaminer's own "cannot be ticked" path, unchanged) - mostly the same 1-4 block population cfg-small-1
+ * (cfg_sign.c) had already measured as "not separable by shape alone" before this number existed, so little of it was usable evidence
+ * to begin with. A function with NO reachable block still has no element to sign (floor never goes below 1). Every reachable block is
+ * one distinct element (the label paired with its k-th occurrence), so a signed function holds at least this many (up to 32). It is
+ * the minimum a CFG block may carry in a pack, in place of KGENOME_MUTATION_MIN_HASH (16, a number chosen for window hashes); the
+ * block record (n_hash u16, a slice of the pool) has no minimum of its own, only the checks that ask kgenome_mutation_block_min - a
+ * pack record already holding fewer than 5 hashes stays valid (every CODE block shipped today has at least 6, checked by hand against
+ * this change) but a NEW one of 1-4 can no longer be generated, and ticking a 1-4 block function in kofeditor already refuses it
+ * (BELOW_FLOOR, the UI path was correct before this change and needed none).
+ * NOT DONE, measured and rejected for now: a callee-identity rescue (KGENOME_CFG_ANCHOR_CALLEES, `ckey`) that would re-admit a
+ * below-floor function whose calls are distinctive. On this same corpus every call inside the worst 1-block collision group resolved
+ * as DIRECT/LOCAL (0 of the sampled calls were an import/PLT stub - a statically-linked or self-contained binary, the common case for
+ * this engine's targets, calls its OWN other functions, not a named library entry point), and the only identity source the engine has
+ * today (kof_callnames_build, libkofeng/analyzers/callnames.h) resolves an IMPORT's spelling only - it has nothing to say about a local
+ * call. A fifth to a quarter of the sampled 1-block functions (setup_ip_header, rand_next, add_sock, _fini) made no call at all, so even
+ * a hypothetical local-call identity would rescue nothing for them. Building a local-call identity (e.g. the callee's own recursive
+ * signature) is a new algorithm, not plumbing, and is not measured - next, if this is revisited.
  */
 #define KGENOME_CFG_MIN_KEYS   KGENOME_CFG_ANCHOR_MIN
 /*
@@ -258,6 +280,12 @@ struct kgenome_cfg {
 enum kgenome_status kgenome_cfg_build(const struct kgenome_cfg_req *req, struct kgenome_cfg *out);
 void kgenome_cfg_free(struct kgenome_cfg *g, const struct kgenome_cfg_mem *mem);
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out with cfg_sign.c, cfg_anchor.c, cfg_view.c and cfg_gv.c (each says so at its head).
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* ---- the signature ---- */
 
 /* What a signature is made of. 0 = STRUCT, the measured result (cfg_decision.md); CALLEES scores the callees' identities alone (a diagnose that
@@ -396,5 +424,164 @@ struct kgenome_cfg_gv_req {
 
 /* Fill `out` (release with kgenome_gv_free and the same allocator). Returns out->status: the view's, worse of OVER_BUDGET / NOMEM / BAD_INPUT when nothing was made. */
 enum kgenome_status kgenome_cfg_gv_make(const struct kgenome_cfg_gv_req *req, struct kgenome_gv *out);
+
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */
+/* ---- THE BLOCK LAYER: the control-flow graph of a whole OBJECT (cfg_obj.c) ---------------------------------------------------- */
+/*
+ * THE BLOCKS OF AN OBJECT, by RECURSIVE DESCENT from the entries the caller trusts (partition redesign STEP B 1b, owner 2026-11-15: goals trusted,
+ * stable, behaviour, cheap). The caller hands the object's code as a cell space (held to the walk's trace, kgenome_diag_walk_hold: an offset the walk
+ * decoded is read back, not decoded again; `n_fresh` says how many were not), the extents where code may be, and the seeds: the entry point and what
+ * the headers declare (exports, .pdata, TLS callbacks, the CF guard list, symbols, unwind starts). From each seed the flow is followed: a direct
+ * branch's target and a direct call's target are walked too, so a function is found because something REACHES it, never because a linear sweep met a
+ * byte that decoded. Every offset is read once (a byte map); a block ends at a flow instruction (the one table, cfg_isa.c: delay slots, predicated
+ * exits) or where another path's leader begins; successors are BLOCK INDICES resolved once (rule 5).
+ *
+ * WHAT IS NOT KNOWN IS SAID, never hidden: an indirect jump ends its block as T_INDIRECT (a switch table is not read here); an indirect call is
+ * counted; a target outside every extent, inside an instruction another path decoded (overlapping code), or at bytes that decode as nothing is a
+ * LOOSE entry with its reason; a seed that is not code keeps its entry with no block and the reason (the caller's anomaly: metadata pointing at
+ * non-code).
+ *
+ * A CALL'S FALL-THROUGH WAITS FOR ITS CALLEE (2026-11-16, phase 2 of the metadata partition; it was "a call is assumed to return"). The bytes after a
+ * direct call to a function the descent reads are read only once that callee is known to RETURN: some path of it reaches a return, a conditional exit,
+ * an indirect jump or a stop for want of code (each of those may return), or a call whose callee returns and whose continuation does. A callee none of
+ * whose paths can is proven NOT to return when every call it waits on is itself proven so (a fixed point over what was read, made when nothing else
+ * can be read; no name list): its callers' blocks end T_NORET and the bytes after them are never decoded unless another path reaches them. A callee
+ * whose answer depends on a recursion cycle (a call that waits, directly or through others, on the function it is in) is RESOLVED AS RETURNING, the
+ * conservative choice that keeps code, and said: its entry block carries B_ASSUMED and `n_assumed` counts it. A call the descent cannot read the callee
+ * of (indirect, outside the extents, inside another instruction, into the other instruction set) is assumed to return, as before. Each instruction is
+ * still decoded once: a continuation is read when it is released, never twice.
+ *
+ * NAMED LIMITS, with the next algorithm: a switch (T_INDIRECT; next: the jump-table reader on this layer), a code pointer stored in data (a
+ * callback, a vtable: no seed until the API row table's code-pointer arguments or a relocation reader hands one in), overlapping instruction
+ * streams (one byte map: the second stream is LOOSE/OVERLAP; next: a map that keeps both), Thumb inside ARM (one ISA per space: an ARM `blx label`
+ * is LOOSE/ISA), a callee that does not return only because what it calls through a register or outside the extents does not (assumed to return).
+ *
+ * MEMORY AND WORK: five bytes per extent byte (the map, and the instruction index of each place), 32 bytes per instruction read, 40 per block, 12 per
+ * place another instruction names; all through `mem`, bounded by `budget->max_bytes`. The work bound `max_insn` comes from the caller (the root's
+ * allowance); reaching it stops the descent with OVER_BUDGET and what was found kept. The proof that a callee does not return is one linear pass over
+ * what was read each time the descent runs dry with calls still waiting; it runs at most KGENOME_CFG_OBJ_PROOF_ROUNDS times (a DoS bound of work), and
+ * past it every waiting callee is resolved as returning (B_ASSUMED: code kept, the bound said by `n_round`) and no call waits any more (the rest is one pass).
+ */
+struct kgenome_cfg_obj_ext {
+	uint64_t off, len;                      /* file bytes [off, off + len) where an instruction may be */
+};
+
+struct kgenome_cfg_obj_seed {
+	uint64_t off;                           /* a file offset the caller says is code that runs */
+	uint32_t src;                           /* the caller's evidence bits (the function table's KGENOME_FN_S_*): kept, not read */
+};
+
+/* How a block ends. */
+enum kgenome_cfg_obj_term {
+	KGENOME_CFG_OBJ_T_FALL = 0,             /* runs into the next block's leader: succ[1] */
+	KGENOME_CFG_OBJ_T_COND,                 /* a direct conditional branch: succ[0] the target, succ[1] the fall-through */
+	KGENOME_CFG_OBJ_T_JUMP,                 /* a direct jump: succ[0] */
+	KGENOME_CFG_OBJ_T_RET,                  /* a return */
+	KGENOME_CFG_OBJ_T_COND_EXIT,            /* leaves only when a condition holds (an ARM conditional return): succ[1] the fall-through */
+	KGENOME_CFG_OBJ_T_INDIRECT,             /* a jump through a register or memory: not resolved here (counted in n_indirect_jmp) */
+	KGENOME_CFG_OBJ_T_EXIT,                 /* a trap, an undefined instruction, an interrupt return, a far jump */
+	KGENOME_CFG_OBJ_T_STOP,                 /* the flow stops for want of code: `stop` says why */
+	KGENOME_CFG_OBJ_T_NORET                 /* a direct call (and its delay slots) whose callee is proven not to return: no successor, the bytes after it are not this path's */
+};
+
+/* The proof rounds a build may make (see A CALL'S FALL-THROUGH WAITS FOR ITS CALLEE above): a DoS bound of work, not a size. An honest object needs one round,
+ * and one more per recursion cycle whose resolution opens new code that waits again. Past it every waiting callee is resolved as returning (code kept, B_ASSUMED). */
+#define KGENOME_CFG_OBJ_PROOF_ROUNDS 64u
+
+/* Why a path stops, or why a target or a seed has no block. */
+enum kgenome_cfg_obj_why {
+	KGENOME_CFG_OBJ_W_NONE = 0,
+	KGENOME_CFG_OBJ_W_UNDECODABLE,          /* the bytes decode as nothing */
+	KGENOME_CFG_OBJ_W_OUTSIDE,              /* not inside a code extent (or the extent ends inside the instruction) */
+	KGENOME_CFG_OBJ_W_OVERLAP,              /* inside an instruction another path decoded */
+	KGENOME_CFG_OBJ_W_BUDGET,               /* the work bound fired before it was read */
+	KGENOME_CFG_OBJ_W_ISA                   /* a call into the other instruction set (ARM `blx label`: Thumb code): not read with this space */
+};
+
+#define KGENOME_CFG_OBJ_B_SEED     0x01u        /* a seed starts it */
+#define KGENOME_CFG_OBJ_B_CALLED   0x02u        /* a direct call's target */
+#define KGENOME_CFG_OBJ_B_BRANCHED 0x04u        /* a direct branch's target */
+#define KGENOME_CFG_OBJ_B_FRESH    0x08u        /* an instruction of it was decoded here: the trace did not hold its offset */
+#define KGENOME_CFG_OBJ_B_NORET    0x10u        /* no path from it reaches a return (for an entry: the function does not return; proven, see above) */
+#define KGENOME_CFG_OBJ_B_ASSUMED  0x20u        /* it starts a callee that was resolved as RETURNING by assumption (its answer depended on a recursion cycle) */
+#define KGENOME_CFG_OBJ_B_FALLEN   0x40u        /* the instruction right before it runs on into it and is no call (a plain instruction, or a conditional branch's not-taken way): its first byte is not where a function is entered */
+
+struct kgenome_cfg_obj_block {
+	uint64_t off;                           /* file offset of its first instruction */
+	uint32_t len;                           /* bytes, a delay slot included */
+	uint32_t n_insn;
+	uint32_t succ[2];                       /* block indices or KGENOME_CFG_NONE: [0] the direct target, [1] the fall-through */
+	uint32_t call_first, n_call;            /* its calls: kgenome_cfg_obj.call[call_first .. + n_call) (a call does not end a block) */
+	uint8_t  term;                          /* enum kgenome_cfg_obj_term */
+	uint8_t  stop;                          /* enum kgenome_cfg_obj_why, for T_STOP */
+	uint8_t  flags;                         /* KGENOME_CFG_OBJ_B_* */
+	uint8_t  pad_;
+};
+
+#define KGENOME_CFG_OBJ_C_INDIRECT 0x01u        /* through a register or memory: no target */
+#define KGENOME_CFG_OBJ_C_LINKED   0x02u        /* ARM: a jump the instruction before made a call (`mov lr, pc; mov pc, rN`) */
+#define KGENOME_CFG_OBJ_C_NORET    0x04u        /* its callee is proven not to return: its block ends T_NORET */
+
+struct kgenome_cfg_obj_call {
+	uint64_t at;                            /* the call instruction */
+	uint64_t target;                        /* file offset, or KGENOME_BROKEN (indirect, or outside the object) */
+	uint32_t blk;                           /* the block that holds it */
+	uint32_t tgt_blk;                       /* the block at the target, or KGENOME_CFG_NONE */
+	uint8_t  flags;                         /* KGENOME_CFG_OBJ_C_* */
+	uint8_t  pad_[7];
+};
+
+/* A seed, as the layer answered it: its block, or none and why (the caller's anomaly when its metadata names non-code). */
+struct kgenome_cfg_obj_entry {
+	uint64_t off;
+	uint32_t src;                           /* every seed's bits at this offset, OR'd */
+	uint32_t blk;                           /* KGENOME_CFG_NONE: not code, see `why` */
+	uint8_t  why;                           /* enum kgenome_cfg_obj_why */
+	uint8_t  pad_[7];
+};
+
+/* A direct target the flow names that holds no block: said, with the reason. */
+struct kgenome_cfg_obj_loose {
+	uint64_t from;                          /* the branch or call */
+	uint64_t target;                        /* file offset, or KGENOME_BROKEN when the address is not in the object */
+	uint8_t  why;                           /* enum kgenome_cfg_obj_why */
+	uint8_t  pad_[7];
+};
+
+struct kgenome_cfg_obj_req {
+	const struct kgenome_cell_space *sp;    /* the object's code; `held` (the walk's trace) is read when set */
+	const struct kgenome_cfg_obj_ext *ext;  /* where code may be; any order, no overlap */
+	uint32_t n_ext;
+	const struct kgenome_cfg_obj_seed *seed;
+	uint32_t n_seed;
+	uint64_t max_insn;                      /* the work bound (instructions read); 0 = the extents' bytes, which an honest object never reaches */
+	struct kgenome_budget *budget;          /* optional; max_bytes bounds what the call holds */
+	struct kgenome_cfg_mem mem;
+};
+
+struct kgenome_cfg_obj {
+	struct kgenome_cfg_obj_block *b;        /* in address order */
+	uint32_t n_b;
+	struct kgenome_cfg_obj_call *call;      /* in address order */
+	uint32_t n_call;
+	struct kgenome_cfg_obj_entry *e;        /* in address order, one per seeded offset */
+	uint32_t n_e;
+	struct kgenome_cfg_obj_loose *loose;    /* in the order met */
+	uint32_t n_loose;
+	uint64_t n_insn;                        /* instructions read */
+	uint64_t n_fresh;                       /* of them, decoded here: the space's `held` did not answer the offset */
+	uint32_t n_indirect_jmp, n_indirect_call;
+	uint32_t cap_b_, cap_call_, cap_e_, cap_loose_;   /* private: entries allocated */
+	enum kgenome_status status;             /* OK; OVER_BUDGET (max_insn or max_bytes: what is here is true and partial); NOMEM; BAD_INPUT; UNSUPPORTED (no ISA row) */
+	/* (appended 2026-11-16) what the waiting calls came to: calls whose callee is proven not to return (C_NORET), callees resolved as returning by assumption
+	 * (B_ASSUMED), and the proof rounds made (more than KGENOME_CFG_OBJ_PROOF_ROUNDS: the bound fired and every callee still waiting then was assumed) */
+	uint32_t n_noret_call, n_assumed, n_round;
+};
+
+/* Build the blocks. The result is zeroed first, so it is always safe to free. Returns out->status. */
+enum kgenome_status kgenome_cfg_obj_build(const struct kgenome_cfg_obj_req *req, struct kgenome_cfg_obj *out);
+void kgenome_cfg_obj_free(struct kgenome_cfg_obj *g, const struct kgenome_cfg_mem *mem);
+/* The block that holds file offset `off` (O(log n)), or KGENOME_CFG_NONE. */
+uint32_t kgenome_cfg_obj_block_at(const struct kgenome_cfg_obj *g, uint64_t off);
 
 #endif /* KGENOME_CFG_H */

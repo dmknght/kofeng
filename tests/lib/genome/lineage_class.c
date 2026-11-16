@@ -143,19 +143,43 @@ static void t_plan(void)
 	CK(kgenome_diag_lineage_plan(KGENOME_CLASS_ELF | KGENOME_CLASS_X86) == KGENOME_LINEAGE_S_ALL);
 	CK(kgenome_diag_lineage_plan(KGENOME_CLASS_ELF | KGENOME_CLASS_NOSECT | KGENOME_CLASS_X86) ==
 	   (KGENOME_LINEAGE_S_FLOW | KGENOME_LINEAGE_S_LOCS));                                        /* no SUMM, no SEED: 1.5 and 4.5 links/s */
-	CK(kgenome_diag_lineage_plan(KGENOME_CLASS_PE | KGENOME_CLASS_X86) == (KGENOME_LINEAGE_S_FLOW | KGENOME_LINEAGE_S_SUMM));
+	CK(kgenome_diag_lineage_plan(KGENOME_CLASS_PE | KGENOME_CLASS_X86) ==
+	   (KGENOME_LINEAGE_S_FLOW | KGENOME_LINEAGE_S_LOCS | KGENOME_LINEAGE_S_SUMM));                /* LOCS since the stages read the row */
 }
 
-/* The names of imports that never return: the table in diag_lineage_chain.c, one name at a time, and what must not be in it. */
+/*
+ * The names of imports that never return: rows of the vocabulary whose result is res=noret (fix_linrow: they were a list in
+ * diag_lineage_chain.c). Every name the old list held is answered, and by the table of the route that reads it: the C names by the ELF
+ * table AND the PE table (the old list answered both routes), the Windows names by the PE table only, exit_group by the ELF table. A
+ * noreturn row has no capability (it makes no node). And what must not be in it.
+ */
 static void t_noreturn_names(void)
 {
-	static const char *const yes[] = { "exit", "_exit", "abort", "__stack_chk_fail", "__assert_fail", "longjmp", "pthread_exit",
-		"ExitProcess", "ExitThread", "RtlExitUserProcess", "RtlExitUserThread" };
+	static const char *const c_names[] = { "exit", "_exit", "_Exit", "abort", "quick_exit", "__stack_chk_fail", "__stack_chk_fail_local",
+		"__assert_fail", "__assert", "__assert_perror_fail", "__chk_fail", "__fortify_fail", "__libc_fatal", "longjmp", "_longjmp",
+		"siglongjmp", "__longjmp_chk", "pthread_exit", "__cxa_throw", "__cxa_rethrow", "__cxa_bad_cast", "__cxa_bad_typeid",
+		"_Unwind_Resume", "err", "errx", "verr", "verrx", "thrd_exit" };
+	static const char *const win_names[] = { "ExitProcess", "ExitThread", "RtlExitUserProcess", "RtlExitUserThread", "FatalExit",
+		"_CxxThrowException", "_amsg_exit", "_invoke_watson" };
 	static const char *const no[] = { "socket", "connect", "printf", "exitx", "Exit", "", "_ex", "longjmp2", "malloc", "read", "TerminateProcess", "CreateProcessA" };
-	unsigned i;
+	unsigned i, t;
+	uint16_t r;
 
-	for (i = 0; i < sizeof yes / sizeof yes[0]; i++)
-		CK(kgenome_diag_name_is_noreturn(yes[i]));
+	for (i = 0; i < sizeof c_names / sizeof c_names[0]; i++) {
+		CK(kgenome_diag_name_is_noreturn(c_names[i]));
+		for (t = 0; t < 2u; t++) {
+			r = kgenome_nucleo_row_of(t ? KGENOME_NUCLEO_T_PE : KGENOME_NUCLEO_T_ELF, c_names[i]);
+			CK(r && kgenome_nucleo_row_res(r) == KGENOME_NUCLEO_RES_NORET && kgenome_nucleo_row_cap(r) == KGENOME_NUCLEO_NONE);
+		}
+	}
+	for (i = 0; i < sizeof win_names / sizeof win_names[0]; i++) {
+		CK(kgenome_diag_name_is_noreturn(win_names[i]));
+		r = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_PE, win_names[i]);
+		CK(r && kgenome_nucleo_row_res(r) == KGENOME_NUCLEO_RES_NORET && kgenome_nucleo_row_cap(r) == KGENOME_NUCLEO_NONE);
+		CK(kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, win_names[i]) == 0);
+	}
+	r = kgenome_nucleo_row_of(KGENOME_NUCLEO_T_ELF, "exit_group");
+	CK(r && kgenome_nucleo_row_res(r) == KGENOME_NUCLEO_RES_NORET && kgenome_diag_name_is_noreturn("exit_group"));
 	for (i = 0; i < sizeof no / sizeof no[0]; i++)
 		CK(!kgenome_diag_name_is_noreturn(no[i]));
 	CK(!kgenome_diag_name_is_noreturn(NULL));

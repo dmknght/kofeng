@@ -655,10 +655,10 @@ static void repros(void)
 		{ "<?php $n = <<<EOT /* c */\nraw\nEOT;", "<?php $n=<<<EOT \nraw\nEOT;" },
 		{ "<?php class A extends B<<<ceptio//n\n{\n}\n", "<?php class A extends B<<<ceptio{\n}" },
 		/* an echo inside the argument of another was written a call when the outer one was typed with its bracket, and not when the form opened it */
-		{ "<?php echo print 'x'; echo 'y';", "<?php echo(print'x');echo('y');" },
+		{ "<?php echo print 'x'; echo 'y';", "<?php echo(print'x');\necho('y');" },
 		{ "<?php echo );\necho 'a';", "<?php echo();\necho('a');" },
 		/* the two words are what an echo's bracket is looked for after, and both are read: the filter that asks for them ends in "o" or "t" */
-		{ "<?php print 'x'; PRINT 'y'; Echo 'z';", "<?php print('x');PRINT('y');Echo('z');" },
+		{ "<?php print 'x'; PRINT 'y'; Echo 'z';", "<?php print('x');\nPRINT('y');\nEcho('z');" },
 		/* the bracket closed inside a halt marker (`__halt_compiler());`), or in front of the data after it */
 		{ "<?php echo 'a' __halt_compiler();\ndata ?>", "<?php echo('a'__halt_compiler();\ndata ?>" },
 		{ "<?php echo 'a' __halt_compiler() ?>data", "<?php echo('a'__halt_compiler()\n?>data" },
@@ -671,8 +671,8 @@ static void repros(void)
 		{ "<?php $a = <<<ABC\n\\x41BC\nABC;\n", "<?php $a= <<<ABC\n\\x41BC\nABC;" },
 		{ "<?php $a = <<<EOT\n \\x20abc\n EOT;\n", "<?php $a= <<<EOT\n \\x20abc\n EOT;" },
 		/* "$ __halt_compiler();" is a variable's name to the form, which closes the blank up, and was a halt to the lexer */
-		{ "<?php $  __halt_compiler(); ) ;", "<?php $__halt_compiler(););" },
-		{ "<?php $ /* c */ // d\n __halt_compiler(); ) ;", "<?php $\n__halt_compiler(););" },
+		{ "<?php $  __halt_compiler(); ) ;", "<?php $__halt_compiler();\n);" },
+		{ "<?php $ /* c */ // d\n __halt_compiler(); ) ;", "<?php $\n__halt_compiler();\n);" },
 		/* an echo's bracket was written in front of the data after a halt marker when a bracket of the program was still open at its ";" */
 		{ "<?php echo f(__halt_compiler();\ndata", "<?php echo(f(__halt_compiler();\ndata" },
 		/* inside `${...}` and `{$...}` the text is the program's, and an escape in it is none: "\x27" written as the quote it spells closed what the lexer

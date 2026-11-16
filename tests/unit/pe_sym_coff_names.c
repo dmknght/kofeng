@@ -122,9 +122,9 @@ static void t_names_resolve(void)
 
 	/* GREEN here; on base/ (pre-patch) both calls return 0 and `out` reads
 	 * "fcn_00000010" / "fcn_00000180" - the exact symptom PE-SYM-NAME-GAP names. */
-	CK(kof_func_name(&l.v[0], blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&l.v[0], blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "calc"));
-	CK(kof_func_name(&l.v[1], blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&l.v[1], blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "a_mingw_generated_helper_name"));
 
 	/* The origin now says so, honestly - not the old "directories" label, which
@@ -161,7 +161,7 @@ static void t_static_storage_class_resolves_too(void)
 		return;
 	}
 	n = kof_pe_syms_with(kof_buf_make(P.b, P.n), &pi, NULL, blk, sizeof blk);
-	CK(kof_func_name(&l.v[0], blk, n, out, sizeof out) == 1);
+	CK(kof_func_name(&l.v[0], blk, n, NULL, 0, out, sizeof out) == 1);
 	CK(!strcmp(out, "local_calc"));
 	kgenome_fntab_list_free(&l);
 }

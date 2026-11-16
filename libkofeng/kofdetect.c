@@ -35,6 +35,29 @@ void kdet_info(const kof_engine *e, const struct kof_result *r, struct kdet_info
 	kdb_tag_name(e, r->cat.tag_id, out->tag, sizeof out->tag);
 }
 
+/* A bit per capability value (16 bits, 8 KiB on the stack): distinct whatever the order and however many records, and the
+ * list comes out ascending without a sort. NONE (0) is a node without a capability and is not listed. */
+uint32_t kdet_nucleo_seen(const struct kof_result *r, uint16_t *out, uint32_t cap)
+{
+	uint64_t seen[65536u / 64u];
+	uint32_t i, n = 0;
+
+	if (!r || !r->lineage || !r->n_lineage)
+		return 0;
+	memset(seen, 0, sizeof seen);
+	for (i = 0; i < r->n_lineage; i++)
+		if (r->lineage[i].cap)
+			seen[r->lineage[i].cap >> 6] |= (uint64_t)1 << (r->lineage[i].cap & 63u);
+	for (i = 0; i < 65536u; i++) {
+		if (!((seen[i >> 6] >> (i & 63u)) & 1u))
+			continue;
+		if (out && n < cap)
+			out[n] = (uint16_t)i;
+		n++;
+	}
+	return n;
+}
+
 int kdet_diag_of(const kof_engine *e, uint32_t id, struct kdet_diag *out)
 {
 	memset(out, 0, sizeof *out);
@@ -114,6 +137,7 @@ int kdet_part_text(const struct kof_diag_part *p, char *out, size_t cap)
 struct kdet_run {
 	struct kdet_object *obj;
 	struct kof_diag_report **rep;      /* the owned copy of each object's report, parallel to obj */
+	struct kof_diag_lineage_rec **lin; /* the owned copy of each object's lineage, parallel to obj */
 	char **own;                        /* the owned copy of each object's name, parallel to obj */
 	uint32_t n, cap, status;
 };
@@ -124,6 +148,7 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 	struct kdet_run *run = user;
 	struct kdet_object *o;
 	struct kof_diag_report *rep = NULL;
+	struct kof_diag_lineage_rec *lin = NULL;
 
 	(void)bytes;
 	(void)len;
@@ -131,6 +156,7 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 		uint32_t nc = run->cap ? run->cap * 2u : 16u;
 		struct kdet_object *no = realloc(run->obj, nc * sizeof *no);
 		struct kof_diag_report **nr;
+		struct kof_diag_lineage_rec **nl;
 
 		if (!no) {
 			run->status |= KDET_RUN_NOMEM;
@@ -143,6 +169,12 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 			return 1;
 		}
 		run->rep = nr;
+		nl = realloc(run->lin, nc * sizeof *nl);
+		if (!nl) {
+			run->status |= KDET_RUN_NOMEM;
+			return 1;
+		}
+		run->lin = nl;
 		{
 			char **ow = realloc(run->own, nc * sizeof *ow);
 
@@ -162,10 +194,32 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 		}
 		memcpy(rep, res->diag, res->n_diag * sizeof *rep);
 	}
+	/*
+	 * res->lineage is st_report_lineage's buffer (scan_pipeline.c): one per scanner,
+	 * realloc'd to fit and kept only until the object ends - exactly the shape res->diag
+	 * is, and for the same reason it is deep-copied here too (LINEAGE-DANGLE-1, fixed:
+	 * a later sibling's own, bigger report reallocs or overwrites it, so every object but
+	 * the last of a multi-object run saw it dangling or wrong; tests/unit/lineage_dangle.c).
+	 */
+	/* (the records and every input of them, in one block: kof_result.lineage_in points into its tail and goes with it) */
+	if (res->n_lineage && res->lineage) {
+		const size_t nin = res->lineage_in ? res->n_lineage_in : 0u;
+
+		lin = malloc(res->n_lineage * sizeof *lin + nin * sizeof *res->lineage_in);
+		if (!lin) {
+			free(rep);
+			run->status |= KDET_RUN_NOMEM;
+			return 1;
+		}
+		memcpy(lin, res->lineage, res->n_lineage * sizeof *lin);
+		if (nin)
+			memcpy(lin + res->n_lineage, res->lineage_in, nin * sizeof *res->lineage_in);
+	}
 	o = &run->obj[run->n];
 	run->own[run->n] = malloc(strlen(name) + 1u);
 	if (!run->own[run->n]) {
 		free(rep);
+		free(lin);
 		run->status |= KDET_RUN_NOMEM;
 		return 1;
 	}
@@ -179,7 +233,12 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 	o->res.packer_build = NULL;
 	o->res.opened_by = NULL;
 	o->res.diag = rep;
+	o->res.lineage = lin;
+	o->res.lineage_in = lin && res->lineage_in && res->n_lineage_in ? (const struct kof_diag_lineage_in *)(const void *)(lin + res->n_lineage) : NULL;
+	if (!o->res.lineage_in)
+		o->res.n_lineage_in = 0;
 	run->rep[run->n] = rep;
+	run->lin[run->n] = lin;
 	run->n++;
 	return 0;
 }
@@ -304,9 +363,11 @@ void kdet_run_free(kdet_run *run)
 		return;
 	for (i = 0; i < run->n; i++) {
 		free(run->rep[i]);
+		free(run->lin[i]);
 		free(run->own[i]);
 	}
 	free(run->rep);
+	free(run->lin);
 	free(run->own);
 	free(run->obj);
 	free(run);

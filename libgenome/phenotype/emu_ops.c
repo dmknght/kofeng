@@ -1,10 +1,10 @@
 /*
  * emu_ops.c - the less common integer, string and system instructions of the interpreter.
- * Part of the interpreter; see emu_interp.c and emu_private.h.
+ * Part of the x86 entry of the interpreter; see emu_x86.c and emu_x86_private.h.
  */
 #define _POSIX_C_SOURCE 199309L
 
-#include "emu_private.h"
+#include "emu_x86_private.h"
 
 
 /*
@@ -156,13 +156,13 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	 * are kept and handed back as written but change nothing.
 	 */
 	case KGENOME_X86_I_STMXCSR:
-		if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], e->mxcsr))
+		if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], e->x86.mxcsr))
 			goto unsupported;
 		break;
 	case KGENOME_X86_I_LDMXCSR:
 		if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &a))
 			goto unsupported;
-		e->mxcsr = (uint32_t)a;
+		e->x86.mxcsr = (uint32_t)a;
 		break;
 
 	/* XCR0: x87 and SSE enabled, nothing wider - which is the truth
@@ -772,7 +772,7 @@ int kgenome_emu_run_sys(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		if (s) { e->stop = (enum kgenome_emu_stop)(s - 1); goto done; }
 		if (e->rip != at)
 			return KGENOME_EMU_RUN_REDIRECT;
-		e->gpr[KGENOME_EMU_RAX] = ret;
+		e->gpr[kgenome_emu_sysabi_of(e)->ret] = ret;   /* the convention's answer register */
 		break;
 	}
 
@@ -797,7 +797,7 @@ int kgenome_emu_run_sys(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		 */
 		if (e->rip != at)
 			return KGENOME_EMU_RUN_REDIRECT;
-		e->gpr[KGENOME_EMU_RAX] = ret;
+		e->gpr[kgenome_emu_sysabi_of(e)->ret] = ret;   /* the convention's answer register */
 		break;
 	}
 	default:

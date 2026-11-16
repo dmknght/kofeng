@@ -38,7 +38,7 @@
 
 /* any and all over the ONE-name call a module reaches: `||` and `&&`, which is
  * what kof_diag_str_any and _all expand to. */
-static int names_all(const struct kgenome_diag_scan *s, const struct kof_diag *d,
+static int names_all(struct kgenome_diag_scan *s, const struct kof_diag *d,
 		     const char *const *v, uint32_t n)
 {
 	uint32_t i;
@@ -51,7 +51,7 @@ static int names_all(const struct kgenome_diag_scan *s, const struct kof_diag *d
 	return 1;
 }
 
-static int names_any(const struct kgenome_diag_scan *s, const struct kof_diag *d,
+static int names_any(struct kgenome_diag_scan *s, const struct kof_diag *d,
 		     const char *const *v, uint32_t n)
 {
 	uint32_t i;

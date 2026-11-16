@@ -100,7 +100,7 @@ static int pe_map_image(struct kgenome_emu *e, const uint8_t *img, uint64_t n,
 		x.va = base + s->mem_rva;
 		x.off = s->file_off;
 		x.file_size = s->file_size;
-		x.code = kgenome_pe_sec_is_code(s);
+		x.code = kgenome_pe_sec_is_code(info, s);
 		/*
 		 * VirtualSize governs the MAPPING and SizeOfRawData the
 		 * CONTENT, and a packer's output is where they differ most:
@@ -349,7 +349,7 @@ static void pe_set_run_state(struct kgenome_emu *e, const struct pe_run_req *rq)
 				       base + es->mem_rva + es->mem_size);
 	}
 	/* And the image itself, so the run can dump it at the handover rather
-	 * than at its end - see the write-then-execute snapshot in emu_interp.c. */
+	 * than at its end - see the write-then-execute snapshot in emu_run_private.h. */
 	{
 		uint64_t hi = 0;
 		uint32_t si;
@@ -478,6 +478,51 @@ static void pe_report(struct kgenome_emu *e, struct kgenome_emu_unp_report *rep,
 	}
 }
 
+/*
+ * Step 0 (EA8): THE MACHINE THE OBJECT ALREADY HAS, carried on - or NULL, and then it has been freed
+ * and the caller builds one. It is carried on only when nothing this request declares would have
+ * changed it before its first instruction (a patch is applied to the image, a watch and a shim are
+ * armed before the run, a program range turns the generic handover test off), and only when it was
+ * built from these bytes. The new owner's ceiling is the whole run's, counted from the entry, so a
+ * carried run stops where a machine built for this request would have stopped.
+ */
+static struct kgenome_emu *pe_resume(const struct kgenome_emu_unp_pe_req *rq, const struct kgenome_emu_cfg *cfg)
+{
+	struct kgenome_emu_unp_kept *k = rq->resume;
+	const struct kgenome_emu_decl *decl = rq->decl;
+	struct kgenome_emu_unp_report *rep = rq->rep;
+	struct kgenome_emu *e = k->em;
+	enum kgenome_emu_stop st;
+	int go;
+
+	k->em = NULL;
+	if (!e)
+		return NULL;
+	if (k->file != rq->file || k->n != rq->n || rq->n_oep ||
+	    (decl && (decl->n_patch || decl->n_iw || decl->n_shim))) {
+		KOF_TRACE("[emu] the object's machine is not carried on: %s\n",
+			  rq->n_oep || decl ? "the request declares what the machine was built without" : "other bytes");
+		kgenome_emu_free(e);
+		return NULL;
+	}
+	go = kgenome_emu_adopt(e, cfg);
+	if (go < 0) {
+		kgenome_emu_free(e);
+		return NULL;
+	}
+	if (rq->idle)
+		kgenome_emu_set_idle(e, rq->idle);
+	st = go ? kgenome_emu_unp_emu_run_while_producing(e, cfg->max_insn, rq->hand_back, rq->extensions)
+		: kgenome_emu_last_stop(e);
+	pe_report(e, rep, st, k->rep.entry, k->rep.improvised);
+	if (rep) {
+		rep->stack_lo = k->rep.stack_lo;
+		rep->stack_hi = k->rep.stack_hi;
+		rep->resumed = 1;
+	}
+	return e;
+}
+
 struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *rq)
 {
 	const uint8_t *file = rq->file;
@@ -501,8 +546,13 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 
 	if (rep)
 		memset(rep, 0, sizeof *rep);
-	if (!file || !n || !info || !info->valid)
+	if (!file || !n || !info || !info->valid) {
+		if (rq->resume) {               /* taken over whatever the answer */
+			kgenome_emu_free(rq->resume->em);
+			rq->resume->em = NULL;
+		}
 		return NULL;
+	}
 
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = bud ? bud->max_insn : 0;
@@ -516,6 +566,11 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 	 * decided which magic this carries.
 	 */
 	cfg.bits = info->pe32_plus ? 64u : 32u;
+	if (rq->resume) {
+		e = pe_resume(rq, &cfg);
+		if (e)
+			return e;
+	}
 	e = kgenome_emu_new(&cfg);
 	if (!e)
 		return NULL;

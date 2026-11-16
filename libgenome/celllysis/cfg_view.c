@@ -8,6 +8,12 @@
 
 #include "cfg_private.h"
 
+/*
+ * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
+ * To re-enable: take this #if 0 out, the declarations in cfg.h ("what a viewer draws") and its caller kof_cfgview_build (analyzers/cfgview.c).
+ * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
+ */
+#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 enum kgenome_status kgenome_cfg_view_make(const struct kgenome_cfg_view_req *r, struct kgenome_cfg_view *out)
 {
 	const struct kgenome_cfg *g;
@@ -84,3 +90,4 @@ void kgenome_cfg_view_free(struct kgenome_cfg_view *v, const struct kgenome_cfg_
 	kgenome_cfg_release(mem, (void *)(uintptr_t)v->blk, v->bytes_);
 	memset(v, 0, sizeof *v);
 }
+#endif /* DISABLED by the owner 2026-11-15 (CFG) */

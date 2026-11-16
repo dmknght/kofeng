@@ -27,6 +27,7 @@
 #include "objctx_decomp.h"
 #include "../analyzers/parsers/containers/gzip_parse.h"
 #include "../analyzers/parsers/scripts/script_apply.h"
+#include "../kofcore/kofdebug.h"
 #include <textual/textual.h>
 #include <uncoat.h>
 
@@ -89,6 +90,8 @@ void oc_script_dec_end(struct oc_script_dec *d)
 		free(d->c[i].p);
 	}
 	oc_scan_release(d->sc, d->held);
+	KOF_TRACE("[script] dec end: %llu byte(s) held released, limit=%d\n", (unsigned long long)d->held,
+		  (int)d->limit);
 	if (d->limit)
 		oc_scan_limit(d->sc);
 	free(d);
@@ -129,6 +132,8 @@ static int dbuf_size(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
 static int dbuf_want(struct oc_script_dec *d, struct dbuf *b, uint64_t n)
 {
 	if (n > d->room + 4096u) {
+		KOF_TRACE("[script] dec: wanted %llu byte(s), over the %llu left of the decode allowance\n",
+			  (unsigned long long)n, (unsigned long long)d->room);
 		d->limit = 1;
 		return 0;
 	}
@@ -245,6 +250,8 @@ static int dec_layer(struct oc_script_dec *d, const uint8_t *p, uint64_t n, stru
 	uint32_t w;
 
 	if (d->depth >= SCRIPT_DEC_DEPTH) {
+		KOF_TRACE("[script] dec: layer depth %u met, SCRIPT_DEC_DEPTH, not formed further\n",
+			  (unsigned)d->depth);
 		d->limit = 1;
 		return 0;
 	}
@@ -269,6 +276,8 @@ static int dec_layer(struct oc_script_dec *d, const uint8_t *p, uint64_t n, stru
 	d->depth++;
 	w = oc_script_form(&rq, NULL);
 	d->depth--;
+	KOF_TRACE("[script] dec: layer at depth=%u formed, fragment=%d, %llu -> %u byte(s)\n",
+		  (unsigned)d->depth, (int)rq.fragment, (unsigned long long)n, w);
 	if (!w)
 		return 0;
 	dst->n = w;
@@ -283,6 +292,8 @@ static int script_decode_hook(void *u, const uint8_t *chain, uint32_t n_chain, c
 	uint64_t curn = len;
 	uint32_t i;
 
+	KOF_TRACE("[script] dec hook: depth=%u, chain of %u decode(s), %u byte(s) in\n", (unsigned)d->depth,
+		  (unsigned)n_chain, (unsigned)len);
 	for (i = 0; i < n_chain; i++) {
 		struct dbuf *dst = i & 1u ? &d->b[d->depth] : &d->a[d->depth];
 
@@ -294,6 +305,8 @@ static int script_decode_hook(void *u, const uint8_t *chain, uint32_t n_chain, c
 		curn = dst->n;
 	}
 	if (curn > d->room) {
+		KOF_TRACE("[script] dec hook: %llu byte(s) decoded is over the %llu left, limit\n",
+			  (unsigned long long)curn, (unsigned long long)d->room);
 		d->limit = 1;
 		return 0;
 	}
@@ -330,7 +343,9 @@ uint32_t oc_script_form(const struct oc_script_form_req *rq, uint32_t *n_dec)
 	enum kgenome_textual_status st = kgenome_textual_form(&fq, &rs);
 
 	if (n_dec)
-		*n_dec = rs.n_decoded + rs.n_folded + rs.n_calls;       /* a join or a call written as one literal says something the file did not */
+		/* a join or a call written as one literal says something the file did not - and so does a statement-end
+		 * line break the file never had (n_stmt, textual.h): the flat, unbroken chain this feature exists for. */
+		*n_dec = rs.n_decoded + rs.n_folded + rs.n_calls + rs.n_stmt;
 	if (rs.n_bound && rq->dec)
 		rq->dec->limit = 1;                                     /* a work bound of the lexer fired (L3, L5): said at oc_script_dec_end, as the hook's own bounds are */
 	return st == KGENOME_TEXTUAL_OK || st == KGENOME_TEXTUAL_OPEN ? rs.n_out : 0;
