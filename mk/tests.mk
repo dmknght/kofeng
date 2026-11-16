@@ -645,6 +645,6 @@ include mk/tests_cov.mk
 # Static half of the "a tool shows what the engine answers" test (tests/tool_logic_check.py; the dynamic half is unit_tool_agree and tests/tui/t_agree.py).
 # Not wired into `check-rules` (mk/checks.mk is not this work's): the coordinator decides; run it with `make check-tool-logic`.
 check-tool-logic:
-	@$(PYTHON) -I tests/tool_logic_check.py .
+	@$(KOF_NEED_PYTHON)$(PYTHON) -I tests/tool_logic_check.py .
 
 .PHONY: check-tool-logic

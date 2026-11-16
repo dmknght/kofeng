@@ -97,3 +97,23 @@ FIND_DEPS = find $(BUILD) -name '*.d' 2>/dev/null
 PYTHON   ?= python3 -B     # -B: no __pycache__ in the tree when the scripts run
 MKFIXTURES = tests/mkfixtures.sh
 endif
+
+#
+# PYTHON IS FOR THE CHECKS AND THE TESTS, NOT FOR THE BUILD (owner, 2026-11-17: "Compile bi loi
+# python not found"). Nothing that sdk, tools or databases builds runs it; check-rules, the merge
+# gate, tui-test, check-tool-logic, cov-report and fuzz-mutants do.
+#
+# Asked by RUNNING it, through the shell this build already uses and with $(SILENCE), not by
+# looking it up: on Windows `where python` finds the Microsoft Store alias in WindowsApps, which
+# exists on a machine with no Python and answers only "Python was not found" - which is the very
+# failure this replaces. The answer is the word yes on stdout and nothing else counts. Recursive
+# (=), so it costs one start of the interpreter only where something asks.
+#
+# The `py` launcher is not tried in place of a missing `python`: which interpreter runs the checks
+# is the caller's to say, and `make PYTHON="py -3"` says it.
+KOF_PYTHON_OK  = $(filter yes,$(shell $(PYTHON) -c "print('yes')" $(SILENCE)))
+#
+# The first word of a recipe that needs it: nothing when it runs, else the build stops naming it.
+KOF_NEED_PYTHON = $(if $(KOF_PYTHON_OK),,$(error $@ needs Python 3 and '$(strip $(PYTHON))' did not run: \
+install it and put it on PATH, or name it: make PYTHON=<program>$(if $(filter yes,$(KOF_CMD_SHELL)), \
+(the launcher: make PYTHON="py -3"))))

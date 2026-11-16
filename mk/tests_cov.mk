@@ -45,7 +45,7 @@ cov-run: fixtures test-sigs
 	@for t in $(COV_TESTS); do echo "== $$t"; (ulimit -v 4194304; timeout -s KILL 600 $(COV_DIR)/bin/$$t$(EXE) > $(COV_DIR)/$$t.out 2>&1) || echo "   $$t exit $$?"; done
 
 cov-report: cov-run
-	@python3 -I tests/cov_report.py $(COV_DIR)/obj $(COV_SRC) --uncovered --json $(COV_DIR)/report.json
+	@$(KOF_NEED_PYTHON)$(PYTHON) -I tests/cov_report.py $(COV_DIR)/obj $(COV_SRC) --uncovered --json $(COV_DIR)/report.json
 endif
 
 cov-clean:

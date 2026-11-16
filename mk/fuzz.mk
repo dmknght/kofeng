@@ -111,7 +111,7 @@ $(FZ_MUT_BIN): $(FZB)/mut_%: $(wildcard tests/fuzz/kit/*.c) tests/lib/fuzz_drv.c
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(FZ_DEF) -DFZ_MUTANT_$* $(wildcard tests/fuzz/kit/*.c) tests/lib/fuzz_drv.c -o $@ $(LDFLAGS) $(FZ_WRAP)
 
 fuzz-mutants: $(FZ_MUT_BIN)
-	@$(foreach m,$(FZ_MUTANTS),$(PYTHON) tools/fuzz_expect.py --fail -- $(FZB)/mut_$(m) --selftest --seed 1 --iters 6 --out $(FZB)/found$(NL))
+	@$(KOF_NEED_PYTHON)$(foreach m,$(FZ_MUTANTS),$(PYTHON) tools/fuzz_expect.py --fail -- $(FZB)/mut_$(m) --selftest --seed 1 --iters 6 --out $(FZB)/found$(NL))
 	$(info fuzz-mutants: every broken harness was caught by the self-test)
 	@$(NOOP)
 

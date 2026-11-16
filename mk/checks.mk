@@ -12,7 +12,7 @@
 #
 .PHONY: check-rules
 check-rules:
-	@$(PYTHON) tools/check_rules.py
+	@$(KOF_NEED_PYTHON)$(PYTHON) tools/check_rules.py
 	@$(PYTHON) tools/check_layers.py
 	@$(MAKE) --no-print-directory check-catalog
 # The merge gate's self-tests run sh, diff, cc, ar and nm (tools/merge_gate.sh, tests/gate/*.py),

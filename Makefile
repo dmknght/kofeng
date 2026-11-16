@@ -61,7 +61,23 @@ include mk/flags.mk
 
 # check-rules first, so a rule a grep can see cannot reach a build - see
 # CLAUDE.md. It is a grep over the tree and costs nothing beside the compile.
-all: check-rules sdk tools databases
+#
+# ...AND ONLY WHERE PYTHON IS. check-rules is Python programs (mk/checks.mk); the build is not.
+# A `make` (or `make all`, or `make debug`, which runs `make all`) on a machine without Python
+# builds the SDK, the tools and the databases and says, once, that the checks were skipped and
+# why. Asked only when `all` is a goal, so `make sdk` and the rest start no interpreter.
+# `make check-rules` asked for by name still stops on a missing Python (KOF_NEED_PYTHON).
+# TODO(owner): the default here keeps CLAUDE.md's "check-rules runs as part of make" wherever
+# Python is installed. The alternative is that `make` never runs check-rules (only by name).
+KOF_ALL_CHECKS := check-rules
+ifneq ($(if $(MAKECMDGOALS),$(filter all,$(MAKECMDGOALS)),all),)
+ifeq ($(KOF_PYTHON_OK),)
+KOF_ALL_CHECKS :=
+$(info make: check-rules skipped: '$(strip $(PYTHON))' did not run, and the checks are Python. \
+The build does not need it; `make check-rules` with Python 3 runs them, or make PYTHON=<program>)
+endif
+endif
+all: $(KOF_ALL_CHECKS) sdk tools databases
 
 include mk/entry.mk
 include mk/stamp.mk

@@ -13,7 +13,7 @@ tui-test:
 	$(error tui-test drives kofviewer in a pseudo-terminal (Python's pty), which Windows does not have: run it on Linux)
 else
 tui-test: kofviewer
-	$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) $(TUI_ARGS)
+	$(KOF_NEED_PYTHON)$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) $(TUI_ARGS)
 endif
 
 # THE MERGE GATE (tools/patch_gate.py says what it checks): code that was added without being asked for.
@@ -33,7 +33,7 @@ gate-test gate gate-api gate-golden:
 	$(error $@ is a Linux step: the merge gate runs sh, diff, cc, ar and nm, and its golden screens need a pseudo-terminal)
 else
 gate-test:
-	$(PYTHON) tests/gate/test_patch_gate.py
+	$(KOF_NEED_PYTHON)$(PYTHON) tests/gate/test_patch_gate.py
 	$(PYTHON) tests/gate/test_merge_gate.py
 	$(PYTHON) tests/gate/test_api_surface.py
 
@@ -45,10 +45,10 @@ gate: gate-test gate-api gate-golden
 endif
 
 gate-api: $(LIB) $(KGENOME_LIB) $(KUNCOAT_LIB)
-	$(PYTHON) tools/api_surface.py verify .
+	$(KOF_NEED_PYTHON)$(PYTHON) tools/api_surface.py verify .
 
 gate-golden: kofviewer
-	$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) -j 2 golden
+	$(KOF_NEED_PYTHON)$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) -j 2 golden
 endif
 
 population:
