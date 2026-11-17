@@ -32,15 +32,7 @@ static const char *box_text(void *user, uint32_t node, uint32_t i)
 	return kgenome_gv_box_line((const struct kgenome_gv *)user, node, i, buf, sizeof buf);
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) is out of #if 0: the picture of the function's CFG made from bytes.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #include "kx_graph_chain_gold.h"
-
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /*
  * A LINEAGE IS DRAWN, ITS LINKS DOWNWARD (2026-11-14: the Lineage tab said "nodes=6 must-links=3" over an empty page). The engine's graph of a value flow
@@ -109,12 +101,6 @@ static void lineage_drawn(void)
 
 int main(void)
 {
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) is out of #if 0: the picture of the function's CFG made from bytes.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct gspec g;
 	struct prog p;
 	struct blob x;
@@ -200,7 +186,6 @@ int main(void)
 	free(s.fs.v);
 	blob_free(&x);
 	prog_free(&p);
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	lineage_drawn();
 	if (fails) {
 		printf("kx_graph_chain: %d failure(s)\n", fails);

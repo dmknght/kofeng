@@ -42,6 +42,8 @@
  * PHASE 2 (2026-11-16, design "Phase 2"; fntab_derive.c, derive_into below): the undeclared code is read by ONE recursive descent from its declared starts
  * (celllysis/cfg_obj.c); every entry it reaches (a declared start, a direct call's target) is a function of trust DERIVED, its extent the blocks it reaches;
  * the NONE units are then made again around them by the same undeclared_fill. HIGH units are never touched.
+ * (2026-11-17, owner decision on FPART-D1, option b) between the ends and the undeclared fill, every FDE no symbol confirms is checked by the same descent
+ * (fntab_derive.c kgenome_fntab_fde_check): an FDE whose code leaves it, or that holds two entries, gives no unit (n_fde_refused); its bytes are undeclared.
  * LIMITS, named: a function nothing declares and no descent reaches (address-taken, a jump table's case, dead code) stays in a NONE unit; a PIE's init_array slot filled by a relocation is not read (fntab_elf_initarr.c); a PE's Go table is not read (fntab_elf_gopcln.c); a view's table (the
  * normalised view, kgenome_funcs_remap) carries the first range of a function only.
  */
@@ -479,6 +481,9 @@ void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *
 	/* THE ENDS: a declared extent is a HIGH unit; every other entry is a declared START (out->st), not a body (round 4) */
 	if (out->n)
 		kgenome_fntab_ends(out, ext, n_ext, NULL, 0u);
+	/* AN FDE NO SYMBOL CONFIRMS IS CHECKED (owner decision 2026-11-17, option b): it gives no unit when code leaves it or it holds two entries */
+	if (obj->format == KGENOME_FMT_ELF && out->n)
+		kgenome_fntab_fde_check(&r, out);
 	/* THE UNDECLARED CODE: every byte of the extents in one entry; with no declared function at all, the whole extent (NO_META). The managed image and the
 	 * image with no code in the file keep their empty answer (their own P_ bit says why). Then PHASE 2 derives functions in it from its declared starts. The
 	 * parts are attached after: the indices are final then. */
@@ -499,6 +504,7 @@ void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *
 	out->state = (out->partial & (KGENOME_FNTAB_P_CAP | KGENOME_FNTAB_P_DERIVE_CAP)) ? KGENOME_FNTAB_OVER_BUDGET :
 		     out->partial ? KGENOME_FNTAB_PARTIAL : KGENOME_FNTAB_COMPLETE;
 	free(pt.at);
+	free(r.outer);
 	free(pt.root);
 	kgenome_diag_walk_free(r.own);          /* the walk the derivation made when the caller had none */
 }

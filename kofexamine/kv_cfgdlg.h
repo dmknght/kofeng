@@ -13,10 +13,7 @@ struct kv_cfg_ui {
 	int open;
 	struct kv_main m;               /* the frame: place (dragged by its title), scroll, geometry */
 	struct kv_cover cv;
-	/* DISABLED by the owner 2026-11-15: the Overview's CFG facts and the Graph rows (kof_cfgview_build). To re-enable: take this #if 0 out with kv_cfgdlg.c's. */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kv_cfg_body body;        /* the Overview and Graph rows (the engine's answer for the function) */
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	uint32_t tab;                   /* the tab shown: enum kv_cfg_tab; it opens on the Overview */
 	uint32_t off[KV_CFG_TABS], hoff[KV_CFG_TABS];   /* the scroll each tab was left at */
 	uint64_t func_off, func_len;    /* the function (the request's) the Disasm and Lineage tabs list */

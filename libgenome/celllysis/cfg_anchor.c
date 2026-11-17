@@ -25,12 +25,6 @@
  */
 #include "cfg.h"
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out, the declarations in cfg.h ("the anchor") and its caller kof_cfgsign_function (analyzers/cfgsign.c).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 int kgenome_cfg_anchor(const struct kgenome_cfg *g, const struct kgenome_cfg_anchor_req *r)
 {
 	const uint32_t min = r && r->min_blk ? r->min_blk : KGENOME_CFG_ANCHOR_MIN;
@@ -57,4 +51,3 @@ int kgenome_cfg_anchor(const struct kgenome_cfg *g, const struct kgenome_cfg_anc
 	}
 	return 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

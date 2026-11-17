@@ -143,5 +143,7 @@ as a user.
         build refuses by name. An image that still defines one is not built, with a line saying
         the entry is retired; the name is what is refused.
 
-7. CFG DISABLED BY OWNER 2026-11-15, KEPT FOR RE-ENABLE. Compiled functions whose only product caller is inside #if 0 now:
-  libgenome/celllysis/gview_loops.c: kgenome_gv_loops (the loop marks of a drawn graph; only cfg_gv.c, inside #if 0, asked it; tests/lib/genome/gview_data.c and tests/fuzz/diag/cfg.c drive it). CFG disabled by owner 2026-11-15, kept for re-enable.
+7. CFG SCAN PATH DISABLED BY OWNER 2026-11-15, KEPT FOR RE-ENABLE (the viewer's on-request CFG was reconnected 2026-11-17).
+   Compiled functions whose only product callers are inside #if 0 (the scan's signing of a function unit and the Blocks table's CFG row):
+  libgenome/celllysis/cfg_sign.c: kgenome_cfg_overlap, kgenome_cfg_keys_sign (the matcher's CFG scoring, kofmutation.c kof_mutation_cfg_unit, and scan_explain.c func_hold, both in #if 0; tests/lib/genome/cfg_*.c and tests/fuzz/diag/cfg.c drive them)
+  libkofeng/analyzers/cfgsign.c: kof_cfgsign_state_name (the Blocks table's tick message, kv_decl_blocks.c hit_plg_tick, and kofexaminer --blocks blk_func, both in #if 0; tests/unit/cfgsign_wk.c reads it)

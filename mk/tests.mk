@@ -95,11 +95,11 @@ else
 UNIT_SKIP := $(UNIT_SKIP_POSIX)
 endif
 
-# DISABLED by the owner 2026-11-15 (CFG): tests that exercise only the CFG signature and the CFG view of a function, whose code is inside #if 0
-# (celllysis/cfg_sign.c, cfg_anchor.c, cfg_view.c, cfg_gv.c, analyzers/cfgsign.c, cfgview.c). Their sources are inside #if 0 too. To re-enable: take
-# the name out of this list when its code is out of #if 0.
-UNIT_CFG_DISABLED := cfg_sig_gen cfg_sig_threads cfgsign_wk cfg_view_api
-LIBTEST_CFG_DISABLED := cfg_sign cfg_sketch cfg_estimator cfg_hostile
+# DISABLED by the owner 2026-11-15 (CFG): tests that need the SCAN to sign function units (scan_feed.c mutation_feed_func, kofmutation.c
+# kof_mutation_cfg_unit) and the Blocks table's CFG row (kv_mutation.c mtn_mark), which stay inside #if 0 (the viewer's CFG was reconnected
+# 2026-11-17, the scan path was not: TODO(owner) at kgenome_mutation_signature). Their sources are inside #if 0 too. To re-enable: take the name
+# out of this list when the scan signs function units again.
+UNIT_CFG_DISABLED := cfg_sig_gen cfg_sig_threads
 
 UNIT_SRC := $(filter-out $(addprefix tests/unit/,$(addsuffix .c,$(UNIT_SKIP) $(UNIT_CFG_DISABLED))),\
                          $(wildcard tests/unit/*.c))
@@ -293,7 +293,7 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # gets the lib's archive alone. UNIT_LIBS_<name> applies to these too (the zlib
 # oracle of inflate_diff). Tests that need the engine - the object context, the
 # parsers, a database - stay in tests/unit/.
-LIBTEST_GENOME_SRC := $(filter-out $(addprefix tests/lib/genome/,$(addsuffix .c,$(LIBTEST_CFG_DISABLED))),$(wildcard tests/lib/genome/*.c))    # LIBTEST_CFG_DISABLED: see UNIT_CFG_DISABLED
+LIBTEST_GENOME_SRC := $(wildcard tests/lib/genome/*.c)
 LIBTEST_UNCOAT_SRC := $(wildcard tests/lib/uncoat/*.c)
 LIBTEST_BIN := $(patsubst tests/lib/genome/%.c,$(TEST)/libtest_genome_%$(EXE),$(LIBTEST_GENOME_SRC)) \
                $(patsubst tests/lib/uncoat/%.c,$(TEST)/libtest_uncoat_%$(EXE),$(LIBTEST_UNCOAT_SRC))

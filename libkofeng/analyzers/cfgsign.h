@@ -25,12 +25,6 @@
 #include <celllysis/cfg.h>
 #include <phenotype/frame.h>
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out with the one in cfgsign.c.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 enum kof_cfgsign_state {
 	KOF_CFGSIGN_SIGNED = 0,
 	KOF_CFGSIGN_BELOW_FLOOR,        /* fewer reachable blocks than the floor (default KGENOME_CFG_ANCHOR_MIN, 5) */
@@ -88,5 +82,4 @@ struct kof_cfgsign {
 enum kof_cfgsign_state kof_cfgsign_function(const struct kof_cfgsign_req *rq, struct kof_cfgsign *out);
 void kof_cfgsign_release(struct kof_cfgsign *r, const struct kgenome_cfg_mem *mem);
 
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 #endif /* KOFENG_CFGSIGN_H */

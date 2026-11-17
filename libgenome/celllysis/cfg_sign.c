@@ -46,12 +46,6 @@
 
 #include "cfg_private.h"
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out, the declarations in cfg.h ("the signature") and the callers: kof_cfgsign_function (analyzers/cfgsign.c), kof_mutation_cfg_unit (kofmutation.c), and kgenome_mutation_signature answering KGENOME_MUTATION_SIG_CFG again.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* the largest label arrays of one call: 4 per block (current, next, predecessor sum, successor sum) */
 #define WORK_PER_BLOCK (4u * sizeof(uint64_t))
 
@@ -392,4 +386,3 @@ uint32_t kgenome_cfg_pct_callee(const struct kgenome_cfg_sign *a, const struct k
 {
 	return pct_keys(a->ckey, a->n_ckey, b->ckey, b->n_ckey);
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

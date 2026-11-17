@@ -1279,7 +1279,7 @@ static int dis_rows_take(struct dis_func_rows *r, struct out *t)
  * THE DISASSEMBLY OF ONE FUNCTION, as the panel draws it: the same formatter (dis_format_src), the same label and the same palette (dis_paint_label, dis_paint_insn), over
  * ONE extent - the function (off, len) of the object - instead of the view's region. It reads what the object holds: the notes and the call names when the reader ran
  * Analysis (kof_codenotes_build is NOT asked here, it reads the whole object), the function table and the symbol block otherwise, exactly as the panel does.
- * `max_insn` bounds the rows (the dialog passes the function's length: its CFG answer, kof_cfgview, is DISABLED by the owner 2026-11-15): the bytes past it are not listed and the
+ * `max_insn` bounds the rows by what the engine decoded of this function (kof_cfgview.n_insn plus the bytes it stepped over): the bytes past it are not listed and the
  * last row says how many. Each row is a string with its colours inside it (prop_put draws it); the selection and the hex marks are the panel's and have no place here.
  * One decode of the function's bytes, at the first call.
  */

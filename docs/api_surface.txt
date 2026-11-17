@@ -3,7 +3,7 @@
 # and tools/merge_gate.sh fails on any name added or removed that the patch manifest does not allow.
 # Flags: exports_kept = named in docs/exports_kept.txt (the reason is there); no_public_header = no header declares it.
 
-== libkofeng.a (2078)
+== libkofeng.a (2093)
 kdb_diag_collisions  [exports_kept]
 kdb_diag_full  [exports_kept]
 kdb_diag_packs_refused  [exports_kept]
@@ -113,19 +113,28 @@ kgenome_cell_state_stack_top
 kgenome_cell_state_track
 kgenome_cell_step
 kgenome_cfg_alloc
+kgenome_cfg_anchor  [exports_kept]
 kgenome_cfg_build
 kgenome_cfg_free
+kgenome_cfg_gv_make
 kgenome_cfg_isa_class
 kgenome_cfg_isa_interworks
 kgenome_cfg_isa_linked  [exports_kept]
 kgenome_cfg_isa_of
 kgenome_cfg_isa_returns  [exports_kept]
 kgenome_cfg_isa_trap
+kgenome_cfg_keys_sign  [exports_kept]
 kgenome_cfg_obj_block_at  [exports_kept]
 kgenome_cfg_obj_build  [exports_kept]
 kgenome_cfg_obj_free  [exports_kept]
 kgenome_cfg_over
+kgenome_cfg_overlap  [exports_kept]
+kgenome_cfg_pct  [exports_kept]
+kgenome_cfg_pct_callee
 kgenome_cfg_release
+kgenome_cfg_sign  [exports_kept]
+kgenome_cfg_view_free  [exports_kept]
+kgenome_cfg_view_make  [exports_kept]
 kgenome_clr_add_ranges
 kgenome_clr_anomaly_name
 kgenome_clr_claims
@@ -704,6 +713,7 @@ kgenome_fntab_ends
 kgenome_fntab_entry
 kgenome_fntab_exidx
 kgenome_fntab_fde
+kgenome_fntab_fde_check
 kgenome_fntab_gopcln
 kgenome_fntab_in_stub_section
 kgenome_fntab_initarr
@@ -749,7 +759,7 @@ kgenome_funcs_starts_in
 kgenome_gv_alloc
 kgenome_gv_box_line
 kgenome_gv_free
-kgenome_gv_loops  [exports_kept]
+kgenome_gv_loops
 kgenome_image_addr_to_off
 kgenome_image_embed_extent
 kgenome_image_embed_spans
@@ -1212,6 +1222,11 @@ kof_catstore_dir_size
 kof_catstore_init
 kof_catstore_load
 kof_catstore_save
+kof_cfgsign_function
+kof_cfgsign_release
+kof_cfgsign_state_name  [exports_kept]
+kof_cfgview_build
+kof_cfgview_free
 kof_cfm_find_tag
 kof_cfm_islands
 kof_chm_anomaly_name
@@ -2083,7 +2098,7 @@ sx_verdict_make
 sx_views_release
 sx_walk_check
 
-== libkgenome.a (1090)
+== libkgenome.a (1100)
 kentropy_eighths
 kentropy_hist
 kentropy_hist_centi
@@ -2145,19 +2160,28 @@ kgenome_cell_state_stack_top
 kgenome_cell_state_track
 kgenome_cell_step
 kgenome_cfg_alloc
+kgenome_cfg_anchor  [exports_kept]
 kgenome_cfg_build
 kgenome_cfg_free
+kgenome_cfg_gv_make
 kgenome_cfg_isa_class
 kgenome_cfg_isa_interworks
 kgenome_cfg_isa_linked  [exports_kept]
 kgenome_cfg_isa_of
 kgenome_cfg_isa_returns  [exports_kept]
 kgenome_cfg_isa_trap
+kgenome_cfg_keys_sign  [exports_kept]
 kgenome_cfg_obj_block_at  [exports_kept]
 kgenome_cfg_obj_build  [exports_kept]
 kgenome_cfg_obj_free  [exports_kept]
 kgenome_cfg_over
+kgenome_cfg_overlap  [exports_kept]
+kgenome_cfg_pct  [exports_kept]
+kgenome_cfg_pct_callee
 kgenome_cfg_release
+kgenome_cfg_sign  [exports_kept]
+kgenome_cfg_view_free  [exports_kept]
+kgenome_cfg_view_make  [exports_kept]
 kgenome_clr_add_ranges
 kgenome_clr_anomaly_name
 kgenome_clr_claims
@@ -2736,6 +2760,7 @@ kgenome_fntab_ends
 kgenome_fntab_entry
 kgenome_fntab_exidx
 kgenome_fntab_fde
+kgenome_fntab_fde_check
 kgenome_fntab_gopcln
 kgenome_fntab_in_stub_section
 kgenome_fntab_initarr
@@ -2781,7 +2806,7 @@ kgenome_funcs_starts_in
 kgenome_gv_alloc
 kgenome_gv_box_line
 kgenome_gv_free
-kgenome_gv_loops  [exports_kept]
+kgenome_gv_loops
 kgenome_image_addr_to_off
 kgenome_image_embed_extent
 kgenome_image_embed_spans
@@ -3214,7 +3239,7 @@ kuncoat_status_name  [exports_kept]
 kuncoat_strfn
 kuncoat_transform
 
-== header-func (2506)
+== header-func (2507)
 KOF_HEAPSORT
 X
 _Static_assert
@@ -4010,6 +4035,7 @@ kgenome_fntab_entry
 kgenome_fntab_exact
 kgenome_fntab_exidx
 kgenome_fntab_fde
+kgenome_fntab_fde_check
 kgenome_fntab_gopcln
 kgenome_fntab_in_stub_section
 kgenome_fntab_initarr
@@ -6572,7 +6598,7 @@ sink_carry
 sx_endian
 walk
 
-== header-member (5186)
+== header-member (5189)
 dec_out.cap
 dec_out.limit
 dec_out.n
@@ -8267,8 +8293,10 @@ kgenome_fntab_run.entry_insn
 kgenome_fntab_run.file
 kgenome_fntab_run.l
 kgenome_fntab_run.meta
+kgenome_fntab_run.n_outer
 kgenome_fntab_run.n_pad
 kgenome_fntab_run.obj
+kgenome_fntab_run.outer
 kgenome_fntab_run.own
 kgenome_fntab_run.pad
 kgenome_fntab_run.plan
@@ -8329,6 +8357,7 @@ kgenome_func_set.n_derive_into_high
 kgenome_func_set.n_derive_skipped
 kgenome_func_set.n_disagree
 kgenome_func_set.n_extra
+kgenome_func_set.n_fde_refused
 kgenome_func_set.n_rng
 kgenome_func_set.n_rng_orphan
 kgenome_func_set.n_st

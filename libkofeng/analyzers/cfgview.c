@@ -22,12 +22,6 @@
 #include "parsers/binaries/funcs.h"
 #include <kofmod/kofmutation.h>
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and the one in cfgview.h; the viewer's function dialog asks it again (kv_cfgdlg.c cfgd_open calling kv_cfgbody_make, the Graph tab title back in cfg_tab_title).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define NAMED_CALLS KOF_CFGVIEW_XLINES
 
 static void fail(struct kof_cfgview *out, enum kgenome_status st, const char *why)
@@ -402,4 +396,3 @@ void kof_cfgview_free(struct kof_cfgview *v)
 	free(v->text);
 	memset(v, 0, sizeof *v);
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

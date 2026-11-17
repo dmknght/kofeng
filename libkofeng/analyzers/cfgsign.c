@@ -15,12 +15,6 @@
 #include "cfgsign.h"
 #include "genome_obj.h"
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and the one in cfgsign.h; the callers are kept in #if 0 too: scan_feed.c mutation_feed_func, scan_explain.c func_hold, kofexaminer_blocks.c blk_func, kv_mutation.c mtn_mark (function units), cfgview.c; and kgenome_mutation_signature answers KGENOME_MUTATION_SIG_CFG again.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define DEFAULT_MAX_BYTES (64ull << 20)
 
 const char *kof_cfgsign_state_name(enum kof_cfgsign_state s)
@@ -182,4 +176,3 @@ enum kof_cfgsign_state kof_cfgsign_function(const struct kof_cfgsign_req *rq, st
 		return finish(out, pass ? KOF_CFGSIGN_SIGNED : KOF_CFGSIGN_BELOW_FLOOR);
 	}
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

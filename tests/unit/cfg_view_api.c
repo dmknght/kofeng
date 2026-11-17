@@ -1,10 +1,4 @@
 /*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when kof_cfgview_build is out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
-/*
  * cfg_view_api - the engine's answer to "what is the shape of this function" (kof_cfgview_build, analyzers/cfgview.c), which the viewer's
  * press on the name of a function row asks and shows without computing anything of its own.
  *
@@ -657,4 +651,3 @@ int main(void)
 	printf("cfg_view_api: ok\n");
 	return 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

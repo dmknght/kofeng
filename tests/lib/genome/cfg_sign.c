@@ -1,10 +1,4 @@
 /*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and drop the name from LIBTEST_CFG_DISABLED (mk/tests.mk) when cfg_sign.c, cfg_anchor.c and cfg_view.c are out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
-/*
  * genome / cfg_sign - the signature of a function's shape (celllysis/cfg.h: labels, one WL round, canonical hash,
  * bottom-32 sketch, pct, anchor, view), through <kgenome.h> alone.
  *
@@ -1041,4 +1035,3 @@ int main(void)
 		printf("cfg_sign: ok\n");
 	return fails != 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

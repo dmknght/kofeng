@@ -410,18 +410,168 @@ static void t_symtab_thumb(void)
 
 /* ---- the unwind case --------------------------------------------------------------------------------------------------------- */
 
-static uint32_t build_x86(struct elf_in *in, int sections, int eh_hdr, const struct fde *f, unsigned nf, uint32_t *pos)
+/* x86-64 with .text = `text` (n bytes) and an .eh_frame of the FDEs `f` (offsets into .text) */
+static uint32_t build_x86_text(struct elf_in *in, const uint8_t *text, uint32_t n, int sections, int eh_hdr, const struct fde *f, unsigned nf, uint32_t *pos)
 {
 	struct lay l;
 
 	memset(in, 0, sizeof *in);
-	in->c64 = 1; in->em = 62; in->base = 0x400000u; in->text = T; in->text_n = x86_text(T);
+	in->c64 = 1; in->em = 62; in->base = 0x400000u; in->text = text; in->text_n = n;
 	in->rodata_n = 0x40; in->sections = sections; in->eh_hdr = eh_hdr; in->eh_section = sections;
 	layout(in, &l);
 	in->eh_n = eh_make(EH, 0, l.eh_va, l.text_va, f, nf, pos);
 	in->eh = EH;
 	return elf_build(in, B);
 }
+
+static uint32_t build_x86(struct elf_in *in, int sections, int eh_hdr, const struct fde *f, unsigned nf, uint32_t *pos)
+{
+	return build_x86_text(in, T, x86_text(T), sections, eh_hdr, f, nf, pos);
+}
+
+#ifndef FNTAB_OLD_API_ONLY
+/*
+ * AN FDE NO SYMBOL CONFIRMS IS CHECKED (owner decision 2026-11-17, "câu 1: làm b"; it was the open defect FPART-D1): read by the table's descent, an FDE gives
+ * NO unit when code leaves it or when it holds two entries; an FDE a symbol confirms is not read; a clean compiler FDE stays HIGH. x86-64, stripped:
+ *   part   one function `mov eax,1; mov ecx,2; ret` (0x00..0x0b) whose FDE covers 0x00..0x05 only: the mov runs on past its end -> no unit, NONE
+ *   two    one FDE 0x10..0x30 over f (0x10 `ret`) and g (0x20 `ret`); FDE h 0x30 `call g; ret` calls into its middle -> the FDE over two is refused, h stays
+ *   out    FDE a 0x40 `xor eax,eax` (no terminator) runs into FDE b 0x42 `ret`: both refused (one flow cut in two)
+ *   clean  FDE c 0x50 `push rbp; pop rbp; ret`, FDE d 0x60 `call c; call 0x70` ending in the call (the callee 0x70 is no FDE, assumed to return: the FDE's
+ *          end says it did not), FDE e 0x70 `call c; hlt` ending in a trap: all three HIGH
+ *   jump   FDE p 0x80 `jmp 0x8b` into the middle of FDE q 0x88: q holds two entries and is refused; p (the jumper) stays HIGH
+ *   sym    the `part` shape with a symbol of size 5 at 0x00: the symbol confirms the FDE, which is not read: HIGH; a size-0 symbol confirms nothing
+ * RED on the old code: part, two, out, jump and the size-0 symbol were HIGH units cutting or merging functions.
+ */
+static void t_fde_check(void)
+{
+	static uint8_t c[0x90];
+	static const struct fde fd[] = { { 0x00, 5 }, { 0x10, 0x20 }, { 0x30, 6 }, { 0x40, 2 }, { 0x42, 1 }, { 0x50, 3 }, { 0x60, 10 }, { 0x70, 6 },
+					 { 0x80, 2 }, { 0x88, 4 } };
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	uint32_t n, k;
+	const uint64_t va = 0x400000u + TEXT_OFF;
+	struct sym s1[1] = { { "p", va, 5, 0x12, 1 } }, s0[1] = { { "p", va, 0, 0x12, 1 } };
+
+	printf("fde check\n");
+	memset(c, 0xcc, sizeof c);
+	memcpy(c + 0x00, "\xb8\x01\x00\x00\x00\xb9\x02\x00\x00\x00\xc3", 11);
+	c[0x10] = 0xc3;
+	c[0x20] = 0xc3;
+	memcpy(c + 0x30, "\xe8\xeb\xff\xff\xff\xc3", 6);              /* call 0x20; ret */
+	memcpy(c + 0x40, "\x31\xc0\xc3", 3);                            /* a: xor eax,eax | b: ret */
+	memcpy(c + 0x50, "\x55\x5d\xc3", 3);
+	memcpy(c + 0x60, "\xe8\xeb\xff\xff\xff\xe8\x06\x00\x00\x00", 10);   /* call 0x50; call 0x70 */
+	memcpy(c + 0x70, "\xe8\xdb\xff\xff\xff\xf4", 6);              /* call 0x50; hlt */
+	memcpy(c + 0x80, "\xeb\x09", 2);                                  /* p: jmp 0x8b, the middle of q */
+	memcpy(c + 0x88, "\x90\x90\x90\xc3", 4);                          /* q */
+	n = build_x86_text(&in, c, sizeof c, 1, 0, fd, (unsigned)(sizeof fd / sizeof *fd), NULL);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.status == KGENOME_OK && fs.n_fde_refused == 5);
+	CK(!fn_at(&fs, TEXT_OFF + 0x00) || fn_at(&fs, TEXT_OFF + 0x00)->trust != KGENOME_FN_TRUST_HIGH);
+	CK(!fn_at(&fs, TEXT_OFF + 0x10) || fn_at(&fs, TEXT_OFF + 0x10)->trust != KGENOME_FN_TRUST_HIGH);
+	CK(fn_at(&fs, TEXT_OFF + 0x30) && fn_at(&fs, TEXT_OFF + 0x30)->trust == KGENOME_FN_TRUST_HIGH && fn_at(&fs, TEXT_OFF + 0x30)->len == 6);
+	CK(!fn_at(&fs, TEXT_OFF + 0x40) || fn_at(&fs, TEXT_OFF + 0x40)->trust != KGENOME_FN_TRUST_HIGH);
+	CK(!fn_at(&fs, TEXT_OFF + 0x42) || fn_at(&fs, TEXT_OFF + 0x42)->trust != KGENOME_FN_TRUST_HIGH);
+	CK(!fn_at(&fs, TEXT_OFF + 0x88) || fn_at(&fs, TEXT_OFF + 0x88)->trust != KGENOME_FN_TRUST_HIGH);
+	for (k = 0x50; k <= 0x80; k += 0x10)
+		CK(fn_at(&fs, TEXT_OFF + k) && fn_at(&fs, TEXT_OFF + k)->trust == KGENOME_FN_TRUST_HIGH && (fn_at(&fs, TEXT_OFF + k)->source & KGENOME_FN_S_FDE));
+	/* the refused bytes are undeclared: every byte of .text is in exactly one unit, none of them HIGH at 0x00..0x30 or 0x40..0x43 */
+	CK(kgenome_funcs_at(&fs, TEXT_OFF + 0x20) != KGENOME_FUNCS_NONE && fs.v[kgenome_funcs_at(&fs, TEXT_OFF + 0x20)].trust != KGENOME_FN_TRUST_HIGH);
+	kgenome_funcs_free(&fs);
+	in.sym = s1; in.nsym = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fn_at(&fs, TEXT_OFF) && fn_at(&fs, TEXT_OFF)->trust == KGENOME_FN_TRUST_HIGH && fn_at(&fs, TEXT_OFF)->len == 5 && fs.n_fde_refused == 4);
+	kgenome_funcs_free(&fs);
+	/* a size-0 symbol at the start confirms no extent: the FDE is read and refused; the symbol's start stays a declared start */
+	in.sym = s0;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.n_fde_refused == 5 && (!fn_at(&fs, TEXT_OFF) || fn_at(&fs, TEXT_OFF)->trust != KGENOME_FN_TRUST_HIGH));
+	CK(fs.n_st >= 1 && fs.st[0].off == TEXT_OFF && (fs.st[0].source & KGENOME_FN_S_SYMTAB) && !(fs.st[0].source & KGENOME_FN_S_FDE));
+	kgenome_funcs_free(&fs);
+}
+
+/*
+ * THE OUTERMOST FRAME (owner decision 2026-11-17, "chấp nhận 2"; it was the open defect FPART2-D1): an FDE no symbol confirms whose CFA program marks the
+ * return address (column 16 here, the CIE's) UNDEFINED where the function begins gives no unit (KGENOME_FN_F_NO_CALLER, refused by the FDE check); a hostile
+ * program is stepped inside its record and said (KGENOME_FN_F_CFA_UNREAD, the unit stands). x86-64, eight 16-byte slots each `ret`, one FDE of 1 byte each;
+ * the FDE's 7 instruction bytes (nops) are rewritten per slot:
+ *   0 `07 10` undefined(16)                     -> no unit                     1 nops                                   -> HIGH
+ *   2 `41 07 10` advance first, then undefined  -> HIGH (defined at the start) 3 `07 10 08 10` undefined, same_value      -> HIGH
+ *   4 `07 90 90 90 90 90 90` operand past end   -> HIGH, CFA_UNREAD            5 `1c` an opcode not stepped             -> HIGH, CFA_UNREAD
+ *   6 `04 ff ff ff ff` a huge advance_loc4      -> HIGH (stops there)          7 `0f ff ff ff ff 0f` a block past the end -> HIGH, CFA_UNREAD
+ * slot 0 holds the entry point: its start stays declared, its bytes NONE (not derived). Then slot 0 with a sized symbol confirming it (HIGH, the symbol's),
+ * and the CIE's own initial instructions `07 10` (every FDE: no unit).
+ * RED on the old code: slot 0 and the CIE row were HIGH units; the flags did not exist.
+ */
+static void t_fde_no_caller(void)
+{
+	static uint8_t c[0x80];
+	static const uint8_t prog[8][7] = { { 0x07, 0x10 }, { 0 }, { 0x41, 0x07, 0x10 }, { 0x07, 0x10, 0x08, 0x10 }, { 0x07, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 },
+					    { 0x1c }, { 0x04, 0xff, 0xff, 0xff, 0xff }, { 0x0f, 0xff, 0xff, 0xff, 0xff, 0x0f } };
+	struct fde fd[8];
+	uint32_t pos[8], n, k;
+	struct elf_in in;
+	struct kgenome_elf_info ei;
+	struct kgenome_obj o;
+	struct kgenome_func_set fs;
+	const uint64_t va = 0x400000u + TEXT_OFF;
+	struct sym s1[1] = { { "p", va, 1, 0x12, 1 } };
+	const struct kgenome_func *f0;
+
+	printf("fde no caller\n");
+	memset(c, 0xcc, sizeof c);
+	for (k = 0; k < 8u; k++) {
+		c[0x10u * k] = 0xc3;
+		fd[k].off = 0x10u * k;
+		fd[k].len = 1;
+	}
+	n = build_x86_text(&in, c, sizeof c, 1, 0, fd, 8, pos);
+	for (k = 0; k < 8u; k++)
+		memcpy(EH + pos[k] + 17u, prog[k], 7);
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	CK(fs.status == KGENOME_OK && fs.n_fde_refused == 1);
+	/* slot 0 holds the entry point: it stays a declared start, and the outermost frame's bytes stay NONE (not derived) */
+	k = kgenome_funcs_at(&fs, TEXT_OFF);
+	CK(k != KGENOME_FUNCS_NONE && fs.v[k].trust == KGENOME_FN_TRUST_NONE && fs.n_st >= 1 && fs.st[0].off == TEXT_OFF && (fs.st[0].source & KGENOME_FN_S_ENTRY));
+	for (k = 1; k < 8u; k++) {
+		const struct kgenome_func *f = fn_at(&fs, TEXT_OFF + 0x10u * k);
+		const int unread = k == 4u || k == 5u || k == 7u;
+
+		CK(f && f->trust == KGENOME_FN_TRUST_HIGH && f->len == 1 && !(f->flags & KGENOME_FN_F_NO_CALLER));
+		CK(f && !!(f->flags & KGENOME_FN_F_CFA_UNREAD) == unread);
+	}
+	kgenome_funcs_free(&fs);
+	/* a sized symbol confirms slot 0: the symbol's unit, not read for its return address */
+	in.sym = s1; in.nsym = 1;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	f0 = fn_at(&fs, TEXT_OFF);
+	CK(f0 && f0->trust == KGENOME_FN_TRUST_HIGH && f0->len == 1 && fs.n_fde_refused == 0);
+	kgenome_funcs_free(&fs);
+	/* the CIE's initial instructions mark it: every FDE of that CIE is an outermost frame (the FDE's own nops keep it) */
+	in.sym = NULL; in.nsym = 0;
+	n = build_x86_text(&in, c, sizeof c, 1, 0, fd, 2, pos);
+	EH[17] = 0x07;
+	EH[18] = 0x10;
+	n = elf_build(&in, B);
+	CK(parse(B, n, &ei, &o));
+	kgenome_diag_funcs_of(&o, B, n, &fs);
+	f0 = fn_at(&fs, TEXT_OFF);
+	CK(fs.n_fde_refused == 2 && (!f0 || f0->trust != KGENOME_FN_TRUST_HIGH));
+	kgenome_funcs_free(&fs);
+}
+#endif
 
 /* RED on base: a stripped file's functions are the call targets only, so C (called by nobody) is missing; its end is the next entry. Here, the unwind table gives
  * start AND length of all four, exact, with the sections present. */
@@ -1766,6 +1916,8 @@ int main(void)
 	t_ends();
 	t_cap();
 	t_fde_hostile();
+	t_fde_check();
+	t_fde_no_caller();
 #endif
 	t_symtab_kinds();
 	t_symtab_thumb();

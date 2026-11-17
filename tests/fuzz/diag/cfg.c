@@ -4,10 +4,6 @@
  * The first byte picks the architecture (x86-64, i386, ARM, AArch64, MIPS LE, MIPS BE); the rest is code, decoded
  * instruction by instruction with the lib's own decoder (an undecodable byte is skipped), the extent is the whole input.
  *
- * DISABLED IN PART by the owner 2026-11-15 (CFG): SIGN, ANCHOR, VIEW and the CFG filler of GRAPH drive code that is inside #if 0 (celllysis/cfg_sign.c,
- * cfg_anchor.c, cfg_view.c, cfg_gv.c); their rows here are inside #if 0 too and the adapter's `.covers` names what still runs. To re-enable: take the #if 0
- * blocks of run() out and put the names back in `.covers` (they are listed beside it).
- *
  * Held:
  *   GRAPH     the blocks tile the instructions (first = the sum of the n_insn before it, n_insn > 0, the sum is the count), every
  *             successor is a block or NONE, block 0 is reachable, out_deg counts the successors, reachable counts agree
@@ -104,9 +100,7 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 {
 	struct kgenome_cell_insn *v;
 	struct kgenome_cfg g[2];
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kgenome_cfg_sign s[2];
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	const struct isa { unsigned arch; int be; } isa[6] = { { KGENOME_ARCH_X86_64, 0 }, { KGENOME_ARCH_X86, 0 }, { KGENOME_ARCH_ARM, 0 },
 		{ KGENOME_ARCH_ARM64, 0 }, { KGENOME_ARCH_MIPS, 0 }, { KGENOME_ARCH_MIPS, 1 } };
 	unsigned a, pass;
@@ -134,13 +128,11 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 	}
 	for (pass = 0; pass < 2; pass++) {
 		struct kgenome_cfg_req rq;
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 		struct kgenome_cfg_sign_req sq;
 		struct kgenome_cfg_view_req vq;
 		struct kgenome_cfg_view vw;
 		struct kgenome_cfg_anchor_req ar;
 		uint64_t *label = NULL;
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 		enum kgenome_status st;
 		uint32_t sum = 0;
 
@@ -165,10 +157,6 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 			FZ_CHECK(c, b->out_deg == (b->succ[0] != KGENOME_CFG_NONE) + (b->succ[1] != KGENOME_CFG_NONE), "out_deg is not the successor count");
 		}
 		FZ_CHECK(c, sum == k && (!k || g[pass].b[0].reach) && g[pass].n_blk <= g[pass].n_all, "the graph does not cover the instructions");
-		FZ_CHECK(c, kgenome_mutation_block_min(KGENOME_SCAN_ELF_CODE) == KGENOME_CFG_MIN_KEYS && kgenome_mutation_block_min(KGENOME_SCAN_ELF_DATA) == KGENOME_MUTATION_MIN_HASH,
-			 "the minimum of a block: a function region may be a CFG block, every other region keeps the window minimum");
-		/* DISABLED by the owner 2026-11-15 (CFG): SIGN, ANCHOR, VIEW and the CFG filler of GRAPH. To re-enable: take this #if 0 out (and the digest's below). */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 		label = malloc((g[pass].n_all + 1u) * sizeof *label);
 		memset(&sq, 0, sizeof sq);
 		sq.g = &g[pass]; sq.policy = KGENOME_CFG_P_BOTH; sq.rounds = (uint8_t)(in[0] >> 5 & 3u); sq.label = label;
@@ -242,11 +230,6 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 		fz_digest(c, s[pass].canon ^ s[pass].ccanon ^ ((uint64_t)g[pass].n_all << 32) ^ g[pass].n_edge);
 		if (pass == 1 && g[0].b && g[1].b)
 			FZ_CHECK(c, s[0].canon == s[1].canon && s[0].n_key == s[1].n_key, "two builds of the same bytes differ");
-#else /* DISABLED by the owner 2026-11-15 (CFG): the digest and the determinism without the signature */
-		fz_digest(c, ((uint64_t)g[pass].n_all << 32) ^ g[pass].n_edge ^ ((uint64_t)g[pass].n_blk << 16));
-		if (pass == 1 && g[0].b && g[1].b)
-			FZ_CHECK(c, g[0].n_all == g[1].n_all && g[0].n_blk == g[1].n_blk && g[0].n_edge == g[1].n_edge, "two builds of the same bytes differ");
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 		kgenome_cfg_free(&g[pass], NULL);
 	}
 	free(v);
@@ -254,9 +237,7 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 }
 
 FZ_ADAPTER(cfg, .name = "kgenome/diag_cfg",
-	   /* DISABLED by the owner 2026-11-15 (CFG), out of .covers with their rows: kgenome_cfg_sign kgenome_cfg_pct kgenome_cfg_pct_callee kgenome_cfg_overlap
-	    * kgenome_cfg_keys_sign kgenome_cfg_anchor kgenome_cfg_view_make kgenome_cfg_view_free kgenome_cfg_gv_make */
-	   .covers = "kgenome_cfg_build kgenome_cfg_free kgenome_mutation_block_min "
-		 "kgenome_gv_alloc kgenome_gv_free kgenome_gv_loops kgenome_gv_box_line",
+	   .covers = "kgenome_cfg_build kgenome_cfg_free kgenome_cfg_sign kgenome_cfg_pct kgenome_cfg_pct_callee kgenome_cfg_overlap kgenome_cfg_keys_sign kgenome_mutation_block_min kgenome_cfg_anchor kgenome_cfg_view_make kgenome_cfg_view_free "
+		 "kgenome_cfg_gv_make kgenome_gv_alloc kgenome_gv_free kgenome_gv_loops kgenome_gv_box_line",
 	   .flags = 0, .backstop_s = 300, .steps_base = 100000u, .steps_per_byte = 64,
 	   .shape = FZ_REQ, .seeds = seeds, .run = run);

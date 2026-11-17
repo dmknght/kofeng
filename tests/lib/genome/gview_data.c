@@ -16,12 +16,6 @@
  */
 #include "cfg_kit.h"
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when celllysis/cfg_gv.c and cfg_view.c are out of #if 0 (the CFG filler of the graph view, kgenome_cfg_gv_make, is what these rows drive).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 #define NN KGENOME_CFG_NONE
 struct g { uint8_t term; uint32_t s0, s1; };
 struct spec { const char *name; const struct g *g; uint32_t n; uint32_t n_unr; };
@@ -57,8 +51,6 @@ static void build_spec(const struct spec *s, struct kgenome_cfg_view *v, struct 
 	for (i = 0; i < s->n_unr; i++) { u[i].off = 0x2000 + 0x20 * i; u[i].n_insn = 2 + i; }
 	v->n_blk = s->n; v->blk = b; v->n_unr = s->n_unr; v->unr = u; v->canon = 0x1122334455667788ull; v->n_key = 3; v->key[0] = 0x11; v->key[1] = 0x2222; v->key[2] = 0xdeadbeef;
 }
-
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /* ---- the oracle: dominators by bit sets, retreating edges by a recursive walk (n <= 32) ---- */
 
@@ -151,12 +143,6 @@ static void vt_release(void *user, void *p, size_t n)
 static const char *loop_name(unsigned l) { return l == 0 ? "none" : l == 1 ? "LOOP" : "RETREAT"; }
 
 /* The graph of `s` through the filler, and the edges' cond and loop and the heads against the oracle that reads the same graph. */
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when celllysis/cfg_gv.c and cfg_view.c are out of #if 0 (the CFG filler of the graph view, kgenome_cfg_gv_make, is what these rows drive).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void fill_and_check(const struct spec *s, struct kgenome_gv *gv, struct kgenome_cfg_view *v, struct kgenome_cfg_view_block *b, struct kgenome_cfg_view_unreach *u)
 {
 	struct kgenome_cfg_gv_req rq;
@@ -281,8 +267,6 @@ static void hand_built(void)
 }
 
 /* 600 random graphs against the oracle. */
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
-
 static void random_graphs(void)
 {
 	struct crng r;
@@ -333,12 +317,6 @@ static void random_graphs(void)
 	}
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when celllysis/cfg_gv.c and cfg_view.c are out of #if 0 (the CFG filler of the graph view, kgenome_cfg_gv_make, is what these rows drive).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* Allocator refusals and budgets. */
 static void memory(void)
 {
@@ -402,8 +380,6 @@ static void memory(void)
 }
 
 /* The box rows. */
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
-
 static void box_rows(void)
 {
 	struct kgenome_gv gv;
@@ -510,13 +486,9 @@ static void bounds(void)
 
 int main(void)
 {
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG): the CFG filler (kgenome_cfg_gv_make); re-enable with the functions' #if 0 */
 	hand_built();
-#endif
 	random_graphs();
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	memory();
-#endif
 	box_rows();
 	bounds();
 	if (fails) {

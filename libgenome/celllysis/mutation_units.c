@@ -66,10 +66,13 @@ int kgenome_mutation_has_blocks(uint32_t format)
  * THE DECISION (owner 2026-11-15): a machine-code function unit is not signed. The CFG sketch it had (2026-10-30 .. 2026-11-15) is
  * disabled with every other CFG feature; the default for what the unit carries instead is NOTHING (listed, unsigned, scores nothing, the
  * reason KGENOME_MUTATION_SIG_NONE_WHY), and data units keep their window sketches.
- * TODO(owner): function units: window sketch (measured weak: exp_cfg/report.md, x86-64 5/60 pairs, 0 on other architectures) or another
- * signing method. DISABLED by the owner 2026-11-15 (the CFG sketch): to re-enable, this line answers KGENOME_MUTATION_SIG_CFG again and the
- * #if 0 blocks of the CFG signing are taken out (cfg_sign.c, cfg_anchor.c, analyzers/cfgsign.c, scan_feed.c mutation_feed_func, kofmutation.c
- * kof_mutation_cfg_unit, scan_explain.c func_hold, kofexaminer_blocks.c blk_func, kv_mutation.c mtn_mark).
+ * TODO(owner): function units: the CFG sketch again, window sketch (measured weak: exp_cfg/report.md, x86-64 5/60 pairs, 0 on other
+ * architectures) or another signing method. The viewer's on-request CFG (the function dialog's Graph tab and Overview: kof_cfgview_build,
+ * kof_cfgsign_function, cfg_sign.c, cfg_anchor.c, cfg_view.c, cfg_gv.c) was reconnected 2026-11-17; this switch is the SCAN's and the Blocks
+ * table's, and stays at SIG_NONE until the owner chooses. DISABLED by the owner 2026-11-15 (the CFG sketch): to re-enable, this line answers
+ * KGENOME_MUTATION_SIG_CFG again and the #if 0 blocks of the CFG signing in the scan and the table are taken out (scan_feed.c
+ * mutation_feed_func, kofmutation.c kof_mutation_cfg_unit, scan_explain.c func_hold, kofexaminer_blocks.c blk_func, kv_mutation.c mtn_mark,
+ * kv_decl_blocks.c hit_plg_tick's message; the tests cfg_sig_gen, cfg_sig_threads, cfg_sig_match, scan_modctx).
  */
 uint32_t kgenome_mutation_signature(const struct kgenome_func *first)
 {

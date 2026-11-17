@@ -286,9 +286,9 @@ void draw_tags(struct out *o, struct view *v);
 int tags_uncovered(struct view *v);
 int tags_click(struct view *v, int rclick);
 int handle_tags_key(struct view *v, int k);
-/* kv_cfgdlg.c: the dialog of one function (Overview, Disasm, Lineage; its CFG graph DISABLED by the owner 2026-11-15), in the dialog frame: opened by hit_plg_cfg for
- * the function [func_off, func_off + func_len) of object `o`. */
-void cfgd_open(struct view *v, uint64_t func_off, uint64_t func_len, const struct object *o);
+/* kv_cfgdlg.c: the CFG dialog of one function (the engine's graph, drawn by kv_graph.c, in the dialog frame): made by cfgd_open from the request hit_plg_cfg fills. */
+struct kof_cfgview_req;
+void cfgd_open(struct view *v, const struct kof_cfgview_req *rq, const struct object *o);
 void cfgd_free(struct view *v);
 int cfgd_up(const struct view *v);
 void draw_cfgd(struct out *o, struct view *v);

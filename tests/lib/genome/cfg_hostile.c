@@ -1,10 +1,4 @@
 /*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and drop the name from LIBTEST_CFG_DISABLED (mk/tests.mk) when cfg_sign.c and cfg_view.c are out of #if 0 (every case here signs the graph it builds; the build-only hostile rows are to be split out: followups).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
-/*
  * genome / cfg_hostile - the cfg family against the inputs a hostile object makes, through <kgenome.h> alone.
  *
  *   SHAPES      a 200000-block function (ladder, all branches to the end, deep nesting, a self loop, all but the entry
@@ -616,4 +610,3 @@ int main(void)
 		printf("cfg_hostile: ok\n");
 	return fails != 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

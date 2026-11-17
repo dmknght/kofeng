@@ -173,16 +173,14 @@ static uint32_t mtn_n_picked(const struct view *v)
 
 
 /*
- * A press on the NAME of a function row: the function's dialog (kv_cfgdlg.c: the frame of the catalog dialogs; Overview, Disasm, Lineage - its content is the lineage).
- * The engine's CFG of the function (kof_cfgview_build, the Graph tab and the Overview's CFG facts) is DISABLED by the owner 2026-11-15: the request for it below is in
- * #if 0; to re-enable, take it out and hand `&rq` to cfgd_open again (kv_cfgdlg.c says what else).
+ * A press on the NAME of a function row (signed or not): the engine's CFG of that function (kof_cfgview_build, on request, nothing cached) is drawn by the CFG dialog (kv_cfgdlg.c: the
+ * frame of the catalog dialogs, the graph laid out by kv_graph.c). Nothing here lays out or computes anything of the graph; a function the engine cannot make a graph of
+ * gets the engine's own sentence in the dialog.
  */
 static void hit_plg_cfg(struct view *v, uint32_t i)
 {
 	struct object *o = cur_obj(v);
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kof_cfgview_req rq;
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 	if (!o || !o->buf.p || i >= v->ed.dr.n_blk)
 		return;
@@ -194,7 +192,6 @@ static void hit_plg_cfg(struct view *v, uint32_t i)
 	 * opened a second time costs nothing more.
 	 */
 	view_explain(v, o);
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	memset(&rq, 0, sizeof rq);
 	rq.ctx = &o->ctx;
 	rq.data = o->buf;
@@ -204,11 +201,10 @@ static void hit_plg_cfg(struct view *v, uint32_t i)
 	rq.sym = o->sym;
 	rq.sym_n = o->sym_n;
 	rq.names = o->calls_done ? &o->calls : NULL;
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	/* KNOWN DEFECT LV-D3 (2026-11-17, M) [sev M]: hit_plg_cfg hands cfgd_open the function's FIRST range (fn_off/fn_len = first->off/len, kv_mutation.c), so a node in a further
 	 * range (kgenome_funcs_range) is in no dialog. Trigger: a function with a chained or derived further range. Effect: 693 of 90,615 set356 records shown nowhere; 11 more are in no function at all.
 	 * Reproducer: lin_truth drv/lgf check (rec ... in a further range). Fix: pass every range of the function to kof_lineageview_build (a list of extents). */
-	cfgd_open(v, v->ed.dr.blk[i].fn_off, v->ed.dr.blk[i].fn_len, o);
+	cfgd_open(v, &rq, o);
 }
 
 static void hit_plg_light(struct view *v, uint32_t i)
@@ -553,7 +549,7 @@ int draw_decl_blocks(struct out *o, struct view *v, int r)
 			/*
 			 * THE OFFSET LIGHTS THE BLOCK: pressing it does what pressing the hash does for now (hit_plg_light) - the block's bytes in the hex
 			 * pane take the block's colour and the pane scrolls to them, a second press puts them out. The cell takes the block's colour
-			 * while lit, as the hash does. (On a function row the NAME opens its dialog instead.)
+			 * while lit, as the hash does. (On a function row the NAME opens its CFG instead.)
 			 */
 			out_str(o, " ");
 			c0 = 1 + (int)o->col_hint;
@@ -593,7 +589,7 @@ int draw_decl_blocks(struct out *o, struct view *v, int r)
 		 * what the rule matches.
 		 */
 		/*
-		 * THE NAME OF A FUNCTION IS A CONTROL: pressing it opens the function's dialog, whose content is its lineage (hit_plg_cfg; its CFG DISABLED 2026-11-15). Only the text of the
+		 * THE NAME OF A FUNCTION IS A CONTROL: pressing it asks the engine for that function's CFG and shows it in the CFG dialog (hit_plg_cfg). Only the text of the
 		 * name is the target - not the padding after it - and only on a function row (a unit cut from a function; a data row has no name to press).
 		 * It looks like every other name: plain. A press there did nothing before.
 		 */

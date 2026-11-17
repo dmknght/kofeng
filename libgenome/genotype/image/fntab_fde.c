@@ -28,7 +28,13 @@
 
 #define KGENOME_FDE_CIE_MAX 65536u
 
-struct cie { uint64_t pos; int enc; };   /* enc < 0: the CIE is one this reads not (version, augmentation) */
+struct cie {
+	uint64_t pos;
+	int enc;            /* < 0: the CIE is one this reads not (version, augmentation) */
+	uint64_t ra;        /* the return address register (column) */
+	uint8_t z;          /* augmentation 'z': its FDEs carry an augmentation data length */
+	uint8_t ra_state;   /* RA_DEFINED / RA_UNDEFINED / RA_UNREAD after the CIE's initial instructions */
+};
 
 struct rd {
 	const uint8_t *p;
@@ -130,8 +136,104 @@ static int enc_read(const struct rd *r, uint64_t *pos, uint64_t end, int enc, ui
 	return 0;
 }
 
-/* The address encoding of a CIE's FDEs: the 'R' augmentation, 0 (absolute) without one; -1 when the CIE is not one this reads. */
-static int cie_enc(const struct rd *r, uint64_t body, uint64_t end)
+/*
+ * THE RETURN ADDRESS AT A FUNCTION'S START (owner decision 2026-11-17, "chấp nhận 2"; it was the open defect FPART2-D1): an FDE whose CFA program marks the return
+ * address column UNDEFINED (DW_CFA_undefined) is the unwinder's outermost frame - glibc's _start, the child half of __clone / __clone3 - which no call enters.
+ * This is NOT a CFI interpreter: it STEPS over the instructions that hold before the first location advance (the CIE's initial instructions, then the FDE's
+ * own up to its first advance_loc / set_loc) and keeps one fact, the state of the return address column: set UNDEFINED by DW_CFA_undefined of that column,
+ * DEFINED again by any rule that gives it one (offset, register, same_value, expression, val_*), back to the CIE's state by restore. Every opcode is stepped by
+ * its operand shapes (DWARF 5 6.4.2, the GNU 0x2e / 0x2f and the AArch64 0x2d); an opcode it does not know, remember/restore_state, an operand past the
+ * record, or a block longer than the record ends the read as RA_UNREAD: not known, the unit stands (KGENOME_FN_F_CFA_UNREAD). Bounded by the record: each
+ * step consumes at least one byte, every operand is read inside [pos, end).
+ */
+enum { RA_DEFINED = 0, RA_UNDEFINED = 1, RA_UNREAD = 2 };
+
+static int cfa_ra(const struct rd *r, uint64_t pos, uint64_t end, uint64_t ra, int state, int cie_state)
+{
+	while (pos < end && state != RA_UNREAD) {
+		const uint8_t op = r->p[pos++];
+		uint64_t a = 0, b = 0;
+		int64_t sv;
+
+		switch (op >> 6) {
+		case 1:                                         /* advance_loc: the function's first instruction is behind */
+			return state;
+		case 2:                                         /* offset reg, uleb */
+			if (!rd_uleb(r, &pos, end, &b))
+				return RA_UNREAD;
+			if ((uint64_t)(op & 0x3fu) == ra)
+				state = RA_DEFINED;
+			continue;
+		case 3:                                         /* restore reg */
+			if ((uint64_t)(op & 0x3fu) == ra)
+				state = cie_state;
+			continue;
+		default:
+			break;
+		}
+		switch (op) {
+		case 0x00: case 0x2d:                           /* nop; AArch64 negate_ra_state (signing, not the rule) */
+			break;
+		case 0x01:                                      /* set_loc */
+		case 0x02: case 0x03: case 0x04:                /* advance_loc1 / 2 / 4 */
+			return state;
+		case 0x05: case 0x14: case 0x2f:                /* offset_extended, val_offset, GNU_negative_offset_extended: reg, uleb */
+		case 0x09:                                      /* register: reg, reg */
+			if (!rd_uleb(r, &pos, end, &a) || !rd_uleb(r, &pos, end, &b))
+				return RA_UNREAD;
+			if (a == ra)
+				state = RA_DEFINED;
+			break;
+		case 0x11: case 0x15:                           /* offset_extended_sf, val_offset_sf: reg, sleb */
+			if (!rd_uleb(r, &pos, end, &a) || !rd_sleb(r, &pos, end, &sv))
+				return RA_UNREAD;
+			if (a == ra)
+				state = RA_DEFINED;
+			break;
+		case 0x06: case 0x07: case 0x08:                /* restore_extended, undefined, same_value: reg */
+			if (!rd_uleb(r, &pos, end, &a))
+				return RA_UNREAD;
+			if (a == ra)
+				state = op == 0x07 ? RA_UNDEFINED : op == 0x08 ? RA_DEFINED : cie_state;
+			break;
+		case 0x0c:                                      /* def_cfa: reg, uleb */
+			if (!rd_uleb(r, &pos, end, &a) || !rd_uleb(r, &pos, end, &b))
+				return RA_UNREAD;
+			break;
+		case 0x12:                                      /* def_cfa_sf: reg, sleb */
+			if (!rd_uleb(r, &pos, end, &a) || !rd_sleb(r, &pos, end, &sv))
+				return RA_UNREAD;
+			break;
+		case 0x0d: case 0x0e: case 0x2e:                /* def_cfa_register, def_cfa_offset, GNU_args_size: uleb */
+			if (!rd_uleb(r, &pos, end, &a))
+				return RA_UNREAD;
+			break;
+		case 0x13:                                      /* def_cfa_offset_sf: sleb */
+			if (!rd_sleb(r, &pos, end, &sv))
+				return RA_UNREAD;
+			break;
+		case 0x0f:                                      /* def_cfa_expression: block */
+			if (!rd_uleb(r, &pos, end, &b) || b > end - pos)
+				return RA_UNREAD;
+			pos += b;
+			break;
+		case 0x10: case 0x16:                           /* expression, val_expression: reg, block */
+			if (!rd_uleb(r, &pos, end, &a) || !rd_uleb(r, &pos, end, &b) || b > end - pos)
+				return RA_UNREAD;
+			pos += b;
+			if (a == ra)
+				state = RA_DEFINED;
+			break;
+		default:                                        /* remember/restore_state, a vendor opcode: not stepped */
+			return RA_UNREAD;
+		}
+	}
+	return state;
+}
+
+/* The address encoding of a CIE's FDEs: the 'R' augmentation, 0 (absolute) without one; -1 when the CIE is not one this reads. It also fills `c`'s return
+ * address column, 'z', and the column's state after the initial instructions (cfa_ra). */
+static int cie_enc(const struct rd *r, uint64_t body, uint64_t end, struct cie *c)
 {
 	uint64_t pos = body + 4u, v;
 	int64_t sv;
@@ -140,6 +242,9 @@ static int cie_enc(const struct rd *r, uint64_t body, uint64_t end)
 	int enc = 0, i;
 	uint64_t alen_end = 0;
 
+	c->ra = 0;
+	c->z = 0;
+	c->ra_state = RA_UNREAD;
 	if (pos >= end)
 		return -1;
 	ver = r->p[pos++];
@@ -161,15 +266,20 @@ static int cie_enc(const struct rd *r, uint64_t body, uint64_t end)
 	if (ver == 1) {
 		if (pos >= end)
 			return -1;
-		pos++;                                           /* return address register */
-	} else if (!rd_uleb(r, &pos, end, &v)) {
+		c->ra = r->p[pos++];                             /* return address register */
+	} else if (!rd_uleb(r, &pos, end, &c->ra)) {
 		return -1;
 	}
-	if (aug[0] != 'z')
-		return aug[0] ? -1 : 0;                          /* an augmentation this does not know: its FDEs are not read */
+	if (aug[0] != 'z') {
+		if (aug[0])
+			return -1;                               /* an augmentation this does not know: its FDEs are not read */
+		c->ra_state = (uint8_t)cfa_ra(r, pos, end, c->ra, RA_DEFINED, RA_DEFINED);
+		return 0;
+	}
 	if (!rd_uleb(r, &pos, end, &v) || v > end - pos)
 		return -1;
 	alen_end = pos + v;
+	c->z = 1;
 	for (i = 1; aug[i]; i++) {
 		if (aug[i] == 'R') {
 			if (pos >= alen_end)
@@ -192,6 +302,7 @@ static int cie_enc(const struct rd *r, uint64_t body, uint64_t end)
 			break;                                   /* unknown: the data after it cannot be stepped over; R, if seen, stands */
 		}
 	}
+	c->ra_state = (uint8_t)cfa_ra(r, alen_end, end, c->ra, RA_DEFINED, RA_DEFINED);      /* the initial instructions follow the augmentation data */
 	return enc;
 }
 
@@ -260,11 +371,8 @@ static int eh_locate(kof_buf file, const struct kgenome_elf_info *e, struct rd *
 	return 1;
 }
 
-/* KNOWN DEFECT FPART-D1 (2026-11-17, M) [sev M]: kgenome_fntab_fde takes every FDE as one function's exact extent; hand-written assembly writes several per function.
- * Trigger: stripped static glibc/OpenSSL (__clone, __clone3: FDE pieces with an undefined return address; poly1305_blocks_avx: three entry FDEs; pthread_cond_wait:
- * one FDE over two symbols). Effect: HIGH units start or end inside a function (R1: 62 boundaries on 63 twins + 45 variants), stripped != unstripped (R2).
- * Reproducer: /mnt/games/normtest/fix_part/h/r12.py (stripped twins, out/t4_twins/fail.txt). Fix: read each FDE by the descent (cfg_obj.c) and demote one whose last instruction
- * runs on past its end, or whose first byte the FDE before runs into; an FDE over two symbols has no metadata answer (owner decision). */
+/* An FDE no symbol confirms is checked after the ends by the table's descent and gives no unit when it is not one function (fntab_derive.c
+ * kgenome_fntab_fde_check, owner decision 2026-11-17; it was the open defect FPART-D1). */
 void kgenome_fntab_fde(kof_buf file, const struct kgenome_elf_info *e, struct kgenome_fntab_list *out)
 {
 	struct rd r;
@@ -312,7 +420,7 @@ void kgenome_fntab_fde(kof_buf file, const struct kgenome_elf_info *e, struct kg
 					cap_cie = nc;
 				}
 				cie[n_cie].pos = pos;
-				cie[n_cie].enc = cie_enc(&r, body, end);
+				cie[n_cie].enc = cie_enc(&r, body, end, &cie[n_cie]);
 				n_cie++;
 			} else {
 				out->n_bad++;                   /* a CIE past the table: the FDEs that name it are refused */
@@ -384,6 +492,20 @@ void kgenome_fntab_fde(kof_buf file, const struct kgenome_elf_info *e, struct kg
 			f.value = fva;
 			f.source = KGENOME_FN_S_FDE;
 			f.end_source = KGENOME_FN_E_UNWIND;
+			{
+				/* the return address where the function begins: the CIE's state, then the FDE's own instructions (after its augmentation data) */
+				uint64_t alen = 0;
+				int ra = cie[lo].ra_state;
+
+				if (ra != RA_UNREAD && cie[lo].z && (!rd_uleb(&r, &p2, end, &alen) || alen > end - p2))
+					ra = RA_UNREAD;
+				else if (ra != RA_UNREAD)
+					ra = cfa_ra(&r, p2 + alen, end, cie[lo].ra, ra, cie[lo].ra_state);
+				if (ra == RA_UNDEFINED)
+					f.flags |= KGENOME_FN_F_NO_CALLER;
+				else if (ra == RA_UNREAD)
+					f.flags |= KGENOME_FN_F_CFA_UNREAD;
+			}
 			if (!kgenome_fntab_list_add(out, &f))
 				goto done;
 		}

@@ -1,8 +1,4 @@
 /*
- * DISABLED IN PART by the owner 2026-11-15 (CFG): every row and mode that asks kof_cfgview_build or kv_cfgbody.c (the unit test's self_test,
- * overview_colours, the dialog half of one_name, the graph half of colour_tests, the modes `<path> <hex offset>`, `--body`, `--calls`) is inside #if 0;
- * `--write`, `--write-lineage`, `--lineage`, `--insn`, the palette rows and the code-notes half of one_name run.
- *
  * cfg_view_scene - the CFG view on a REAL object: an ELF64 x86-64 executable WRITTEN BY THIS TEST (nothing stored, nothing run: the code is
  * inert, it is only ever read), parsed by the engine's own parser, its functions found by the engine's own function table and named by the
  * engine's own symbol block, and each asked of kof_cfgview_build the way the viewer's press on a function row's name asks.
@@ -49,7 +45,6 @@
 #include "../../libkofeng/analyzers/lineageview.h"
 
 /* A row as text: the Overview rows carry the colours of kv_cfgbody_text_attr as the Graph rows carry theirs; the pins below read the words. */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG): used only by the rows in #if 0 */
 static void plain(char *row)
 {
 	char *w = row, *q;
@@ -66,7 +61,6 @@ static void plain(char *row)
 	}
 	*w = 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 static int fails;
 
@@ -409,12 +403,6 @@ static void obj_close(struct obj *o)
 	free(o->view);
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) and kofexamine/kv_cfgbody.c are out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void request(struct kof_cfgview_req *rq, const struct obj *o, uint64_t off, uint64_t len)
 {
 	memset(rq, 0, sizeof *rq);
@@ -426,7 +414,6 @@ static void request(struct kof_cfgview_req *rq, const struct obj *o, uint64_t of
 	rq->sym = o->sym;
 	rq->sym_n = o->sym_n;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 static const struct kgenome_func *func_by_off(const struct obj *o, uint64_t off)
 {
@@ -438,7 +425,6 @@ static const struct kgenome_func *func_by_off(const struct obj *o, uint64_t off)
 	return NULL;
 }
 
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG): used only by the rows in #if 0 */
 static double now_ms(void)
 {
 	struct timespec t;
@@ -446,7 +432,6 @@ static double now_ms(void)
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /* THE COLOURS OF THE GRAPH TAB are data: an edge's attribute is a function of the engine's (cond, loop) alone, a box's marks of the engine's node flags. */
 static const char *tag_text(void *user, uint32_t node, uint32_t i)
@@ -460,7 +445,7 @@ static const char *tag_text(void *user, uint32_t node, uint32_t i)
 	return t;
 }
 
-static void colour_tests(void)       /* it took (rq, off, len) for the graph half below, DISABLED 2026-11-15 */
+static void colour_tests(struct kof_cfgview_req *rq, uint64_t off, uint64_t len)
 {
 	/* the table the viewer states, written out here as an independent oracle: [loop][cond] */
 	static const char *const want[3][3] = {
@@ -529,12 +514,6 @@ static void colour_tests(void)       /* it took (rq, off, len) for the graph hal
 		}
 		kv_graph_free(&g);
 	}
-/*
-	 * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
-	 * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) and kofexamine/kv_cfgbody.c are out of #if 0.
-	 * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
-	 */
-	#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	/* the real graph of a function with loops, T/F branches and calls: the marks are the engine's flags */
 	{
 		struct kv_cfg_body bd;
@@ -580,7 +559,6 @@ static void colour_tests(void)       /* it took (rq, off, len) for the graph hal
 		}
 		kv_cfgbody_free(&bd);
 	}
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 }
 
 /* ONE NAME FOR A FUNCTION, on a real object. The disassembly notes (codenotes) said `sub_<offset>` where the CFG dialog said `fcn_<offset>`. Bytes of the
@@ -604,10 +582,8 @@ static void one_name(void)
 	uint64_t n;
 	struct obj o;
 	struct kof_codenotes cn;
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kof_cfgview v;
 	struct kof_cfgview_req rq;
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	const struct kgenome_func *f4, *f0, *f5, *f1;
 	char want[48], sym[48], mid[48], t[128];
 	uint64_t at;
@@ -675,12 +651,6 @@ static void one_name(void)
 	CKM(note_text(&cn, at + 5u, KOF_NOTE_COMMENT) && !strcmp(note_text(&cn, at + 5u, KOF_NOTE_COMMENT), t), "symbol call comment '%s'", note_text(&cn, at + 5u, KOF_NOTE_COMMENT));
 	for (i = 0; i < cn.n; i++)
 		CK(strstr(kof_codenotes_text(&cn, &cn.v[i]), "sub_") == NULL);
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) and kofexamine/kv_cfgbody.c are out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	/* the dialog: its own name, and the callee names of the same function, are the same words */
 	request(&rq, &o, f4->off, f4->len);
 	CK(kof_cfgview_build(&rq, &v) == 1);
@@ -699,7 +669,6 @@ static void one_name(void)
 		CKM(seen_un >= 1 && seen_sym == 1 && seen_mid == 1, "dialog callees: unnamed %d symbol %d mid %d", seen_un, seen_sym, seen_mid);
 	}
 	kof_cfgview_free(&v);
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	kof_codenotes_free(&cn);
 out:
 	obj_close(&o);
@@ -707,12 +676,6 @@ out:
 	free(img);
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when analyzers/cfgview.c (kof_cfgview_build) and kofexamine/kv_cfgbody.c are out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* THE COLOURS OF THE OVERVIEW, data first: the attribute of a label and of a value, read through kv_cfgbody_text_attr off the engine's plain lines. */
 static void overview_colours(void)
 {
@@ -955,7 +918,6 @@ out:
 	obj_close(&o);
 	free(img);
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /* The function's instructions as the library spells them: the walk the panel makes (a word that is not an instruction is one byte, `(data)`). */
 static void print_insns(const struct obj *o, uint64_t off, uint64_t len)
@@ -1093,10 +1055,8 @@ static int dump(const char *path, const char *hex, int mode)
 	uint8_t *b;
 	long sz;
 	struct obj o;
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	struct kof_cfgview v;
 	struct kof_cfgview_req rq;
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	const struct kgenome_func *f;
 	const uint64_t off = strtoull(hex, NULL, 16);
 
@@ -1114,9 +1074,7 @@ static int dump(const char *path, const char *hex, int mode)
 	if (!obj_open(&o, b, (uint64_t)sz))
 		return 3;
 	f = func_by_off(&o, off);
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	request(&rq, &o, off, f ? f->len : 0);
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (mode == 5) {
 		/* the Lineage tab's two panes, whole (kv_lineagebody.c): `G <rows>`, the drawing and what it left out, `L <rows>`, the links with their boxes */
 		struct lg_oracle lb;
@@ -1140,9 +1098,6 @@ static int dump(const char *path, const char *hex, int mode)
 		lg_free(&lb);
 	} else if (mode == 4) {
 		print_insns(&o, off, f ? f->len : 0);
-	}
-	/* DISABLED by the owner 2026-11-15 (CFG): the modes that print kof_cfgview_build's answer (3 --calls, 1/2 --body, 0 the facts text). To re-enable: take this #if 0 out. */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	} else if (mode == 3) {
 		uint32_t i;
 
@@ -1207,7 +1162,6 @@ static int dump(const char *path, const char *hex, int mode)
 		fputs(v.text ? v.text : "", stdout);
 		kof_cfgview_free(&v);
 	}
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	obj_close(&o);
 	free(b);
 	return 0;
@@ -1231,29 +1185,22 @@ int main(int argc, char **argv)
 		free(img);
 		return 0;
 	}
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (argc == 3)
 		return dump(argv[1], argv[2], 0);
 	if ((argc == 5 || argc == 6) && !strcmp(argv[3], "--body")) {
 		dump_db = argc == 6 ? argv[5] : NULL;
 		return dump(argv[1], argv[2], !strcmp(argv[4], "overview") ? 1 : 2);
 	}
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (argc == 5 && !strcmp(argv[3], "--lineage")) {
 		dump_db = argv[4];
 		return dump(argv[1], argv[2], 5);
 	}
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (argc == 4 && !strcmp(argv[3], "--calls"))
 		return dump(argv[1], argv[2], 3);
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (argc == 4 && !strcmp(argv[3], "--insn"))
 		return dump(argv[1], argv[2], 4);
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	self_test();
 	overview_colours();
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
-	colour_tests();       /* was run by self_test: its palette half (the Lineage tab's) is not CFG */
 	one_name();
 	if (fails) {
 		printf("cfg_view_scene: %d failure(s)\n", fails);

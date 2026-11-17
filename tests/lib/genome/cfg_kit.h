@@ -536,12 +536,6 @@ static CK_UNUSED double ref_jaccard(const struct refsig *a, const struct refsig 
 	return u ? 100.0 * in / u : 100.0;
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out (and gspec_sign's) when celllysis/cfg_sign.c is out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* ---- helpers to sign a graph ---- */
 static CK_UNUSED enum kgenome_status sign_of(const struct kgenome_cfg *g, unsigned rounds, struct kgenome_cfg_sign *s)
 {
@@ -559,7 +553,6 @@ static CK_UNUSED int sign_eq(const struct kgenome_cfg_sign *a, const struct kgen
 	       !memcmp(a->key, b->key, a->n_key * sizeof *a->key);
 }
 
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 /* A counting allocator that can be told to refuse the Nth allocation. */
 struct counting {
 	uint32_t n_alloc, n_free, fail_at;      /* fail_at 0 = never; 1 = the first */
@@ -667,12 +660,6 @@ static CK_UNUSED void gspec_prog(const struct gspec *g, struct prog *p, uint32_t
 
 /* ---- the graph spec: build the lib's graph + signature of a gspec through the assembler and the decoder ---- */
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out (and sign_of's) when celllysis/cfg_sign.c is out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* Assemble `g` for `isa` at `va0`, decode, build, sign. Returns 0 when the architecture cannot spell it. */
 static CK_UNUSED int gspec_sign(const struct isa_t *isa, const struct gspec *g, uint64_t va0, unsigned rounds, struct kgenome_cfg_sign *s,
 				struct kgenome_cfg *keep)
@@ -707,7 +694,6 @@ static CK_UNUSED int gspec_sign(const struct isa_t *isa, const struct gspec *g, 
 	prog_free(&p);
 	return 1;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 
 /* The reference graph of a gspec, straight from the spec (no assembler, no decoder). */
 static CK_UNUSED void gspec_ref(const struct gspec *g, struct refg *r)

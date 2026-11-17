@@ -47,7 +47,7 @@
 #define R_LINKED   0x04u        /* ARM: a jump the instruction before made a call */
 #define R_FRESH    0x08u        /* decoded here: `held` did not answer */
 #define R_FLOW     0x10u        /* the flow instruction of its block: `term` and `target` are its */
-#define R_TRAP     0x20u        /* the trap behind a call that does not return (traps): it runs on into nothing */
+#define R_TRAP     0x20u        /* a trap (kgenome_cfg_isa_trap): read in a path, or behind a call that does not return (traps); it runs on into nothing */
 
 /* What the proof knows of it (`fx`). */
 #define X_RET      0x01u        /* a return may be reached from here */
@@ -69,6 +69,8 @@ struct rec {
 	uint8_t  fx;            /* X_* (on the HEAD of a delay slot: the branch or the call) */
 	uint8_t  back;          /* a delay slot: how many records back its branch or call is (0: not a slot) */
 	uint8_t  pad_[2];
+	uint32_t ext;           /* the extent that holds it (2026-11-17: looked up once, at its read; measured, the lookup per hand-back and per block was 0.35 G Ir on
+				 * a 5.9 MB static-pie whose FDE check had one extent per FDE) */
 };
 
 /* An edge into a place: `src` (a record) is a branch to it, or (`call`) a call that waits on it. */
@@ -447,7 +449,7 @@ static void drain(struct ctx *c)
 {
 	while (c->n_q) {
 		const uint32_t i = c->q[--c->n_q];
-		const int k = ext_of(c, c->r[i].off);
+		const int k = (int)c->r[i].ext;
 		uint32_t p, e;
 		uint64_t y;
 
@@ -522,6 +524,7 @@ static uint32_t rec_new(struct ctx *c, int k, const struct kgenome_cell_insn *in
 	r = &c->r[i];
 	memset(r, 0, sizeof *r);
 	r->off = in->at;
+	r->ext = (uint32_t)k;
 	r->len = in->len;
 	r->target = KGENOME_BROKEN;
 	r->in = *x;                     /* the branches and calls that named the place before it was read */
@@ -590,6 +593,8 @@ static void run(struct ctx *c, const struct wl *w)
 			goto stop;
 		if ((i = rec_new(c, k, &in, served0)) == NIL)
 			return;
+		if (kgenome_cfg_isa_trap(c->isa, &in, c->sp.base, c->sp.size))
+			c->r[i].flags |= R_TRAP;
 		call = in.op == KGENOME_CELL_CALL || kgenome_cfg_isa_linked(c->isa, have_prev ? &prev : NULL, &in);
 		if (call) {
 			c->r[i].flags |= R_CALL;
@@ -937,16 +942,50 @@ uint32_t kgenome_cfg_obj_block_at(const struct kgenome_cfg_obj *g, uint64_t off)
 	return lo - 1u;
 }
 
+/* The records in address order WITHOUT a comparison sort (2026-11-17, measured: the qsort of 32-byte records was 0.91 G of the 2.44 G Ir of one descent over
+ * a 5.9 MB static-pie, corp300/019): the byte map already lists every instruction start, extent by extent (the extents are sorted and apart), and its index
+ * the record. One pass over the map, one copy of the records. 0 when the copy is refused (the allowance, memory) or the map disagrees: the caller sorts. */
+static int in_order(struct ctx *c)
+{
+	struct rec *nr;
+	uint32_t e, k = 0;
+
+	if (!c->n_r || kgenome_cfg_over(c->rq->budget, c->held + (uint64_t)c->n_r * sizeof *c->r))
+		return 0;
+	nr = kgenome_cfg_alloc(&c->rq->mem, (size_t)c->n_r * sizeof *nr);
+	if (!nr)
+		return 0;
+	for (e = 0; e < c->n_ext; e++) {
+		const uint8_t *m = c->map + c->ext[e].map;
+		const uint32_t *x = c->ix + c->ext[e].map;
+		uint64_t o;
+
+		for (o = 0; o < c->ext[e].len; o++)
+			if ((m[o] & M_STATE) == M_START && x[o] < c->n_r && k < c->n_r)
+				nr[k++] = c->r[x[o]];
+	}
+	if (k != c->n_r) {
+		kgenome_cfg_release(&c->rq->mem, nr, (size_t)c->n_r * sizeof *nr);
+		return 0;
+	}
+	kgenome_cfg_release(&c->rq->mem, c->r, (size_t)c->cap_r * sizeof *c->r);
+	c->held -= (uint64_t)(c->cap_r - c->n_r) * sizeof *c->r;
+	c->r = nr;
+	c->cap_r = c->n_r;
+	return 1;
+}
+
 /* Step (3): the instructions in address order cut into blocks, their calls, and the successors as indices. */
 static void blocks(struct ctx *c)
 {
 	struct kgenome_cfg_obj *o = c->out;
 	uint32_t i, cur = KGENOME_CFG_NONE;
 
-	qsort(c->r, c->n_r, sizeof *c->r, rec_cmp);
+	if (!in_order(c))
+		qsort(c->r, c->n_r, sizeof *c->r, rec_cmp);
 	for (i = 0; i < c->n_r; i++) {
 		const struct rec *r = &c->r[i];
-		const int k = ext_of(c, r->off);
+		const int k = (int)r->ext;
 		const uint8_t m = *map_at(c, k, r->off);
 		struct kgenome_cfg_obj_block *b;
 
@@ -987,6 +1026,8 @@ static void blocks(struct ctx *c)
 		if (r->stop) {
 			b->term = KGENOME_CFG_OBJ_T_STOP;
 			b->stop = r->stop;
+			if (r->stop == KGENOME_CFG_OBJ_W_OUTSIDE && !(c->r[i - r->back].flags & (R_CALL | R_TRAP)))
+				b->flags |= KGENOME_CFG_OBJ_B_RUNS_OUT;
 		}
 		if (r->flags & R_CALL) {
 			struct kgenome_cfg_obj_call *k2;

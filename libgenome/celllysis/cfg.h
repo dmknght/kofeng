@@ -280,12 +280,6 @@ struct kgenome_cfg {
 enum kgenome_status kgenome_cfg_build(const struct kgenome_cfg_req *req, struct kgenome_cfg *out);
 void kgenome_cfg_free(struct kgenome_cfg *g, const struct kgenome_cfg_mem *mem);
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out with cfg_sign.c, cfg_anchor.c, cfg_view.c and cfg_gv.c (each says so at its head).
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 /* ---- the signature ---- */
 
 /* What a signature is made of. 0 = STRUCT, the measured result (cfg_decision.md); CALLEES scores the callees' identities alone (a diagnose that
@@ -425,7 +419,6 @@ struct kgenome_cfg_gv_req {
 /* Fill `out` (release with kgenome_gv_free and the same allocator). Returns out->status: the view's, worse of OVER_BUDGET / NOMEM / BAD_INPUT when nothing was made. */
 enum kgenome_status kgenome_cfg_gv_make(const struct kgenome_cfg_gv_req *req, struct kgenome_gv *out);
 
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 /* ---- THE BLOCK LAYER: the control-flow graph of a whole OBJECT (cfg_obj.c) ---------------------------------------------------- */
 /*
  * THE BLOCKS OF AN OBJECT, by RECURSIVE DESCENT from the entries the caller trusts (partition redesign STEP B 1b, owner 2026-11-15: goals trusted,
@@ -505,6 +498,7 @@ enum kgenome_cfg_obj_why {
 #define KGENOME_CFG_OBJ_B_NORET    0x10u        /* no path from it reaches a return (for an entry: the function does not return; proven, see above) */
 #define KGENOME_CFG_OBJ_B_ASSUMED  0x20u        /* it starts a callee that was resolved as RETURNING by assumption (its answer depended on a recursion cycle) */
 #define KGENOME_CFG_OBJ_B_FALLEN   0x40u        /* the instruction right before it runs on into it and is no call (a plain instruction, or a conditional branch's not-taken way): its first byte is not where a function is entered */
+#define KGENOME_CFG_OBJ_B_RUNS_OUT 0x80u        /* its path ran on out of what may be read: its last instruction is no call and no trap (kgenome_cfg_isa_trap), and the place after it is outside every extent or inside a cut instruction */
 
 struct kgenome_cfg_obj_block {
 	uint64_t off;                           /* file offset of its first instruction */

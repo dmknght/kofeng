@@ -28,6 +28,9 @@
  * was not yet: it is the decode every later reader of the same code shares (the lineage's frames, the routes), so a derived function is not decoded twice.
  * With no walk (a tool asking for the table alone) the walk is made here, freed with the table's run: the same decode, and the same padding runs, on both paths.
  *
+ * THE FDE CHECK (kgenome_fntab_fde_check, owner decision 2026-11-17): before the derivation, every FDE no symbol confirms is read by the same descent and
+ * gives no unit when code leaves it or it holds two entries; its bytes then join the undeclared code this file derives functions from.
+ *
  * NAMED LIMITS, each with the next algorithm: a function reached only through a pointer (a callback, a vtable, a jump table's case: the relocation and
  * pointer-table readers); a switch (backward slicing of the indirect jump); a function whose only return is through what it calls via a register (assumed to
  * return); Thumb code (a space per instruction set); a hole between a function's blocks that is not one run of padding stays a NONE unit (hole_is_body).
@@ -85,8 +88,24 @@ static const struct kgenome_func_start *start_at(const struct kgenome_func_set *
 }
 
 /* The extents and seeds of the descent: the NONE units, and the declared starts in them that this space can read. 0 when memory was refused. */
-static int gather(const struct kgenome_func_set *s, int thumb, struct kgenome_cfg_obj_ext **ext, uint32_t *n_ext, struct kgenome_cfg_obj_seed **sd,
-		  uint32_t *n_sd, uint32_t *skipped)
+/* Is `off` inside an outermost frame the FDE check refused (r->outer, sorted, apart)? */
+static int in_outer(const struct kgenome_fntab_run *r, uint64_t off)
+{
+	uint32_t lo = 0, hi = r->n_outer;
+
+	while (lo < hi) {
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (r->outer[mid].at <= off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo && off - r->outer[lo - 1u].at < r->outer[lo - 1u].len;
+}
+
+static int gather(const struct kgenome_fntab_run *r, const struct kgenome_func_set *s, int thumb, struct kgenome_cfg_obj_ext **ext, uint32_t *n_ext,
+		  struct kgenome_cfg_obj_seed **sd, uint32_t *n_sd, uint32_t *skipped)
 {
 	uint32_t i, ne = 0, ns = 0;
 
@@ -106,6 +125,10 @@ static int gather(const struct kgenome_func_set *s, int thumb, struct kgenome_cf
 		(*ext)[(*n_ext)++].len = s->v[i].len;
 		n = kgenome_funcs_starts_in(s, i, &first);
 		for (k = first; k < first + n; k++) {
+			if (in_outer(r, s->st[k].off)) {
+				(*skipped)++;           /* a start inside an outermost frame (the entry point in _start): its bytes stay NONE (owner decision 2026-11-17) */
+				continue;
+			}
 			if (thumb || s->st[k].isa_mode == KGENOME_FN_ISA_THUMB) {
 				(*skipped)++;           /* the space reads one instruction set: an ARM Thumb start is not read as ARM */
 				continue;
@@ -458,39 +481,32 @@ out:
 	return ok;
 }
 
-void kgenome_fntab_derive(struct kgenome_fntab_run *r, const struct kgenome_func_set *s, struct kgenome_fntab_derived *d)
+/* THE ONE DESCENT of the function table (the derivation, and the check of the unconfirmed FDEs): the object's cell space held to the walk's trace - the
+ * caller's walk (the scan), or one made here for a tool asking for the table alone (kgenome_diag_funcs_of; freed by the builder) - and the block layer over
+ * `ext` from `sd`. With `need_walk` (the derivation: its holes are judged by the walk's padding runs) the walk is made when it was not; without it (the FDE
+ * check) the walk's trace is read when the walk exists and the descent decodes what it reads otherwise: measured 2026-11-17, forcing the walk for the
+ * check cost the plain scan of set356 +21% (10.56 -> 12.75 s), a linear decode of every object that nothing else on that path reads. Its padding runs are
+ * kept in the run (hole_is_body). Returns the build's status; `g` is always safe to free. */
+static enum kgenome_status descent(struct kgenome_fntab_run *r, const struct kgenome_cfg_obj_ext *ext, uint32_t n_ext, const struct kgenome_cfg_obj_seed *sd,
+				   uint32_t n_sd, int need_walk, struct kgenome_cfg_obj *g)
 {
-	struct kgenome_cfg_obj_ext *ext = NULL;
-	struct kgenome_cfg_obj_seed *sd = NULL;
 	struct kgenome_cfg_obj_req rq;
-	struct kgenome_cfg_obj g;
 	struct kgenome_cell_space sp;
 	struct kgenome_budget bud;
-	struct hole hl;
-	const uint32_t parts0 = d->parts->n;
-	uint32_t n_ext = 0, n_sd = 0, i;
-	int thumb;
 
-	memset(&g, 0, sizeof g);
-	/* a PE of machine 0x1c2 / 0x1c4 is Thumb code throughout (its arch is ARM, the space's decoder A32): every start is skipped, as a Thumb start of an ELF is */
-	thumb = r->obj->format == KGENOME_FMT_PE && (((const struct kgenome_pe_info *)r->obj->file_header)->machine == 0x1c2u ||
-						     ((const struct kgenome_pe_info *)r->obj->file_header)->machine == 0x1c4u);
-	if (!gather(s, thumb, &ext, &n_ext, &sd, &n_sd, &d->n_skipped)) {
-		d->status = KGENOME_NOMEM;
-		goto out;
-	}
-	if (!n_sd)
-		goto out;
 	kgenome_cell_space_init(&sp, r->obj, r->data, r->data_n);
 	sp.raw = 1;             /* the instruction as the decoder writes it: what the walk's trace holds */
-	/* the walk is the one decode of the object: the caller's (the scan), or one made here for a tool asking for the table alone (kgenome_diag_funcs_of; freed
-	 * by the builder). Its padding runs decide which holes of a body are the body's (hole_is_body). */
-	if (!r->walk)
-		r->walk = r->own = kgenome_diag_walk_new();
-	if (r->walk && kgenome_diag_walk_ensure(r->walk, r->obj, r->data, r->data_n, 1)) {
-		(void)kgenome_diag_walk_hold(&sp, r->walk);
-		r->pad = kgenome_diag_walk_pads(r->walk, &r->n_pad);
-		r->walked = 1;
+	if (!need_walk) {
+		if (r->walk)
+			(void)kgenome_diag_walk_hold(&sp, r->walk);     /* the walk's trace when the walk was made already; else the descent decodes what it reads, once */
+	} else {
+		if (!r->walk)
+			r->walk = r->own = kgenome_diag_walk_new();
+		if (r->walk && (r->walked || kgenome_diag_walk_ensure(r->walk, r->obj, r->data, r->data_n, 1))) {
+			(void)kgenome_diag_walk_hold(&sp, r->walk);
+			r->pad = kgenome_diag_walk_pads(r->walk, &r->n_pad);
+			r->walked = 1;
+		}
 	}
 	memset(&rq, 0, sizeof rq);
 	rq.sp = &sp;
@@ -504,7 +520,30 @@ void kgenome_fntab_derive(struct kgenome_fntab_run *r, const struct kgenome_func
 	 * Reproducer: fix_pmeta5/followups.txt FU-PM5-9. Fix: a kgenome_budget in kgenome_diag_funcs_with_walk's request from the scanner's ledger. */
 	bud.max_bytes = KGENOME_FNTAB_DERIVE_BYTES;
 	rq.budget = &bud;
-	switch (kgenome_cfg_obj_build(&rq, &g)) {
+	return kgenome_cfg_obj_build(&rq, g);
+}
+
+void kgenome_fntab_derive(struct kgenome_fntab_run *r, const struct kgenome_func_set *s, struct kgenome_fntab_derived *d)
+{
+	struct kgenome_cfg_obj_ext *ext = NULL;
+	struct kgenome_cfg_obj_seed *sd = NULL;
+	struct kgenome_cfg_obj g;
+	struct hole hl;
+	const uint32_t parts0 = d->parts->n;
+	uint32_t n_ext = 0, n_sd = 0, i;
+	int thumb;
+
+	memset(&g, 0, sizeof g);
+	/* a PE of machine 0x1c2 / 0x1c4 is Thumb code throughout (its arch is ARM, the space's decoder A32): every start is skipped, as a Thumb start of an ELF is */
+	thumb = r->obj->format == KGENOME_FMT_PE && (((const struct kgenome_pe_info *)r->obj->file_header)->machine == 0x1c2u ||
+						     ((const struct kgenome_pe_info *)r->obj->file_header)->machine == 0x1c4u);
+	if (!gather(r, s, thumb, &ext, &n_ext, &sd, &n_sd, &d->n_skipped)) {
+		d->status = KGENOME_NOMEM;
+		goto out;
+	}
+	if (!n_sd)
+		goto out;
+	switch (descent(r, ext, n_ext, sd, n_sd, 1, &g)) {
 	case KGENOME_OK:
 		break;
 	case KGENOME_OVER_BUDGET:       /* the bound of memory: what was read before it is true; a body it cut ends STOP/BUDGET (INCOMPLETE) */
@@ -539,4 +578,196 @@ out:
 	kgenome_cfg_obj_free(&g, NULL);
 	free(ext);
 	free(sd);
+}
+
+/*
+ * THE CHECK OF AN FDE NO SYMBOL CONFIRMS (owner decision 2026-11-17, "câu 1: làm b"; it was the open defect FPART-D1). An FDE declares where one unwind rule
+ * holds; compiled code writes one per function, hand-written assembly writes several per function or one over several (glibc __clone / __clone3: three
+ * FDEs, the middle one with an undefined return address; OpenSSL poly1305_blocks_avx: one per internal entry; old pthread_cond_wait: one over two
+ * symbols), and on a stripped file such an FDE cut a function (R1: 62 boundaries on the x86 twins and variants). So on a view where no symbol confirms
+ * an FDE's extent (a HIGH unit whose end is the FDE's: end_source UNWIND, source FDE, no .pdata), the FDE is read by the ONE descent of the table
+ * (descent(): the block layer over the FDEs' own bytes from their starts, the walk's trace) and gives NO unit when
+ *   (1) code LEAVES it: a path runs on past its end (a plain instruction or a conditional branch's other way: not a call, whose callee did not return
+ *       where the FDE ends, and not a trap: the block layer's KGENOME_CFG_OBJ_B_RUNS_OUT) - and the FDE it runs into is not one function either;
+ *   (2) it holds TWO ENTRIES: a direct jump, branch or call from another FDE goes to a place inside it that is not its start. Only the FDE entered gives
+ *       its unit up: the caller of an interior is not judged by it (measured, CHA i386: every call to a PLT stub enters the linker's ONE FDE over the
+ *       whole .plt; judging the caller refused main and 10 more compiled functions per build).
+ * A jump or call to another FDE's START is a tail call or a call; a target in no FDE (a PLT slot, undeclared code) is not judged. The refused FDE's bytes
+ * stay NONE (the undeclared fill), its start-only sources (the entry point) stay declared starts, and it is counted (kgenome_func_set.n_fde_refused). An
+ * FDE a symbol confirms is not read. What cannot be read (no control-flow rules for the architecture, memory) keeps its unit: unverified, as before.
+ */
+static int unchecked(const struct kgenome_func *f)
+{
+	/* a sized symbol at the start outranks the FDE in the merge (end_source SYMBOL), so end UNWIND is "no symbol confirms it"; a size-0 symbol declares no
+	 * extent and confirms nothing */
+	return f->trust == KGENOME_FN_TRUST_HIGH && f->end_source == KGENOME_FN_E_UNWIND && (f->source & KGENOME_FN_S_FDE) && !(f->source & KGENOME_FN_S_PDATA);
+}
+
+/* Drop the units `bad` marks; a start-only source among a dropped unit's (the entry point, an export, an init/fini slot) stays a declared start of the
+ * set, sorted (the FDE's own start does not: an FDE that is no function declares no start). */
+static void refuse(struct kgenome_func_set *s, const uint8_t *bad)
+{
+	const uint16_t own = KGENOME_FN_S_FDE | KGENOME_FN_S_DERIVED_SEED | KGENOME_FN_S_DERIVED_CALL | KGENOME_FN_S_DERIVED_JUMP;
+	uint32_t i, k = 0, add = 0;
+
+	for (i = 0; i < s->n; i++)
+		if (bad[i] && (s->v[i].source & (uint16_t)~own))
+			add++;
+	if (add) {
+		struct kgenome_func_start *st = realloc(s->st, ((size_t)s->n_st + add) * sizeof *st);
+
+		if (!st) {
+			s->status = KGENOME_NOMEM;      /* those starts are lost, said */
+			add = 0;
+		} else {
+			s->st = st;
+		}
+	}
+	for (i = 0; i < s->n; i++) {
+		if (!bad[i]) {
+			s->v[k++] = s->v[i];
+			continue;
+		}
+		s->n_fde_refused++;
+		if (add && (s->v[i].source & (uint16_t)~own)) {
+			struct kgenome_func_start *x = &s->st[s->n_st];
+			uint32_t j = s->n_st++;
+
+			while (j && s->st[j - 1u].off > s->v[i].off) {         /* sorted by off: a few at most, insertion */
+				s->st[j] = s->st[j - 1u];
+				j--;
+			}
+			x = &s->st[j];
+			memset(x, 0, sizeof *x);
+			x->off = s->v[i].off;
+			x->value = s->v[i].value;
+			x->shndx = s->v[i].shndx;
+			x->source = (uint16_t)(s->v[i].source & (uint16_t)~own);
+			x->isa_mode = s->v[i].isa_mode;
+			x->kind = s->v[i].kind;
+		}
+	}
+	s->n = k;
+}
+
+void kgenome_fntab_fde_check(struct kgenome_fntab_run *r, struct kgenome_func_set *s)
+{
+	struct kgenome_cfg_obj_ext *ext = NULL;
+	struct kgenome_cfg_obj_seed *sd = NULL;
+	struct kgenome_cfg_obj g;
+	uint32_t n = 0, i, k;
+	uint8_t *bad = NULL;
+	enum kgenome_status st;
+	int need = 0;
+
+	memset(&g, 0, sizeof g);
+	for (i = 0; i < s->n; i++)
+		n += unchecked(&s->v[i]) ? 1u : 0u;
+	if (!n)
+		return;
+	ext = malloc((size_t)n * sizeof *ext);
+	sd = malloc((size_t)n * sizeof *sd);
+	bad = calloc(s->n, 1);
+	if (!ext || !sd || !bad) {
+		s->status = KGENOME_NOMEM;              /* the FDEs keep their units, unverified: said by the status */
+		goto out;
+	}
+	/* the extents: one per FDE, so a path that runs on past an FDE's end stops there (KGENOME_CFG_OBJ_B_RUNS_OUT). Tried 2026-11-17: touching FDEs as one
+	 * extent (the run-in then seen at the next start, B_FALLEN) - the paths then went on into the next FDE and read further than its own descent does: one more
+	 * compiled constructor of corp300/015 refused (R2 changed), so it was dropped; the extent lookups it saved are now cached per record (cfg_obj.c rec.ext). */
+	for (i = 0, k = 0; i < s->n; i++)
+		if (unchecked(&s->v[i])) {
+			ext[k].off = s->v[i].off;
+			ext[k].len = s->v[i].len;
+			sd[k].off = s->v[i].off;
+			sd[k++].src = s->v[i].source;
+		}
+	/* the walk is made here when the derivation will make it anyway (a declared start already lies in code no unit holds: kgenome_diag_funcs_with_walk then
+	 * derives, and the derivation needs the walk's padding runs), so the FDE bytes are decoded once, by the walk, for both; otherwise the descent decodes
+	 * what it reads, once, and no linear walk is made for nothing */
+	for (i = 0; i < s->n_st && !need; i++)
+		need = kgenome_funcs_at(s, s->st[i].off) == KGENOME_FUNCS_NONE;
+	st = descent(r, ext, n, sd, n, need, &g);
+	if (st == KGENOME_OVER_BUDGET)
+		s->partial |= KGENOME_FNTAB_P_DERIVE_CAP;       /* what was read is judged; an FDE the bound kept from being read keeps its unit */
+	else if (st != KGENOME_OK)
+		goto judged;                                    /* no rules for the architecture, or memory: the FDEs keep their units, unverified by the descent */
+	for (i = 0, k = 0; i < g.n_b; i++) {
+		const struct kgenome_cfg_obj_block *b = &g.b[i];
+		uint32_t f, t;
+		uint64_t end;
+
+		/* the unit that holds the block: the blocks and the units are both in address order, so one cursor (measured: a lookup per block was 0.10 G Ir
+		 * of 2.5 G on corp300/292 sshd) */
+		while (k < s->n && s->v[k].off + s->v[k].len <= b->off)
+			k++;
+		f = k < s->n && s->v[k].off <= b->off ? k : KGENOME_FUNCS_NONE;
+		end = f == KGENOME_FUNCS_NONE ? 0 : s->v[f].off + s->v[f].len;
+
+		if (f == KGENOME_FUNCS_NONE)
+			continue;
+		/* (1) a path runs on past the FDE's end */
+		if ((b->flags & KGENOME_CFG_OBJ_B_RUNS_OUT) && b->off + b->len == end) {
+			const uint32_t h = kgenome_funcs_start(s, end);
+
+			bad[f] = 1;
+			if (h != KGENOME_FUNCS_NONE && unchecked(&s->v[h]))
+				bad[h] = 1;
+		}
+		/* (2) a direct jump or branch into the middle of another FDE */
+		if ((b->term == KGENOME_CFG_OBJ_T_JUMP || b->term == KGENOME_CFG_OBJ_T_COND) && (t = b->succ[0]) != KGENOME_CFG_NONE) {
+			const uint32_t h = kgenome_funcs_at(s, g.b[t].off);
+
+			if (h != KGENOME_FUNCS_NONE && h != f && s->v[h].off != g.b[t].off && unchecked(&s->v[h]))
+				bad[h] = 1;
+		}
+	}
+	for (i = 0; i < g.n_call; i++) {                        /* (2) a call into the middle of another FDE */
+		const uint32_t f = kgenome_funcs_at(s, g.call[i].at), t = g.call[i].tgt_blk;
+		const uint32_t h = t == KGENOME_CFG_NONE ? KGENOME_FUNCS_NONE : kgenome_funcs_at(s, g.b[t].off);
+
+		if (f != KGENOME_FUNCS_NONE && h != KGENOME_FUNCS_NONE && h != f && s->v[h].off != g.b[t].off && unchecked(&s->v[h]))
+			bad[h] = 1;
+	}
+	for (i = 0; i < g.n_loose; i++) {                       /* a target inside another FDE that could not be read (inside an instruction): two entries */
+		const uint32_t f = kgenome_funcs_at(s, g.loose[i].from), h = kgenome_funcs_at(s, g.loose[i].target);
+
+		if (f != KGENOME_FUNCS_NONE && h != KGENOME_FUNCS_NONE && h != f && s->v[h].off != g.loose[i].target && unchecked(&s->v[h]))
+			bad[h] = 1;
+	}
+judged:
+	/* (3) owner decision 2026-11-17 ("chấp nhận 2", it was the open defect FPART2-D1): an FDE whose CFA program marks the return address undefined where it begins
+	 * (KGENOME_FN_F_NO_CALLER, read by the FDE strategy, fntab_fde.c cfa_ra) is the unwinder's outermost frame - glibc's _start, the child half of __clone /
+	 * __clone3 - and declares no callable function: closed and entered only at its start, it passes (1) and (2) (stripped twins and variants: the last 5 R1
+	 * boundaries on x86). Read without the descent: it holds where the descent cannot run. */
+	for (i = 0, k = 0; i < s->n; i++) {
+		if (unchecked(&s->v[i]) && (s->v[i].flags & KGENOME_FN_F_NO_CALLER)) {
+			bad[i] = 1;
+			k++;
+		}
+		if (bad[i] && !unchecked(&s->v[i]))
+			bad[i] = 0;                             /* only an unconfirmed FDE gives its unit up */
+	}
+	/* "its bytes become NONE": the outermost frames are remembered for the derivation, which takes no seed in them (the entry point that lies in _start stays a
+	 * declared start of the set, and is not derived). TODO(owner): default applied 2026-11-17 - the bytes NOT derived; the alternative, derived like an FDE
+	 * refused by (1)/(2), was measured: the derivation's own limits then cut _start (i386: its pc thunk `call 1f` is a call target, FPART-D2; x86-64: the read
+	 * runs on past `hlt` after an unreadable call, FPART-D4): CHA stripped R1 0 -> 280/140, var 4 -> 6/3. */
+	if (k) {
+		r->outer = malloc((size_t)k * sizeof *r->outer);
+		if (!r->outer) {
+			s->status = KGENOME_NOMEM;              /* the outermost frames are refused all the same; their bytes may be derived: said */
+		} else {
+			for (i = 0; i < s->n; i++)
+				if (bad[i] && (s->v[i].flags & KGENOME_FN_F_NO_CALLER)) {
+					r->outer[r->n_outer].at = s->v[i].off;
+					r->outer[r->n_outer++].len = s->v[i].len;
+				}
+		}
+	}
+	refuse(s, bad);
+out:
+	kgenome_cfg_obj_free(&g, NULL);
+	free(ext);
+	free(sd);
+	free(bad);
 }

@@ -1,10 +1,4 @@
 /*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out and drop the name from UNIT_CFG_DISABLED (mk/tests.mk) when kof_cfgsign_function is out of #if 0.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
-/*
  * cfgsign_wk - kof_cfgsign_function reads the object's walk (req.wk) instead of decoding again, and gives the same answer either way.
  *
  * Phase A1 passes the walk of the object to the signing of a function (scan_feed.c: `rq.wk = ...obj.diag.walk`). Its claim: on a walk that holds a trace the function is READ from the
@@ -284,4 +278,3 @@ int main(void)
 	printf("cfgsign_wk: %lu checks, %d failure(s)\n", checks, fails);
 	return fails != 0;
 }
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */

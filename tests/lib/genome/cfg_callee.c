@@ -61,12 +61,6 @@ static struct kgenome_cell_insn *build_with(const struct gspec *g, struct ids *i
 	return in;
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when celllysis/cfg_sign.c and cfg_anchor.c are out of #if 0 (the callee signature, KGENOME_CFG_P_*, the anchor); facts() tests cfg_build and runs.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static enum kgenome_status sign_pol(const struct kgenome_cfg *g, unsigned policy, struct kgenome_cfg_sign *s)
 {
 	struct kgenome_cfg_sign_req rq;
@@ -96,7 +90,6 @@ static void shaped(struct gspec *g, uint32_t seed, uint32_t calls)
 		g->calls[crng_below(&r, 14)]++;
 }
 
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 static void facts(void)
 {
 	/* nop; call rel; call *rax; syscall; nop; ret ; plus an unreachable block with a call */
@@ -142,12 +135,6 @@ static void facts(void)
 	kgenome_cfg_free(&g, NULL);
 }
 
-/*
- * DISABLED by the owner 2026-11-15: CFG and its hash are not used by the scan or the viewer; kept for re-enable.
- * To re-enable: take this #if 0 out when celllysis/cfg_sign.c and cfg_anchor.c are out of #if 0 (the callee signature, KGENOME_CFG_P_*, the anchor); facts() tests cfg_build and runs.
- * The code below is inside #if 0 (it holds comments, and C block comments do not nest).
- */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 static void default_is_struct_only(void)
 {
 	struct gspec g;
@@ -454,13 +441,9 @@ static void resources(void)
 	free(in);
 }
 
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
-
 int main(void)
 {
 	facts();
-	/* DISABLED by the owner 2026-11-15 (CFG): the callee signature and the anchor. To re-enable: take this #if 0 out with the functions'. */
-#if 0 /* DISABLED by the owner 2026-11-15 (CFG) */
 	default_is_struct_only();
 	separate_scores();
 	unresolved();
@@ -468,7 +451,6 @@ int main(void)
 	reachable_only();
 	anchor();
 	resources();
-#endif /* DISABLED by the owner 2026-11-15 (CFG) */
 	if (fails)
 		printf("cfg_callee: %d FAILED\n", fails);
 	else

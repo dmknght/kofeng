@@ -27,6 +27,9 @@ struct kgenome_fntab_run {
 	 * inside that hot per-candidate loop (kofeng/CLAUDE.md: a bound of work is sized once, from the object, not
 	 * per use). NULL until kgenome_fntab_reach runs (nothing else in this struct's lifetime calls it). */
 	int (*entry_insn)(const struct kgenome_cell_insn *);
+	/* (2026-11-17) the outermost frames the FDE check refused (KGENOME_FN_F_NO_CALLER), sorted: their bytes stay NONE, the derivation takes no seed in them */
+	struct kgenome_fntab_extent *outer;
+	uint32_t n_outer;
 };
 
 /* THE PARTS OF FUNCTIONS: an extent that belongs to the function starting at `root` but is not its first range - a chained .pdata part that does not continue
@@ -54,6 +57,10 @@ struct kgenome_fntab_derived {
 
 /* Derive the functions of the undeclared code of `s` (its NONE units) from the declared starts in it (fntab_derive.c). `s` is read, not changed. */
 void kgenome_fntab_derive(struct kgenome_fntab_run *r, const struct kgenome_func_set *s, struct kgenome_fntab_derived *out);
+
+/* Check every FDE no symbol confirms by the table's one descent; one whose code leaves it or that holds two entries gives no unit (fntab_derive.c, owner
+ * decision 2026-11-17). Run after the ends, before the undeclared fill; the units of `s` are dropped in place. */
+void kgenome_fntab_fde_check(struct kgenome_fntab_run *r, struct kgenome_func_set *s);
 
 /* The strategies of an ELF case (fntab_build_elf.c) and of a PE case (fntab_build_pe.c): the selector's row, run. */
 void kgenome_fntab_collect_elf(struct kgenome_fntab_run *r);

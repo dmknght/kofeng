@@ -1,6 +1,6 @@
-"""DISABLED IN PART by the owner 2026-11-15 (CFG): the dialog lost its Graph tab and the Overview's CFG facts (kof_cfgview_build, kv_cfgbody.c, inside #if 0),
-and a function row has no signature (its hash cell is `-`). The cases that drive the disabled parts SKIP with cfg_disabled(); the strip, keys, Disasm, Lineage and
-blocks-table cases run, flipped where they pinned a CFG answer. To re-enable: drop the cfg_disabled() lines when the code is out of #if 0.
+"""DISABLED IN PART by the owner 2026-11-15 (CFG); the function dialog's Graph tab and Overview were reconnected 2026-11-17. A function row of the blocks table still has
+no signature (its hash cell is `-`: kgenome_mutation_signature answers SIG_NONE, the scan's switch, TODO(owner)), so the cases that need a signed function row SKIP with
+cfg_disabled() or stay flipped. To re-enable: drop the cfg_disabled() lines and the FLIPPED rows when the scan signs function units again.
 
 The name of a function row in the blocks table opens the CFG of that function (hit_plg_cfg, kofexamine/kv_decl.c): a dialog in the frame of the Syndromes and Pathogens dialogs
 (kv_cfgdlg.c) with THREE TABS in its top rule - Overview (the engine's facts and the calls as a table), Disasm (the disassembly panel's own rows of the function) and Graph (the graph
@@ -109,11 +109,11 @@ def inner(v):
     return [v.row(y)[x0 + 1:x1 - 2].rstrip() for y in range(y0 + 1, y1)], x1 - x0 - 3, title
 
 
-TABS = ('Overview', 'Disasm', 'Lineage')      # 'Graph' between Disasm and Lineage: DISABLED by the owner 2026-11-15 (CFG)
+TABS = ('Overview', 'Disasm', 'Graph', 'Lineage')
 
 
 def cfg_disabled(what):
-    """A case that drives what the owner disabled on 2026-11-15 (the CFG graph, its hash, the Overview's CFG facts and their oracle in the helper)."""
+    """A case that needs a signed function row (its CFG hash in the Blocks table, or a CFG block the scan scores): DISABLED by the owner 2026-11-15."""
     raise Skip('DISABLED by the owner 2026-11-15 (CFG): ' + what)
 DB = os.path.join(REPO, 'build', 'release', 'databases')
 
@@ -145,17 +145,19 @@ def same_window(v, rows, off, hoff, what):
 
 
 def func_off(v, row):
-    """The function's own offset, opening its dialog. It was read from the dialog's extent line (DISABLED by the owner 2026-11-15 with the Overview's CFG facts);
-    a function unit is ONE function of the table (no grouping since 2026-11-03), so the row's offset is the function's."""
+    """The function's own offset, from the dialog's extent line (the row's offset is the unit's)."""
     click_name(v, row)
-    box(v)
-    return row[1]
+    for l in inner(v)[0]:
+        m = re.match(r' extent  0x([0-9a-f]+) \+', l)
+        if m:
+            return int(m.group(1), 16)
+    raise Fail('no extent line in the dialog')
 
 
 def handle_x(v):
     """A column of the top rule that is neither a tab title nor [ Close ]: where a press takes hold of the box."""
     x0, y0, x1, y1, _ = box(v)
-    return v.row(y0).index('Lineage') + len('Lineage') + 6
+    return v.row(y0).index('Graph') + len('Graph') + 6
 
 
 def show_tab(v, name):
@@ -205,7 +207,6 @@ def function_rows_are_named_by_the_engine_and_nothing_says_show_cfg():
 
 @case(A)
 def pressing_a_function_name_opens_the_dialog_and_it_shows_the_body_the_engine_side_makes():
-    cfg_disabled('the Overview and Graph bodies (kv_cfgbody.c) and their oracle')
     p = scene()
     with blocks(p) as v:
         for name in ('cv_small', 'cv_loop', 'cv_switch', 'cv_big', 'fcn_'):
@@ -261,7 +262,7 @@ def only_the_name_of_a_function_row_opens_it_and_the_offset_lights():
 
 @case(A)
 def the_unit_line_is_the_blocks_table_id_and_no_canon_anchor_or_repeated_count_is_said():
-    cfg_disabled('the unit id and the CFG lines of the Overview')
+    cfg_disabled('the unit line against the Blocks table id: a function row is not signed (kgenome_mutation_signature, TODO(owner))')
     p = scene()
     with blocks(p) as v:
         for name in ('cv_small', 'cv_loop', 'cv_switch', 'cv_big'):
@@ -348,7 +349,6 @@ def closing_works_and_it_opens_again():
 
 @case(A)
 def the_wheel_scrolls_the_dialog_down_and_it_has_a_scrollbar():
-    cfg_disabled('the case scrolls the Graph and Overview bodies against their oracle (--body)')
     p = scene()
     with blocks(p, rows=40) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -381,7 +381,6 @@ def the_wheel_scrolls_the_dialog_down_and_it_has_a_scrollbar():
 
 @case(A)
 def the_shift_and_ctrl_wheel_scroll_it_sideways():
-    cfg_disabled('the case scrolls the Graph body against its oracle (--body)')
     p = scene()
     with blocks(p, rows=50, cols=100) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -419,7 +418,6 @@ def the_shift_and_ctrl_wheel_scroll_it_sideways():
 
 @case(A)
 def the_title_bar_drags_the_dialog_and_it_stays_on_the_screen():
-    cfg_disabled('the case compares the Overview body with its oracle (--body)')
     p = scene()
     with blocks(p, rows=60, cols=160) as v:
         off = func_off(v, row_named(v, 'cv_small'))
@@ -452,7 +450,6 @@ def the_title_bar_drags_the_dialog_and_it_stays_on_the_screen():
 
 @case(A)
 def a_big_function_has_every_block_as_a_box_and_a_say_for_what_it_leaves_out():
-    cfg_disabled('the Graph tab')
     p = scene()
     with blocks(p) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -471,7 +468,6 @@ def a_big_function_has_every_block_as_a_box_and_a_say_for_what_it_leaves_out():
 
 @case(A)
 def a_damaged_function_says_so_and_the_viewer_lives():
-    cfg_disabled('the engine text of kof_cfgview_build (the facts mode of the helper)')
     # Eight undecodable bytes (0x06 is not an instruction in 64-bit mode) inside cv_loop: the engine steps over them and says so.
     base = scene('cfg_probe.elf')
     with blocks(base) as v:
@@ -541,7 +537,7 @@ def the_strip_names_three_tabs_and_a_press_on_a_title_switches():
     with blocks(p) as v:
         off = func_off(v, row_named(v, 'cv_small'))
         x0, y0, x1, y1, title = box(v)
-        eq(re.findall(r'[A-Za-z]+', title)[:3], list(TABS), 'the titles of the strip, in order (three: Graph DISABLED by the owner 2026-11-15)')
+        eq(re.findall(r'[A-Za-z]+', title)[:4], list(TABS), 'the titles of the strip, in order')
         eq(current_tab(v), 'Overview', 'the tab it opens on')
         top = [v.row(y) for y in range(y0, y1 + 1)]
         show_tab(v, 'Disasm')
@@ -551,7 +547,8 @@ def the_strip_names_three_tabs_and_a_press_on_a_title_switches():
         again = [v.row(y) for y in range(y0, y1 + 1)]
         show_tab(v, 'Disasm')
         eq([v.row(y) for y in range(y0, y1 + 1)], again, 'a press on the tab already shown changed the screen')
-        check('Graph' not in v.row(y0), 'the Graph tab is in the strip (DISABLED by the owner 2026-11-15): %r' % v.row(y0))    # FLIPPED: it was pressed here
+        show_tab(v, 'Graph')
+        eq(current_tab(v), 'Graph', 'after a press on Graph')
         show_tab(v, 'Overview')
         eq(current_tab(v), 'Overview', 'after a press on Overview')
         eq([v.row(y) for y in range(y0, y1 + 1)], top, 'back on the Overview the screen is as it was')
@@ -577,17 +574,16 @@ def no_key_switches_a_tab():
             check(v.dialog(), 'the key %r closed the dialog' % k)
             eq(current_tab(v), 'Overview', 'the key %r switched the tab' % k)
         eq([v.row(y) for y in range(y0, y1 + 1)], before, 'a key changed the dialog')
-        show_tab(v, 'Lineage')      # was 'Graph': DISABLED by the owner 2026-11-15 (CFG)
+        show_tab(v, 'Graph')
         for k in ('tab', 'backtab', 'right', 'left', '1', 'ctrl+n'):
             v.key(k)
             v.pump_quiet(0.15, maxt=3)
-            eq(current_tab(v), 'Lineage', 'the key %r switched the tab away from the Lineage' % k)
+            eq(current_tab(v), 'Graph', 'the key %r switched the tab away from the Graph' % k)
         close(v)
 
 
 @case(A)
 def overview_calls_table_cells_are_the_engines_fields():
-    cfg_disabled('the calls table of the Overview (kof_cfgview_build) and its oracle (--calls); KNOWN DEFECT CFGTAB-1 is pinned here')
     p = scene()
     with blocks(p, rows=60, cols=200) as v:
         off = func_off(v, row_named(v, 'cv_small'))
@@ -722,7 +718,6 @@ def dialog_cells(v):
 
 @case(A)
 def graph_tab_colours_its_edges_and_marks_from_the_engines_values():
-    cfg_disabled('the Graph tab')
     # The attribute of an edge is a function of the engine's (cond, loop) and is asserted exhaustively on data in tests/unit/cfg_view_scene.c; this is the smoke on the real screen:
     # T green, F red, a loop head's first row yellow, the entry's border cyan, the call rows of a block blue; the Overview and the Disasm tabs are not touched.
     p = scene()
@@ -819,7 +814,6 @@ def disasm_tab_keeps_the_panels_colours_row_for_row():
 
 @case(A)
 def each_tab_keeps_the_scroll_it_was_left_at():
-    cfg_disabled('the case scrolls the Graph and Overview bodies against their oracle (--body)')
     p = scene()
     with blocks(p, rows=40) as v:
         off = func_off(v, row_named(v, 'cv_big'))
@@ -1037,7 +1031,6 @@ def lineage_tab_draws_the_engines_links_on_top_and_lists_every_one_below():
 
 @case(A)
 def the_overview_ends_with_the_engines_head_of_the_lineage():
-    cfg_disabled('the oracle of the Overview (--body overview), kv_cfgbody.c')
     p = lineage_scene()
     with blocks(p, rows=60) as v:
         off = func_off(v, row_named(v, 'lg_stager'))

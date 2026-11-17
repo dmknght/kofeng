@@ -165,6 +165,10 @@ enum kgenome_fn_isa {
 #define KGENOME_FN_F_BROKEN      0x0800u        /* a path of it runs into bytes that decode as nothing, or into the middle of an instruction another path read */
 #define KGENOME_FN_F_ASSUMED_RET 0x1000u        /* it was resolved as RETURNING by assumption: whether it returns depends on a recursion cycle (celllysis/cfg.h, B_ASSUMED) */
 #define KGENOME_FN_F_SHARED      0x2000u        /* a block its entry reaches is reached by another derived function's entry too; the block is the one of them with the lower entry */
+#define KGENOME_FN_F_NO_CALLER   0x4000u        /* (2026-11-17) an FDE whose CFA program marks the return address column UNDEFINED where it begins (DW_CFA_undefined: the
+						 * unwinder's outermost frame - a thread's or a process's first frame): no call enters it (fntab_fde.c cfa_ra) */
+#define KGENOME_FN_F_CFA_UNREAD  0x8000u        /* (2026-11-17) the FDE's CFA program could not be read up to where the function begins (truncated, an opcode this
+						 * does not step over, restore_state): whether its return address is undefined is not known; the unit stands */
 
 /*
  * HOW COMPLETE THE ANSWER IS, as a value (never a silent "none"): COMPLETE means the sources the object has were read to
@@ -239,6 +243,7 @@ struct kgenome_func_set {
 	/* THE DERIVATION (phase 2, appended 2026-11-16, fntab_derive.c) */
 	uint32_t n_derive_into_high;        /* direct branch or call targets the descent met inside an exact (HIGH) body and not at its start: dropped */
 	uint32_t n_derive_skipped;          /* declared starts in undeclared code that derived nothing: another instruction set (an ARM Thumb start), bytes that are not code, an architecture with no control-flow rules */
+	uint32_t n_fde_refused;             /* (appended 2026-11-17) FDEs no symbol confirms that the descent found not to be one function: code leaves them, or they hold two entries (fntab_derive.c kgenome_fntab_fde_check); their bytes are undeclared */
 };
 
 /* A DECLARED START (round 4): a start-only source named it (entry, init/fini/preinit arrays, exports, TLS, SafeSEH, CF guard, .ARM.exidx, a size-0 or NOTYPE
