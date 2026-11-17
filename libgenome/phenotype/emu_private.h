@@ -528,6 +528,11 @@ struct kgenome_emu {
 	uint64_t cmdline[2];   /* [0] ANSI, [1] UTF-16; 0 until asked for */
 	uint64_t hop_last_rip;
 	uint32_t hop_count;
+	/* The instruction that TRANSFERRED control into the first and the last hop (kgenome_emu_hop_from), 0 when the hop was not
+	 * entered by a branch the previous instruction took (a fall-through, a redirect): the site of the transfer, which is what a
+	 * node of it is placed at. last_branch_insn is e->insn when last_branch_at was set, so the gate can tell "the instruction
+	 * just before this one jumped here" from a stale branch. */
+	uint64_t hop_first_from, hop_last_from, last_branch_insn;
 
 	uint64_t win_image_base, win_k32_base, win_heap;
 	/* The CALL instruction that most recently ran: the site of the API call a

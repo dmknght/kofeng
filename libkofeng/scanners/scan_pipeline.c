@@ -604,6 +604,7 @@ static void st_report_lineage(struct kof_pipeline *p)
 			r->in[k].role = h->in[k].role;
 			r->in[k].how  = h->in[k].how;
 			r->in[k].kind = h->in[k].kind;
+			r->in[k].flags = h->in[k].flags;
 		}
 		r->in_first = at;
 		r->n_all = nall;
@@ -614,6 +615,7 @@ static void st_report_lineage(struct kof_pipeline *p)
 			sc->diag.lineage_in[at].role = x->role;
 			sc->diag.lineage_in[at].how = x->how;
 			sc->diag.lineage_in[at].kind = x->kind;
+			sc->diag.lineage_in[at].flags = x->flags;
 		}
 	}
 	p->out->lineage = sc->diag.lineage;

@@ -16,7 +16,8 @@
  * they should stand left to right), which is all the viewer asks of them.
  *
  * THE LINEAGE FILLER is the engine's (libkofeng/analyzers/lineageview.c, it fills from the engine's snapshot of the lineage): nodes = the sites of one
- * function, edges = every input whose producer is one of them (its `sure` the link's certainty), notes = one row per input (drawn or not: a producer
+ * function in the order of their addresses (`ordered`), edges = every input whose producer is one of them (its `sure` the link's certainty, its `carry`
+ * and its `label` from the link's role; one to a site at or before its producer is RETREAT), notes = one row per input (drawn or not: a producer
  * outside the function or the stack has no box), `link` the edge a row is drawn as. The dialog and the engine's API shape (a request, a graph, a
  * status, caller-owned memory) are the CFG's.
  *
@@ -37,6 +38,7 @@
 #define KGENOME_GV_NOTE 96u
 #define KGENOME_GV_HEAD_MAX 20u
 #define KGENOME_GV_HEAD_COLS 112u
+#define KGENOME_GV_LABEL 12u            /* an edge's label: 11 characters and a terminator */
 #define KGENOME_GV_BOX_X 4u             /* extra lines of a box that kgenome_gv_box_line gives before it says how many it left out */
 
 /*
@@ -57,6 +59,13 @@ enum kgenome_gv_cond { KGENOME_GV_COND_NONE = 0, KGENOME_GV_COND_T, KGENOME_GV_C
  */
 enum kgenome_gv_sure { KGENOME_GV_SURE = 0, KGENOME_GV_SURE_MAY, KGENOME_GV_SURE_UNKNOWN, KGENOME_GV_SURE_BROKEN };
 enum kgenome_gv_loop { KGENOME_GV_LOOP_NONE = 0, KGENOME_GV_LOOP_LINK, KGENOME_GV_LOOP_RETREAT };
+/*
+ * A FOURTH property, of a lineage's link: WHAT it carries. VALUE (0, the zeroed default: a CFG edge, and every link whose role is a value the consumer
+ * takes - a descriptor, a buffer, a target, the content an exec runs); CONTROL: the producer's result decided WHICH call the consumer is and is no
+ * argument of it (role KGENOME_DIAG_ROLE_NUMBER: a system call's number that another call returned, kgenome_diag_nr RESULT). The filler decides it from
+ * the link's role; a viewer draws the two apart.
+ */
+enum kgenome_gv_carry { KGENOME_GV_CARRY_VALUE = 0, KGENOME_GV_CARRY_CONTROL };
 #define KGENOME_GV_NF_LOOP_HEAD 1u      /* node flag: the target of at least one loop link */
 #define KGENOME_GV_DOM_MAX 200000u      /* nodes the dominators are computed for; the iterative algorithm is also bounded in passes and says so when cut */
 
@@ -75,6 +84,8 @@ struct kgenome_gv_edge {
 	uint8_t  cond;                  /* enum kgenome_gv_cond */
 	uint8_t  loop;                  /* enum kgenome_gv_loop */
 	uint8_t  sure;                  /* enum kgenome_gv_sure (appended) */
+	uint8_t  carry;                 /* enum kgenome_gv_carry (appended: a zeroed edge carries a VALUE) */
+	char     label[KGENOME_GV_LABEL];       /* the word the filler gives the edge (a lineage: its role, the same word as its row); empty: none */
 };
 
 /* One extra row of the box of `node` (the CFG: `call <name>`); the entries are sorted by node, a node's rows in the order they are drawn. */
@@ -116,6 +127,9 @@ struct kgenome_gv {
 	char     xnoun[16];             /* what the extra lines are, for the box's `+N more <noun>` (the CFG: "calls") */
 	char     aside_none[KGENOME_GV_HEAD_COLS];      /* the line that says there is none, when n_aside is 0 and the title is set (may be empty) */
 	enum kgenome_status status;     /* the filler's: how complete the graph is (a viewer may add its own bounds beside it, never into it) */
+	/* 1: the nodes are listed in the order they stand top to bottom (a lineage: by the address of the site, program order) and an edge to a node
+	 * listed at or before its source goes back (its loop is RETREAT); 0: a CFG, ranked from its entry. Appended: a zeroed graph is a CFG. */
+	uint8_t  ordered;
 	size_t   bytes_;                /* private: what kgenome_gv_free gives back */
 };
 
@@ -133,6 +147,35 @@ void kgenome_gv_free(struct kgenome_gv *gv, const struct kgenome_cfg_mem *mem);
  * NOMEM / OVER_BUDGET / BAD_INPUT when nothing was marked (every edge keeps loop none: a viewer that walks the graph itself still finds the edges that go back).
  */
 enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome_budget *budget, const struct kgenome_cfg_mem *mem);
+
+/*
+ * THE DOMINATORS OF A GRAPH (gview_loops.c, the one implementation: kgenome_gv_loops is made of it, and the lineage's use chain asks it of a function's frame).
+ * The edges are `m` records of `stride` bytes, `from` at offset 0 and `to` at offset 4 (struct kgenome_dom_edge, or struct kgenome_gv_edge itself), sorted by `from`.
+ * OK, or TRUNCATED when the dominators were not computed in full (kgenome_dom_dominates then answers 0: "not established", never a guess); NOMEM / OVER_BUDGET /
+ * BAD_INPUT: nothing is held. `ret` marks the retreating edges of the walk from `entry`; `pos` is NONE (0xffffffff) for a node the entry does not reach.
+ */
+struct kgenome_dom_edge {
+	uint32_t from, to;
+};
+struct kgenome_dom_req {
+	uint32_t n, entry, m;
+	const void *edge;
+	size_t   stride;
+	const struct kgenome_budget *budget;
+	const struct kgenome_cfg_mem *mem;
+};
+struct kgenome_dom {
+	uint32_t n, m;
+	const uint32_t *tin, *tout, *pos;
+	const uint8_t *ret;
+	uint8_t  exact;
+	void    *mem_;                  /* private */
+	size_t   bytes_;
+};
+enum kgenome_status kgenome_dom_make(const struct kgenome_dom_req *rq, struct kgenome_dom *out);
+/* 1: every path from the entry to `b` passes through `a` (a node dominates itself); 0: it does not, or it was not established. */
+int kgenome_dom_dominates(const struct kgenome_dom *d, uint32_t a, uint32_t b);
+void kgenome_dom_free(struct kgenome_dom *d, const struct kgenome_cfg_mem *mem);
 
 /*
  * Row `i` of the box of `node`, NULL after the last: the two rows of the node, then at most KGENOME_GV_BOX_X of its extra lines, then one row that says

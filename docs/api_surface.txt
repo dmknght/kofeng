@@ -3,7 +3,7 @@
 # and tools/merge_gate.sh fails on any name added or removed that the patch manifest does not allow.
 # Flags: exports_kept = named in docs/exports_kept.txt (the reason is there); no_public_header = no header declares it.
 
-== libkofeng.a (2093)
+== libkofeng.a (2101)
 kdb_diag_collisions  [exports_kept]
 kdb_diag_full  [exports_kept]
 kdb_diag_packs_refused  [exports_kept]
@@ -200,6 +200,7 @@ kgenome_diag_hit_of
 kgenome_diag_imports
 kgenome_diag_in_at
 kgenome_diag_in_count
+kgenome_diag_in_flag
 kgenome_diag_kernel_entry
 kgenome_diag_lineage_plan
 kgenome_diag_lineage_stats_of  [exports_kept]
@@ -304,6 +305,7 @@ kgenome_diag_wrapper_isrc_next
 kgenome_diag_wrapper_isrc_scan
 kgenome_diag_wrapper_isrc_seek
 kgenome_diag_wrapper_isrc_walk
+kgenome_diag_wrapper_param_settle
 kgenome_diag_wrapper_pass_b
 kgenome_diag_wrapper_pe_boundary
 kgenome_diag_wrapper_pe_close
@@ -339,6 +341,9 @@ kgenome_disasm_level
 kgenome_disasm_level_obj
 kgenome_disasm_max_len  [exports_kept]
 kgenome_disasm_name
+kgenome_dom_dominates
+kgenome_dom_free
+kgenome_dom_make
 kgenome_dtx_add_node
 kgenome_dtx_alias_add
 kgenome_dtx_append_len
@@ -539,6 +544,7 @@ kgenome_emu_get_rip
 kgenome_emu_hit
 kgenome_emu_hop_add
 kgenome_emu_hop_bounds
+kgenome_emu_hop_from
 kgenome_emu_host_dshift16
 kgenome_emu_i2d
 kgenome_emu_i2f
@@ -745,6 +751,7 @@ kgenome_frame_get
 kgenome_frame_make
 kgenome_frame_of_extent
 kgenome_frame_release
+kgenome_frame_returns
 kgenome_frame_state_name
 kgenome_funcs_at
 kgenome_funcs_build
@@ -842,6 +849,7 @@ kgenome_nucleo_cap_of_name
 kgenome_nucleo_cap_of_sockcall
 kgenome_nucleo_cap_of_syscall
 kgenome_nucleo_cap_of_syscall_abi
+kgenome_nucleo_cap_on_handle
 kgenome_nucleo_cap_role
 kgenome_nucleo_capshape_cap  [no_public_header]
 kgenome_nucleo_capshape_n  [no_public_header]
@@ -3239,7 +3247,7 @@ kuncoat_status_name  [exports_kept]
 kuncoat_strfn
 kuncoat_transform
 
-== header-func (2507)
+== header-func (2515)
 KOF_HEAPSORT
 X
 _Static_assert
@@ -3509,6 +3517,7 @@ kgenome_diag_hit_of
 kgenome_diag_imports
 kgenome_diag_in_at
 kgenome_diag_in_count
+kgenome_diag_in_flag
 kgenome_diag_kernel_entry
 kgenome_diag_lineage_plan
 kgenome_diag_lineage_stats_of
@@ -3616,6 +3625,7 @@ kgenome_diag_wrapper_isrc_next
 kgenome_diag_wrapper_isrc_scan
 kgenome_diag_wrapper_isrc_seek
 kgenome_diag_wrapper_isrc_walk
+kgenome_diag_wrapper_param_settle
 kgenome_diag_wrapper_pass_b
 kgenome_diag_wrapper_pe_boundary
 kgenome_diag_wrapper_pe_close
@@ -3652,6 +3662,9 @@ kgenome_disasm_level
 kgenome_disasm_level_obj
 kgenome_disasm_max_len
 kgenome_disasm_name
+kgenome_dom_dominates
+kgenome_dom_free
+kgenome_dom_make
 kgenome_dtx_add_node
 kgenome_dtx_alias_add
 kgenome_dtx_append_len
@@ -3848,6 +3861,7 @@ kgenome_emu_hit
 kgenome_emu_hop_add
 kgenome_emu_hop_bounds
 kgenome_emu_hop_first
+kgenome_emu_hop_from
 kgenome_emu_host_dshift16
 kgenome_emu_i2d
 kgenome_emu_i2f
@@ -4071,6 +4085,7 @@ kgenome_frame_get
 kgenome_frame_make
 kgenome_frame_of_extent
 kgenome_frame_release
+kgenome_frame_returns
 kgenome_frame_state_name
 kgenome_funcs_at
 kgenome_funcs_build
@@ -4190,6 +4205,7 @@ kgenome_nucleo_cap_of_name
 kgenome_nucleo_cap_of_sockcall
 kgenome_nucleo_cap_of_syscall
 kgenome_nucleo_cap_of_syscall_abi
+kgenome_nucleo_cap_on_handle
 kgenome_nucleo_cap_role
 kgenome_nucleo_entry_arg
 kgenome_nucleo_hands_on
@@ -5748,7 +5764,7 @@ wide_run
 zero_run
 zlib_hdr_len
 
-== header-type (848)
+== header-type (852)
 anon:KDET_KIND_FORM
 anon:KDET_M_FIND
 anon:KDET_M_NO
@@ -5979,6 +5995,9 @@ kgenome_dir_decl
 kgenome_disasm_level
 kgenome_disasm_req
 kgenome_disasm_res
+kgenome_dom
+kgenome_dom_edge
+kgenome_dom_req
 kgenome_dtx
 kgenome_dtx_alias
 kgenome_dtx_at
@@ -6076,6 +6095,7 @@ kgenome_gt_fmt
 kgenome_gt_fmt_res
 kgenome_gv
 kgenome_gv_aside
+kgenome_gv_carry
 kgenome_gv_cond
 kgenome_gv_edge
 kgenome_gv_loop
@@ -6598,7 +6618,7 @@ sink_carry
 sx_endian
 walk
 
-== header-member (5189)
+== header-member (5222)
 dec_out.cap
 dec_out.limit
 dec_out.n
@@ -7096,6 +7116,7 @@ kgenome_diag_hit.row
 kgenome_diag_hit.symadd
 kgenome_diag_hit.symref
 kgenome_diag_hit.val
+kgenome_diag_in.flags
 kgenome_diag_in.from
 kgenome_diag_in.how
 kgenome_diag_in.kind
@@ -7171,6 +7192,7 @@ kgenome_diag_scan.base
 kgenome_diag_scan.bud
 kgenome_diag_scan.cap_hit
 kgenome_diag_scan.cap_noret
+kgenome_diag_scan.cap_param_site
 kgenome_diag_scan.cap_str
 kgenome_diag_scan.cap_wrap
 kgenome_diag_scan.cap_xin
@@ -7195,6 +7217,7 @@ kgenome_diag_scan.n_hit
 kgenome_diag_scan.n_keep_caps
 kgenome_diag_scan.n_noret
 kgenome_diag_scan.n_oblig
+kgenome_diag_scan.n_param_site
 kgenome_diag_scan.n_rcall
 kgenome_diag_scan.n_seq
 kgenome_diag_scan.n_str
@@ -7214,6 +7237,7 @@ kgenome_diag_scan.own_funcs
 kgenome_diag_scan.own_imports
 kgenome_diag_scan.own_relocs
 kgenome_diag_scan.own_walk
+kgenome_diag_scan.param_site
 kgenome_diag_scan.ran
 kgenome_diag_scan.rcall
 kgenome_diag_scan.rcall_done
@@ -7358,6 +7382,7 @@ kgenome_diag_wrapper_ctx.obj
 kgenome_diag_wrapper_ctx.open
 kgenome_diag_wrapper_ctx.over_steps
 kgenome_diag_wrapper_ctx.pend
+kgenome_diag_wrapper_ctx.quiet
 kgenome_diag_wrapper_ctx.s
 kgenome_diag_wrapper_ctx.size
 kgenome_diag_wrapper_ctx.sp
@@ -7417,6 +7442,9 @@ kgenome_diag_wrapper_pe.zero_from
 kgenome_diag_wrapper_pending.at
 kgenome_diag_wrapper_pending.f
 kgenome_diag_wrapper_pending.n
+kgenome_diag_wrapper_pending.n_pre
+kgenome_diag_wrapper_pending.pre
+kgenome_diag_wrapper_pending.pre_more
 kgenome_diag_wrapper_reader.at
 kgenome_diag_wrapper_reader.delta
 kgenome_diag_wrapper_reader.p
@@ -7469,6 +7497,24 @@ kgenome_disasm_res.has_x86
 kgenome_disasm_res.len
 kgenome_disasm_res.status
 kgenome_disasm_res.target
+kgenome_dom.bytes_
+kgenome_dom.exact
+kgenome_dom.m
+kgenome_dom.mem_
+kgenome_dom.n
+kgenome_dom.pos
+kgenome_dom.ret
+kgenome_dom.tin
+kgenome_dom.tout
+kgenome_dom_edge.from
+kgenome_dom_edge.to
+kgenome_dom_req.budget
+kgenome_dom_req.edge
+kgenome_dom_req.entry
+kgenome_dom_req.m
+kgenome_dom_req.mem
+kgenome_dom_req.n
+kgenome_dom_req.stride
 kgenome_dtx.al
 kgenome_dtx.alt
 kgenome_dtx.altcap
@@ -7942,9 +7988,11 @@ kgenome_emu.hop.hi
 kgenome_emu.hop.lo
 kgenome_emu.hop.seen
 kgenome_emu.hop_count
+kgenome_emu.hop_first_from
 kgenome_emu.hop_first_insn
 kgenome_emu.hop_first_rip
 kgenome_emu.hop_hi
+kgenome_emu.hop_last_from
 kgenome_emu.hop_last_rip
 kgenome_emu.hop_lo
 kgenome_emu.hop_unseen
@@ -7979,6 +8027,7 @@ kgenome_emu.iw.n
 kgenome_emu.iw_len
 kgenome_emu.iw_skip
 kgenome_emu.last_branch_at
+kgenome_emu.last_branch_insn
 kgenome_emu.last_call_at
 kgenome_emu.last_new_page
 kgenome_emu.last_wr_line
@@ -8403,14 +8452,17 @@ kgenome_gv.node
 kgenome_gv.note
 kgenome_gv.note_title
 kgenome_gv.note_total
+kgenome_gv.ordered
 kgenome_gv.status
 kgenome_gv.xline
 kgenome_gv.xnoun
 kgenome_gv_aside.ext
 kgenome_gv_aside.off
 kgenome_gv_aside.text
+kgenome_gv_edge.carry
 kgenome_gv_edge.cond
 kgenome_gv_edge.from
+kgenome_gv_edge.label
 kgenome_gv_edge.loop
 kgenome_gv_edge.sure
 kgenome_gv_edge.to
@@ -9718,6 +9770,7 @@ kof_diag.users_len
 kof_diag.users_off
 kof_diag.variant_id
 kof_diag.when
+kof_diag_lineage_in.flags
 kof_diag_lineage_in.from
 kof_diag_lineage_in.how
 kof_diag_lineage_in.kind

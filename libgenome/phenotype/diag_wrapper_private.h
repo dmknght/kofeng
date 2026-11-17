@@ -147,10 +147,15 @@ struct kgenome_diag_wrapper_glob {
 
 /* A path of a summary waiting to be walked: the state at the branch, where it
  * goes, and how many instructions the path to it has cost. */
+#define KGENOME_DIAG_WRAPPER_PRE 4u     /* calls before the end a path records (a COST bound of the pending record, not measured: a path with more is not shown to be one job and makes no wrapper - nodes stay at its own calls) */
 struct kgenome_diag_wrapper_pending {
 	struct kgenome_diag_wrapper_frame f;
 	uint64_t at;
 	unsigned n;
+	/* the direct calls of functions that are not wrappers the path made on its way (diag_wrapper_summary.c, ONE JOB); `pre_more`: more than
+	 * the record holds, or one through a register - the path is then not shown to be one job */
+	uint64_t pre[KGENOME_DIAG_WRAPPER_PRE];
+	uint8_t  n_pre, pre_more;
 };
 
 /*
@@ -367,6 +372,7 @@ struct kgenome_diag_wrapper_ctx {
 	uint32_t cap_pend;              /* ...and how many it holds room for */
 	struct kgenome_diag_wrapper_summary  *var;              /* the summaries of one call: KGENOME_DIAG_WRAPPER_VARIANTS_CEIL, once */
 	struct kgenome_diag_wrapper_tseen *tseen;            /* per call target - see struct kgenome_diag_wrapper_tseen */
+	uint8_t  *quiet;                /* per function of the table: what the ONE JOB check answered (diag_wrapper_summary.c; 0 not asked), made on the first question */
 };
 
 static inline void kgenome_diag_wrapper_winsn_of(struct kgenome_diag_wrapper_insn *w, const struct kgenome_cell_insn *in)
@@ -487,6 +493,9 @@ struct kgenome_diag_wrapper_isrc {
 
 /* Parameter numbers from here up are registers, not stack slots. */
 #define KGENOME_DIAG_WRAPPER_REG_PARAM 16u
+
+/* x86-64: the parameters a summary reads from the stack, numbered 6 on (see kgenome_diag_wrapper_summarise). */
+#define KGENOME_DIAG_WRAPPER_STACK_PARAMS 2u
 
 /* ---- what one part offers another ---- */
 

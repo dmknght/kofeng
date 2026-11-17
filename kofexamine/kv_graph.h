@@ -8,7 +8,12 @@
  * the lib from the control-flow graph); this unit decides only WHERE a box and a line go, the way `dot` does for a hierarchy.
  *
  * THE STYLE (top-down, hierarchical, `dot`-like):
- *   - a RANK (layer) is the longest path from the entry over the forward edges; every forward edge points down;
+ *   - a RANK (layer) is the longest path from the entry over the forward edges; every forward edge points down. An ORDERED graph (kv_graph_in.ordered:
+ *     a lineage, whose nodes come in program order) is ranked in that order: a node's rank is at least the one before it and below every node that
+ *     feeds it, so no node stands above one listed before it; an edge to a node listed at or before its source goes back (drawn retreating);
+ *   - an edge's LABEL (a lineage's role word) stands beside its arrowhead, one blank after it, inside the column span of the box it enters: the ports of
+ *     that side are spread so the labels fit (the box is widened when they would not), and a label that would land on a cell already drawn is not
+ *     drawn and is counted (n_label_cut);
  *   - the order inside a rank is a bounded number of barycenter sweeps (KV_GRAPH_SWEEPS), ties kept as they were, so the first edge of a node stands
  *     left of its later ones and the result is the same on every run;
  *   - the SPINE: the first forward edge of a node ends straight below it (a box that is the only child of its parent is placed under it, with a heavy
@@ -70,6 +75,12 @@ enum kv_graph_loop { KV_GL_NONE = 0, KV_GL_LOOP, KV_GL_RETREAT };
  * A loop link or a retreating edge keeps its own dotted runs and `^` (a lineage's cycle is one); a corner and a junction are the same for every kind.
  */
 enum kv_graph_sure { KV_GSR_SURE = 0, KV_GSR_MAY, KV_GSR_UNKNOWN, KV_GSR_BROKEN };
+/*
+ * WHAT A LINK CARRIES (kgenome_gv_carry, the same values): a VALUE, or CONTROL - the producer's result chose WHICH call the consumer is (a system call's
+ * number). A SURE control link is drawn with the MAY dashed runs (`╎` `╌`, plain `;` `_`): the line says "not a value", its label says what it is.
+ */
+enum kv_graph_carry { KV_GCA_VALUE = 0, KV_GCA_CONTROL };
+#define KV_GRAPH_LABEL_MAX 11u          /* characters of an edge's label that are drawn */
 
 enum kv_graph_status { KV_GS_OK = 0, KV_GS_TRUNCATED, KV_GS_BAD_INPUT, KV_GS_NOMEM };
 
@@ -78,6 +89,8 @@ struct kv_graph_edge {
 	uint8_t  cond;                  /* enum kv_graph_cond: T and F are drawn as a letter under the source box, none draws none */
 	uint8_t  loop;                  /* enum kv_graph_loop: a loop link or a retreating edge is a back edge (never walked forward); none may still turn out to go back, and is then drawn as retreating */
 	uint8_t  sure;                  /* enum kv_graph_sure (appended: an initialiser that names none draws every edge SURE) */
+	uint8_t  carry;                 /* enum kv_graph_carry (appended) */
+	const char *label;              /* drawn beside the arrowhead (appended: NULL or empty, none); read while the graph is made and not kept */
 };
 
 struct kv_graph_in {
@@ -95,6 +108,8 @@ struct kv_graph_in {
 	/* 1: the graph has no one entry (a lineage: every node nothing points to is a start): the order is topological over all of them, and `entry` is not
 	 * read. 0: a CFG, the entry's part first (APPENDED: an initialiser that does not name it keeps the CFG's drawing). */
 	uint8_t  sources_first;
+	/* 1: the nodes are given in the order they stand top to bottom (see THE STYLE); `entry` and sources_first are not read (APPENDED). */
+	uint8_t  ordered;
 };
 
 struct kv_graph_box {
@@ -113,11 +128,14 @@ struct kv_graph_wire {
 	uint32_t seg0, n_seg;           /* its segments, in order of travel; consecutive segments share their corner cell */
 	uint8_t  cond, loop;            /* as given, loop = RETREAT for an edge the walk found going back that the input did not call a loop */
 	uint8_t  sure;                  /* as given */
+	uint8_t  carry;                 /* as given */
 	uint8_t  back;                  /* routed through a lane (or a hook): leaves the tail's bottom, enters the head's bottom from below */
 	char     letter;                /* 'T', 'F' or 0 */
 	char     arrow;                 /* `v` (a forward edge enters the top of its target), `^` (a back edge enters the bottom of its head) */
 	int32_t  lx, ly;                /* the cell of the letter (ly < 0: none) */
 	int32_t  ax, ay;                /* the cell of the arrowhead */
+	int32_t  bx;                    /* the first cell of the label, on the arrowhead's row (bx < 0: none drawn) */
+	uint32_t blen;                  /* its characters */
 };
 
 /* one cell of the canvas */
@@ -127,6 +145,7 @@ struct kv_graph_cell {
 	uint8_t kind;                   /* the edge drawn here: 1 + loop * 3 + cond (kv_graph_cell_attr); a box's border or text cell: KV_GRAPH_MARK0 - 1 + its mark (kv_graph_in.mark), else 0 */
 	char    ch;                     /* a letter, an arrowhead or a character of a box's text */
 	uint8_t sure;                   /* the edge drawn here: enum kv_graph_sure, the first edge's when two share the cell (as `kind`) */
+	uint8_t carry;                  /* the edge drawn here: enum kv_graph_carry, as `sure` */
 };
 
 enum kv_graph_glyph { KV_GG_EMPTY = 0, KV_GG_TEXT, KV_GG_BTL, KV_GG_BTR, KV_GG_BBL, KV_GG_BBR, KV_GG_BH, KV_GG_BV, KV_GG_LINE, KV_GG_ARROW, KV_GG_LABEL };
@@ -153,6 +172,7 @@ struct kv_graph {
 	uint32_t n_rest;                /* ids in rest[] (at most KV_GRAPH_REST) */
 	uint32_t rest[KV_GRAPH_REST];   /* the first nodes that were not drawn, in the order of the walk */
 	uint32_t n_rank, n_dummy, n_lane, n_share, n_line_cut, n_shrunk;
+	uint32_t n_label_cut;           /* labels of drawn edges that were not drawn (a cell of theirs was taken) */
 	void    *mem_;                  /* private */
 };
 

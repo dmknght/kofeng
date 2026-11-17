@@ -36,7 +36,7 @@ static int lay_try(const struct kv_graph_in *in, const struct kv_graph_walk *wk,
 	c.in = in;
 	c.wk = wk;
 	c.g = g;
-	g->n_edge_not_drawn = g->n_line_cut = g->n_share = g->n_lane = g->n_dummy = g->n_skipped = 0;
+	g->n_edge_not_drawn = g->n_line_cut = g->n_share = g->n_lane = g->n_dummy = g->n_skipped = g->n_label_cut = 0;
 	rc = kv_graph_step_alloc(&c, P);
 	if (rc != TRY_OK)
 		return rc;

@@ -79,6 +79,8 @@ int  kgenome_diag_links_rehash(struct kgenome_diag_scan *s);
 int kgenome_diag_note_in_seen(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
 			      uint16_t from, uint8_t role, uint8_t kind);
 /* 1 when the link did not fit (the node holds four) and was dropped. */
+/* Set `flag` (KGENOME_DIAG_IN_*) on input k of `node`, in the order kgenome_diag_in_at reads them; 0 when there is no such input. */
+int kgenome_diag_in_flag(struct kgenome_diag_scan *s, uint32_t node, uint32_t k, uint8_t flag);
 int kgenome_diag_note_in_how(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
 			  uint16_t from, uint8_t role, uint8_t kind, uint8_t how);
 
@@ -320,6 +322,7 @@ struct kgenome_fntab_list;
 void kgenome_fntab_walk(const struct kgenome_obj *obj, const struct kgenome_diag_walk *walk, struct kgenome_fntab_list *out);
 void kgenome_fntab_pe_thunk(const struct kgenome_diag_walk *walk, struct kgenome_fntab_list *out);   /* fntab_pe_thunk.c */
 void kgenome_diag_wrap_settle(struct kgenome_diag_scan *s);   /* the socketcall site list: once each, plus a sorted copy */
+void kgenome_diag_wrapper_param_settle(struct kgenome_diag_scan *s);   /* after the routes: no capability node at a kernel entry whose number its callers give (s->param_site) */
 void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s, const struct kgenome_obj *obj,
 			   const uint8_t *base, uint64_t size);
 void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,

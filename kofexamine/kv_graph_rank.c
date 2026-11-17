@@ -38,6 +38,37 @@ int kv_graph_walk_make(const struct kv_graph_in *in, void *mem, struct kv_graph_
 	}
 	for (i = 0; i < n; i++)
 		wk->first[i + 1u] += wk->first[i];
+	if (in->ordered) {
+		/*
+		 * THE INPUT'S ORDER IS THE ORDER (a lineage: program order, gview.h `ordered`). The walk is the identity; an edge to a node listed at or
+		 * before its source goes back; a node's rank is at least its predecessor's in the list and one below every node that feeds it, so the
+		 * ranks never invert the list and a consumer stands below each of its producers. One pass: every forward edge points down the list.
+		 */
+		for (i = 0; i < n; i++) {
+			wk->rpo[i] = i;
+			wk->pos[i] = i;
+		}
+		uint32_t floor_lvl = 0;         /* the rank of the last LINKED node before this one */
+
+		for (e = 0; e < m; e++)         /* a node on no edge: st 0 (it stands at the side, in the first rank, and moves no other) */
+			wk->st[in->edge[e].from] = wk->st[in->edge[e].to] = 1;
+		for (i = 0; i < n; i++) {
+			if (!wk->st[i])
+				continue;
+			if (wk->lvl[i] < floor_lvl)
+				wk->lvl[i] = floor_lvl;
+			floor_lvl = wk->lvl[i];
+			for (e = wk->first[i]; e < wk->first[i + 1u]; e++) {
+				const uint32_t s = in->edge[e].to;
+
+				if (!wk->bk[e] && s <= i)
+					wk->bk[e] = 1;
+				if (!wk->bk[e] && wk->lvl[s] < wk->lvl[i] + 1u)
+					wk->lvl[s] = wk->lvl[i] + 1u;
+			}
+		}
+		return 1;
+	}
 	for (i = 0; i < n; i++)
 		wk->cur[i] = wk->first[i + 1u];         /* edges are taken from the last to the first: the first edge's subtree finishes last, so it is first in the order */
 	/*
@@ -274,11 +305,12 @@ static void sweep_x(struct kv_graph_lay *L, uint32_t l, int down)
 		for (q = b; q < e; q++) {
 			const uint32_t pc = down ? L->up_pc[q] : L->dn_pc[q];
 			const struct kv_graph_wr *w = &L->wr[L->pc_w[pc]];
-			const uint32_t a = L->pc_a[pc];
-			const int32_t po = (a == w->from && L->bh[a]) ? port_rel(L->bw[a], w->j, w->k) : 0;
+			const uint32_t a = L->pc_a[pc], bb = L->pc_b[pc];
+			const int32_t po = (a == w->from && L->bh[a]) ? (w->planned ? w->out_off : port_rel(L->bw[a], w->j, w->k)) : 0;
+			const int32_t pi = (bb == w->to && L->bh[bb] && w->planned) ? w->in_off : 0;     /* (labels_plan) */
 			const int64_t pw = down ? 1 : (a == w->from && w->j == 0 ? W_FIRST : 1);
 
-			sum += pw * (down ? kv_graph_item_cx(L, a) + po : kv_graph_item_cx(L, L->pc_b[pc]) - po);
+			sum += pw * (down ? kv_graph_item_cx(L, a) + po - pi : kv_graph_item_cx(L, bb) + pi - po);
 			sw += pw;
 		}
 		des[i - n0] = (e > b ? fdiv(sum, sw) : kv_graph_item_cx(L, it)) - (int64_t)(L->bw[it] / 2u);
@@ -372,7 +404,9 @@ int kv_graph_step_alloc(struct kv_graph_ctx *c, uint32_t P)
 			L->up_first = take(&ar, ((size_t)I + 1u) * 4u);
 			L->up_pc = take(&ar, (size_t)NP * 4u);
 			L->tmp_a = take(&ar, (size_t)J * 16u);          /* sweep keys (16 bytes each) or desired positions */
-			L->tmp_b = take(&ar, (size_t)J * 16u);          /* clusters and offsets, the columns of one side of a box */
+			/* clusters and offsets; the columns of one side of a box: its ports twice and its inner width (the text's, or what labels_widen gave it:
+			 * at most twice the spans, KV_GRAPH_LABEL_MAX + 3 an edge) */
+			L->tmp_b = take(&ar, (size_t)J * 16u + ((size_t)WE * (2u + 2u * (KV_GRAPH_LABEL_MAX + 3u)) + KV_GRAPH_LINE_MAX + 16u) * 4u);
 			L->tmp_w = take(&ar, (size_t)J * 16u);          /* item weights and cluster weights */
 			L->tmp_c = take(&ar, (size_t)J * 4u);           /* cluster sizes, the fill of the ranks, the lane order */
 			L->chan_t = take(&ar, ((size_t)NL + 2u) * 4u);
@@ -396,6 +430,96 @@ int kv_graph_step_alloc(struct kv_graph_ctx *c, uint32_t P)
 		}
 	}
 	return TRY_OK;
+}
+
+/* The columns a port takes on its side before the next port may stand (`v label `): a labelled edge spaces BOTH its ends this way - the arrowhead's end for
+ * its label and the leaving end so that the parallel edges of one pair leave as far apart as they arrive and run straight; a back edge's leaving end
+ * is 1. 1 for every end of an edge with no label (a CFG is drawn as before). */
+uint32_t kv_graph_port_span(const struct kv_graph_wr *w, int role)
+{
+	if (!w->blen || (role == 0 && w->back))
+		return 1u;
+	return w->blen + 3u;
+}
+
+/* The cells a port's end takes to its right on its row: the arrowhead, a blank and the label (`v label`), or 1. */
+uint32_t kv_graph_port_fit(const struct kv_graph_wr *w, int role)
+{
+	return role != 0 && w->blen ? w->blen + 2u : 1u;
+}
+
+/* A box side whose edges carry labels is made wide enough for every port of the side spread for its label, and for the widest of them to stand at the
+ * middle of the box (where the placement puts a box under its one parent's port); a side with no label keeps the width its text gave it, so a graph with
+ * no labels (a CFG) is drawn as before. */
+static void labels_widen(struct kv_graph_lay *L)
+{
+	uint32_t *need = (uint32_t *)(void *)L->tmp_b, *wid = need + 2u * L->P, e, i;  /* [2 * item + side]: side 0 the bottom, 1 the top; bit 31: a label */
+	const uint32_t LB = 0x80000000u;
+
+	memset(need, 0, (size_t)L->P * 4u * sizeof *need);
+	for (e = 0; e < L->W; e++) {
+		const struct kv_graph_wr *w = &L->wr[e];
+		const uint32_t in_side = w->back ? 0u : 1u, so = kv_graph_port_span(w, 0), si = kv_graph_port_span(w, w->back ? 2 : 1);
+
+		need[2u * w->from] += so;
+		need[2u * w->to + in_side] += si;
+		if (so > wid[2u * w->from])
+			wid[2u * w->from] = so;
+		if (si > wid[2u * w->to + in_side])
+			wid[2u * w->to + in_side] = si;
+		if (w->blen) {
+			need[2u * w->to + in_side] |= LB;
+			if (!w->back)
+				need[2u * w->from] |= LB;
+		}
+	}
+	for (i = 0; i < 2u * L->P; i++)
+		if ((need[i] & LB) && (need[i] & ~LB) + wid[i] + 2u > L->bw[i / 2u])
+			L->bw[i / 2u] = (need[i] & ~LB) + wid[i] + 2u;
+}
+
+/*
+ * WHERE A LABELLED EDGE'S ENDS STAND (a graph with labels: a lineage). The forward edges leaving a box are a group of their spans (kv_graph_port_span), in
+ * the order they leave, centred under the box; the forward edges arriving at a box are a group of the same spans, in the order of their sources (then of
+ * the edges), centred over it. The placement (sweep_x) puts a box where these ends line up and the ports (port_other) ask for them, so an edge between
+ * two ranks is one straight line and the parallel edges of one pair stand side by side at both ends. A graph with no label keeps the CFG's spread
+ * (port_rel), so its drawing does not move. The work is the edges into a box squared (each is compared with the others of its target).
+ */
+static void labels_plan(struct kv_graph_lay *L)
+{
+	uint32_t *sum = (uint32_t *)(void *)L->tmp_b, e, f;     /* [2 * item]: the spans leaving, [2 * item + 1]: arriving */
+	int any = 0;
+
+	for (e = 0; e < L->W && !any; e++)
+		any = L->wr[e].blen != 0;
+	if (!any)
+		return;
+	memset(sum, 0, (size_t)L->P * 2u * sizeof *sum);
+	for (e = 0; e < L->W; e++)
+		if (!L->wr[e].back) {
+			sum[2u * L->wr[e].from] += kv_graph_port_span(&L->wr[e], 0);
+			sum[2u * L->wr[e].to + 1u] += kv_graph_port_span(&L->wr[e], 1);
+		}
+	for (e = 0; e < L->W; e++) {
+		struct kv_graph_wr *w = &L->wr[e];
+		uint32_t before_out = 0, before_in = 0;
+
+		if (w->back)
+			continue;
+		for (f = 0; f < L->W; f++) {
+			const struct kv_graph_wr *o = &L->wr[f];
+
+			if (o->back || f == e)
+				continue;
+			if (o->from == w->from && f < e)
+				before_out += kv_graph_port_span(o, 0);
+			if (o->to == w->to && (o->from < w->from || (o->from == w->from && f < e)))
+				before_in += kv_graph_port_span(o, 1);
+		}
+		w->planned = 1;
+		w->out_off = (int32_t)before_out - (int32_t)(sum[2u * w->from] / 2u);
+		w->in_off = (int32_t)before_in - (int32_t)(sum[2u * w->to + 1u] / 2u);
+	}
 }
 
 /* The boxes (sizes from the text) and the edges drawn, in the order of the walk; a forward edge becomes a chain of items through virtual nodes. */
@@ -442,6 +566,9 @@ void kv_graph_step_wires(struct kv_graph_ctx *c)
 			w->cond = in->edge[e].cond;
 			w->loop = in->edge[e].loop;
 			w->sure = in->edge[e].sure;
+			w->carry = in->edge[e].carry;
+			w->label = in->edge[e].label;
+			w->blen = (uint8_t)(w->label ? strnlen(w->label, KV_GRAPH_LABEL_MAX) : 0u);
 			w->back = wk->bk[e];
 			w->self = w->from == w->to;
 			if (!w->back) {
@@ -480,6 +607,8 @@ void kv_graph_step_wires(struct kv_graph_ctx *c)
 	L->W = W;
 	L->Npc = Npc;
 	L->Nback = Nback;
+	labels_widen(L);
+	labels_plan(L);
 	c->g->n_dummy = D;
 	c->g->n_line_cut = c->lines_cut;
 }

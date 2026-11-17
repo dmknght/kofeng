@@ -65,6 +65,14 @@ static void generic_ends(struct fz_ctx *c, uint16_t cap)
 	FZ_CHECK(c, cap == KGENOME_NUCLEO_NONE, "following kgenome_nucleo_cap_generic does not end");
 }
 
+/* kgenome_nucleo_cap_on_handle is the reverse step of kgenome_nucleo_cap_generic: its answer is NONE or a case of the call's word */
+static void on_handle_inverts(struct fz_ctx *c, uint16_t cap, uint16_t made_by)
+{
+	const uint16_t w = kgenome_nucleo_cap_on_handle(cap, made_by);
+
+	FZ_CHECK(c, w == KGENOME_NUCLEO_NONE || kgenome_nucleo_cap_generic(w) == cap, "kgenome_nucleo_cap_on_handle is no case of its word");
+}
+
 static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 {
 	uint32_t nr = rd32(in, n, 0), sel = rd32(in, n, 4), tsel = rd32(in, n, 8);
@@ -155,6 +163,9 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 	/* capabilities */
 	(void)kgenome_nucleo_cap_named(cap);
 	generic_ends(c, cap);
+	on_handle_inverts(c, cap, (uint16_t)cls);
+	on_handle_inverts(c, KGENOME_NUCLEO_MEM_READ, cap);
+	on_handle_inverts(c, KGENOME_NUCLEO_MEM_WRITE, cap);
 	(void)kgenome_nucleo_hands_on(cap, name);
 	(void)kgenome_nucleo_hands_on(cap, NULL);
 	{
@@ -248,7 +259,7 @@ FZ_ADAPTER(tables, .name = "kgenome/diag_tables",
 	   .covers = "kgenome_nucleo_abi_of kgenome_nucleo_sys_ordered kgenome_nucleo_cap_of_syscall_abi kgenome_nucleo_sys_name_abi "
 		     "kgenome_nucleo_sys_zero_on_success kgenome_nucleo_arg_is_flags kgenome_nucleo_sock_nonblock kgenome_nucleo_sockcall_nonblock "
 		     "kgenome_nucleo_cap_of_sockcall kgenome_nucleo_sys_name kgenome_nucleo_sys_name_all kgenome_nucleo_cap_of_syscall "
-		     "kgenome_nucleo_cap_of_name kgenome_nucleo_cap_named kgenome_nucleo_cap_generic kgenome_nucleo_hands_on kgenome_nucleo_name_arg "
+		     "kgenome_nucleo_cap_of_name kgenome_nucleo_cap_named kgenome_nucleo_cap_generic kgenome_nucleo_cap_on_handle kgenome_nucleo_hands_on kgenome_nucleo_name_arg "
 		     "kgenome_nucleo_name_id kgenome_nucleo_name_lookup kgenome_nucleo_cap_of_call kgenome_nucleo_name_of "
 		     "kgenome_nucleo_row_of kgenome_nucleo_row_cap kgenome_nucleo_row_role kgenome_nucleo_row_field kgenome_nucleo_row_res "
 		     "kgenome_nucleo_row_hands_on kgenome_nucleo_row_out kgenome_nucleo_row_release kgenome_nucleo_entry_arg kgenome_nucleo_cap_role "

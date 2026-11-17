@@ -64,6 +64,22 @@ static void gview(struct fz_ctx *c, const uint8_t *in, size_t n)
 			heads++;
 		}
 	}
+	{       /* the dominators the marks are made of: a reachable node dominates itself, the entry dominates every reachable node, a loop link's head its tail */
+		struct kgenome_dom dm;
+		const enum kgenome_status sd = kgenome_dom_make(&(const struct kgenome_dom_req){ .n = nn, .entry = gv.entry, .m = ne, .edge = gv.edge,
+										 .stride = sizeof *gv.edge }, &dm);
+
+		if (sd == KGENOME_OK)
+			for (i = 0; i < nn; i++)
+				if (dm.pos[i] != 0xffffffffu)
+					FZ_CHECK(c, kgenome_dom_dominates(&dm, i, i) && kgenome_dom_dominates(&dm, gv.entry < nn ? gv.entry : 0u, i),
+						 "a reachable node is not dominated by itself and by the entry");
+		if (sd == KGENOME_OK)
+			for (i = 0; i < ne; i++)
+				if (gv.edge[i].loop == KGENOME_GV_LOOP_LINK)
+					FZ_CHECK(c, kgenome_dom_dominates(&dm, gv.edge[i].to, gv.edge[i].from), "a loop link's head does not dominate its tail");
+		kgenome_dom_free(&dm, NULL);
+	}
 	st2 = kgenome_gv_loops(&gv, NULL, NULL);                    /* the same marks again: the result does not depend on what was there */
 	for (i = 0; i < ne; i++)
 		d2 = d2 * 31u + gv.edge[i].loop;
@@ -238,6 +254,6 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 
 FZ_ADAPTER(cfg, .name = "kgenome/diag_cfg",
 	   .covers = "kgenome_cfg_build kgenome_cfg_free kgenome_cfg_sign kgenome_cfg_pct kgenome_cfg_pct_callee kgenome_cfg_overlap kgenome_cfg_keys_sign kgenome_mutation_block_min kgenome_cfg_anchor kgenome_cfg_view_make kgenome_cfg_view_free "
-		 "kgenome_cfg_gv_make kgenome_gv_alloc kgenome_gv_free kgenome_gv_loops kgenome_gv_box_line",
+		 "kgenome_cfg_gv_make kgenome_gv_alloc kgenome_gv_free kgenome_gv_loops kgenome_gv_box_line kgenome_dom_make kgenome_dom_dominates kgenome_dom_free",
 	   .flags = 0, .backstop_s = 300, .steps_base = 100000u, .steps_per_byte = 64,
 	   .shape = FZ_REQ, .seeds = seeds, .run = run);

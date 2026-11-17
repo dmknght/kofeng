@@ -207,6 +207,25 @@ const uint16_t *kgenome_frame_facts_of(const struct kgenome_frame *f, const stru
 	return r;
 }
 
+/*
+ * DOES THE FUNCTION COME BACK: a reachable block ends in a `ret`, goes out of the extent (a jump, a conditional jump or a loop past it, or through a register
+ * or memory: a thunk) or runs on past the end of the extent into the next function's code. What is left is a function whose every path stops: a call that
+ * does not come back, a trap, a loop with no way out. The rule and its measurements are the lineage's (kgenome_lineage_noret, diag_lineage_summ.c), which
+ * asks it here; so does the wrapper analysis (diag_wrapper_summary.c, ONE JOB).
+ */
+int kgenome_frame_returns(const struct kgenome_frame *f, const struct kgenome_frame_src *s)
+{
+	const uint16_t *bits;
+	uint32_t b;
+
+	if (!f || f->state != KGENOME_FRAME_OK || !f->cfg.n_all || !(bits = kgenome_frame_facts_of(f, s)))
+		return -1;
+	for (b = 0; b < f->cfg.n_all; b++)
+		if (f->cfg.b[b].reach && (bits[b] & (KGENOME_FRAME_B_RET | KGENOME_FRAME_B_LEAVES | KGENOME_FRAME_B_RUNS_OUT)))
+			return 1;
+	return 0;
+}
+
 /* ---- make ---- */
 
 enum kgenome_frame_state kgenome_frame_make(const struct kgenome_frame_src *s, uint64_t off, uint64_t len, unsigned flags,

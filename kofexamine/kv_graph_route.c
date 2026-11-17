@@ -115,6 +115,8 @@ static int32_t port_other(const struct kv_graph_lay *L, const struct kv_graph_po
 		return p->role == 0 ? L->x[w->from] + (int32_t)L->bw[w->from] : L->x[w->from] + (int32_t)L->bw[w->from] + 1;
 	if (w->back)
 		return w->lane_col;
+	if (w->planned)                 /* a labelled edge leaves where its group puts it (labels_plan), so it arrives straight */
+		return kv_graph_item_cx(L, w->from) + w->out_off;
 	return kv_graph_item_cx(L, w->nc ? w->d0 : w->to);       /* a forward edge leaves: towards the centre of the next box or virtual node */
 }
 
@@ -152,6 +154,107 @@ static int col_taken(const struct kv_graph_top *arr, uint32_t n, uint32_t chan, 
 	return 0;
 }
 
+/* Does an edge of the side's ports carry a label (an arriving end shows it, a leaving end is spaced for it: kv_graph_port_span)? */
+static int ports_labelled(const struct kv_graph_lay *L, uint32_t a, uint32_t m)
+{
+	uint32_t q;
+
+	for (q = 0; q < m; q++)
+		if (kv_graph_port_span(&L->wr[L->port[a + q].wire], L->port[a + q].role) > 1u)
+			return 1;
+	return 0;
+}
+
+/* Left to right over the free columns fr[0..nfree): each port at the free column nearest at or below where it wants to be (from_desire) or at the left
+ * end (not), and at least the previous port's span after it; 1 when every port's cells end inside the box. */
+static int spread_fwd(const struct kv_graph_lay *L, uint32_t a, uint32_t m, int32_t hi, const int32_t *fr, int32_t nfree, int from_desire, int32_t *col)
+{
+	int32_t k = 0, prev_end = -0x7fffffff;
+	uint32_t q;
+
+	for (q = 0; q < m; q++) {
+		const struct kv_graph_port *p = &L->port[a + q];
+		const struct kv_graph_wr *w = &L->wr[p->wire];
+
+		if (from_desire)
+			while (k + 1 < nfree && fr[k + 1] <= p->other)
+				k++;
+		while (k < nfree && fr[k] < prev_end)
+			k++;
+		if (k >= nfree || fr[k] + (int32_t)kv_graph_port_fit(w, p->role) - 1 > hi)
+			return 0;
+		col[q] = fr[k];
+		prev_end = fr[k] + (int32_t)kv_graph_port_span(w, p->role);
+		k++;
+	}
+	return 1;
+}
+
+/* Right to left: each port at the free column nearest its wish that still leaves its own cells inside the box and the next port's room; 1 when they fit
+ * (the wishes run past the box's right side: the ports keep their places as far as the box allows, instead of being packed to its left). */
+static int spread_bwd(const struct kv_graph_lay *L, uint32_t a, uint32_t m, int32_t lo, int32_t hi, const int32_t *fr, int32_t nfree, int32_t *col)
+{
+	int32_t k = nfree - 1, lim = hi + 1;
+	uint32_t q;
+
+	for (q = m; q-- > 0;) {
+		const struct kv_graph_port *p = &L->port[a + q];
+		const struct kv_graph_wr *w = &L->wr[p->wire];
+		const int32_t top = lim - (q + 1u < m ? (int32_t)kv_graph_port_span(w, p->role) : (int32_t)kv_graph_port_fit(w, p->role));
+		const int32_t want = p->other < top ? p->other : top;
+
+		while (k >= 0 && fr[k] > want)
+			k--;
+		if (k < 0 || fr[k] < lo)
+			return 0;
+		col[q] = fr[k];
+		lim = fr[k];
+		k--;
+	}
+	return 1;
+}
+
+/* The ports of a side some of whose edges carry labels (kv_graph.h, THE STYLE): spread so each label fits between its arrowhead and the next port and the
+ * parallel edges of one pair stand as far apart at both ends, on the free columns near where each edge wants to be, else from the left, else on every
+ * column of the box (labels_widen made it wide enough for that). The columns, not indices, go to col[]. */
+/* What a choice of columns costs: the ports not where they want to be (each is a bend of its line), then how far they are. */
+static uint64_t spread_cost(const struct kv_graph_lay *L, uint32_t a, uint32_t m, const int32_t *col)
+{
+	uint64_t bends = 0, dist = 0;
+	uint32_t q;
+
+	for (q = 0; q < m; q++) {
+		const int64_t d = (int64_t)col[q] - L->port[a + q].other;
+
+		bends += d != 0;
+		dist += (uint64_t)(d < 0 ? -d : d);
+	}
+	return (bends << 32) + dist;
+}
+
+static void ports_spread(struct kv_graph_lay *L, uint32_t a, uint32_t m, int32_t lo, int32_t hi, int32_t *col, int32_t *fr, int32_t nfree)
+{
+	int32_t q;
+
+	/* the two near-the-wish spreads, the one with fewer bends kept (left to right pushes a crowded port right, right to left pulls the one before it left) */
+	if (spread_fwd(L, a, m, hi, fr, nfree, 1, col)) {
+		int32_t *alt = fr + nfree;      /* tmp_b holds both: the side's m columns, the free columns and m more */
+
+		if (spread_bwd(L, a, m, lo, hi, fr, nfree, alt) && spread_cost(L, a, m, alt) < spread_cost(L, a, m, col))
+			memcpy(col, alt, (size_t)m * sizeof *col);
+		return;
+	}
+	if (spread_bwd(L, a, m, lo, hi, fr, nfree, col) || spread_fwd(L, a, m, hi, fr, nfree, 0, col))
+		return;
+	nfree = 0;
+	for (q = lo; q <= hi; q++)
+		fr[nfree++] = q;
+	if (spread_fwd(L, a, m, hi, fr, nfree, 1, col) || spread_bwd(L, a, m, lo, hi, fr, nfree, col) || spread_fwd(L, a, m, hi, fr, nfree, 0, col))
+		return;
+	for (q = 0; (uint32_t)q < m; q++)      /* not reached when the box was widened for the side; a shared column is counted below */
+		col[q] = lo + q <= hi ? lo + q : hi;
+}
+
 /* The ports of one side of one box: `m` records in L->port[a..a+m), sorted by where the other end is, given distinct columns as near it as the box allows. A bottom keeps off
  * the columns of the virtual nodes of the rank below (L->bot), a top (a forward edge arriving) keeps off every column an edge of its channel starts a run from (L->top). */
 static void ports_assign(struct kv_graph_ctx *c, uint32_t a, uint32_t m)
@@ -183,7 +286,9 @@ static void ports_assign(struct kv_graph_ctx *c, uint32_t a, uint32_t m)
 		for (q = lo; q <= hi; q++)
 			fr[nfree++] = q;
 	}
-	{
+	if (ports_labelled(L, a, m))
+		ports_spread(L, a, m, lo, hi, col, fr, nfree);
+	else {
 		int32_t prev = -1;
 
 		for (q = 0; (uint32_t)q < m; q++) {

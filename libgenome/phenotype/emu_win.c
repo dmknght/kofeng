@@ -396,6 +396,13 @@ void kgenome_emu_last_hop(const struct kgenome_emu *e, uint64_t *rip, uint32_t *
 	if (count) *count = e ? e->hop_count : 0;
 }
 
+/* The branch that entered the first and the last hop, 0 when that hop was not entered by a taken branch. */
+void kgenome_emu_hop_from(const struct kgenome_emu *e, uint64_t *first, uint64_t *last)
+{
+	if (first) *first = e ? e->hop_first_from : 0;
+	if (last)  *last  = e ? e->hop_last_from : 0;
+}
+
 uint64_t kgenome_emu_mod_reads(const struct kgenome_emu *e, unsigned i)
 {
 	return e && i < KGENOME_EMU_WIN_MOD_COUNT ? e->mod_reads[i] : 0;

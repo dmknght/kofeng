@@ -446,6 +446,9 @@ void        kgenome_emu_first_hop(const struct kgenome_emu *e, uint64_t *insn,
  * the run ended, which is the address a dump writes as its entry point. */
 void        kgenome_emu_last_hop(const struct kgenome_emu *e, uint64_t *rip,
 			     uint32_t *count);
+/* The instruction whose taken branch entered the first and the last hop: the SITE of the transfer. 0 when the hop was not
+ * entered by a branch the instruction before it took (a fall-through, a redirect): no site is known then. */
+void        kgenome_emu_hop_from(const struct kgenome_emu *e, uint64_t *first, uint64_t *last);
 
 /*
  * Tell the interpreter where the three Windows regions are. Until this is

@@ -9,6 +9,7 @@
  * (64 per node and edge plus a floor): past either the retreating edges are all RETREAT, no head is marked and the result is TRUNCATED - "not computed" is said, never
  * guessed as a loop. A reducible graph settles in two passes.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -63,19 +64,60 @@ static uint32_t intersect(const struct lp *p, uint32_t a, uint32_t b, uint64_t *
 	return a;
 }
 
-enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome_budget *budget, const struct kgenome_cfg_mem *mem)
+/* edge e of the request: `from` at offset 0 and `to` at offset 4 of each `stride`-byte record (kgenome_dom_edge, kgenome_gv_edge) */
+static uint32_t ed_from(const struct kgenome_dom_req *r, uint32_t e)
 {
-	const uint32_t n = gv->n_node, m = gv->n_edge;
+	uint32_t v;
+
+	memcpy(&v, (const char *)r->edge + (size_t)e * r->stride, sizeof v);
+	return v;
+}
+
+static uint32_t ed_to(const struct kgenome_dom_req *r, uint32_t e)
+{
+	uint32_t v;
+
+	memcpy(&v, (const char *)r->edge + (size_t)e * r->stride + sizeof(uint32_t), sizeof v);
+	return v;
+}
+
+_Static_assert(offsetof(struct kgenome_gv_edge, from) == 0 && offsetof(struct kgenome_gv_edge, to) == 4, "kgenome_dom_req reads from/to at 0/4");
+_Static_assert(offsetof(struct kgenome_dom_edge, from) == 0 && offsetof(struct kgenome_dom_edge, to) == 4, "kgenome_dom_req reads from/to at 0/4");
+
+void kgenome_dom_free(struct kgenome_dom *d, const struct kgenome_cfg_mem *mem)
+{
+	if (d && d->mem_)
+		kgenome_cfg_release(mem, d->mem_, d->bytes_);
+	if (d)
+		memset(d, 0, sizeof *d);
+}
+
+int kgenome_dom_dominates(const struct kgenome_dom *d, uint32_t a, uint32_t b)
+{
+	if (!d || !d->exact || a >= d->n || b >= d->n || d->pos[a] == NONE_ || d->pos[b] == NONE_)
+		return 0;
+	return d->tin[a] <= d->tin[b] && d->tout[b] <= d->tout[a];
+}
+
+enum kgenome_status kgenome_dom_make(const struct kgenome_dom_req *rq, struct kgenome_dom *out)
+{
+	const uint32_t n = rq ? rq->n : 0u, m = rq ? rq->m : 0u;
+	const struct kgenome_cfg_mem *mem = rq ? rq->mem : NULL;
 	struct lp p;
 	void *w;
 	size_t bytes;
 	uint32_t i, e, sp = 0, cnt = 0;
 	int exact;
 
-	if (!n || !m)
+	if (!out)
+		return KGENOME_BAD_INPUT;
+	memset(out, 0, sizeof *out);
+	if (!rq || (m && !rq->edge) || rq->stride < 2u * sizeof(uint32_t))
+		return KGENOME_BAD_INPUT;
+	if (!n)
 		return KGENOME_OK;
 	bytes = lp_bytes(n, m);
-	if (kgenome_cfg_over(budget, bytes))
+	if (kgenome_cfg_over(rq->budget, bytes))
 		return KGENOME_OVER_BUDGET;
 	w = kgenome_cfg_alloc(mem, bytes);
 	if (!w)
@@ -83,11 +125,11 @@ enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome
 	memset(w, 0, bytes);
 	lp_carve(&p, w, n, m);
 	for (e = 0; e < m; e++) {
-		if (gv->edge[e].from >= n || gv->edge[e].to >= n || (e && gv->edge[e].from < gv->edge[e - 1u].from)) {
+		if (ed_from(rq, e) >= n || ed_to(rq, e) >= n || (e && ed_from(rq, e) < ed_from(rq, e - 1u))) {
 			kgenome_cfg_release(mem, w, bytes);
 			return KGENOME_BAD_INPUT;
 		}
-		p.first[gv->edge[e].from + 1u]++;
+		p.first[ed_from(rq, e) + 1u]++;
 	}
 	for (i = 0; i < n; i++)
 		p.first[i + 1u] += p.first[i];
@@ -95,7 +137,7 @@ enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome
 		p.cur[i] = p.first[i];
 	/* the walk: retreating edges and the reverse post-order of what the entry reaches */
 	{
-		const uint32_t s0 = gv->entry < n ? gv->entry : 0u;
+		const uint32_t s0 = rq->entry < n ? rq->entry : 0u;
 
 		p.st[s0] = 1;
 		p.stk[sp++] = s0;
@@ -104,7 +146,7 @@ enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome
 		const uint32_t u = p.stk[sp - 1u];
 
 		if (p.cur[u] < p.first[u + 1u]) {
-			const uint32_t ed = p.cur[u]++, s = gv->edge[ed].to;
+			const uint32_t ed = p.cur[u]++, s = ed_to(rq, ed);
 
 			if (!p.st[s]) {
 				p.st[s] = 1;
@@ -135,15 +177,15 @@ enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome
 		uint32_t pass, changed = 1;
 
 		for (e = 0; e < m; e++)
-			if (p.pos[gv->edge[e].from] != NONE_)
-				p.pfirst[gv->edge[e].to + 1u]++;
+			if (p.pos[ed_from(rq, e)] != NONE_)
+				p.pfirst[ed_to(rq, e) + 1u]++;
 		for (i = 0; i < n; i++)
 			p.pfirst[i + 1u] += p.pfirst[i];
 		for (i = 0; i < n; i++)
 			p.cur[i] = p.pfirst[i];
 		for (e = 0; e < m; e++)
-			if (p.pos[gv->edge[e].from] != NONE_)
-				p.pidx[p.cur[gv->edge[e].to]++] = gv->edge[e].from;
+			if (p.pos[ed_from(rq, e)] != NONE_)
+				p.pidx[p.cur[ed_to(rq, e)]++] = ed_from(rq, e);
 		for (i = 0; i < n; i++)
 			p.idom[i] = NONE_;
 		p.idom[p.rpo[0]] = p.rpo[0];
@@ -200,19 +242,44 @@ enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome
 			}
 		}
 	}
-	for (e = 0; e < m; e++) {
+	out->n = n;
+	out->m = m;
+	out->tin = p.tin;
+	out->tout = p.tout;
+	out->pos = p.pos;
+	out->ret = p.ret;
+	out->exact = (uint8_t)exact;
+	out->mem_ = w;
+	out->bytes_ = bytes;
+	return exact ? KGENOME_OK : KGENOME_TRUNCATED;
+}
+
+enum kgenome_status kgenome_gv_loops(struct kgenome_gv *gv, const struct kgenome_budget *budget, const struct kgenome_cfg_mem *mem)
+{
+	const struct kgenome_dom_req rq = { .n = gv->n_node, .entry = gv->entry, .m = gv->n_edge, .edge = gv->edge, .stride = sizeof *gv->edge,
+					    .budget = budget, .mem = mem };
+	struct kgenome_dom d;
+	enum kgenome_status st;
+	uint32_t e;
+
+	if (!gv->n_node || !gv->n_edge)
+		return KGENOME_OK;
+	st = kgenome_dom_make(&rq, &d);
+	if (st != KGENOME_OK && st != KGENOME_TRUNCATED)
+		return st;
+	for (e = 0; e < gv->n_edge; e++) {
 		const uint32_t u = gv->edge[e].from, v = gv->edge[e].to;
 
 		gv->edge[e].loop = KGENOME_GV_LOOP_NONE;
-		if (!p.ret[e])
+		if (!d.ret[e])
 			continue;
-		if (exact && p.tin[v] <= p.tin[u] && p.tout[u] <= p.tout[v]) {
+		if (d.exact && d.tin[v] <= d.tin[u] && d.tout[u] <= d.tout[v]) {
 			gv->edge[e].loop = KGENOME_GV_LOOP_LINK;
 			gv->node[v].flags |= KGENOME_GV_NF_LOOP_HEAD;
 		} else {
 			gv->edge[e].loop = KGENOME_GV_LOOP_RETREAT;
 		}
 	}
-	kgenome_cfg_release(mem, w, bytes);
-	return exact ? KGENOME_OK : KGENOME_TRUNCATED;
+	kgenome_dom_free(&d, mem);
+	return st;
 }

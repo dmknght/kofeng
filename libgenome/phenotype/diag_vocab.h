@@ -58,6 +58,14 @@ enum kgenome_diag_role {
 	 * VALUE was: a renumbering breaks every diagnose.
 	 */
 	KGENOME_DIAG_ROLE_NUMBER,
+	/*
+	 * THE BYTES AN EXEC OF MEMORY RUNS ARE WHAT THIS PRODUCER WROTE: a link (kind SHARED, the two share the memory object) from a node that
+	 * wrote into a region (its BUFFER input) to a KGENOME_NUCLEO_EXEC_REG node whose TARGET is the same region, both PROVEN from the one
+	 * producer of the region (diag_scan.c, exec_content_settle). A stager's whole behaviour - receive, then execute - is this link; without
+	 * it the read and the jump were two unrelated consumers of the mmap. Never in the four-input view (no pack names it, as NUMBER).
+	 * Appended: a renumbering breaks every diagnose.
+	 */
+	KGENOME_DIAG_ROLE_CONTENT,
 	KGENOME_DIAG_ROLE_COUNT
 };
 

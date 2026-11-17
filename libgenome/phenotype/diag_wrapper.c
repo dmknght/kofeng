@@ -29,7 +29,10 @@
  *      target before it. If the straight line from the entry to the instruction
  *      reaches it without a branch, and the registers the kernel reads are the
  *      function's parameters (possibly moved or widened on the way) or constants,
- *      the function is a wrapper and the summary says which.
+ *      the function is a wrapper and the summary says which. A function whose line
+ *      ends in a CALL of a wrapper is one only if that call is its whole job: no
+ *      other function it calls on the way, before the call or after it to the
+ *      return, enters a kernel (kgenome_diag_wrapper_summarise, "ONE JOB").
  *   2. WALK THE CALLERS, function by function, with a small symbolic state: which
  *      node produced the value in each register, in each stack slot of this frame,
  *      and in each global. A call to a wrapper makes a node at the call, with the
@@ -496,6 +499,7 @@ out:
 	free(c.pend);
 	free(c.var);
 	free(c.tseen);
+	free(c.quiet);
 	free(c.fret);
 	free(c.fmiss);
 	free(c.ws);

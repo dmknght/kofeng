@@ -139,6 +139,10 @@ const uint16_t *kgenome_frame_facts(const struct kgenome_frame *f, const struct 
  * for [f->off, f->off + f->len), from `s`; once, and the memo is then there for every later ask. NULL as above, or when that read could not be held. */
 const uint16_t *kgenome_frame_facts_of(const struct kgenome_frame *f, const struct kgenome_frame_src *s);
 
+/* Does the function come back to its caller (see frame.c): 1 when a reachable block ends in a `ret`, leaves the extent or runs on past it, 0 when none does (it
+ * never returns), -1 when the frame has no graph or the facts of its blocks could not be read. */
+int kgenome_frame_returns(const struct kgenome_frame *f, const struct kgenome_frame_src *s);
+
 /* The words of a state, for a report. */
 const char *kgenome_frame_state_name(enum kgenome_frame_state s);
 

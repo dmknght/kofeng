@@ -199,11 +199,15 @@ static inline int kgenome_emu_run_gate(struct kgenome_emu *e, const struct kgeno
 		int h = kgenome_emu_hop_first(e, e->rip);
 
 		if (h >= 0) {
+			const uint64_t from = e->insn && e->last_branch_insn == e->insn ? e->last_branch_at : 0;
+
 			if (!e->hop_first_insn) {
 				e->hop_first_insn = e->insn ? e->insn : 1;
 				e->hop_first_rip = e->rip;
+				e->hop_first_from = from;
 			}
 			e->hop_last_rip = e->rip;
+			e->hop_last_from = from;
 			e->hop_count++;
 			kgenome_emu_snap_take(e, e->hop[h].lo,
 				  e->hop[h].hi - e->hop[h].lo);
@@ -532,6 +536,7 @@ static inline int kgenome_emu_run_landed(struct kgenome_emu *e, const struct kge
 		e->rip = next;
 	else {
 		e->last_branch_at = at;
+		e->last_branch_insn = e->insn;
 		/* A backward branch taken again and again from one place is a loop:
 		 * see emu_loop.c for the one kind of it that is not run. */
 		if (e->rip <= at) {

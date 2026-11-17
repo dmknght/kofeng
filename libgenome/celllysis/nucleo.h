@@ -314,6 +314,10 @@ int kgenome_nucleo_cap_named(uint16_t cap);
  * note at the definition: a rule names the level it means, and the matcher
  * accepts anything more specific. */
 uint16_t kgenome_nucleo_cap_generic(uint16_t cap);
+/* The reverse step, for a descriptor: the special case of the generic `cap` (mem-read, mem-write) when its descriptor is the
+ * object a call of `made_by` handed back - net-recv / net-send for a socket, file-read / file-write for an opened file - or
+ * KGENOME_NUCLEO_NONE when the vocabulary has no such case. kgenome_nucleo_cap_generic of the answer is `cap`. */
+uint16_t kgenome_nucleo_cap_on_handle(uint16_t cap, uint16_t made_by);
 
 /*
  * DOES A CALL OF THIS CAPABILITY HAND BACK THE OBJECT IT MADE, so a later

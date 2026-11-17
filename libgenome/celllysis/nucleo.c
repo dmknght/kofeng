@@ -365,6 +365,29 @@ uint16_t kgenome_nucleo_cap_generic(uint16_t cap)
 	}
 }
 
+/*
+ * WHICH CASE OF A DESCRIPTOR CALL, from what made the descriptor: the "descriptor identified" half of the table above, as a
+ * fact of the vocabulary. A route names the call (read(2), ReadFile) and not the object it is handed, so its word is the
+ * generic one; the object is known only once the descriptor's producer is linked, and the scan asks this then
+ * (caps_settle, diag_scan.c). Only calls whose result IS the object: a socket (socket, a raw socket, accept) and an opened
+ * file. A memfd, a pipe and a dup'd number have no case word here (a memfd is not what a rule means by file-read, a pipe has
+ * no word, dup2's answer is a number the shape does not hand on): they keep the generic word.
+ */
+uint16_t kgenome_nucleo_cap_on_handle(uint16_t cap, uint16_t made_by)
+{
+	int sock, file;
+
+	if (cap != KGENOME_NUCLEO_MEM_READ && cap != KGENOME_NUCLEO_MEM_WRITE)
+		return KGENOME_NUCLEO_NONE;
+	sock = made_by == KGENOME_NUCLEO_NET_OPEN || made_by == KGENOME_NUCLEO_NET_RAW || made_by == KGENOME_NUCLEO_NET_ACCEPT;
+	file = made_by == KGENOME_NUCLEO_FILE_OPEN;
+	if (sock)
+		return cap == KGENOME_NUCLEO_MEM_READ ? KGENOME_NUCLEO_NET_READ : KGENOME_NUCLEO_NET_WRITE;
+	if (file)
+		return cap == KGENOME_NUCLEO_MEM_READ ? KGENOME_NUCLEO_READ : KGENOME_NUCLEO_WRITE;
+	return KGENOME_NUCLEO_NONE;
+}
+
 const char *kgenome_nucleo_cap_name(uint16_t cap)
 {
 	switch (cap) {

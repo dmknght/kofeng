@@ -142,6 +142,16 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 				(void)kgenome_frame_make(&s, 0, len, 0u, &f3);
 				if (f3.state == KGENOME_FRAME_OK && b1 && kgenome_frame_facts_of(&f3, &s)) {
 					FZ_CHECK(c, f3.cfg.n_all == f1.cfg.n_all && !memcmp(f3.bits, f1.bits, (size_t)f1.cfg.n_all * sizeof *f1.bits), "the facts read again are not the facts made with the graph");
+					{
+						/* whether it comes back is a reading of those facts: a reachable block with a ret, a jump out or a run past the end */
+						const int back = kgenome_frame_returns(&f3, &s);
+						uint32_t b;
+						int any = 0;
+
+						for (b = 0; b < f3.cfg.n_all; b++)
+							any |= f3.cfg.b[b].reach && (f3.bits[b] & (KGENOME_FRAME_B_RET | KGENOME_FRAME_B_LEAVES | KGENOME_FRAME_B_RUNS_OUT));
+						FZ_CHECK(c, back == (f3.cfg.n_all ? any : -1), "kgenome_frame_returns does not read the facts");
+					}
 				}
 				kgenome_frame_release(&f3, NULL);
 			}
@@ -249,7 +259,7 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 
 FZ_ADAPTER(frame, .name = "kgenome/diag_frame",
 	   .covers = "kgenome_frame_make kgenome_frame_release kgenome_frame_state_name kgenome_frame_cache_new kgenome_frame_get kgenome_frame_of_extent "
-		     "kgenome_frame_facts kgenome_frame_facts_of kgenome_cfg_alloc kgenome_cfg_release kgenome_frame_cache_built kgenome_frame_cache_hits kgenome_frame_cache_refused kgenome_frame_cache_bytes kgenome_frame_cache_free kgenome_funcs_at kgenome_funcs_start "
+		     "kgenome_frame_facts kgenome_frame_facts_of kgenome_frame_returns kgenome_cfg_alloc kgenome_cfg_release kgenome_frame_cache_built kgenome_frame_cache_hits kgenome_frame_cache_refused kgenome_frame_cache_bytes kgenome_frame_cache_free kgenome_funcs_at kgenome_funcs_start "
 		     "kgenome_funcs_n_ranges kgenome_funcs_range kgenome_funcs_set_ranges kgenome_fn_trust_name kgenome_funcs_starts_in",
 	   .flags = 0, .backstop_s = 300, .steps_base = 100000u, .steps_per_byte = 64,
 	   .shape = FZ_REQ, .seeds = seeds, .run = run);

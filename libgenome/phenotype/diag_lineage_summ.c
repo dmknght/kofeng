@@ -437,8 +437,7 @@ int kgenome_lineage_noret(struct kgenome_lineage *L, uint32_t fi)
 	struct kgenome_lineage_fn fn;
 	struct kgenome_frame own;
 	const struct kgenome_frame *fr;
-	uint32_t b;
-	int bad = 0;
+	int back;
 
 	if (L->noret_fn[fi])
 		return L->noret_fn[fi] == 1u;
@@ -449,12 +448,9 @@ int kgenome_lineage_noret(struct kgenome_lineage *L, uint32_t fi)
 	fr = kgenome_frame_of_extent(L->frames, &L->fsrc, fn.off, fn.len, &own);
 	if (!fr)
 		return 0;
-	if (fr->state == KGENOME_FRAME_OK && fr->cfg.n_all && kgenome_frame_facts_of(fr, &L->fsrc)) {
-		for (b = 0; b < fr->cfg.n_all; b++)
-			if (fr->cfg.b[b].reach)
-				bad |= (fr->bits[b] & (KGENOME_FRAME_B_RET | KGENOME_FRAME_B_LEAVES | KGENOME_FRAME_B_RUNS_OUT)) != 0;
-		L->noret_fn[fi] = (uint8_t)(bad ? 2u : 1u);
-	}
+	back = kgenome_frame_returns(fr, &L->fsrc);
+	if (back >= 0)
+		L->noret_fn[fi] = (uint8_t)(back ? 2u : 1u);
 	kgenome_frame_release(&own, &L->fsrc.mem);
 	return L->noret_fn[fi] == 1u;
 }

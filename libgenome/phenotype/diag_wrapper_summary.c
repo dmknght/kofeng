@@ -4,6 +4,7 @@
  * files share.
  */
 #include "diag_wrapper_private.h"
+#include "frame.h"
 
 /* ---- kgenome_diag_wrapper_summarise one wrapper ------------------------------------------------- */
 
@@ -48,11 +49,6 @@ int kgenome_diag_wrapper_site_wrapped(const struct kgenome_diag_scan *s, uint64_
 
 /* One path through a wrapper that ended in a syscall or a call to a wrapper,
  * turned into a summary. 1 when it says something about the parameters. */
-/* KNOWN DEFECT LE-D3 (2026-11-17, Inference) [sev M]: a function whose straight line meets a wrapper call first is summarised by summarise_end as a wrapper of that call,
- * though it does more after it (M: 830 false net-open nodes in main at calls of user functions beginning with socket(), 978 nodes at non-capability lines, 144 static builds).
- * Trigger: gcc/clang -static, f() { socket(2,1,0); connect(..); write(..); } called from main. Effect: a producer node at every call of f; f's own call has none (superseded).
- * Reproducer: /mnt/games/normtest/lin_truth kit/node_audit.py static (e.g. s2 gcc_O2_64_static 0x4015a1). Which rule accepts it (constants vs parameters) is not located: Inference.
- * Fix: a function is a wrapper only when the path to the call is its whole body (nothing after the call but the return). */
 static int summarise_end(struct kgenome_diag_wrapper_ctx *c, struct kgenome_diag_wrapper_frame *f, uint64_t entry,
 			 const struct kgenome_diag_wrapper_insn *in, struct kgenome_diag_wrapper_summary *callee,
 			 struct kgenome_diag_wrapper_summary *out)
@@ -223,6 +219,192 @@ static int pend_room(struct kgenome_diag_wrapper_ctx *c, unsigned n_pend)
 	return 1;
 }
 
+/*
+ * ---- ONE JOB: DOES A FUNCTION ENTER A KERNEL ----------------------------------------------------------
+ *
+ * A function whose straight line ends in a call of a wrapper is a wrapper of that call only if the call is its whole job (diag_wrapper.c):
+ * the functions it calls on the way there, and on the way from the call to its return, enter no kernel. A callee is asked through the
+ * object's products, not read here: it is a FUNCTION of the table (kgenome_funcs_start, trust not NONE), and its FRAME (frame.h: the graph,
+ * the reachable blocks, their calls and system calls, the facts of their instructions) has no reachable system call, no reachable block that
+ * leaves the function (a tail jump, a branch through a register), no indirect call, and every direct call it makes is to a function that is
+ * quiet itself or never comes back (kgenome_frame_returns: a path that calls __stack_chk_fail or abort ends there). The answer does not depend on the wrapper table, so a level that adds a wrapper never changes it (the levels stay a
+ * fixpoint). Memoised per function of the table. A callee that is no function of the table (code no metadata or descent partitioned), a frame
+ * that could not be made, a chain deeper than KGENOME_DIAG_WRAPPER_QUIET_DEPTH, or a function met again while it is being read (recursion) is
+ * not shown quiet - the safe answer, which costs a wrapper and never makes a false one.
+ *
+ * WHY (LE-D3, 2026-11-17, M: tests/lib/genome/lineage_sites.c t_truth_wrapper_job): the summary stopped at the first call of a wrapper, and
+ * the socket wrapper's summary maps r8 and r9 - which it never sets - to the kernel's arguments 4 and 5, so a function that called it with
+ * constants and did more afterwards had "parameters" (its own untouched r8 and r9) and was a wrapper: lin_truth found 830 net-open nodes at
+ * calls of user functions in main (144 static builds), and the socket call inside them had none. musl's cancellable wrappers call
+ * __syscall_ret after the call (errno, no kernel): that is quiet, and they stay wrappers.
+ */
+#define KGENOME_DIAG_WRAPPER_QUIET_DEPTH 6u
+
+/* What a callee is to ONE JOB: it comes back and enters no kernel (QUIET), it never comes back (NORET: a path that calls it ends there - the
+ * stack protector's __stack_chk_fail, abort; what it does on the way out is not the caller's job), or neither shown (BUSY). */
+enum { WQ_UNASKED = 0, WQ_QUIET, WQ_NORET, WQ_BUSY, WQ_READING };
+
+static int quiet_fn(struct kgenome_diag_wrapper_ctx *c, uint64_t fn, unsigned depth);
+
+/* The direct calls of the reachable blocks of a frame: each to a function that is quiet or never comes back. The instruction of a call is read
+ * again through the walk's reader at its block (the frame keeps the graph, not the instructions). */
+static int quiet_calls(struct kgenome_diag_wrapper_ctx *c, const struct kgenome_frame *fr, unsigned depth)
+{
+	uint32_t b, k;
+
+	for (b = 0; b < fr->cfg.n_all; b++) {
+		const struct kgenome_cfg_block *bl = &fr->cfg.b[b];
+		struct kgenome_diag_wrapper_isrc it;
+		struct kgenome_diag_wrapper_insn in;
+		uint32_t at = 0;
+
+		if (!bl->reach || !bl->n_call)
+			continue;
+		kgenome_diag_wrapper_isrc_walk(&it, c, fr->off + bl->at);
+		for (k = bl->call_first; k < bl->call_first + bl->n_call; k++) {
+			const struct kgenome_cfg_call *cl = &fr->cfg.call[k];
+
+			if (cl->kind == KGENOME_CFG_CK_INDIRECT || cl->kind == KGENOME_CFG_CK_SYSCALL || cl->insn < bl->first)
+				return WQ_BUSY;
+			for (; at <= cl->insn - bl->first; at++)
+				if (!kgenome_diag_wrapper_isrc_next(&it, &in))
+					return WQ_BUSY;
+			if (in.op != KGENOME_CELL_CALL || (in.flags & KGENOME_CELL_F_INDIRECT) || in.target == KGENOME_BROKEN)
+				return WQ_BUSY;
+			if (in.target == in.at + in.len || in.target == fr->off)
+				continue;       /* the get-pc idiom; a call of itself */
+			if (quiet_fn(c, in.target, depth + 1u) == WQ_BUSY)
+				return WQ_BUSY;
+		}
+	}
+	return WQ_QUIET;
+}
+
+static int quiet_frame(struct kgenome_diag_wrapper_ctx *c, const struct kgenome_func_set *fs, uint32_t fi, unsigned depth)
+{
+	const struct kgenome_frame_src src = { .obj = c->obj, .base = c->base, .size = c->size, .fs = fs, .wk = c->wk };
+	const struct kgenome_frame *fr = kgenome_frame_get(kgenome_diag_frames(c->s), &src, fi);
+	const int back = kgenome_frame_returns(fr, &src);
+	uint32_t b;
+
+	if (back < 0)
+		return WQ_BUSY;
+	if (!back)
+		return WQ_NORET;
+	if (fr->cfg.n_sys)
+		return WQ_BUSY;
+	for (b = 0; b < fr->cfg.n_all; b++)
+		if (fr->cfg.b[b].reach && (fr->bits[b] & KGENOME_FRAME_B_LEAVES))
+			return WQ_BUSY;
+	return quiet_calls(c, fr, depth);
+}
+
+/* WQ_QUIET, WQ_NORET or WQ_BUSY for the function that starts at `fn`. */
+static int quiet_fn(struct kgenome_diag_wrapper_ctx *c, uint64_t fn, unsigned depth)
+{
+	const struct kgenome_func_set *fs = kgenome_diag_funcs(c->s, c->obj);
+	const uint32_t fi = kgenome_funcs_start(fs, fn);
+	int q;
+
+	if (fi == KGENOME_FUNCS_NONE || fs->v[fi].trust == KGENOME_FN_TRUST_NONE || depth > KGENOME_DIAG_WRAPPER_QUIET_DEPTH)
+		return WQ_BUSY;
+	if (!c->quiet) {
+		if (!kgenome_diag_wrapper_charge(c, fs->n))
+			return WQ_BUSY;
+		c->quiet = calloc(fs->n, 1);
+		if (!c->quiet) {
+			kgenome_diag_note(c->s, KGENOME_NOMEM);
+			return WQ_BUSY;
+		}
+	}
+	if (c->quiet[fi] == WQ_READING)
+		return WQ_BUSY;
+	if (c->quiet[fi] != WQ_UNASKED)
+		return c->quiet[fi];
+	c->quiet[fi] = WQ_READING;
+	q = quiet_frame(c, fs, fi, depth);
+	c->quiet[fi] = (uint8_t)q;
+	return q;
+}
+
+/* The calls a path made before it met the wrapper (the summary's pending record keeps them): every one to a function that comes back and enters
+ * no kernel (a path through one that never comes back does not reach the wrapper). */
+static int quiet_before(struct kgenome_diag_wrapper_ctx *c, const uint64_t *pre, unsigned n_pre, int more)
+{
+	unsigned i;
+
+	if (more)
+		return 0;
+	for (i = 0; i < n_pre; i++)
+		if (quiet_fn(c, pre[i], 0) != WQ_QUIET)
+			return 0;
+	return 1;
+}
+
+/*
+ * From just after the call of a wrapper to the function's return: does every path enter no kernel and call nothing that does. The paths are
+ * this one and the forward branches inside the span (as the summary's own), at most `room` of them queued; a jump out of the span is a tail
+ * call, quiet when its target is; a path that runs out of the span or of the body bound has not reached the return, and the answer is no.
+ */
+static int rest_quiet(struct kgenome_diag_wrapper_ctx *c, uint64_t entry, uint64_t span, uint64_t from, unsigned body_max)
+{
+	uint64_t todo[KGENOME_DIAG_WRAPPER_PENDING_MIN];
+	unsigned n_todo = 1, n_insn = 0;
+
+	todo[0] = from;
+	while (n_todo) {
+		struct kgenome_diag_wrapper_isrc it;
+		struct kgenome_diag_wrapper_insn in;
+		int ended = 0;
+
+		kgenome_diag_wrapper_isrc_walk(&it, c, todo[--n_todo]);
+		while (!ended) {
+			if (++n_insn > body_max || !kgenome_diag_wrapper_isrc_next(&it, &in) || in.at < entry || in.at - entry >= span)
+				return 0;
+			if (kgenome_diag_wrapper_is_kernel_entry(c, &in))
+				return 0;
+			switch (in.op) {
+			case KGENOME_CELL_RET:
+				ended = 1;
+				break;
+			case KGENOME_CELL_CALL:
+				if ((in.flags & KGENOME_CELL_F_INDIRECT) || in.target == KGENOME_BROKEN)
+					return 0;
+				if (in.target != in.at + in.len) {
+					const int q = quiet_fn(c, in.target, 0);
+
+					if (q == WQ_BUSY)
+						return 0;
+					ended = q == WQ_NORET;  /* the path stops in it: what it does on the way out is no part of the job */
+				}
+				break;
+			case KGENOME_CELL_JMP:
+				if (in.flags & KGENOME_CELL_F_INDIRECT)
+					return 0;
+				if (in.target != KGENOME_BROKEN && in.target > in.at && in.target - entry < span) {
+					kgenome_diag_wrapper_isrc_seek(&it, in.target);
+					break;
+				}
+				if (in.target == KGENOME_BROKEN || quiet_fn(c, in.target, 0) == WQ_BUSY)
+					return 0;
+				ended = 1;              /* a tail call: its return is this function's */
+				break;
+			case KGENOME_CELL_JCC:
+			case KGENOME_CELL_LOOP:
+				if (in.target != KGENOME_BROKEN && in.target > in.at && in.target - entry < span) {
+					if (n_todo == KGENOME_DIAG_WRAPPER_PENDING_MIN)
+						return 0;       /* more arms than are held: not shown quiet */
+					todo[n_todo++] = in.target;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	}
+	return 1;
+}
+
 /* The summaries of one call, written into the walk's table (valid until the next
  * kgenome_diag_wrapper_summarise): at most `var_max` of them. */
 unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint64_t entry, struct kgenome_diag_wrapper_tseen *seen, int holds_site)
@@ -280,6 +462,18 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 			pend[0].f.reg[p64[i]].t = KGENOME_DIAG_WRAPPER_V_PARAM;
 			pend[0].f.reg[p64[i]].v = i;
 		}
+		/*
+		 * AND THE STACK: the seventh parameter on is above the return address. glibc's cancellable system calls pass the NUMBER there
+		 * (__syscall_cancel(a1..a6, nr), __internal_syscall_cancel reads it at [rsp+8] of its entry), and the six arguments and the number
+		 * are what a system call has. Without it the number was unknown at every level, no call of read/write/open/connect/send of a static
+		 * glibc had a node, and the one `syscall` they share stood for all of them (LE-D4). Parameters 6 and 7: glibc's
+		 * __syscall_cancel_arch, the deepest of them, takes the cancel word, the number and six arguments - two words above the registers (R).
+		 */
+		for (i = 0; i < KGENOME_DIAG_WRAPPER_STACK_PARAMS; i++) {
+			struct kgenome_diag_wrapper_val v = { KGENOME_DIAG_WRAPPER_V_PARAM, 0, (int64_t)(6u + i) };
+
+			kgenome_diag_wrapper_slot_put(c, &pend[0].f, (int32_t)(8u + 8u * i), v);
+		}
 	} else {
 		/* cdecl: the return address is at offset 0 and the arguments above it */
 		for (i = 0; i < 8; i++) {
@@ -303,6 +497,8 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 	}
 	pend[0].at = entry;
 	pend[0].n = 0;
+	pend[0].n_pre = 0;
+	pend[0].pre_more = 0;
 	n_pend = 1;
 	while (n_pend && n_out < var_max) {
 		struct kgenome_diag_wrapper_pending *p;
@@ -319,10 +515,15 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 		struct kgenome_diag_wrapper_frame fcur;
 		struct kgenome_diag_wrapper_frame *f = &fcur;
 		unsigned n_insn;
+		uint64_t pre[KGENOME_DIAG_WRAPPER_PRE];
+		uint8_t n_pre, pre_more;
 
 		pend = c->pend;         /* it may have grown since the last path */
 		p = &pend[--n_pend];
 		n_insn = p->n;
+		n_pre = p->n_pre;
+		pre_more = p->pre_more;
+		memcpy(pre, p->pre, sizeof pre);
 		kgenome_diag_wrapper_frame_copy(&fcur, &p->f);
 		kgenome_diag_wrapper_isrc_walk(&it, c, p->at);
 		for (;;) {
@@ -363,6 +564,13 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 					n_out++;
 				break;
 			}
+			/*
+			 * ONE JOB (see rest_quiet): a call of a wrapper is the function's job only when nothing it called before it on this path, and
+			 * nothing from it to the return, enters a kernel. A jump to a wrapper is the end of the function by itself.
+			 */
+			if (callee && (!quiet_before(c, pre, n_pre, pre_more) ||
+				       (in.op == KGENOME_CELL_CALL && !rest_quiet(c, entry, span, in.at + in.len, body_max))))
+				break;
 			if (callee) {
 				uint32_t base = kgenome_diag_wrapper_summary_pos(c, in.target);
 
@@ -395,6 +603,11 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 			 * files that set O_NONBLOCK produced no node for it.
 			 */
 			if (in.op == KGENOME_CELL_CALL) {
+				/* (asked only if the path ends in a call of a wrapper: quiet_before) */
+				if ((in.flags & KGENOME_CELL_F_INDIRECT) || in.target == KGENOME_BROKEN || n_pre == KGENOME_DIAG_WRAPPER_PRE)
+					pre_more = 1;
+				else if (in.target != in.at + in.len)
+					pre[n_pre++] = in.target;
 				kgenome_diag_wrapper_frame_call_unknown(c, f);
 				continue;
 			}
@@ -410,6 +623,9 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 				kgenome_diag_wrapper_frame_copy(&pend[n_pend].f, f);
 				pend[n_pend].at = in.target;
 				pend[n_pend].n = n_insn;
+				pend[n_pend].n_pre = n_pre;
+				pend[n_pend].pre_more = pre_more;
+				memcpy(pend[n_pend].pre, pre, sizeof pre);
 				n_pend++;
 				continue;
 			}

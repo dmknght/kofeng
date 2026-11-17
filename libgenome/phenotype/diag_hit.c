@@ -338,6 +338,32 @@ const struct kgenome_diag_in *kgenome_diag_in_at(const struct kgenome_diag_scan 
 	return NULL;
 }
 
+int kgenome_diag_in_flag(struct kgenome_diag_scan *s, uint32_t node, uint32_t k, uint8_t flag)
+{
+	uint32_t n, lo, i;
+
+	if (!s || node >= s->n_hit)
+		return 0;
+	if (k < s->hit[node].n_in) {
+		s->hit[node].in[k].flags |= flag;
+		return 1;
+	}
+	k -= s->hit[node].n_in;
+	if (s->n_xin_ord == s->n_xin) {
+		lo = xin_run(s, node, &n);
+		if (k >= n)
+			return 0;
+		s->xin[s->xin_ord[lo + k]].in.flags |= flag;
+		return 1;
+	}
+	for (i = 0; i < s->n_xin; i++)
+		if (s->xin[i].hit == node && !k--) {
+			s->xin[i].in.flags |= flag;
+			return 1;
+		}
+	return 0;
+}
+
 /* The input (from, role, kind) of the node, wherever it is kept, or NULL. */
 static struct kgenome_diag_in *in_find(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h, uint16_t from, uint8_t role, uint8_t kind)
 {
@@ -395,7 +421,7 @@ int kgenome_diag_note_in_how(struct kgenome_diag_scan *s, struct kgenome_diag_hi
 	in.role = role;
 	in.how = how;
 	in.kind = kind;
-	if (h->n_in < 4u && role != KGENOME_DIAG_ROLE_NUMBER) {
+	if (h->n_in < 4u && role != KGENOME_DIAG_ROLE_NUMBER && role != KGENOME_DIAG_ROLE_CONTENT) {
 		h->in[h->n_in++] = in;
 		return 0;
 	}

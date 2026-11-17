@@ -1079,6 +1079,177 @@ static void lit_links(void)
 	kv_graph_free(&g);
 }
 
+/*
+ * PROGRAM ORDER, LABELS, A CONTROL LINK (the Lineage tab, owner 2026-11-17: "the representation is not correct"). The stager's shape as a constructed
+ * graph, nodes in program order (alloc, socket, connect, sleep, read, exec): read <- alloc buffer, socket fd; connect fd; read number <- connect (CONTROL);
+ * exec target <- alloc, content <- read; and a back edge exec -> socket. Asserted: no box stands above one listed before it, exec is strictly below read,
+ * the back edge is drawn retreating, every forward edge's role word stands beside its arrowhead, and the number link's straight run is dashed.
+ * Why the old tests missed it: (a) the lineage drawing was only ever tested with sources_first, which ranks by longest path; no edge had a label.
+ */
+static void lineage_order(void)
+{
+	static struct tg t;
+	static const char *const lab[] = { "buffer", "target", "fd", "fd", "number", "content", "x" };
+	struct kv_graph_in in;
+	struct kv_graph g;
+	uint32_t i, w, q;
+	int dashed = 0;
+
+	memset(&t, 0, sizeof t);
+	t.n = 6;
+	add(&t, 0, 4, C0, L0);  /* alloc -> read buffer */
+	add(&t, 0, 5, C0, L0);  /* alloc -> exec target */
+	add(&t, 1, 2, C0, L0);  /* socket -> connect fd */
+	add(&t, 1, 4, C0, L0);  /* socket -> read fd */
+	add(&t, 2, 4, C0, L0);  /* connect -> read number */
+	add(&t, 4, 5, C0, L0);  /* read -> exec content */
+	add(&t, 5, 1, C0, L0);  /* a back edge: exec -> socket */
+	for (i = 0; i < t.ne; i++)
+		t.e[i].label = lab[i];
+	t.e[4].carry = KV_GCA_CONTROL;
+	in_of(&in, &t);
+	in.sources_first = 1;
+	in.ordered = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	for (i = 1; i < t.n; i++) {     /* node 3 is on no edge: it stands at the side of the first rank (ordered_shape) */
+		const struct kv_graph_box *a = box_of(&g, i - 1u == 3u ? 2u : i - 1u), *b = box_of(&g, i);
+
+		if (i == 3u)
+			continue;
+		CKM(a && b && b->y >= a->y, "ordered: B%u (y %d) stands above B%u (y %d)", i, b ? b->y : -1, i - 1u, a ? a->y : -1);
+	}
+	CKM(box_of(&g, 5) && box_of(&g, 4) && box_of(&g, 5)->y > box_of(&g, 4)->y, "ordered: exec is not below read");
+	for (w = 0; w < g.n_wire; w++) {
+		const struct kv_graph_wire *o = &g.wire[w];
+
+		if (o->edge == 6u) {
+			CKM(o->back && o->loop == KV_GL_RETREAT && o->arrow == '^', "the back edge is drawn retreating");
+			continue;
+		}
+		CKM(o->bx == o->ax + 2 && o->blen == strlen(lab[o->edge]), "edge %u: no label beside its arrowhead", o->edge);
+		for (q = 0; o->bx >= 0 && q < o->blen; q++) {
+			const struct kv_graph_cell *c = &g.cell[(size_t)o->ay * g.width + (uint32_t)(o->bx + (int32_t)q)];
+
+			CKM(c->g == KV_GG_LABEL && c->ch == lab[o->edge][q], "edge %u: label cell %u is '%c'", o->edge, q, c->ch);
+		}
+		if (o->edge == 4u)
+			for (q = 0; q < o->n_seg; q++) {
+				const struct kv_graph_seg *s = &g.seg[o->seg0 + q];
+
+				int32_t y;
+
+				for (y = s->y0; s->x0 == s->x1 && y < s->y1; y++) {      /* the straight cells of a vertical run (a corner is the same for every kind) */
+					const struct kv_graph_cell *c = &g.cell[(size_t)y * g.width + (uint32_t)s->x0];
+					char tmp[4];
+
+					if (c->g == KV_GG_LINE && (c->mask & (KV_GM_E | KV_GM_W)) == 0u)
+						dashed += !strcmp(cell_glyph(c, 1, tmp), ";") ? 1 : -100;
+				}
+			}
+	}
+	CKM(dashed > 0, "the number link's straight run is not dashed");
+	CK(g.n_label_cut == 0u);
+	if (dump_k == -2) {
+		char *d = draw(&g, 1);
+
+		fputs(d, stdout);
+		free(d);
+	}
+	kv_graph_free(&g);
+}
+
+/* every segment of a wire is vertical, and it is one run: the edge is a straight line from the source's bottom to the arrowhead */
+static int wire_straight(const struct kv_graph *g, const struct kv_graph_wire *o)
+{
+	uint32_t q;
+
+	for (q = 0; q < o->n_seg; q++)
+		if (g->seg[o->seg0 + q].x0 != g->seg[o->seg0 + q].x1)
+			return 0;
+	return o->n_seg >= 1u;
+}
+
+/*
+ * THE ORDERED DRAWING'S SHAPE (owner 2026-11-17: "each node has 1-2 connections, why such a mess"; "draw as many edges as a node has links"). On constructed
+ * graphs in ordered mode with labels:
+ *   CHAIN     a -> b -> c, one labelled link each: both edges are straight vertical lines, no crossing;
+ *   PARALLEL  a -> b twice ("fd" and "number", the second a control link): two wires, each straight, in two columns, each with its own label, the number dashed;
+ *   UNLINKED  a node on no edge stands in the first rank, right of the linked ones, and draws no line.
+ * Why the old tests missed it: (b) the ordered mode was tested on one graph for order only; the ports of a pair were spread for the labels at the target
+ * and not at the source, so two parallel links bent into each other.
+ */
+static void ordered_shape(void)
+{
+	static struct tg t;
+	struct kv_graph_in in;
+	struct kv_graph g;
+	uint32_t w, x_fd = 0, x_nr = 0;
+	int dashed = 0;
+
+	memset(&t, 0, sizeof t);
+	t.n = 3;
+	add(&t, 0, 1, C0, L0);
+	add(&t, 1, 2, C0, L0);
+	t.e[0].label = "fd";
+	t.e[1].label = "content";
+	in_of(&in, &t);
+	in.ordered = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	for (w = 0; w < g.n_wire; w++)
+		CKM(wire_straight(&g, &g.wire[w]) && g.wire[w].bx == g.wire[w].ax + 2, "chain: edge %u is not one straight labelled line", g.wire[w].edge);
+	CK(crossings(&g) == 0u);
+	kv_graph_free(&g);
+
+	memset(&t, 0, sizeof t);
+	t.n = 2;
+	add(&t, 0, 1, C0, L0);
+	add(&t, 0, 1, C0, L0);
+	t.e[0].label = "fd";
+	t.e[1].label = "number";
+	t.e[1].carry = KV_GCA_CONTROL;
+	in_of(&in, &t);
+	in.ordered = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	CK(g.n_wire == 2u);
+	for (w = 0; w < g.n_wire; w++) {
+		const struct kv_graph_wire *o = &g.wire[w];
+
+		CKM(wire_straight(&g, o), "parallel: edge %u is not straight", o->edge);
+		CKM(o->bx == o->ax + 2 && o->blen == strlen(t.e[o->edge].label), "parallel: edge %u has no label of its own", o->edge);
+		if (o->edge == 0u)
+			x_fd = (uint32_t)o->ax;
+		else
+			x_nr = (uint32_t)o->ax;
+		if (o->edge == 1u) {
+			const struct kv_graph_seg *sg = &g.seg[o->seg0];
+			char tmp[4];
+
+			dashed = !strcmp(cell_glyph(&g.cell[(size_t)sg->y0 * g.width + (uint32_t)sg->x0], 1, tmp), ";");
+		}
+	}
+	CKM(x_fd != x_nr, "parallel: the two links share one column");
+	if (dump_k == -2) {
+		char *d = draw(&g, 1);
+
+		fputs(d, stdout);
+		free(d);
+	}
+	CK(dashed);
+	CK(crossings(&g) == 0u);
+	kv_graph_free(&g);
+
+	memset(&t, 0, sizeof t);
+	t.n = 4;
+	add(&t, 0, 1, C0, L0);
+	add(&t, 1, 3, C0, L0);          /* node 2 is on no edge */
+	in_of(&in, &t);
+	in.ordered = 1;
+	CK(kv_graph_layout(&in, &g) == KV_GS_OK);
+	CKM(box_of(&g, 2) && box_of(&g, 0) && box_of(&g, 2)->rank == 0u && box_of(&g, 2)->x > box_of(&g, 0)->x, "unlinked: node 2 is not at the side of the first rank");
+	CKM(box_of(&g, 3) && box_of(&g, 1) && box_of(&g, 3)->rank == box_of(&g, 1)->rank + 1u, "unlinked: it moved the chain");
+	kv_graph_free(&g);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "--dump"))
@@ -1095,6 +1266,10 @@ int main(int argc, char **argv)
 	no_avoidable_crossing();
 	link_kinds();
 	lit_links();
+	if (argc == 2 && !strcmp(argv[1], "--dump-lineage"))
+		dump_k = -2;
+	lineage_order();
+	ordered_shape();
 	if (fails) {
 		printf("kx_graph: %d failure(s)\n", fails);
 		return 1;

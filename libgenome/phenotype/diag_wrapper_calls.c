@@ -13,8 +13,8 @@ static struct kgenome_diag_wrapper_val kgenome_diag_wrapper_call_param(const str
 
 	if (i >= KGENOME_DIAG_WRAPPER_REG_PARAM)
 		return i - KGENOME_DIAG_WRAPPER_REG_PARAM < 16u ? f->reg[i - KGENOME_DIAG_WRAPPER_REG_PARAM] : kgenome_diag_wrapper_unk;
-	if (c->wide)
-		return i < 6u ? f->reg[p64[i]] : kgenome_diag_wrapper_unk;
+	if (c->wide)                    /* the seventh on are on the stack, the first of them at the top (the return address is not pushed yet) */
+		return i < 6u ? f->reg[p64[i]] : kgenome_diag_wrapper_slot_get(f, -f->sp + (int32_t)(8u * (i - 6u)));
 	/* cdecl: the last value pushed is the first argument. At the call the
 	 * stack pointer has not yet taken the return address, so argument i is
 	 * i words above the top. */
@@ -60,8 +60,12 @@ void kgenome_diag_wrapper_eval_call(const struct kgenome_diag_wrapper_ctx *c, st
 	}
 }
 
+/*
+ * The node a call to a wrapper makes, and what the call hands back. `in_fn` says the call is in a FUNCTION of the object's table (see
+ * kgenome_diag_wrapper_pass_b): only there are the caller's values carried, so only there does the node get inputs and the call a result.
+ */
 static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrapper_ctx *c, struct kgenome_diag_wrapper_frame *f, struct kgenome_diag_wrapper_summary *ws,
-				const struct kgenome_diag_wrapper_insn *in)
+				const struct kgenome_diag_wrapper_insn *in, int in_fn)
 {
 	struct kgenome_diag_scan *s = c->s;
 	struct kgenome_diag_wrapper_effect e;
@@ -75,12 +79,8 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 	struct kgenome_diag_hit *h;
 
 	kgenome_diag_wrapper_eval_call(c, f, ws, &e);
-	/* KNOWN DEFECT LE-D4 (2026-11-17, Inference) [sev M]: emit_call_node makes no node when the number is not a constant here; glibc's cancellable calls (open/read/write/connect/send)
-	 * pass it as a stack argument to __syscall_cancel, so the user's calls get no node and ONE sweep node at __internal_syscall_cancel's `syscall` stands for all of them (M). Trigger: static glibc >= 2.34.
-	 * Effect: 34 sites hold two nodes (mem-read + file-open), 31 self links, fd/buffer MAY from every producer of the program, PROVEN from one (144 static builds).
-	 * Reproducer: lin_truth res/s2/gcc_O2_64_static.sym.dump node at 0x3b4c5. Fix: carry the stack-passed number through the helper level so the node is made at the user call. */
 	if (e.nr.t != KGENOME_DIAG_WRAPPER_V_CONST)
-		return kgenome_diag_wrapper_unk;                     /* which system call is not known */
+		return kgenome_diag_wrapper_unk;                     /* which system call is not known: no node (UNKNOWN, never a guess - see supersede_param_sites) */
 	nr = (uint64_t)e.nr.v;
 	for (i = 0; i < 6u; i++) {
 		av[i] = e.arg[i];
@@ -128,15 +128,19 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 	if ((cap == KGENOME_NUCLEO_ALLOC && !(have & (1u << 2))) ||
 	    (cap == KGENOME_NUCLEO_NET_OPEN && (have & 3u) != 3u))
 		h->bits |= KGENOME_DIAG_H_ARG_UNKNOWN;
-	/* KNOWN DEFECT LE-D2 (2026-11-17, M) [sev M]: emit_call_node writes every input through kgenome_diag_note_in, i.e. PROVEN, though pass B walks in address order taking no branch (diag_wrapper.c: "a MAY link").
-	 * Trigger: a value made on two arms (socket on one, open on the other) and consumed after the join, in a static program. Effect: the arm laid out last is linked PROVEN, the other not at all.
-	 * Reproducer: tests/lib/genome/lineage_sites.c t_truth_two_arms (green until fixed); lin_truth's static cells: 226 of 1724 scored links are such PROVEN overclaims. Fix: write these MAY (kgenome_diag_note_in_how). */
-	for (i = 0; i < 6u; i++) {
+	/*
+	 * THE INPUTS ARE MAY. This walk reads the function in address order and takes no branch (diag_wrapper.c), so what it carries to the
+	 * call is what the code laid out last before it left there: one path, not every path. Whether every path reaching the call gives this
+	 * one producer is the lineage stage's question (FLOW joins the paths over the function's graph, diag_lineage.c), and a link it proves
+	 * on every path it says PROVEN over this MAY (kgenome_diag_note_in_seen). (LE-D2: they were written PROVEN, and a value made on two
+	 * arms was linked PROVEN from the arm laid out last: tests/lib/genome/lineage_sites.c t_truth_two_arms.)
+	 */
+	for (i = 0; i < 6u && in_fn; i++) {
 		uint8_t role = kgenome_diag_role_of_arg(cap, i);
 
 		if (role != KGENOME_DIAG_ROLE_NONE && av[i].t == KGENOME_DIAG_WRAPPER_V_NODE)
-			kgenome_diag_note_in(c->s, h, av[i].node, role,
-					 KGENOME_DIAG_KIND_PRODUCED);
+			(void)kgenome_diag_note_in_how(c->s, h, av[i].node, role,
+						       KGENOME_DIAG_KIND_PRODUCED, KGENOME_DIAG_LINK_MAY);
 	}
 	if (bits == 64 && nm && kgenome_nucleo_sys_zero_on_success(nm))
 		h->bits |= KGENOME_DIAG_H_ZERO_OK;
@@ -152,7 +156,7 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 			if (nb)
 				kgenome_diag_hit_nonblock(s, in->at, r.node);
 		}
-		return r;
+		return in_fn ? r : kgenome_diag_wrapper_unk;
 	}
 	return kgenome_diag_wrapper_unk;
 }
@@ -232,12 +236,64 @@ int kgenome_diag_wrapper_site_made(struct kgenome_diag_wrapper_ctx *c, uint64_t 
  * which is then the one callers use. One pass over the nodes against the sorted
  * set of such sites; it used to be a pass over the nodes, and one over the call
  * targets, for each wrapper. */
+/*
+ * A KERNEL ENTRY WHOSE NUMBER ITS CALLERS GIVE (a wrapper summarised with the number a parameter, and no path of it with a number of its own:
+ * glibc's __internal_syscall_cancel, which every cancellable call of the program goes through) is no one system call: what each call of the
+ * program is was decided at the call, from the caller's number, and a call whose number is not known is unknown there. A node any route makes
+ * at the entry speaks for all of them at once (LE-D4: the sweep's mem-read and file-open nodes at glibc's shared `syscall`, the file-open taking
+ * an fd from itself; the emulate route's node of the one call its run arrived with), and is set aside once every route has answered
+ * (kgenome_diag_wrapper_param_settle); an opaque node (no capability) stays, saying the number is not known. Recorded here from the wrapper
+ * table, by the summaries' own sites.
+ */
+static void supersede_param_sites(struct kgenome_diag_wrapper_ctx *c)
+{
+	struct kgenome_diag_scan *s = c->s;
+	uint32_t i, k;
+
+	for (i = 0; i < c->n_ws; i++) {
+		const struct kgenome_diag_wrapper_summary *w = &c->ws[i];
+		struct kgenome_diag_wrapper_isrc it;
+		struct kgenome_diag_wrapper_insn in;
+		int own = 0;
+
+		if (w->flow != KGENOME_DIAG_WRAPPER_FLOW_NONE || w->nr.t != KGENOME_DIAG_WRAPPER_V_PARAM)
+			continue;
+		for (k = 0; k < c->n_ws && !own; k++)
+			own = c->ws[k].site == w->site && c->ws[k].nr.t == KGENOME_DIAG_WRAPPER_V_CONST;
+		if (own)
+			continue;
+		kgenome_diag_wrapper_isrc_walk(&it, c, w->site);
+		if (!kgenome_diag_wrapper_isrc_next(&it, &in) || in.at != w->site || !kgenome_diag_wrapper_is_kernel_entry(c, &in))
+			continue;               /* a call of an inner wrapper: its node, if any, is a caller's statement */
+		if (!kgenome_diag_wrapper_push_u64(&s->param_site, &s->n_param_site, &s->cap_param_site, w->site)) {
+			kgenome_diag_note(s, KGENOME_NOMEM);
+			return;
+		}
+	}
+}
+
+void kgenome_diag_wrapper_param_settle(struct kgenome_diag_scan *s)
+{
+	uint32_t i, j;
+
+	if (!s->n_param_site)
+		return;
+	qsort(s->param_site, s->n_param_site, sizeof *s->param_site, kof_cmp_u64);
+	for (j = 0; j < s->n_hit; j++)
+		if (s->hit[j].cap != KGENOME_NUCLEO_NONE && s->hit[j].at != KGENOME_BROKEN) {
+			i = kof_lower_bound_u64(s->param_site, s->n_param_site, sizeof *s->param_site, 0, s->hit[j].at);
+			if (i < s->n_param_site && s->param_site[i] == s->hit[j].at)
+				s->hit[j].bits |= KGENOME_DIAG_H_SUPERSEDED;
+		}
+}
+
 void kgenome_diag_wrapper_supersede(struct kgenome_diag_wrapper_ctx *c)
 {
 	struct kgenome_diag_scan *s = c->s;
 	uint64_t *back = NULL, *set = NULL;
 	uint32_t n_back = 0, n_set = 0, i, j;
 
+	supersede_param_sites(c);
 	if (c->made_state == 0)
 		made_build(c);
 	if (!c->n_made && c->made_state == 1)
@@ -291,46 +347,88 @@ int kgenome_diag_wrapper_tgt_index(const struct kgenome_diag_wrapper_ctx *c, uin
 	return lo < c->wk->n_tgt && c->wk->tgt[lo] == at ? (int)lo : -1;
 }
 
-/* KNOWN DEFECT LE-D1 (2026-11-17, M) [sev M]: kgenome_diag_wrapper_pass_b resets the frame only at a direct-CALL target (wk->tgt), so a function reached only by a jump inherits the registers of the code laid out before it.
- * Trigger: i386 static, GCC -O2: a local function taking its argument in eax, entered by a tail jmp, after a function that ends in a jmp. Effect: a FALSE PROVEN link (send fd <- an open of another function).
- * Reproducer: tests/lib/genome/lineage_sites.c t_truth_tail_jump_carry (green until fixed); lin_truth s5/s6/s11 gcc_O2_32_static. Fix: reset at every start of the function table (kgenome_funcs_start) and after an unconditional jmp/ret. */
+/*
+ * THE PIECE OF THE FUNCTION TABLE AN INSTRUCTION IS IN: the function that holds it (kgenome_funcs_at, the one lookup in the table), the
+ * part of that function it is in, and where the piece ends - at the end of that part, or where the next entry or part of the table begins,
+ * whichever is first. Code no entry holds (padding between bodies) is a piece of its own, up to the next start. Asked when the walk enters
+ * a piece, so a function costs one lookup and not one per instruction. `in_fn` is a function the table vouches for: a unit of trust NONE is
+ * code no metadata or descent partitioned (fntab_build.c) and is not one.
+ */
+struct wrapper_piece {
+	uint64_t hi;            /* the first offset past the piece */
+	int in_fn;
+	int cur;                /* the call target the function starts at (its index in the walk's targets), or -1 */
+};
+
+static void piece_of(const struct kgenome_diag_wrapper_ctx *c, const struct kgenome_func_set *fs, uint64_t at,
+		     struct wrapper_piece *p)
+{
+	const uint32_t f = kgenome_funcs_at(fs, at);
+	uint64_t hi = UINT64_MAX;
+	uint32_t i, k, nr;
+
+	p->in_fn = 0;
+	p->cur = -1;
+	if (fs && fs->n) {
+		i = kof_lower_bound_u64(fs->v, fs->n, sizeof *fs->v, offsetof(struct kgenome_func, off), at + 1u);
+		if (i < fs->n)
+			hi = fs->v[i].off;
+	}
+	if (fs && fs->n_rng) {
+		i = kof_lower_bound_u64(fs->rng, fs->n_rng, sizeof *fs->rng, offsetof(struct kgenome_func_range, off), at + 1u);
+		if (i < fs->n_rng && fs->rng[i].off < hi)
+			hi = fs->rng[i].off;
+	}
+	if (f != KGENOME_FUNCS_NONE) {
+		nr = kgenome_funcs_n_ranges(fs, f);
+		for (k = 0; k < nr; k++) {
+			const struct kgenome_func_range r = kgenome_funcs_range(fs, f, k);
+
+			if (r.off <= at && at - r.off < r.len) {
+				if (r.off + r.len < hi)
+					hi = r.off + r.len;
+				break;
+			}
+		}
+		p->in_fn = fs->v[f].trust != KGENOME_FN_TRUST_NONE;
+		if (p->in_fn)
+			p->cur = kgenome_diag_wrapper_tgt_index(c, fs->v[f].off);
+	}
+	p->hi = hi > at ? hi : at + 1u;
+}
+
+/*
+ * PASS B: every call of a wrapper in the extent, in address order, with the caller's state carried from one instruction to the next.
+ *
+ * THE STATE IS ONE FUNCTION'S, AND THE FUNCTIONS ARE THE OBJECT'S TABLE (kgenome_diag_funcs: one partition, built once, read by everyone).
+ * The registers and slots are reset where the walk enters a piece of the table - an entry, a further part of a function, code between bodies -
+ * so nothing the code laid out before a function left in a register reaches it. (LE-D1: they were reset at direct-CALL targets only, a partition
+ * of the walk's own, and a function entered by a tail jump inherited the registers of the function before it - a FALSE PROVEN link from an open
+ * the write never sees: tests/lib/genome/lineage_sites.c t_truth_tail_jump_carry, lin_truth gcc -O2 -m32 -static.)
+ *
+ * A UNIT OF TRUST NONE IS NOT A FUNCTION: its calls of wrappers are nodes, but no value is carried between them there (no input, no result) -
+ * the same rule the lineage stage keeps (kgenome_lineage_fn_get). TODO(owner): default applied 2026-11-17 = no links in a NONE unit; the
+ * alternative is resetting at the walk's call targets inside it (the old rule, a second partition, with LE-D1's false links back there).
+ */
 void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
+	const struct kgenome_func_set *fs = kgenome_diag_funcs(c->s, c->obj);
 	struct kgenome_diag_wrapper_isrc it;
 	struct kgenome_diag_wrapper_insn in;
 	struct kgenome_diag_wrapper_frame f;
-	int cur = -1;                   /* the call target this code belongs to */
-	uint32_t ei;                    /* the first call target not before the code */
+	struct wrapper_piece pc;
 
+	pc.hi = 0;                      /* (no piece yet: the first instruction asks) */
+	pc.in_fn = 0;
+	pc.cur = -1;
 	kgenome_diag_wrapper_frame_reset(&f);
 	kgenome_diag_wrapper_isrc_scan(&it, c, seg, off, n);
-	/*
-	 * THE ENTRY TEST IS A MERGE, NOT A SEARCH. The instructions of one scan come
-	 * in increasing offset and the targets are sorted, so a position that only
-	 * moves forward answers "is this an entry" - a binary search per
-	 * instruction was ~90 Ir of a pass that costs ~300 per instruction.
-	 */
-	{
-		uint32_t lo = 0, hi = c->wk->n_tgt;
-
-		while (lo < hi) {
-			uint32_t mid = lo + (hi - lo) / 2u;
-
-			if (c->wk->tgt[mid] < off)
-				lo = mid + 1u;
-			else
-				hi = mid;
-		}
-		ei = lo;
-	}
 	while (!c->s->halt && kgenome_diag_wrapper_isrc_next(&it, &in)) {
 		struct kgenome_diag_wrapper_summary *ws;
 
-		while (ei < c->wk->n_tgt && c->wk->tgt[ei] < in.at)
-			ei++;
-		if (ei < c->wk->n_tgt && c->wk->tgt[ei] == in.at) {
+		if (in.at >= pc.hi || !pc.hi) {
+			piece_of(c, fs, in.at, &pc);
 			kgenome_diag_wrapper_frame_reset(&f);
-			cur = (int)ei;
 		}
 		/*
 		 * A FUNCTION THAT HANDS BACK WHAT IT MADE. Mirai builds its raw sockets
@@ -339,11 +437,11 @@ void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned se
 		 * is produced in another function. The helper's return value is the
 		 * node; the callers, in the second walk, take it from there.
 		 */
-		if (in.op == KGENOME_CELL_RET && cur >= 0 && c->fret &&
+		if (in.op == KGENOME_CELL_RET && pc.cur >= 0 && c->fret &&
 		    f.reg[KGENOME_CELL_REG_AX].t == KGENOME_DIAG_WRAPPER_V_NODE) {
-			if (!c->fret[cur] && c->fmiss && c->fmiss[cur])
+			if (!c->fret[pc.cur] && c->fmiss && c->fmiss[pc.cur])
 				c->need_round2 = 1;     /* a caller above asked too early */
-			c->fret[cur] = (uint32_t)f.reg[KGENOME_CELL_REG_AX].node + 1u;
+			c->fret[pc.cur] = (uint32_t)f.reg[KGENOME_CELL_REG_AX].node + 1u;
 		}
 		if (in.op == KGENOME_CELL_CALL) {
 			ws = (!(in.flags & KGENOME_CELL_F_INDIRECT) && in.target != KGENOME_BROKEN)
@@ -360,7 +458,7 @@ void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned se
 					for (v = base; v < c->n_ws &&
 						       kgenome_diag_wrapper_summary_at(c, v)->entry == in.target; v++) {
 						struct kgenome_diag_wrapper_val r = emit_call_node(c, &f,
-							kgenome_diag_wrapper_summary_at(c, v), &in);
+							kgenome_diag_wrapper_summary_at(c, v), &in, pc.in_fn);
 
 						if (r.t != KGENOME_DIAG_WRAPPER_V_UNK && ret.t == KGENOME_DIAG_WRAPPER_V_UNK)
 							ret = r;
@@ -375,7 +473,7 @@ void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned se
 				 * helper's later links, and a send on it could never reach the
 				 * IP_HDRINCL that made the socket raw-with-header.
 				 */
-				if (c->fret && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
+				if (pc.in_fn && c->fret && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
 				    in.target != KGENOME_BROKEN) {
 					int ti = kgenome_diag_wrapper_tgt_index(c, in.target);
 

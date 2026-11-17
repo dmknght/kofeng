@@ -32,7 +32,7 @@ static void put_seg(struct kv_graph *g, struct kv_graph_wire *wr, int32_t x0, in
 	g->n_seg++;
 }
 
-static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t kind, uint8_t sure)
+static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t kind, uint8_t sure, uint8_t carry)
 {
 	int32_t x = s->x0, y = s->y0;
 	const int dx = s->x1 > s->x0 ? 1 : s->x1 < s->x0 ? -1 : 0, dy = s->y1 > s->y0 ? 1 : s->y1 < s->y0 ? -1 : 0;
@@ -54,6 +54,7 @@ static void paint_line(struct kv_graph *g, const struct kv_graph_seg *s, uint8_t
 			if (!c->kind) {
 				c->kind = kind;
 				c->sure = sure;
+				c->carry = carry;
 			}
 		}
 		if (last)
@@ -167,7 +168,9 @@ int kv_graph_step_emit(struct kv_graph_ctx *c)
 		o->cond = w->cond;
 		o->loop = w->loop;
 		o->sure = w->sure;
+		o->carry = w->carry;
 		o->back = w->back;
+		o->bx = -1;
 		o->letter = w->cond == KV_GC_T ? 'T' : w->cond == KV_GC_F ? 'F' : 0;
 		o->ly = -1;
 		if (!w->back) {
@@ -228,7 +231,7 @@ int kv_graph_step_emit(struct kv_graph_ctx *c)
 		uint32_t q;
 
 		for (q = 0; q < o->n_seg; q++)
-			paint_line(g, &g->seg[o->seg0 + q], k, o->sure);
+			paint_line(g, &g->seg[o->seg0 + q], k, o->sure, o->carry);
 	}
 	for (e = 0; e < nw; e++) {
 		const struct kv_graph_wire *o = &wv[e];
@@ -244,6 +247,41 @@ int kv_graph_step_emit(struct kv_graph_ctx *c)
 
 			cl->g = KV_GG_ARROW;
 			cl->ch = o->arrow;
+		}
+	}
+	/* the labels last, beside their arrowheads, only on cells nothing else took (the ports were spread for them: kv_graph_step_ports) */
+	for (e = 0, nw = 0; e < W; e++) {
+		const struct kv_graph_wr *w = &L->wr[e];
+		struct kv_graph_wire *o;
+		uint32_t k;
+		int free_ = 1;
+
+		if (w->skip)
+			continue;
+		o = &wv[nw++];
+		if (!w->blen)
+			continue;
+		for (k = 0; k < w->blen + 1u && free_; k++) {
+			const int32_t x = o->ax + 1 + (int32_t)k;
+
+			free_ = x >= 0 && (uint32_t)x < g->width && o->ay >= 0 && (uint32_t)o->ay < g->height &&
+				g->cell[(size_t)o->ay * g->width + (uint32_t)x].g == KV_GG_EMPTY;
+		}
+		if (!free_) {
+			g->n_label_cut++;
+			continue;
+		}
+		o->bx = o->ax + 2;
+		o->blen = w->blen;
+		for (k = 0; k < w->blen; k++) {
+			struct kv_graph_cell *cl = &g->cell[(size_t)o->ay * g->width + (uint32_t)(o->bx + (int32_t)k)];
+			const char ch = w->label[k];
+
+			cl->g = KV_GG_LABEL;
+			cl->ch = ch >= 0x20 && ch < 0x7f ? ch : '?';
+			cl->kind = (uint8_t)(1u + o->loop * 3u + o->cond);
+			cl->sure = o->sure;
+			cl->carry = o->carry;
 		}
 	}
 	return TRY_OK;
@@ -274,7 +312,7 @@ unsigned kv_graph_cell_attr(const struct kv_graph_cell *c)
 /* The glyph of a line cell from the sides it connects to. The straight runs of a loop link are dotted and those of a retreating edge are dotted another way, and a
  * lineage's link that is not SURE is dashed by how sure it is (kv_graph.h, enum kv_graph_sure); a corner and a junction are the same for every kind (there is no
  * dotted corner), so what is drawn there is still a function of the sides alone. */
-static const char *line_glyph(unsigned mask, int ascii, unsigned loop, unsigned sure)
+static const char *line_glyph(unsigned mask, int ascii, unsigned loop, unsigned sure, unsigned carry)
 {
 	static const char *const asc[16] = { " ", "|", "-", "'", "|", "|", ".", "+", "-", "'", "-", "+", ".", "+", "+", "+" };
 	static const char *const uni[16] = {
@@ -294,7 +332,7 @@ static const char *line_glyph(unsigned mask, int ascii, unsigned loop, unsigned 
 			return ascii ? "!" : "\xe2\x94\x8a";            /* U+250A */
 		if (horz)
 			return ascii ? "~" : "\xe2\x94\x88";            /* U+2508 */
-	} else if (sure == KV_GSR_MAY) {
+	} else if (sure == KV_GSR_MAY || (sure == KV_GSR_SURE && carry == KV_GCA_CONTROL)) {    /* a control link: MAY's dashes (kv_graph.h) */
 		if (vert)
 			return ascii ? ";" : "\xe2\x95\x8e";            /* U+254E */
 		if (horz)
@@ -323,7 +361,7 @@ static const char *cell_glyph(const struct kv_graph_cell *c, int ascii, char *tm
 		tmp[1] = 0;
 		return tmp;
 	case KV_GG_LINE:
-		return line_glyph(c->mask, ascii, c->kind ? (c->kind - 1u) / 3u : 0u, c->sure);
+		return line_glyph(c->mask, ascii, c->kind ? (c->kind - 1u) / 3u : 0u, c->sure, c->carry);
 	case KV_GG_BTL: return ascii ? "." : G_TL;
 	case KV_GG_BTR: return ascii ? "." : G_TR;
 	case KV_GG_BBL: return ascii ? "`" : G_BL;

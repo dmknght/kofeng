@@ -304,6 +304,7 @@ struct kof_diag_lineage_in {
 	uint8_t  kind;    /* enum kgenome_diag_kind - PRODUCED or SHARED; a merge of the two under one
 			   * word is the mistake this field exists to prevent (CLAUDE.md, link-has-
 			   * two-kinds) */
+	uint8_t  flags;   /* KGENOME_DIAG_IN_* (KGENOME_DIAG_IN_UNDRAWN: a fact the drawing leaves to its use chain) */
 };
 
 /* ONE NODE of the object's value-flow graph - see kof_result.lineage. Carries the same fields

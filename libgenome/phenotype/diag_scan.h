@@ -81,7 +81,14 @@ struct kgenome_diag_in {
 	uint8_t  role;          /* enum kgenome_diag_role                         */
 	uint8_t  how;           /* enum kgenome_diag_link                         */
 	uint8_t  kind;          /* enum kgenome_diag_kind                         */
+	uint8_t  flags;         /* KGENOME_DIAG_IN_* (was the padding byte: the layout did not move) */
 };
+/*
+ * THIS LINK IS NOT DRAWN: a later consumer of a value that an earlier consumer also used, the earlier one dominating it, is drawn from that earlier
+ * consumer (its USE CHAIN link, kind SHARED, the same role), and its direct link from the producer stays a fact (a row) with this bit set. Decided once,
+ * after the links are final (diag_scan.c, use_chain_settle); a viewer only reads it.
+ */
+#define KGENOME_DIAG_IN_UNDRAWN 0x01u
 
 /* Bits in kgenome_diag_hit.bits. */
 /*

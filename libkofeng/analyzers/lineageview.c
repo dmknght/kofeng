@@ -94,7 +94,7 @@ static const char *lgv_how_word(uint8_t how, char *tmp, size_t cap)
 
 static const char *lgv_role_word(uint8_t role, char *tmp, size_t cap)
 {
-	static const char *const w[KGENOME_DIAG_ROLE_COUNT] = { "-", "buffer", "target", "fd", "path", "source", "value", "number" };
+	static const char *const w[KGENOME_DIAG_ROLE_COUNT] = { "-", "buffer", "target", "fd", "path", "source", "value", "number", "content" };
 
 	if (role < KGENOME_DIAG_ROLE_COUNT)
 		return w[role];
@@ -118,7 +118,8 @@ static void lgv_from_text(const struct kof_lineageview_req *rq, const uint32_t *
 
 struct lgv_tmp_edge {
 	uint32_t from, to, link;
-	uint8_t  sure;
+	uint8_t  sure, carry;
+	char     label[KGENOME_GV_LABEL];
 };
 
 /* gview.h's contract: the edges are sorted by `from` (the drawing, kv_graph_walk_make, refuses a list that is not: the Lineage tab drew nothing until
@@ -155,17 +156,55 @@ static void head_lines(struct kgenome_gv *gv, const struct kof_lineageview_req *
 #undef HL
 }
 
-static void lgv_fill_nodes(const struct kof_lineageview_req *rq, const uint32_t *local, struct kgenome_gv *out)
+/* The records inside, by (address, record index): the order they stand top to bottom. */
+struct lgv_key {
+	uint64_t at;
+	uint32_t rec;
+};
+
+static int lgv_key_cmp(const void *a, const void *b)
 {
-	uint32_t i, node_i = 0, xline_i = 0;
+	const struct lgv_key *x = a, *y = b;
 
-	for (i = 0; i < rq->n_lin; i++) {
-		const struct kof_diag_lineage_rec *r = &rq->lin[i];
-		struct kgenome_gv_node *n;
+	if (x->at != y->at)
+		return x->at < y->at ? -1 : 1;
+	return x->rec < y->rec ? -1 : x->rec > y->rec;
+}
 
-		if (local[i] == KOF_LGV_NONE)
-			continue;
-		n = &out->node[node_i];
+/*
+ * PROGRAM ORDER. A node's index (L<n>) is its rank in the order of the ADDRESSES of the sites inside (a tie by record index), so the drawing stands
+ * the program top to bottom (gview.h, `ordered`) and an L number says where it is: the records come in the order the routes made them, which
+ * put an exec-memory node above the read that filled its region (cleartext, 2026-11-17). `ord[k]` is the record of node k.
+ */
+static enum kgenome_status lgv_order(const struct kof_lineageview_req *rq, uint32_t *local, uint32_t n, uint32_t *ord)
+{
+	struct lgv_key *ky = malloc((size_t)n * sizeof *ky);
+	uint32_t i, k = 0;
+
+	if (!ky)
+		return KGENOME_NOMEM;
+	for (i = 0; i < rq->n_lin; i++)
+		if (local[i] != KOF_LGV_NONE) {
+			ky[k].at = rq->lin[i].at;
+			ky[k++].rec = i;
+		}
+	qsort(ky, n, sizeof *ky, lgv_key_cmp);
+	for (k = 0; k < n; k++) {
+		local[ky[k].rec] = k;
+		ord[k] = ky[k].rec;
+	}
+	free(ky);
+	return KGENOME_OK;
+}
+
+static void lgv_fill_nodes(const struct kof_lineageview_req *rq, const uint32_t *ord, struct kgenome_gv *out)
+{
+	uint32_t node_i, xline_i = 0;
+
+	for (node_i = 0; node_i < out->n_node; node_i++) {
+		const struct kof_diag_lineage_rec *r = &rq->lin[ord[node_i]];
+		struct kgenome_gv_node *n = &out->node[node_i];
+
 		n->off = r->at;
 		snprintf(n->line[0], KGENOME_GV_LINE, "L%u %s", (unsigned)node_i, kgenome_nucleo_cap_name(r->cap));
 		snprintf(n->line[1], KGENOME_GV_LINE, "0x%llx", (unsigned long long)r->at);
@@ -198,39 +237,43 @@ static void lgv_fill_nodes(const struct kof_lineageview_req *rq, const uint32_t 
 					 (unsigned long long)r->symref, r->symadd);
 			xline_i++;
 		}
-		node_i++;
 	}
 }
 
 /* One row per input of every node inside, in node order and each node's inputs in their order; the ones whose producer is a node inside are
  * the edges, given to `te` with the row they belong to. */
-static void lgv_fill_links(const struct kof_lineageview_req *rq, const uint32_t *local, struct kgenome_gv *out, struct lgv_tmp_edge *te)
+static void lgv_fill_links(const struct kof_lineageview_req *rq, const uint32_t *local, const uint32_t *ord, struct kgenome_gv *out,
+			   struct lgv_tmp_edge *te)
 {
-	uint32_t i, k, link_i = 0, edge_i = 0;
+	uint32_t j, k, link_i = 0, edge_i = 0;
 	int view = 0;
 
-	for (i = 0; i < rq->n_lin; i++) {
+	for (j = 0; j < out->n_node; j++) {
+		const uint32_t i = ord[j];
 		const struct kof_diag_lineage_in *x;
 		uint32_t nx;
 		char to[16];
 
-		if (local[i] == KOF_LGV_NONE)
-			continue;
 		x = lgv_inputs(rq, i, &nx, &view);
 		snprintf(to, sizeof to, "L%u", (unsigned)local[i]);    /* its box says what and where it is */
 		for (k = 0; k < nx && link_i < out->n_note; k++, link_i++) {
 			struct kgenome_gv_note *nt = &out->note[link_i];
 			char from[64], th[16], tr[16];
+			const char *role = lgv_role_word(x[k].role, tr, sizeof tr);    /* ONE word for the row and the edge */
 
 			lgv_from_text(rq, local, x[k].from, from, sizeof from);
 			nt->node = local[i];
-			snprintf(nt->text, KGENOME_GV_NOTE, "%-34.56s -> %-6.6s %-6.8s %-7.8s %.8s", from, to, lgv_role_word(x[k].role, tr, sizeof tr),
+			snprintf(nt->text, KGENOME_GV_NOTE, "%-34.56s -> %-6.6s %-6.8s %-7.8s %.8s", from, to, role,
 				 lgv_how_word(x[k].how, th, sizeof th), x[k].kind == KGENOME_DIAG_KIND_SHARED ? "shared" : "produced");
-			if (x[k].from < rq->n_lin && local[x[k].from] != KOF_LGV_NONE && edge_i < out->n_edge) {
+			/* a link the engine leaves to its use chain (KGENOME_DIAG_IN_UNDRAWN) is a row and no edge */
+			if (x[k].from < rq->n_lin && local[x[k].from] != KOF_LGV_NONE && !(x[k].flags & KGENOME_DIAG_IN_UNDRAWN) && edge_i < out->n_edge) {
 				te[edge_i].from = local[x[k].from];
 				te[edge_i].to = local[i];
 				te[edge_i].link = link_i;
 				te[edge_i].sure = lgv_sure(x[k].how);
+				/* the number of a system call is no argument: the producer's result chose which call this is (diag_vocab.h) */
+				te[edge_i].carry = x[k].role == KGENOME_DIAG_ROLE_NUMBER ? KGENOME_GV_CARRY_CONTROL : KGENOME_GV_CARRY_VALUE;
+				snprintf(te[edge_i].label, sizeof te[edge_i].label, "%.11s", role);   /* KGENOME_GV_LABEL - 1 */
 				edge_i++;
 			}
 		}
@@ -240,6 +283,10 @@ static void lgv_fill_links(const struct kof_lineageview_req *rq, const uint32_t 
 		out->edge[k].from = te[k].from;
 		out->edge[k].to = te[k].to;
 		out->edge[k].sure = te[k].sure;
+		out->edge[k].carry = te[k].carry;
+		memcpy(out->edge[k].label, te[k].label, sizeof out->edge[k].label);
+		/* the nodes stand in address order (`ordered`): a link into a site at or before its producer's goes back */
+		out->edge[k].loop = te[k].to <= te[k].from ? KGENOME_GV_LOOP_RETREAT : KGENOME_GV_LOOP_NONE;
 		out->note[te[k].link].link = k + 1u;
 	}
 }
@@ -247,6 +294,7 @@ static void lgv_fill_links(const struct kof_lineageview_req *rq, const uint32_t 
 enum kgenome_status kof_lineageview_build(const struct kof_lineageview_req *rq, struct kgenome_gv *out)
 {
 	uint32_t *local;   /* rq->n_lin entries: KOF_LGV_NONE, or the node's index in `out` */
+	uint32_t *ord = NULL;      /* c.node entries: the record of node k (lgv_order) */
 	struct lgv_tmp_edge *te = NULL;
 	struct lgv_count c;
 	uint64_t n_link = 0, n_edge = 0;
@@ -275,6 +323,13 @@ enum kgenome_status kof_lineageview_build(const struct kof_lineageview_req *rq, 
 			local[i] = KOF_LGV_NONE;
 		}
 	}
+	if (c.node && (!(ord = malloc((size_t)c.node * sizeof *ord)) || lgv_order(rq, local, c.node, ord) != KGENOME_OK)) {
+		free(ord);
+		free(local);
+		out->status = KGENOME_NOMEM;
+		head_lines(out, rq, &c);
+		return out->status;
+	}
 	/* Counted before the allocation, as cfg_gv does: every input of a node inside is a row (a link), and one whose producer is a node inside is
 	 * also an edge. Nothing is left out for its certainty: MAY, UNKNOWN and BROKEN are drawn, each its own way (the edge's `sure`). */
 	for (i = 0; i < rq->n_lin; i++) {
@@ -290,10 +345,12 @@ enum kgenome_status kof_lineageview_build(const struct kof_lineageview_req *rq, 
 			/* KNOWN DEFECT LV-D2 (2026-11-17, M) [sev L]: kof_lineageview_build counts every input that is no edge as `from-outside`: the stack (KGENOME_DIAG_FROM_STACK) and a record that does not exist too.
 			 * Trigger: a node of the function with an input from the stack. Effect: the Overview's one row says from-outside=N for links that come from no other function.
 			 * Reproducer: tests/unit/lineageview.c, the from-outside row (green until fixed). Fix: count the stack and the dangling `from` apart and say each in head_lines. */
-			if (x[k].from < rq->n_lin && local[x[k].from] != KOF_LGV_NONE)
-				n_edge++;
-			else
+			if (x[k].from < rq->n_lin && local[x[k].from] != KOF_LGV_NONE) {
+				if (!(x[k].flags & KGENOME_DIAG_IN_UNDRAWN))
+					n_edge++;
+			} else {
 				c.outside++;
+			}
 		}
 	}
 	c.link = n_link > 0xffffffffu ? 0xffffffffu : (uint32_t)n_link;
@@ -314,18 +371,21 @@ enum kgenome_status kof_lineageview_build(const struct kof_lineageview_req *rq, 
 			 "graph not drawn: %s", st == KGENOME_OVER_BUDGET ? "over budget" : "no memory");
 		if (out->n_head < KGENOME_GV_HEAD_MAX)
 			out->n_head++;
+		free(ord);
 		free(local);
 		return out->status;
 	}
 	out->id_prefix = 'L';
 	out->status = KGENOME_OK;
-	lgv_fill_nodes(rq, local, out);
-	lgv_fill_links(rq, local, out, te);
+	out->ordered = 1;
+	lgv_fill_nodes(rq, ord, out);
+	lgv_fill_links(rq, local, ord, out, te);
 	out->entry = 0;
 	out->note_total = c.link;
 	snprintf(out->note_title, sizeof out->note_title, "links: %u", (unsigned)c.link);
 	head_lines(out, rq, &c);
 	free(te);
+	free(ord);
 	free(local);
 	return out->status;
 }

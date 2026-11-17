@@ -39,6 +39,10 @@ struct kgenome_diag_scan {
 	/* Syscall sites whose first argument was not a constant the sweep could
 	 * read - the candidates for a wrapper. See kgenome_diag_run_wrappers. */
 	uint32_t             n_unread;
+	/* KERNEL ENTRIES WHOSE NUMBER THE CALLERS GIVE (the wrapper analysis found it a parameter of every path: diag_wrapper_calls.c,
+	 * supersede_param_sites): no node of any route stands at one (kgenome_diag_wrapper_param_settle, after the routes). Offsets. */
+	uint64_t            *param_site;
+	uint32_t             n_param_site, cap_param_site;
 	/*
 	 * THE RELOCATIONS OF THIS OBJECT, one table for every route - see
 	 * struct kgenome_elf_relocs. Borrowed when the caller built it for the object

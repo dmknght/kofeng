@@ -598,12 +598,13 @@ static void route_hops(struct route *R)
  * hop_count is how many ARRIVALS there were, not how many ranges are
  * watched - zero means control never entered one of them.
  */
-	uint64_t hop[2] = { 0, 0 };
+	uint64_t hop[2] = { 0, 0 }, from[2] = { 0, 0 };
 	uint32_t n_hop = 0;
 	unsigned q;
 
 	kgenome_emu_first_hop(R->em, &(uint64_t){ 0 }, &hop[0]);
 	kgenome_emu_last_hop(R->em, &hop[1], &n_hop);
+	kgenome_emu_hop_from(R->em, &from[0], &from[1]);
 	for (q = 0; q < 2u && n_hop; q++) {
 		unsigned i;
 
@@ -620,14 +621,27 @@ static void route_hops(struct route *R)
 			    hop[q] - R->made[i].val >= R->made[i].len)
 				continue;
 			/*
-			 * THE SITE IS NOT IN THE FILE, and saying it
-			 * is would be the lie. Control is executing
-			 * bytes the run produced; kgenome_image_addr_to_off
-			 * answers KGENOME_BROKEN for them, which is the
-			 * engine's word for "applies, could not be
-			 * determined" and is the truth here.
+			 * THE NODE IS THE BRANCH THAT ENTERED, not the place
+			 * it arrived at. A node is a SITE of the object; the
+			 * arrival is in bytes the run produced and has none,
+			 * so it was published at KGENOME_BROKEN: a node no
+			 * function holds and no reader can place, beside the
+			 * static route's node of the same `jmp` (two carriers
+			 * of one fact). The transfer's own instruction is a
+			 * site: placed there, merge_sites folds it with the
+			 * static route's node of that instruction (same site,
+			 * same capability), as the apihash route places its
+			 * handover. A hop not entered by a taken branch, or
+			 * entered from bytes that are not the file's, has no
+			 * site, and no node is made of it.
+			 * TODO(owner): the emulate route's SYSTEM CALLS in
+			 * produced bytes are still nodes at KGENOME_BROKEN
+			 * (real calls with no site; dropping them deletes the
+			 * evidence of a second stage): kept by default.
 			 */
-			off = kgenome_image_addr_to_off(R->obj, hop[q]);
+			off = from[q] ? kgenome_image_addr_to_off(R->obj, from[q]) : KGENOME_BROKEN;
+			if (off == KGENOME_BROKEN)
+				break;
 			h = kgenome_diag_hit_add(R->s, off,
 					     KGENOME_NUCLEO_EXEC_REG, 0);
 			if (h)

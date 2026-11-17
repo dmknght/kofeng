@@ -88,6 +88,8 @@ static struct kv_graph_edge *graph_edges(const struct kgenome_gv *gv)
 		e[i].cond = gv->edge[i].cond;
 		e[i].loop = gv->edge[i].loop;
 		e[i].sure = gv->edge[i].sure;
+		e[i].carry = gv->edge[i].carry;
+		e[i].label = gv->edge[i].label;        /* the engine's word: the same one as the link's row */
 	}
 	return e;
 }
@@ -123,6 +125,8 @@ static void note_left_out(struct kv_lineage_body *u)
 		if (g->n_not_drawn > g->n_rest)
 			list_add(&u->xl, &u->n_xl, "  ... %u more not indexed", (unsigned)(g->n_not_drawn - g->n_rest));
 	}
+	if (g->n_label_cut)
+		list_add(&u->xl, &u->n_xl, "... %u link label(s) not drawn (no room beside the arrowhead): the rows below name every link", (unsigned)g->n_label_cut);
 	if (g->n_edge_not_drawn) {
 		list_add(&u->xl, &u->n_xl, "... %u link(s) not drawn:", (unsigned)g->n_edge_not_drawn);
 		for (i = 0; i < g->n_skipped; i++) {
@@ -161,6 +165,7 @@ void kv_lineagebody_make(struct kv_lineage_body *u, const struct kof_lineageview
 	in.max_cols = LGV_MAX_COLS;
 	in.max_rows = LGV_MAX_ROWS;
 	in.sources_first = 1;          /* a value flow has no one entry: every producer nothing feeds is a start */
+	in.ordered = u->gv.ordered;    /* the engine's: the nodes are in program order */
 	if (e || !in.n_edge)
 		(void)kv_graph_layout(&in, &u->g);
 	free(e);

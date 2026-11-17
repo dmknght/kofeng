@@ -32,7 +32,11 @@ struct kv_graph_wr {                     /* one drawn edge */
 	uint32_t p0;                    /* the first piece */
 	uint32_t j, k;                  /* this is the j-th of the k drawn edges of its source */
 	uint8_t  cond, loop, back, skip, self;
-	uint8_t  out_shared, sure;
+	uint8_t  out_shared, sure, carry;
+	uint8_t  blen;                  /* the label's characters (0: none) */
+	uint8_t  planned;               /* 1: the graph has labels, and out_off / in_off are where this edge's ends stand from its boxes' centres */
+	int32_t  out_off, in_off;
+	const char *label;
 	int32_t  out_col, in_col, lane_col;
 	uint32_t lane;                  /* 0 nearest the boxes */
 	uint32_t ce, ci;                /* the channels of a lane edge: below the tail, below the head (the head is entered from below) */
@@ -102,6 +106,8 @@ void kv_graph_note_skip(struct kv_graph *g, uint32_t edge, uint8_t why);
 int kv_graph_step_alloc(struct kv_graph_ctx *c, uint32_t P);
 void kv_graph_step_wires(struct kv_graph_ctx *c);
 void kv_graph_step_order(struct kv_graph_ctx *c);
+uint32_t kv_graph_port_span(const struct kv_graph_wr *w, int role);
+uint32_t kv_graph_port_fit(const struct kv_graph_wr *w, int role);
 void kv_graph_step_place(struct kv_graph_ctx *c);
 /* kv_graph_route.c */
 void kv_graph_step_lanes(struct kv_graph_ctx *c);

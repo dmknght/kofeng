@@ -25,6 +25,7 @@
 
 #include "diag_scan_private.h"
 #include "frame.h"
+#include "../celllysis/gview.h"
 #include "diag_lineage.h"
 
 /*
@@ -373,6 +374,424 @@ static void merge_sites(struct kgenome_diag_scan *s)
 #undef DOUBT
 
 /*
+ * A DESCRIPTOR CALL'S WORD FROM WHAT ITS DESCRIPTOR IS - run once, after every route and stage has linked (the links are final).
+ *
+ * A route names the CALL: read(2), write(2), ReadFile, the libc `read`. The word is then the generic one (mem-read, mem-write),
+ * because what is read from is the descriptor's object, and that is known only when the descriptor's producer is linked. Once it
+ * is, the word is the vocabulary's case of it (kgenome_nucleo_cap_on_handle: a socket's read is net-recv, an opened file's is
+ * file-read). Every route's nodes, one rule, decided here and nowhere else; a reader shows the word.
+ *
+ * ONLY ON PROOF. Every descriptor input of the node must be PROVEN (one producer on every path), PRODUCED, from a node, and every
+ * one of them must give the same case: a MAY, an UNKNOWN, a descriptor from the stack or a constant (no input at all), two
+ * producers of different kinds, or a producer the vocabulary has no case for (a heap pointer, a memfd, dup2's number) keeps the
+ * generic word - never a narrower word than was shown. A rule that names the generic word still matches (kofdiag.c cap_is walks
+ * kgenome_nucleo_cap_generic). The node's (site, capability) is folded before this runs (merge_sites), so no fold sees two words.
+ */
+static void caps_settle(struct kgenome_diag_scan *s)
+{
+	uint32_t i, q;
+
+	for (i = 0; i < s->n_hit; i++) {
+		struct kgenome_diag_hit *h = &s->hit[i];
+		const uint32_t nin = kgenome_diag_in_count(s, i);
+		uint16_t want = KGENOME_NUCLEO_NONE;
+		uint32_t nfd = 0;
+		int ok = 1;
+
+		if (h->cap != KGENOME_NUCLEO_MEM_READ && h->cap != KGENOME_NUCLEO_MEM_WRITE)
+			continue;
+		for (q = 0; q < nin && ok; q++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, q);
+			uint16_t c;
+
+			if (!x || x->role != KGENOME_DIAG_ROLE_FD)
+				continue;
+			nfd++;
+			if (x->how != KGENOME_DIAG_LINK_PROVEN || x->kind != KGENOME_DIAG_KIND_PRODUCED || x->from >= s->n_hit) {
+				ok = 0;
+				break;
+			}
+			c = kgenome_nucleo_cap_on_handle(h->cap, s->hit[x->from].cap);
+			if (c == KGENOME_NUCLEO_NONE || (want != KGENOME_NUCLEO_NONE && c != want))
+				ok = 0;
+			want = c;
+		}
+		if (ok && nfd)
+			h->cap = want;
+	}
+}
+
+/* one writer of a region: the region's producer and the node whose BUFFER input it is */
+struct exec_writer {
+	uint16_t region, node;
+};
+
+static int exec_writer_cmp(const void *a, const void *b)
+{
+	const struct exec_writer *x = a, *y = b;
+
+	if (x->region != y->region)
+		return x->region < y->region ? -1 : 1;
+	return x->node < y->node ? -1 : x->node > y->node;
+}
+
+/* Is input `x` a PROVEN, PRODUCED link of role `role` from a node (not the stack, not a node that does not exist). */
+static int exec_proven_from(const struct kgenome_diag_scan *s, const struct kgenome_diag_in *x, uint8_t role)
+{
+	return x && x->role == role && x->how == KGENOME_DIAG_LINK_PROVEN && x->kind == KGENOME_DIAG_KIND_PRODUCED && x->from < s->n_hit;
+}
+
+/*
+ * WRITTEN, THEN EXECUTED (KGENOME_DIAG_ROLE_CONTENT) - run once, after every route and stage has linked (the links are final), for every route.
+ *
+ * An exec of memory (KGENOME_NUCLEO_EXEC_REG) whose TARGET is PROVEN to be the value of producer P (an mmap's region), and a node whose BUFFER input
+ * (the memory it writes, diag_vocab.h) is PROVEN to be the same P: the bytes the exec runs are what that node wrote. The exec gets an input from the
+ * writer, role CONTENT, kind SHARED (neither made the region: they share it), PROVEN. Nothing weaker makes one: a MAY or UNKNOWN on either side, a
+ * region from the stack, two different producers - no link (the same rule as caps_settle: never a statement stronger than the links it is read off).
+ * LIMIT: the link says the two touch ONE region; it does not say the write comes first on every path (no order is read). Next: the lineage solve's
+ * path order between the two sites.
+ * The writers are listed once and sorted by region, so the cost is the inputs, not exec nodes x writers. A refused allocation makes no link and says
+ * so (KGENOME_TRUNCATED).
+ */
+static void exec_content_settle(struct kgenome_diag_scan *s)
+{
+	struct exec_writer *wr;
+	uint32_t i, q, n = 0, k, added = 0;
+	int any_exec = 0;
+
+	for (i = 0; i < s->n_hit && !any_exec; i++)
+		any_exec = s->hit[i].cap == KGENOME_NUCLEO_EXEC_REG && !(s->hit[i].bits & KGENOME_DIAG_H_SUPERSEDED);
+	if (!any_exec)
+		return;
+	for (i = 0; i < s->n_hit; i++)
+		if (!(s->hit[i].bits & KGENOME_DIAG_H_SUPERSEDED))
+			for (q = 0; q < kgenome_diag_in_count(s, i); q++)
+				n += (uint32_t)exec_proven_from(s, kgenome_diag_in_at(s, i, q), KGENOME_DIAG_ROLE_BUFFER);
+	if (!n)
+		return;
+	if (!kgenome_ledger_charge(&s->led, (uint64_t)n * sizeof *wr)) {
+		kgenome_diag_note(s, KGENOME_TRUNCATED);
+		return;
+	}
+	wr = malloc((size_t)n * sizeof *wr);
+	if (!wr) {
+		kgenome_ledger_release(&s->led, (uint64_t)n * sizeof *wr);
+		kgenome_diag_note(s, KGENOME_NOMEM);
+		return;
+	}
+	n = 0;
+	for (i = 0; i < s->n_hit; i++)
+		if (!(s->hit[i].bits & KGENOME_DIAG_H_SUPERSEDED))
+			for (q = 0; q < kgenome_diag_in_count(s, i); q++) {
+				const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, q);
+
+				if (exec_proven_from(s, x, KGENOME_DIAG_ROLE_BUFFER) && x->from != i) {
+					wr[n].region = x->from;
+					wr[n++].node = (uint16_t)i;
+				}
+			}
+	qsort(wr, n, sizeof *wr, exec_writer_cmp);
+	for (i = 0; i < s->n_hit; i++) {
+		const uint32_t nin = kgenome_diag_in_count(s, i);
+
+		if (s->hit[i].cap != KGENOME_NUCLEO_EXEC_REG || (s->hit[i].bits & KGENOME_DIAG_H_SUPERSEDED))
+			continue;
+		for (q = 0; q < nin; q++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, q);
+			uint32_t lo = 0, hi = n;
+			uint16_t region;
+
+			if (!exec_proven_from(s, x, KGENOME_DIAG_ROLE_TARGET))
+				continue;
+			region = x->from;
+			while (lo < hi) {
+				const uint32_t mid = lo + (hi - lo) / 2u;
+
+				if (wr[mid].region < region)
+					lo = mid + 1u;
+				else
+					hi = mid;
+			}
+			/* noting an input past the view goes to the scan's table, never to the node's in[] read here: `x` of a later q is re-read */
+			for (k = lo; k < n && wr[k].region == region; k++)
+				if (wr[k].node != i) {
+					(void)kgenome_diag_note_in_how(s, &s->hit[i], wr[k].node, KGENOME_DIAG_ROLE_CONTENT, KGENOME_DIAG_KIND_SHARED,
+								       KGENOME_DIAG_LINK_PROVEN);
+					added++;
+				}
+		}
+	}
+	kgenome_ledger_release(&s->led, (uint64_t)n * sizeof *wr);
+	free(wr);
+	if (added)
+		kgenome_diag_links_settle(s);
+}
+
+/* ---- THE USE CHAIN of one value ---- */
+
+/* The class of value a role names, for the use chain: 1 a descriptor, 2 a region (written, read from, or jumped into); 0: not chained (a number, a path,
+ * a script's value, the content link). */
+static unsigned use_class(uint8_t role)
+{
+	switch (role) {
+	case KGENOME_DIAG_ROLE_FD:      return 1u;
+	case KGENOME_DIAG_ROLE_BUFFER:
+	case KGENOME_DIAG_ROLE_SOURCE:
+	case KGENOME_DIAG_ROLE_TARGET:  return 2u;
+	default:                        return 0u;
+	}
+}
+
+struct use_ent {
+	uint64_t at;            /* the consumer's site */
+	uint16_t prod, node;    /* the producer; the consumer */
+	uint16_t k;             /* the index of the input (kgenome_diag_in_at order) */
+	uint8_t  cls, role;
+};
+
+static int use_ent_cmp(const void *a, const void *b)
+{
+	const struct use_ent *x = a, *y = b;
+
+	if (x->prod != y->prod)
+		return x->prod < y->prod ? -1 : 1;
+	if (x->cls != y->cls)
+		return x->cls < y->cls ? -1 : 1;
+	if (x->at != y->at)
+		return x->at < y->at ? -1 : 1;
+	if (x->node != y->node)
+		return x->node < y->node ? -1 : 1;
+	return x->k < y->k ? -1 : x->k > y->k;
+}
+
+/* The dominators of the frames asked so far (one function's per entry, a handful per object: the chain is between consumers of one value). */
+struct use_dom {
+	uint32_t fi;
+	const struct kgenome_frame *fr;
+	struct kgenome_dom d;
+	enum kgenome_status st;
+};
+
+struct use_ctx {
+	struct kgenome_diag_scan *s;
+	const struct kgenome_func_set *fs;
+	struct kgenome_frame_src src;
+	struct use_dom *dom;
+	uint32_t n_dom, cap_dom;
+};
+
+/*
+ * Does block b hold a call or system call that never returns (exit, abort: the scan's list, kgenome_diag_site_noreturn - the one the lineage solve ends a
+ * path at)? Its successors are then no path: the frame's graph lets an exit block fall into the next one (msfvenom's stagers put the exit just above the
+ * code after the loop), which would make every consumer after it reachable around the loop. LIMIT: the list is the routes' (the sweep reads a number in
+ * address order); the lineage solve also asks its own state that the number is a constant, which is not kept after the solve.
+ */
+static int use_block_exits(const struct kgenome_diag_scan *s, const struct kgenome_frame *fr, uint32_t b)
+{
+	const uint64_t lo = fr->off + fr->cfg.b[b].at, hi = b + 1u < fr->cfg.n_all ? fr->off + fr->cfg.b[b + 1u].at : fr->off + fr->len;
+	uint32_t l = 0, h = s->n_noret;
+
+	while (l < h) {
+		const uint32_t mid = l + (h - l) / 2u;
+
+		if (s->noret_at[mid] < lo)
+			l = mid + 1u;
+		else
+			h = mid;
+	}
+	return l < s->n_noret && s->noret_at[l] < hi;
+}
+
+static const struct use_dom *use_dom_of(struct use_ctx *c, uint32_t fi)
+{
+	const struct kgenome_frame *fr;
+	struct kgenome_dom_edge *ed;
+	struct use_dom *u;
+	uint32_t i, b, m = 0;
+
+	for (i = 0; i < c->n_dom; i++)
+		if (c->dom[i].fi == fi)
+			return &c->dom[i];
+	if (c->n_dom == c->cap_dom) {
+		const uint32_t nc = c->cap_dom ? 2u * c->cap_dom : 8u;
+		struct use_dom *nv = realloc(c->dom, (size_t)nc * sizeof *nv);
+
+		if (!nv)
+			return NULL;
+		c->dom = nv;
+		c->cap_dom = nc;
+	}
+	u = &c->dom[c->n_dom++];
+	memset(u, 0, sizeof *u);
+	u->fi = fi;
+	u->st = KGENOME_BAD_INPUT;
+	fr = kgenome_frame_get(kgenome_diag_frames(c->s), &c->src, fi);
+	if (!fr || fr->state != KGENOME_FRAME_OK || !fr->cfg.n_all)
+		return u;
+	for (b = 0; b < fr->cfg.n_all; b++) {
+		if (fr->cfg.b[b].term == KGENOME_CFG_T_SWITCH)
+			return u;       /* its edges are not in succ[]: a dominator read without them could claim a path that is not the only one */
+		m += fr->cfg.b[b].out_deg;
+	}
+	ed = malloc(((size_t)m + 1u) * sizeof *ed);
+	if (!ed)
+		return u;
+	m = 0;
+	kgenome_diag_noret_settle(c->s);
+	for (b = 0; b < fr->cfg.n_all; b++)
+		for (i = 0; i < 2u && !use_block_exits(c->s, fr, b); i++)
+			if (fr->cfg.b[b].succ[i] != KGENOME_CFG_NONE && fr->cfg.b[b].succ[i] < fr->cfg.n_all) {
+				ed[m].from = b;
+				ed[m++].to = fr->cfg.b[b].succ[i];
+			}
+	u->st = kgenome_dom_make(&(const struct kgenome_dom_req){ .n = fr->cfg.n_all, .entry = 0, .m = m, .edge = ed, .stride = sizeof *ed }, &u->d);
+	u->fr = fr;
+	free(ed);
+	return u;
+}
+
+/* The block of the frame that holds file offset `at`, or KGENOME_CFG_NONE. */
+static uint32_t use_block(const struct kgenome_frame *fr, uint64_t at)
+{
+	uint32_t lo = 0, hi = fr->cfg.n_all;
+	uint64_t rel;
+
+	if (at < fr->off || at - fr->off >= fr->len)
+		return KGENOME_CFG_NONE;
+	rel = at - fr->off;
+	while (lo < hi) {               /* the last block whose start is at or before `rel` */
+		const uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fr->cfg.b[mid].at <= rel)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo ? lo - 1u : KGENOME_CFG_NONE;
+}
+
+/* 1: the site of node a runs before the site of node b on every path into b (same function; a's block dominates b's, or one block and a first). 0: not
+ * established (another function, no frame, a switch, a block the entry does not reach, the dominators not computed). */
+static int use_dominates(struct use_ctx *c, uint32_t a, uint32_t b)
+{
+	const uint64_t xa = c->s->hit[a].at, xb = c->s->hit[b].at;
+	const uint32_t fa = kgenome_funcs_at(c->fs, xa), fb = kgenome_funcs_at(c->fs, xb);
+	const struct use_dom *u;
+	uint32_t ba, bb;
+
+	if (fa == KGENOME_FUNCS_NONE || fa != fb || xa >= xb)
+		return 0;
+	u = use_dom_of(c, fa);
+	if (!u || !u->fr || u->st != KGENOME_OK)
+		return 0;
+	ba = use_block(u->fr, xa);
+	bb = use_block(u->fr, xb);
+	if (ba == KGENOME_CFG_NONE || bb == KGENOME_CFG_NONE || !u->fr->cfg.b[ba].reach || !u->fr->cfg.b[bb].reach)
+		return 0;
+	return ba == bb || kgenome_dom_dominates(&u->d, ba, bb);
+}
+
+/* Does node `to` already have an input from `from` that is drawn for the same relation (the role, or the content link)? */
+static int use_has_link(const struct kgenome_diag_scan *s, uint32_t to, uint32_t from, uint8_t role)
+{
+	uint32_t q;
+
+	for (q = 0; q < kgenome_diag_in_count(s, to); q++) {
+		const struct kgenome_diag_in *x = kgenome_diag_in_at(s, to, q);
+
+		if (x && x->from == from && (x->role == role || x->role == KGENOME_DIAG_ROLE_CONTENT))
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * THE USE CHAIN (owner, 2026-11-17: "socket -> connect -> recv, as alloc -> recv -> exec") - run once, after every link is final (after exec_content_settle).
+ *
+ * Several consumers of ONE value - the same producer, PROVEN and PRODUCED, a role of one class (a descriptor; a region) - are put in program order. Each
+ * consumer after the first whose previous consumer DOMINATES it (runs before it on every path into it: the function's frame, kgenome_dom_make) is
+ * drawn from that previous consumer: it gets an input from it (kind SHARED - they share the value -, its own role, PROVEN) unless it already has one for
+ * that relation (the content link), and its direct link from the producer is kept as a fact with KGENOME_DIAG_IN_UNDRAWN. A consumer the previous one does
+ * not dominate (another arm, another function, no frame) keeps its direct link drawn. Nothing is deleted: the rows list every link.
+ * The scripts' route has no frame: its links are not chained (limit; next: the text route's own statement order).
+ */
+static void use_chain_settle(struct kgenome_diag_scan *s, const struct kgenome_obj *obj)
+{
+	struct use_ctx c;
+	struct use_ent *v;
+	uint32_t i, q, n = 0, j, added = 0;
+
+	if (!obj || !s->n_hit)
+		return;
+	for (i = 0; i < s->n_hit; i++)
+		for (q = 0; q < kgenome_diag_in_count(s, i); q++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, q);
+
+			n += x && use_class(x->role) && x->how == KGENOME_DIAG_LINK_PROVEN && x->kind == KGENOME_DIAG_KIND_PRODUCED && x->from < s->n_hit;
+		}
+	if (n < 2u)
+		return;
+	if (!kgenome_ledger_charge(&s->led, (uint64_t)n * sizeof *v)) {
+		kgenome_diag_note(s, KGENOME_TRUNCATED);
+		return;
+	}
+	v = malloc((size_t)n * sizeof *v);
+	if (!v) {
+		kgenome_ledger_release(&s->led, (uint64_t)n * sizeof *v);
+		kgenome_diag_note(s, KGENOME_NOMEM);
+		return;
+	}
+	n = 0;
+	for (i = 0; i < s->n_hit; i++)
+		for (q = 0; q < kgenome_diag_in_count(s, i); q++) {
+			const struct kgenome_diag_in *x = kgenome_diag_in_at(s, i, q);
+
+			if (!x || !use_class(x->role) || x->how != KGENOME_DIAG_LINK_PROVEN || x->kind != KGENOME_DIAG_KIND_PRODUCED || x->from >= s->n_hit ||
+			    x->from == i || (s->hit[i].bits & KGENOME_DIAG_H_SUPERSEDED))
+				continue;
+			v[n].at = s->hit[i].at;
+			v[n].prod = x->from;
+			v[n].node = (uint16_t)i;
+			v[n].k = (uint16_t)q;
+			v[n].cls = (uint8_t)use_class(x->role);
+			v[n++].role = x->role;
+		}
+	qsort(v, n, sizeof *v, use_ent_cmp);
+	memset(&c, 0, sizeof c);
+	c.s = s;
+	c.fs = kgenome_diag_funcs(s, obj);
+	c.src = (struct kgenome_frame_src){ .obj = obj, .base = s->base, .size = s->size, .fs = c.fs, .wk = s->walk };
+	/* first the bits (the inputs' order is what kgenome_diag_in_at reads; the links added below go after every one of them) */
+	for (j = 1; j < n; j++) {
+		const struct use_ent *p = &v[j - 1u], *e = &v[j];
+
+		if (p->prod != e->prod || p->cls != e->cls || p->node == e->node || !c.fs)
+			continue;
+		if (use_dominates(&c, p->node, e->node))
+			(void)kgenome_diag_in_flag(s, e->node, e->k, KGENOME_DIAG_IN_UNDRAWN);
+		else
+			v[j - 1u].cls = 0;      /* not chained: said to the second pass by the pair's class */
+	}
+	for (j = 1; j < n; j++) {
+		const struct use_ent *p = &v[j - 1u], *e = &v[j];
+
+		if (!p->cls || p->prod != e->prod || p->cls != e->cls || p->node == e->node || !c.fs)
+			continue;
+		if (!use_has_link(s, e->node, p->node, e->role)) {
+			(void)kgenome_diag_note_in_how(s, &s->hit[e->node], p->node, e->role, KGENOME_DIAG_KIND_SHARED, KGENOME_DIAG_LINK_PROVEN);
+			added++;
+		}
+	}
+	for (i = 0; i < c.n_dom; i++)
+		kgenome_dom_free(&c.dom[i].d, NULL);
+	free(c.dom);
+	kgenome_ledger_release(&s->led, (uint64_t)n * sizeof *v);
+	free(v);
+	if (added)
+		kgenome_diag_links_settle(s);
+}
+
+/*
  * A SCAN OBJECT WITH ITS BUDGET AND LEDGER, for a route to fill: the caller's budget with every field it left at zero
  * filled by the default for THIS object, and the one number only the caller knows (the memory allowance) as given.
  * `code_bytes` is what the object's code is, 0 for one that has none (a script: its size is its text).
@@ -474,6 +893,7 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 		}
 		if (!pass) {
 			merge_sites(s);
+			kgenome_diag_wrapper_param_settle(s);
 			if (s->halt)
 				break;
 		}
@@ -483,6 +903,9 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	if (s->own_walk)
 		kgenome_diag_walk_trim(s->own_walk);
 	kgenome_diag_links_settle(s);
+	caps_settle(s);
+	exec_content_settle(s);
+	use_chain_settle(s, obj);
 	kgenome_diag_nodes_keep(s);     /* (only when the table refused a node) */
 	return s;
 }
@@ -501,6 +924,8 @@ struct kgenome_diag_scan *kgenome_diag_scan_text(const struct kgenome_diag_text_
 	KOF_TIME_END(KOF_T_DIAG_TEXT);
 	s->ran |= KGENOME_DIAG_RUN_TEXT;
 	kgenome_diag_links_settle(s);
+	caps_settle(s);
+	exec_content_settle(s);
 	return s;
 }
 
@@ -803,6 +1228,7 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	free(s->adj_edge);
 	free(s->wrap);
 	free(s->wrap_sorted);
+	free(s->param_site);
 	/* The walk may outlive this scan (it is the object's): let go of the ledger
 	 * it was charging before the ledger is gone. */
 	kgenome_diag_walk_bind(s->walk, NULL);
